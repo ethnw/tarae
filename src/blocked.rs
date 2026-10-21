@@ -5,8 +5,9 @@
 //! user's call; `allow::write_choices` leaves out what must never open), connect to a port on this machine
 //! (not the risky ones — `sandbox::RISKY_PORTS`, by hand only), or run that one command outside the
 //! sandbox. Each is a weighty card. A write or a port is for once (the command runs again now with it),
-//! for this conversation, or always (`allow.rs`) — and runs it again now too. That run is the user's: how it
-//! ended goes to Claude with the next message (`tools::For::User`).
+//! for this conversation, this session, or always (`allow.rs`; no longer than `Caps::storable` lets it) — and
+//! runs it again now too. That run is the user's: how it ended goes to Claude with the next message
+//! (`tools::For::User`).
 
 use std::path::{Path, PathBuf};
 
@@ -380,13 +381,19 @@ fn grant_offer(
     tokens: Option<String>,
     warned: Vec<String>,
 ) -> crate::offer::Offer {
-    // (a socket: this run, or this conversation — everything else stays in the sandbox)
-    let lasts = match (&grant, grant.keepable()) {
+    // (as far as it may be kept: a socket this conversation's at most, a key and Docker's socket this run's —
+    // everything else stays in the sandbox)
+    let lasts = match (&grant, crate::caps::Caps::storable(&grant)) {
         (Grant::Host(..), _) => {
             "This session lasts until you quit, always until :sandbox-allowed takes it back."
         }
-        (_, true) => "Always lasts until :sandbox-allowed takes it back.",
-        (_, false) => "Everything else stays in the sandbox; it's never kept past this conversation.",
+        (_, Scope::Always | Scope::Session) => {
+            "s lasts until this session ends, A until :sandbox-allowed takes it back."
+        }
+        (_, Scope::ThisChat) => {
+            "Everything else stays in the sandbox; it's never kept past this conversation."
+        }
+        (_, Scope::Once) => "Everything else stays in the sandbox; it's never kept past this run.",
     };
     let mut question = format!("Let Claude's commands {}\n\n{said} {lasts}", grant.shown());
     if let Some(from) = &run.from {
@@ -658,8 +665,9 @@ mod tests {
     }
 
     /// A file named like a key refused in the project (macOS, 7a) offers that one file, once — never a folder of
-    /// it (the project is read anyway); kept, it reaches the run (`with_allowed`) and `:sandbox-disallow` takes
-    /// it back. One outside the project isn't this (home's rules: its folders).
+    /// it (the project is read anyway), never kept past this run (`Caps::storable`, cardauto 6); kept by an
+    /// earlier build's `A`, it reaches the run (`with_allowed`) and `:sandbox-disallow` takes it back. One outside
+    /// the project isn't this (home's rules: its folders).
     #[test]
     fn a_key_named_file_refused_offers_that_file() {
         let d = |target: &str| Denial {
@@ -680,7 +688,7 @@ mod tests {
         assert_eq!(got, [(&g, "node reading …/app/.env", why.as_str())]);
         let outside = choices(&[d("/Users/u/q/.env")], &crate::caps::Caps::at(home, root));
         assert!(outside.iter().all(|c| matches!(c.grant, Grant::Read(_))), "{outside:?}");
-        assert!(g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));
+        assert!(!g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));
         let base = crate::scratch::Scratch::new("blocked-key");
         let store = base.join("sandbox.json");
         crate::allow::keep(&store, root, |a| a.add(&g)).unwrap();
@@ -878,6 +886,46 @@ mod tests {
         assert!(!q.contains("tarae-fake-token"), "{q}");
         let (q, warned) = card(&mut ed, "1");
         assert!(warned.is_empty() && !q.contains("token"), "{q}");
+    }
+
+    /// cardauto 6: a grant's card offers each scope up to what its grant may be kept for (`Caps::storable`) —
+    /// `s` (this session) on every one kept past the conversation; a socket the conversation's at most; Docker's
+    /// socket, a file named like a key, home and a place holding keys this run's only; a host as its own card.
+    #[test]
+    fn a_grants_card_offers_each_scope_up_to_what_may_be_kept() {
+        let scratch = crate::scratch::Scratch::new("blocked-scopes");
+        let base = scratch.to_path_buf();
+        let home = crate::allow::home().expect("a home");
+        let card = |g: Grant| {
+            let run = BlockedRun {
+                job: Job::Command("true".into(), base.clone()),
+                denials: Vec::new(),
+                from: None,
+                claude: None,
+            };
+            grant_card(g, "it was refused", "true", Box::new(run), None)
+        };
+        let all = "yasAn";
+        for (g, keys) in [
+            (Grant::Read(base.join("r")), all),
+            (Grant::Write(base.join("w")), all),
+            (Grant::Port(5432), all),
+            (Grant::Terminals, all),
+            (Grant::Host("example.invalid".into(), 443), "ysAn"),
+            (Grant::Socket(base.join("s.sock")), "yan"),
+            (Grant::Socket("/run/docker.sock".into()), "yn"),
+            (Grant::Key(base.join(".env")), "yn"),
+            (Grant::Read(home.clone()), "yn"),
+            (Grant::Read(home.join(".ssh")), "yn"),
+        ] {
+            let o = card(g.clone());
+            let answers: String = o.answers(false).iter().map(|a| a.0).collect();
+            assert_eq!(answers, keys, "{g:?}");
+            // (what the keys take: each letter shown is taken, `s` among them)
+            assert_eq!(o.lasts(), keys.contains('a'), "{g:?}");
+            assert_eq!(o.for_session(), keys.contains('s'), "{g:?}");
+            assert_eq!(o.keeps(), keys.contains('A'), "{g:?}");
+        }
     }
 
     /// #119: a denied connect to a unix socket offers that socket — its real path, the file only — and not

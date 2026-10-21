@@ -407,6 +407,7 @@ impl Editor {
             v.extend(o.aborts().then_some('X'));
             v.extend(o.restart_other().then_some('f'));
             v.extend(o.made().then_some('r'));
+            v.extend(o.for_session().then_some('s'));
             v
         };
         if o.weighty() {
@@ -434,6 +435,7 @@ impl Editor {
                 .then_some('N'),
         );
         t.extend(o.lasts().then_some('a'));
+        t.extend(o.for_session().then_some('s'));
         t.extend(o.keeps().then_some('A'));
         t.extend(o.both().then_some('D'));
         t.extend(o.preflights().then_some('p'));

@@ -279,7 +279,8 @@ fn the_policy_is_pinned() {
 
 /// What a session's Claude may do (`caps::Caps`, cardauto piece 3), each system's, from the stand-in home: the
 /// defaults found (the checkout, the temp folders, the toolchains' code and the project's build folders), the
-/// answers kept for the project and this conversation's, each with where it comes from, and what's never in it.
+/// answers kept for the project, this session's and this conversation's, each with where it comes from, and
+/// what's never in it.
 #[test]
 fn the_caps_are_pinned() {
     let mut out = String::new();
@@ -300,8 +301,15 @@ fn the_caps_are_pinned() {
             terminals: true,
             ..Default::default()
         };
-        let basis =
-            crate::caps::Basis { root: f.root.clone(), store: Some(store), chat, temp: true, outside: true };
+        let session = crate::allow::Allowed { ports: vec![5432], ..Default::default() };
+        let basis = crate::caps::Basis {
+            root: f.root.clone(),
+            store: Some(store),
+            session,
+            chat,
+            temp: true,
+            outside: true,
+        };
         out.push_str(&format!("══ {os:?}\n"));
         let caps = basis.build_in(Some(&f.home), &f.here);
         out.push_str(&caps.said(|p| f.named(&p.display().to_string(), None)));

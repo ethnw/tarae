@@ -1,11 +1,13 @@
 //! What the user lets Claude do past the defaults: read outside the project (`reads.rs`), and — from what
 //! the sandbox blocked (`blocked.rs`) — let its commands write in a folder or connect to a port on this
-//! machine. Each answer on its card is for once, for this conversation (`Chat.allowed`), or always: kept per
-//! project (its real path) in `$state/sandbox.json` — the user's state, not the project's files (those go
-//! into git, to other people, and would need trust again).
+//! machine. Each answer on its card is for once, for this conversation (`Chat.allowed`), for this session
+//! (`Session.allowed`, kept with it in `$state/sessions`), or always: kept per project (its real path) in
+//! `$state/sandbox.json` — the user's state, not the project's files (those go into git, to other people, and
+//! would need trust again). Each kept answer is an entry with its scope and when it was granted.
 //!
-//! A place that holds keys or is home itself (or above it) is only ever allowed to be read once
-//! (`keepable`); a folder whose writing could run something later (`NEVER_WRITE`) isn't offered at all.
+//! How long one may last is `Caps::storable`'s (plan §2.3): a place that holds keys or is home itself (or above
+//! it), a file named like a key, Docker's socket are only ever allowed once; another socket for the
+//! conversation at most. A folder whose writing could run something later (`NEVER_WRITE`) isn't offered at all.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,14 @@ pub struct Allowed {
     /// Files named like keys inside the project Claude's commands may read — each that file, by its real path
     /// (`Grant::Key`; macOS 7a, Linux 7b).
     pub keys: Vec<PathBuf>,
+    /// When each was answered (seconds since the epoch) — what `:granted` says. One kept before times were (an
+    /// old `sandbox.json`) has its file's time.
+    pub granted: BTreeMap<Grant, u64>,
+}
+
+/// Now, in seconds since the epoch.
+pub fn now_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 impl Allowed {
@@ -42,22 +52,28 @@ impl Allowed {
 
     /// Adds a place (one already covered isn't added twice).
     pub fn add_read(&mut self, real: PathBuf) {
-        add_place(&mut self.read, real);
+        if add_place(&mut self.read, real.clone()) {
+            self.stamp(Grant::Read(real));
+        }
     }
 
     pub fn add_write(&mut self, real: PathBuf) {
-        add_place(&mut self.write, real);
+        if add_place(&mut self.write, real.clone()) {
+            self.stamp(Grant::Write(real));
+        }
     }
 
     pub fn add_port(&mut self, port: u16) {
         if !self.ports.contains(&port) {
             self.ports.push(port);
+            self.stamp(Grant::Port(port));
         }
     }
 
     pub fn add_host(&mut self, host: &str, port: u16) {
         if !self.hosts.iter().any(|(h, p)| h == host && *p == port) {
             self.hosts.push((host.to_string(), port));
+            self.stamp(Grant::Host(host.to_string(), port));
         }
     }
 
@@ -71,20 +87,95 @@ impl Allowed {
             Grant::Socket(s) => {
                 if !self.sockets.contains(s) {
                     self.sockets.push(s.clone());
+                    self.stamp(g.clone());
                 }
             }
             Grant::Host(h, p) => self.add_host(h, *p),
-            Grant::Terminals => self.terminals = true,
+            Grant::Terminals => {
+                if !self.terminals {
+                    self.terminals = true;
+                    self.stamp(Grant::Terminals);
+                }
+            }
             Grant::Key(k) => {
                 if !self.keys.contains(k) {
                     self.keys.push(k.clone());
+                    self.stamp(g.clone());
                 }
             }
         }
     }
 
+    /// `g` answered now — unless a time is there already (read from where it was kept).
+    fn stamp(&mut self, g: Grant) {
+        self.granted.entry(g).or_insert_with(now_s);
+    }
+
+    /// Everything in it, each kind in its fields' order.
+    pub fn grants(&self) -> Vec<Grant> {
+        let mut out: Vec<Grant> = self.read.iter().cloned().map(Grant::Read).collect();
+        out.extend(self.write.iter().cloned().map(Grant::Write));
+        out.extend(self.ports.iter().copied().map(Grant::Port));
+        out.extend(self.sockets.iter().cloned().map(Grant::Socket));
+        out.extend(self.hosts.iter().cloned().map(|(h, p)| Grant::Host(h, p)));
+        out.extend(self.terminals.then_some(Grant::Terminals));
+        out.extend(self.keys.iter().cloned().map(Grant::Key));
+        out
+    }
+
+    /// `other`'s added, each with its own time.
+    pub fn merge(&mut self, other: &Allowed) {
+        for g in other.grants() {
+            if let Some(at) = other.granted.get(&g) {
+                self.granted.entry(g.clone()).or_insert(*at);
+            }
+            self.add(&g);
+        }
+    }
+
+    /// What it holds as kept entries (`sandbox.json`'s, a session's in `$state/sessions`): kind, what, `scope`,
+    /// `granted` — never a socket (a server's socket is the server: this conversation's at most).
+    pub fn entries(&self, scope: &str) -> Vec<Json> {
+        let mut out = Vec::new();
+        for g in self.grants() {
+            let Some((kind, what)) = g.entry() else { continue };
+            let mut e = json!({ "kind": kind, "scope": scope });
+            if let Some(what) = what {
+                e["what"] = json!(what);
+            }
+            if let Some(at) = self.granted.get(&g) {
+                e["granted"] = json!(at);
+            }
+            out.push(e);
+        }
+        out
+    }
+
+    /// Read back from `entries` (what `entries` wrote); one with no time takes `at` (its file's). One that
+    /// doesn't read (a hand edit — a host the proxy can't read, a kind unknown) is left out, and said.
+    pub fn from_entries(entries: &Json, at: u64) -> Allowed {
+        let mut a = Allowed::default();
+        for e in entries.as_array().into_iter().flatten() {
+            let (kind, what) = (e["kind"].as_str().unwrap_or(""), e["what"].as_str());
+            let Some(g) = Grant::of_entry(kind, what) else {
+                let said = format!("sandbox: a kept entry that doesn't read: {e}");
+                crate::log::line("sandbox", "warning", &said);
+                continue;
+            };
+            a.granted.insert(g.clone(), e["granted"].as_u64().unwrap_or(at));
+            a.add(&g);
+        }
+        a
+    }
+
     /// Takes back a place, a port, a socket or the terminals (as `:sandbox-allowed` lists it).
     pub fn remove(&mut self, what: &str) {
+        self.remove_only(what);
+        let left = self.grants();
+        self.granted.retain(|g, _| left.contains(g));
+    }
+
+    fn remove_only(&mut self, what: &str) {
         if what == TERMINALS_LISTED {
             self.terminals = false;
         }
@@ -126,17 +217,20 @@ pub fn host_port(s: &str) -> Option<(String, u16)> {
     }
 }
 
-fn add_place(list: &mut Vec<PathBuf>, real: PathBuf) {
-    if !list.iter().any(|p| real.starts_with(p)) {
-        list.retain(|p| !p.starts_with(&real));
-        list.push(real);
+/// Whether `real` was added (not covered by a place there already).
+fn add_place(list: &mut Vec<PathBuf>, real: PathBuf) -> bool {
+    if list.iter().any(|p| real.starts_with(p)) {
+        return false;
     }
+    list.retain(|p| !p.starts_with(&real));
+    list.push(real);
+    true
 }
 
 /// What a command of Claude's may do more: read a place in home (its reads there are confined — card model
 /// P2; Claude's Read tool reads it too), write in a folder, connect to a port on this machine, or to one
 /// unix socket (#119 — colima's `docker.sock` for `cargo xtask linux`: the only way was the sandbox off).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Grant {
     Read(PathBuf),
     Write(PathBuf),
@@ -167,14 +261,37 @@ impl Grant {
         }
     }
 
-    /// Whether it can be kept for the project (`A`): a socket can't — a server's socket is the server — nor
-    /// a read of home itself or above it, or of a place that holds keys.
+    /// Whether it can be kept for the project (`A`) — `Caps::storable`'s rule.
     pub fn keepable(&self) -> bool {
-        match self {
-            Grant::Socket(_) => false,
-            Grant::Read(p) => keepable(p, home().as_deref()),
-            _ => true,
-        }
+        crate::caps::Caps::storable(self) == Scope::Always
+    }
+
+    /// As a kept entry: its kind, and what (none for the terminals) — None for a socket, never kept.
+    fn entry(&self) -> Option<(&'static str, Option<String>)> {
+        let s = |p: &PathBuf| Some(p.to_string_lossy().into_owned());
+        Some(match self {
+            Grant::Read(p) => ("read", s(p)),
+            Grant::Write(p) => ("write", s(p)),
+            Grant::Port(n) => ("port", Some(n.to_string())),
+            Grant::Socket(_) => return None,
+            Grant::Host(h, p) => ("host", Some(format!("{h}:{p}"))),
+            Grant::Terminals => ("terminals", None),
+            Grant::Key(k) => ("key", s(k)),
+        })
+    }
+
+    /// Back from a kept entry (`entry`) — a path absolute, a host one name at its port.
+    fn of_entry(kind: &str, what: Option<&str>) -> Option<Grant> {
+        let path = || what.map(PathBuf::from).filter(|p| p.is_absolute());
+        Some(match kind {
+            "read" => Grant::Read(path()?),
+            "write" => Grant::Write(path()?),
+            "port" => Grant::Port(what?.parse().ok()?),
+            "host" => host_port(what?).map(|(h, p)| Grant::Host(h, p))?,
+            "terminals" => Grant::Terminals,
+            "key" => Grant::Key(path()?),
+            _ => return None,
+        })
     }
 
     /// Whether it's as much as running outside the sandbox (`warning` says why: Docker's socket) — never
@@ -228,15 +345,20 @@ pub fn tilde(p: &Path) -> String {
     }
 }
 
-/// How long an answer lasts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How long an answer lasts — shortest first (`Caps::storable` says the longest a grant may).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Scope {
     Once,
     ThisChat,
-    /// This tarae session, until you quit (a host — `hosts.rs`).
+    /// This tarae session: kept with it (`Session.allowed`, `$state/sessions`) until it ends or the answer is
+    /// taken back — a host's until you quit (`hosts.rs`).
     Session,
     Always,
 }
+
+/// `sandbox.json`'s form: each project a list of entries, each with its `scope` and when it was `granted`
+/// (cardauto piece 6). A file without it is the old form: a list per kind, no times.
+const STORE_VERSION: u64 = 2;
 
 /// The "always" answers, per project (real path) — `$state/sandbox.json`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -249,10 +371,20 @@ impl Store {
         crate::config::state_dir().map(|d| d.join("sandbox.json"))
     }
 
-    /// Read from `path` (missing or unreadable = nothing allowed).
+    /// Read from `path` (missing or unreadable = nothing allowed) — the old form too, each answer taking the
+    /// file's time (written in the new form at the next change).
     pub fn read(path: Option<&Path>) -> Store {
         let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Store::default() };
         let Ok(json) = serde_json::from_str::<Json>(&text) else { return Store::default() };
+        let at = path
+            .and_then(|p| std::fs::metadata(p).ok()?.modified().ok())
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        if json["version"].as_u64() == Some(STORE_VERSION) {
+            let projects = json["projects"].as_object().into_iter().flatten();
+            let projects = projects.map(|(p, e)| (PathBuf::from(p), Allowed::from_entries(e, at))).collect();
+            return Store { projects };
+        }
         let mut projects = BTreeMap::new();
         for (project, a) in json["projects"].as_object().into_iter().flatten() {
             let paths = |k: &str| -> Vec<PathBuf> {
@@ -273,10 +405,9 @@ impl Store {
             let (read, write, sockets) = (paths("read"), paths("write"), Vec::new());
             let terminals = a["terminals"].as_bool().unwrap_or(false);
             let keys = paths("keys");
-            projects.insert(
-                PathBuf::from(project),
-                Allowed { read, write, ports, sockets, hosts, terminals, keys },
-            );
+            let mut a = Allowed { read, write, ports, sockets, hosts, terminals, keys, ..Allowed::default() };
+            a.granted = a.grants().into_iter().map(|g| (g, at)).collect();
+            projects.insert(PathBuf::from(project), a);
         }
         Store { projects }
     }
@@ -286,21 +417,13 @@ impl Store {
     }
 
     pub fn to_json(&self) -> String {
-        let strings = |v: &[PathBuf]| v.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>();
         // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
         let mut projects = serde_json::Map::new();
         for (p, a) in self.projects.iter().filter(|(_, a)| !a.is_empty()) {
-            let hosts: Vec<String> = a.hosts.iter().map(|(h, p)| format!("{h}:{p}")).collect();
-            let mut body = json!({ "read": strings(&a.read), "write": strings(&a.write), "ports": a.ports, "hosts": hosts });
-            if a.terminals {
-                body["terminals"] = json!(true);
-            }
-            if !a.keys.is_empty() {
-                body["keys"] = json!(strings(&a.keys));
-            }
-            projects.insert(p.to_string_lossy().into_owned(), body);
+            projects.insert(p.to_string_lossy().into_owned(), json!(a.entries("always")));
         }
-        serde_json::to_string_pretty(&json!({ "projects": projects })).unwrap_or_default()
+        serde_json::to_string_pretty(&json!({ "version": STORE_VERSION, "projects": projects }))
+            .unwrap_or_default()
     }
 }
 
@@ -678,25 +801,53 @@ pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allow
     });
 }
 
-/// `a`/`A` on a card: Claude may read `places` (real paths) for the rest of this conversation, or always in
-/// this project (kept on a worker) — said in a toast.
+/// `grants` for `scope` past once: this conversation's (`Chat.allowed`), this session's (`Session.allowed`,
+/// kept with it), or the project's (kept on a worker, and the conversation's meanwhile) — the session's
+/// `Caps` made again.
+fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
+    match scope {
+        Scope::Once => return,
+        Scope::Session => {
+            grants.iter().for_each(|g| ed.session.allowed.add(g));
+            ed.sessions_keep();
+        }
+        Scope::ThisChat | Scope::Always => {
+            if let Some(c) = ed.session.chat.as_mut() {
+                grants.iter().for_each(|g| c.allowed.add(g));
+            }
+        }
+    }
+    if scope == Scope::Always {
+        let grants = grants.to_vec();
+        keep_later(ed, move |a| grants.iter().for_each(|g| a.add(g)));
+    }
+    ed.caps_sync();
+}
+
+/// How long `scope` lasts, as Claude hears it and as the toast ends.
+fn lasting(scope: Scope) -> (&'static str, &'static str) {
+    match scope {
+        Scope::Always => {
+            ("in this project, until they take it back", " in this project — :sandbox-allowed lists it")
+        }
+        Scope::Session => (
+            "in this session, until it ends or they take it back",
+            " in this session — :sandbox-allowed lists it",
+        ),
+        Scope::ThisChat | Scope::Once => ("for the rest of this conversation", " in this conversation"),
+    }
+}
+
+/// `a`/`s`/`A` on a card: Claude may read `places` (real paths) for the rest of this conversation, this
+/// session, or always in this project — said in a toast.
 pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Scope) {
     if scope == Scope::Once || places.is_empty() {
         return;
     }
-    if let Some(c) = ed.session.chat.as_mut() {
-        for p in places {
-            c.allowed.add_read(p.clone());
-        }
-    }
-    ed.caps_sync();
+    let grants: Vec<Grant> = places.iter().cloned().map(Grant::Read).collect();
+    add_for(ed, &grants, scope);
     let shown = places.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
-    if scope == Scope::ThisChat {
-        return ed.set_success(format!("Claude may read {shown} in this conversation"));
-    }
-    let places = places.to_vec();
-    keep_later(ed, move |a| places.into_iter().for_each(|p| a.add_read(p)));
-    ed.set_success(format!("Claude may read {shown} in this project — :sandbox-allowed lists it"));
+    ed.set_success(format!("Claude may read {shown}{}", lasting(scope).1));
 }
 
 /// `a`/`A` on a read card naming files in the project named like keys (`reads.rs`): Claude may read `keys`
@@ -706,52 +857,33 @@ pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope
     if scope == Scope::Once || keys.is_empty() {
         return;
     }
+    // (no longer than a key may be kept: `Caps::storable`)
     let grants: Vec<Grant> = keys.iter().map(|k| Grant::Key(k.clone())).collect();
-    if let Some(c) = ed.session.chat.as_mut() {
-        grants.iter().for_each(|g| c.allowed.add(g));
+    let scope = grants.iter().map(crate::caps::Caps::storable).fold(scope, Scope::min);
+    if scope == Scope::Once {
+        return;
     }
-    ed.caps_sync();
+    add_for(ed, &grants, scope);
     let shown = keys.iter().map(|k| tilde(k)).collect::<Vec<_>>().join(", ");
-    let when = match scope {
-        Scope::Always => "in this project, until they take it back",
-        _ => "for the rest of this conversation",
-    };
+    let (when, toast) = lasting(scope);
     // (Claude's read was answered; that its commands may read it too is news to it — as `grant` says)
     let tell = format!("The user let you and your commands read {shown}, named like a key — {when}.");
     ed.session.checkpoints.tell.push(tell);
-    if scope == Scope::ThisChat {
-        return ed.set_success(format!("Claude and its commands may read {shown} in this conversation"));
-    }
-    keep_later(ed, move |a| grants.iter().for_each(|g| a.add(g)));
-    ed.set_success(format!(
-        "Claude and its commands may read {shown} in this project — :sandbox-allowed lists it"
-    ));
+    ed.set_success(format!("Claude and its commands may read {shown}{toast}"));
 }
 
-/// `a`/`A` on a card about what the sandbox blocked: Claude's commands may do `g` for the rest of this
-/// conversation, or always in this project — and Claude hears it with the next message.
+/// `a`/`s`/`A` on a card about what the sandbox blocked: Claude's commands may do `g` for the rest of this
+/// conversation, this session, or always in this project — and Claude hears it with the next message.
 pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
-    // (Docker's socket is as much as the sandbox off: never for longer than one run — #193)
-    if scope == Scope::Once || g.as_outside() {
+    // (no longer than it may be kept: Docker's socket is as much as the sandbox off — never past one run, #193;
+    // another socket this conversation's at most)
+    let scope = scope.min(crate::caps::Caps::storable(g));
+    if scope == Scope::Once {
         return;
     }
-    // (a socket is this conversation's at most)
-    let scope = if g.keepable() { scope } else { Scope::ThisChat };
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.allowed.add(g);
-    }
-    ed.caps_sync();
-    let (when, toast) = match scope {
-        Scope::Always => {
-            ("in this project, until they take it back", " in this project — :sandbox-allowed lists it")
-        }
-        _ => ("for the rest of this conversation", " in this conversation"),
-    };
+    add_for(ed, std::slice::from_ref(g), scope);
+    let (when, toast) = lasting(scope);
     ed.session.checkpoints.tell.push(format!("The user let your commands {} — {when}.", g.shown()));
-    if scope == Scope::Always {
-        let g = g.clone();
-        keep_later(ed, move |a| a.add(&g));
-    }
     ed.set_success(format!("Claude's commands may {}{toast}", g.shown()));
 }
 
@@ -761,6 +893,7 @@ impl crate::editor::Editor {
     pub fn sandbox_allowed(&mut self) {
         use crate::picker::{Action, FillError, Item};
         let chat = self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+        let session = self.session.allowed.clone();
         let (path, project) = (self.allow_path.clone(), self.session.root.clone());
         let session_hosts = self.session.hosts.clone();
         let fill: crate::picker::Fill = Box::new(move || {
@@ -772,7 +905,7 @@ impl crate::editor::Editor {
                 glyph: Some(("◦", "ui.virtual")),
             };
             let mut items = Vec::new();
-            for (a, when) in [(&kept, "always"), (&chat, "this chat")] {
+            for (a, when) in [(&kept, "always"), (&session, "this session"), (&chat, "this chat")] {
                 let not_kept = |also: bool| when == "always" || !also;
                 for p in a.read.iter().filter(|p| not_kept(kept.read.contains(p))) {
                     items.push(row(p.display().to_string(), format!("reads · {when}")));
@@ -836,6 +969,11 @@ impl crate::editor::Editor {
         }
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
+        }
+        let had = self.session.allowed.clone();
+        self.session.allowed.remove(&what);
+        if self.session.allowed != had {
+            self.sessions_keep();
         }
         self.caps_sync();
         if let Some((kind, h, p)) = host {
@@ -956,11 +1094,12 @@ pub(crate) mod tests {
         );
         assert!(!rules.answered("static.example.invalid", 8443), "at its port");
         // A hand edit: only what the proxy reads
-        let text = std::fs::read_to_string(&path).unwrap().replace(
-            "\"static.example.invalid:443\"",
-            "\"static.example.invalid:443\", \"*.example.invalid:443\", \"1.2.3.4:443\", \"bare.example.invalid\"",
-        );
-        std::fs::write(&path, text).unwrap();
+        let mut v: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let entries = v["projects"][root.to_string_lossy().as_ref()].as_array_mut().unwrap();
+        for what in ["*.example.invalid:443", "1.2.3.4:443", "bare.example.invalid"] {
+            entries.push(json!({ "kind": "host", "what": what, "scope": "always", "granted": 1 }));
+        }
+        std::fs::write(&path, v.to_string()).unwrap();
         assert_eq!(Store::read(Some(&path)).get(&root).hosts.len(), 1);
         // Taken back
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
@@ -1258,5 +1397,73 @@ pub(crate) mod tests {
         assert_eq!(got.len(), WRITE_CHOICES, "{got:?}");
         assert_eq!(got[0], deep);
         assert!(write_choices(Path::new("/opt/x/y"), &home, &root, &later).is_empty(), "{got:?}");
+    }
+
+    /// cardauto 6: a `sandbox.json` of the old form (a list per kind, no times) is read with each answer at the
+    /// file's time, and written in the new form at the next change — each entry with its scope and when it was
+    /// granted, the old ones keeping the file's time, the new one its own.
+    #[test]
+    fn an_old_sandbox_json_reads_at_its_files_time_and_is_written_anew() {
+        let dir = crate::scratch::Scratch::new("allow-old");
+        let path = dir.join("sandbox.json");
+        let old = json!({ "projects": { "/p": {
+            "read": ["/t/r"], "write": ["/t/w"], "ports": [3000], "hosts": ["example.invalid:443"],
+            "terminals": true, "keys": ["/p/.env"] } } });
+        std::fs::write(&path, old.to_string()).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let at = modified.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let a = Store::read(Some(&path)).get(Path::new("/p"));
+        let all = [
+            Grant::Read("/t/r".into()),
+            Grant::Write("/t/w".into()),
+            Grant::Port(3000),
+            Grant::Host("example.invalid".into(), 443),
+            Grant::Terminals,
+            Grant::Key("/p/.env".into()),
+        ];
+        assert_eq!(a.grants(), all);
+        assert!(all.iter().all(|g| a.granted.get(g) == Some(&at)), "{:?}", a.granted);
+        // Written anew at the next change
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        keep(&path, Path::new("/p"), |a| a.add_port(8080)).unwrap();
+        let v: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["version"], STORE_VERSION, "{v}");
+        let entries = v["projects"]["/p"].as_array().unwrap();
+        assert_eq!(entries.len(), 7, "{v}");
+        assert!(entries.iter().all(|e| e["scope"] == "always" && e["granted"].is_u64()), "{v}");
+        let b = Store::read(Some(&path)).get(Path::new("/p"));
+        assert_eq!(b.grants()[..3], [all[0].clone(), all[1].clone(), Grant::Port(3000)]);
+        assert_eq!(b.ports, [3000, 8080]);
+        assert!(all.iter().all(|g| b.granted.get(g) == Some(&at)), "the file's time kept: {:?}", b.granted);
+        assert!(b.granted[&Grant::Port(8080)] > at, "the new one's own");
+        // Taken back: its time goes with it
+        keep(&path, Path::new("/p"), |a| a.remove("port 8080")).unwrap();
+        assert!(!Store::read(Some(&path)).get(Path::new("/p")).granted.contains_key(&Grant::Port(8080)));
+    }
+
+    /// cardauto 6: `s` — a grant for this session is the session's (not the conversation's, not the project's),
+    /// cut to what it may be kept for, in the session's `Caps` and so in its runs' policy, and Claude hears it.
+    #[test]
+    fn a_session_answer_is_the_sessions_and_goes_no_further() {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        let g = Grant::Write("/t/w".into());
+        grant(&mut ed, &g, Scope::Session);
+        assert_eq!(ed.session.allowed.write, [PathBuf::from("/t/w")]);
+        assert!(ed.session.allowed.granted.contains_key(&g), "with its time");
+        assert!(ed.session.chat.as_ref().is_none_or(|c| c.allowed.is_empty()), "not the conversation's");
+        let told = ed.session.checkpoints.tell.last().cloned().unwrap_or_default();
+        assert!(told.contains("in this session, until it ends"), "{told}");
+        let caps = ed.caps_basis().granted();
+        assert!(caps.grants().contains(&g), "in the runs' policy");
+        assert!(caps.write.iter().any(|e| e.source == crate::caps::Source::Grant(Scope::Session)));
+        // Never past what it may be kept for: Docker's socket this run's, a key this run's, another socket the
+        // conversation's
+        grant(&mut ed, &Grant::Socket("/run/docker.sock".into()), Scope::Session);
+        grant(&mut ed, &Grant::Key("/t/.env".into()), Scope::Session);
+        grant(&mut ed, &Grant::Socket("/t/s.sock".into()), Scope::Session);
+        assert_eq!(ed.session.allowed.grants(), [g], "nothing else the session's");
+        // Taken back
+        ed.sandbox_disallow("/t/w").unwrap();
+        assert!(ed.session.allowed.is_empty() && ed.session.allowed.granted.is_empty());
     }
 }

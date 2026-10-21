@@ -108,6 +108,8 @@ pub struct Kept {
     pub base: Option<String>,
     /// None: kept by a build before billing (it takes `llm.billing`, as a new one).
     pub billing: Option<crate::billing::Billing>,
+    /// What the user let its Claude do for the session (`Session.allowed`).
+    pub allowed: crate::allow::Allowed,
 }
 
 impl Kept {
@@ -118,12 +120,18 @@ impl Kept {
             branch: l.branch.clone(),
             base: l.base.clone(),
             billing: Some(l.billing),
+            allowed: l.allowed.clone(),
         }
     }
 
     fn json(&self) -> Value {
-        json!({ "root": self.root, "name": self.name, "branch": self.branch, "base": self.base,
-            "billing": self.billing.map(crate::billing::Billing::name) })
+        let mut v = json!({ "root": self.root, "name": self.name, "branch": self.branch, "base": self.base,
+            "billing": self.billing.map(crate::billing::Billing::name) });
+        let allowed = self.allowed.entries("session");
+        if !allowed.is_empty() {
+            v["allowed"] = json!(allowed);
+        }
+        v
     }
 
     fn from_json(v: &Value) -> Option<Kept> {
@@ -133,6 +141,8 @@ impl Kept {
             branch: v["branch"].as_str().map(str::to_string),
             base: v["base"].as_str().map(str::to_string),
             billing: v["billing"].as_str().and_then(crate::billing::Billing::parse),
+            // (every entry has its time: written by `json`)
+            allowed: crate::allow::Allowed::from_entries(&v["allowed"], 0),
         })
     }
 }
@@ -1303,6 +1313,7 @@ impl Editor {
                     self.session_add(k.root.clone())
                 }
             };
+            let granted = !k.allowed.is_empty();
             if let Some(l) = self.session_by_id(id) {
                 (l.name, l.branch, l.base) = (k.name, k.branch, k.base);
                 // (its claude, if one already runs — session 0's chat opened before the list came back — keeps the
@@ -1310,6 +1321,11 @@ impl Editor {
                 if let Some(b) = k.billing {
                     l.billing = b;
                 }
+                // (with what was answered here before it came back)
+                l.allowed.merge(&k.allowed);
+            }
+            if granted {
+                self.caps_sync_of(id);
             }
         }
         self.session_store.restored = true;
@@ -4444,6 +4460,39 @@ mod tests {
         assert!(load(&state.join("elsewhere"), common).sessions.is_empty());
         assert_eq!(kept_list(&json!({ OLD_NAME: [kept("c")] }))[0].name, "c", ":restart's state");
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// cardauto 6: what the user let a session's Claude do for the session (`s`) is kept with it — each answer
+    /// with its scope and time, in its file and `:restart`'s state — and comes back onto it, beside what was
+    /// answered there before the list came back; a session kept by an earlier build has none.
+    #[test]
+    fn a_sessions_grants_are_kept_with_it_and_come_back() {
+        let scratch = crate::scratch::Scratch::new("kept-grants");
+        let state = scratch.to_path_buf();
+        let (dir, common) = (state.join(DIR), Path::new("/repo/.git"));
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = state.clone();
+        ed.session.allowed.add(&crate::allow::Grant::Write("/t/w".into()));
+        ed.session.allowed.add(&crate::allow::Grant::Port(5432));
+        let k = Kept::of(&ed.session);
+        let v = k.json();
+        assert!(
+            v["allowed"].as_array().unwrap().iter().all(|e| e["scope"] == "session" && e["granted"].is_u64())
+        );
+        save(&dir, common, Stored { sessions: vec![k.clone()], front: None, seq: 1 });
+        assert_eq!(load(&dir, common).sessions, std::slice::from_ref(&k), "read back, times and all");
+        assert_eq!(kept_list(&snapshot(&ed))[0].allowed, k.allowed, ":restart's state");
+        // Back onto the session, beside an answer given meanwhile
+        ed.session.allowed = Default::default();
+        ed.session.allowed.add(&crate::allow::Grant::Port(8080));
+        ed.sessions_back(vec![k.clone()], Vec::new(), None, false);
+        assert_eq!(ed.session.allowed.ports, [8080, 5432]);
+        assert_eq!(ed.session.allowed.write, [PathBuf::from("/t/w")]);
+        let w = crate::allow::Grant::Write("/t/w".into());
+        assert_eq!(ed.session.allowed.granted.get(&w), k.allowed.granted.get(&w), "its own time");
+        // An earlier build's: none
+        let old = json!({ "root": "/wt/a", "name": "a" });
+        assert!(Kept::from_json(&old).unwrap().allowed.is_empty());
     }
 
     /// A high-risk change it brings (the Rust pack's `unsafe` — `risk.rs`) holds the bring until a person has

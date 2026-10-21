@@ -1915,6 +1915,11 @@ impl Editor {
                 'v' => self.offer_view(),
                 'r' => self.offer_one_by_one(),
                 'a' if self.offer_settled() => self.offer_for_chat(),
+                's' if self.offer_settled()
+                    && self.offers.first().is_some_and(crate::offer::Offer::for_session) =>
+                {
+                    self.offer_for_session()
+                }
                 'A' if self.offer_settled() => self.offer_always(),
                 'D' if self.offer_settled() => self.offer_remove(true),
                 'R' if self.offer_settled() => self.offer_remove(false),
@@ -6675,7 +6680,9 @@ mod tests {
         crate::term::render(&mut ed, &mut bytes, 140, 40).unwrap();
         let mut parser = vt100::Parser::new(40, 140, 0);
         parser.process(&bytes);
-        assert!(parser.screen().contents().contains("y Run   a This chat   A Always   n No"));
+        assert!(
+            parser.screen().contents().contains("y Run   a This chat   s This session   A Always   n No")
+        );
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
         feed(&mut ed, "a");
@@ -8441,10 +8448,13 @@ mod tests {
         let dir = scratch.to_path_buf();
         std::fs::create_dir_all(dir.join("out")).unwrap();
         std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::create_dir_all(dir.join("sess")).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
         let (out, other) = (dir.join("out"), dir.join("other"));
         let marker = out.join("marker.txt");
         std::fs::write(&marker, "tarae-marker\n").unwrap();
+        let sess = dir.join("sess/notes.txt");
+        std::fs::write(&sess, "tarae-marker\n").unwrap();
         let store = dir.join("state/sandbox.json");
         let project = this_repo();
         let mut ed = editor("");
@@ -8457,6 +8467,7 @@ mod tests {
             ("Read", json!({"file_path": marker})),
             ("Glob", json!({"pattern": "*.txt", "path": other})),
             ("Glob", json!({"pattern": "*", "path": "/"})),
+            ("Read", json!({"file_path": sess})),
         ];
         let log = fake_tool_asks(&mut ed, &dir, &asks);
         // (answers decided on a worker: the editor's events go on while it waits)
@@ -8490,6 +8501,7 @@ mod tests {
         );
         assert!(s.contains("marker.txt"), "{s}");
         assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
+        assert!(s.contains("s This session"), "{s}");
         feed(&mut ed, "n");
         let a = answered(&mut ed, "p2");
         assert_eq!(a["behavior"], "deny");
@@ -8512,10 +8524,16 @@ mod tests {
         assert!(ed.offers.iter().any(|o| o.title == TITLE), "A isn't an answer here");
         feed(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p6")["behavior"], "allow");
+        // `s`: this session's — not the conversation's, not the project's
+        card(&mut ed);
+        feed(&mut ed, "s");
+        assert_eq!(answered(&mut ed, "p7")["behavior"], "allow");
+        assert!(ed.session.allowed.reads(&sess), "{:?}", ed.session.allowed);
+        assert!(!ed.session.chat.as_ref().unwrap().allowed.reads(&sess));
         // Kept for this project; this chat's only in the chat
         let kept = |p: &Path| crate::allow::Store::read(Some(&store)).get(&project).reads(p);
         settle_until(&mut ed, |_| kept(&other));
-        assert!(!kept(&out) && !kept(Path::new("/")));
+        assert!(!kept(&out) && !kept(Path::new("/")) && !kept(&sess));
         assert!(ed.session.chat.as_ref().unwrap().allowed.reads(&marker));
         // Taken back
         crate::typed::execute(&mut ed, &format!("sandbox-disallow {}", other.display())).unwrap();
@@ -8524,13 +8542,13 @@ mod tests {
     }
 
     /// 7c: Claude's Read of a file in the project named like a key (`runtime/secret-names.txt`) asks on the
-    /// read card, as a run can't read it either (7a/7b); an exception (`!.env.example`) and a file the run's
-    /// panel opened (`Grant::Key`) are read unasked, and `a` opens it for the chat's reads and runs alike —
-    /// one grant. A Grep over a folder asks once, naming the keys it would search (not those opened, nor one
-    /// below tools' output) and what else there looks like a token; a glob that leaves them out, and a Glob
-    /// (names only), don't ask. `A` keeps the grant for the project, and its next Grep goes unasked. Claude is
-    /// told its commands may read what it opened. Nothing is read here: the fake claude only asks, and its
-    /// paths are this test's own temp folder.
+    /// read card, as a run can't read it either (7a/7b); an exception (`!.env.example`) is read unasked. A key is
+    /// read once at a time (cardauto 6, `Caps::storable`): the card offers `y` and `n` only, `a` and `A` are
+    /// refused on it, and the run's panel opens one for its run only — the same file asks again. A Grep over a
+    /// folder asks once, naming the keys it would search (not one below tools' output) and what else there looks
+    /// like a token; a glob that leaves them out, and a Glob (names only), don't ask. A key an earlier build kept
+    /// for the project (`A`) still opens it, in a later conversation too. Nothing is read here: the fake claude
+    /// only asks, and its paths are this test's own temp folder.
     #[test]
     fn reading_a_key_named_file_in_the_project_asks() {
         use crate::reads::KEYS_TITLE;
@@ -8584,33 +8602,32 @@ mod tests {
             (ed.offers[0].question.clone(), parser.screen().contents())
         };
         feed(&mut ed, "<space>l");
-        // (opened for this chat on the run's panel — `blocked::grant_answer`'s `a`)
+        // (the run's panel opens one for its run only — `blocked::grant_answer`'s `a` is never on its card)
         crate::allow::grant(&mut ed, &crate::allow::Grant::Key(tls.clone()), crate::allow::Scope::ThisChat);
+        assert!(ed.session.chat.as_ref().unwrap().allowed.keys.is_empty());
         feed(&mut ed, "read them<ret>");
         assert_eq!(answered(&mut ed, "p1")["behavior"], "allow", "an exception: unasked");
-        assert_eq!(answered(&mut ed, "p2")["behavior"], "allow", "opened on the run's panel: unasked");
         let (q, s) = card(&mut ed);
-        assert!(q.starts_with(&env.display().to_string()) && q.contains("It's named like a key."), "{q}");
-        assert!(q.contains("a and A open it to its commands too"), "{q}");
-        assert!(s.contains("y Once") && s.contains("a This chat") && s.contains("A Always"), "{s}");
+        assert!(q.starts_with(&tls.display().to_string()) && q.contains("It's named like a key."), "{q}");
+        assert!(!q.contains("a and A"), "{q}");
+        assert!(s.contains("y Once") && !s.contains("a This chat") && !s.contains("A Always"), "{s}");
         feed(&mut ed, "a");
+        feed(&mut ed, "A");
+        assert!(ed.offers.iter().any(|o| o.title == KEYS_TITLE), "a and A aren't answers here");
+        feed(&mut ed, "y");
+        assert_eq!(answered(&mut ed, "p2")["behavior"], "allow");
+        card(&mut ed);
+        feed(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p3")["behavior"], "allow");
-        let allowed = ed.session.chat.as_ref().unwrap().allowed.clone();
-        assert_eq!(allowed.keys, [tls.clone(), env.clone()], "the runs' grant, not a read of a place");
-        assert!(allowed.read.is_empty(), "{allowed:?}");
-        let told = |ed: &Editor, k: &Path| {
-            let said = format!("you and your commands read {}", crate::allow::tilde(k));
-            ed.session.checkpoints.tell.iter().any(|t| t.contains(&said))
-        };
-        assert!(told(&ed, &env), "{:?}", ed.session.checkpoints.tell);
-        assert_eq!(answered(&mut ed, "p4")["behavior"], "allow", "opened by `a`: unasked");
+        assert!(ed.session.chat.as_ref().unwrap().allowed.keys.is_empty(), "once: nothing opened");
+        let (q, _) = card(&mut ed);
+        assert!(q.starts_with(&env.display().to_string()), "the same file asks again: {q}");
+        feed(&mut ed, "n");
+        assert_eq!(answered(&mut ed, "p4")["behavior"], "deny");
         let (q, _) = card(&mut ed);
         let named = format!("searches {} and everything in it\nfor TOKEN", project.display());
-        assert!(
-            q.starts_with(&named) && q.contains("It opens files named like keys:\n    deploy/prod.pem\n\n"),
-            "{q}"
-        );
-        assert!(!q.contains(".env") && !q.contains("server.key") && !q.contains("test.key"), "{q}");
+        assert!(q.starts_with(&named) && q.contains("It opens files named like keys:\n"), "{q}");
+        assert!(q.contains("    deploy/prod.pem") && !q.contains("test.key"), "{q}");
         assert!(q.contains("deploy/hosts.yml holds a token-like line"), "its yes reads more: {q}");
         feed(&mut ed, "n");
         let a = answered(&mut ed, "p5");
@@ -8620,15 +8637,13 @@ mod tests {
         assert_eq!(answered(&mut ed, "p7")["behavior"], "allow", "Glob lists names only");
         let (q, _) = card(&mut ed);
         assert!(q.starts_with(&pem.display().to_string()), "{q}");
-        feed(&mut ed, "A");
+        feed(&mut ed, "y");
         assert_eq!(answered(&mut ed, "p8")["behavior"], "allow");
-        // Kept for the project (on a worker), not this chat's alone — and the search it held back goes now
-        let kept =
-            |p: &Path| crate::allow::Store::read(Some(&store)).get(&project).keys.contains(&p.to_path_buf());
-        settle_until(&mut ed, |_| kept(&pem));
-        assert!(!kept(&env), "`a` was this chat's");
-        assert!(told(&ed, &pem));
-        // (a later conversation: the project's grant alone lets it through)
+        card(&mut ed);
+        feed(&mut ed, "n");
+        assert_eq!(answered(&mut ed, "p9")["behavior"], "deny", "the search asks again");
+        // Kept for the project by an earlier build's `A`: a later conversation reads it unasked
+        crate::allow::keep(&store, &project, |a| a.add(&crate::allow::Grant::Key(pem.clone()))).unwrap();
         let basis =
             crate::caps::Basis { root: project.clone(), store: Some(store.clone()), ..Default::default() };
         let later = |f: &Path| {
@@ -8636,7 +8651,6 @@ mod tests {
             crate::reads::decide("Read", &input, &basis.build(), &Default::default()).1
         };
         assert!(later(&pem) && !later(&env));
-        assert_eq!(answered(&mut ed, "p9")["behavior"], "allow", "every key it'd read opened");
         std::fs::remove_dir_all(&dir).ok();
     }
 

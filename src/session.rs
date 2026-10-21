@@ -200,6 +200,9 @@ pub struct Session {
     /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:sandbox-allowed` lists and
     /// takes back; the proxy holds the answers itself (`hosts.rs`).
     pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
+    /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
+    /// host's, `hosts`), kept with it in `$state/sessions` until it ends or `:sandbox-disallow` takes it back.
+    pub allowed: crate::allow::Allowed,
     /// What its Claude may do, as last made (`Editor::caps_sync_of`) with the generation it was asked as — for
     /// what reads it on the main thread (the card line's shadow); None until the first lands. The gates make
     /// theirs on their workers, from what's answered at that moment.
@@ -331,6 +334,7 @@ impl Session {
             limit_asked: None,
             compacted: Default::default(),
             hosts: Vec::new(),
+            allowed: Default::default(),
             caps: None,
             caps_asked: 0,
             sandbox: None,

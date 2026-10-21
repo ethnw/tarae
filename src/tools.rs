@@ -2279,7 +2279,7 @@ fn ask_with(
     if !folders.is_empty() {
         let shown: Vec<String> = folders.iter().map(|f| f.display().to_string()).collect();
         question.push_str(&format!(
-            "\n\na and A allow everything in {} — not only these files.",
+            "\n\na, s and A allow everything in {} — not only these files.",
             shown.join(", ")
         ));
     }
@@ -2733,7 +2733,8 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     call.step("answered yes");
     let letter = match scope {
         crate::allow::Scope::Once => 'y',
-        crate::allow::Scope::ThisChat | crate::allow::Scope::Session => 'a',
+        crate::allow::Scope::ThisChat => 'a',
+        crate::allow::Scope::Session => 's',
         crate::allow::Scope::Always => 'A',
     };
     // What it runs: from the run's own snapshot, right before it starts (`go`) — it rides with the run
@@ -2747,7 +2748,7 @@ pub fn run_answer(ed: &mut Editor, id: u64, what: RunCard, scope: Option<crate::
     // One socket past the sandbox: this run's (`y`), or this conversation's (`a` — #119) — Docker's never
     // the conversation's: its `a` is this command's (#193, below)
     let docker = socket.as_deref().is_some_and(outside_socket);
-    let lasting = matches!(scope, crate::allow::Scope::ThisChat | crate::allow::Scope::Always);
+    let lasting = scope != crate::allow::Scope::Once;
     let grant = socket.clone().map(crate::allow::Grant::Socket);
     if let Some(g) = grant.as_ref().filter(|_| lasting && !docker) {
         crate::allow::grant(ed, g, crate::allow::Scope::ThisChat);
@@ -5257,7 +5258,10 @@ mod tests {
         assert!(q.contains("Claude asks, for `true`: its test server"), "{q}");
         let o = &ed.offers[0];
         assert_eq!(o.title, crate::blocked::GRANT_TITLE);
-        assert_eq!(o.answers(false), [('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]);
+        assert_eq!(
+            o.answers(false),
+            [('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+        );
         // `n`: said to Claude, and it sticks — asked again, no card
         ed.offer_dismiss();
         let no = super::ANSWERED

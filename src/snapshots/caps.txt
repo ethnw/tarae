@@ -12,6 +12,7 @@ read
 write
     $HOME/elsewhere · always
 ports
+    5432 · this session
     9 · always
 sockets
     $BASE/tmp/s.sock · this chat
@@ -75,6 +76,7 @@ read
 write
     $HOME/elsewhere · always
 ports
+    5432 · this session
     9 · always
 sockets
     $BASE/tmp/s.sock · this chat

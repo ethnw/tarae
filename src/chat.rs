@@ -3086,8 +3086,9 @@ mod tests {
     /// a conversation that its text wasn't sent and how to send it. Pointing at its pane (`C-o`) is the
     /// user's own act: the read card asks, the message waits for the answer — `y` sends its text with that
     /// message only, `n` keeps it to its name; taking the chip off drops the card, or the `y` given for it;
-    /// a new conversation drops the card; `A` keeps it open for the project. The fake claude logs each
-    /// message to this test's temp folder (the token is a fake).
+    /// a new conversation drops the card; `A` isn't an answer (a key is opened once at a time), but one an
+    /// earlier build kept for the project is open. The fake claude logs each message to this test's temp folder
+    /// (the token is a fake).
     /// The chat over `.env` in front (`key_project`), its claude a fake that logs each message it's sent to
     /// the test's temp folder — one process a turn —, the project's kept keys read: (dir, .env, notes.txt,
     /// the log, the editor).
@@ -3526,9 +3527,16 @@ mod tests {
         assert!(!ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE), "dropped with it");
         let m = ask(&mut ed, "a new conversation, first");
         assert!(!m.contains("tarae-fake-token") && m.contains("not sent"), "{m}");
-        // `A`: kept for the project (on a worker), the chat's copy read again — a new conversation sends it
+        // `A` isn't an answer: a key is opened once at a time (`Caps::storable`)
         point(&mut ed);
         answer(&mut ed, "A");
+        assert!(ed.offers.iter().any(|o| o.title == crate::reads::POINTED_TITLE), "A refused on the card");
+        answer(&mut ed, "n");
+        // Kept for the project by an earlier build's `A`: the chat's copy read again — a new conversation sends it
+        let store = ed.allow_path.clone().expect("a stand-in sandbox.json");
+        let project = crate::sandbox::profile_path(&ed.session.root);
+        crate::allow::keep(&store, &project, |a| a.add(&crate::allow::Grant::Key(env.clone()))).unwrap();
+        crate::reads::kept_keys_load(&mut ed);
         let kept = |ed: &Editor| {
             ed.session.chat.as_ref().unwrap().kept_keys.as_ref().is_some_and(|k| k.contains(&env))
         };
@@ -3751,8 +3759,8 @@ mod tests {
     /// 7c′: a note or the code review's comments on a file named like a key ask on the same card before its
     /// lines go — the user's own act, never sent nor left out silently: `n` sends the note with the file's
     /// name and the marker in place of its lines, `y` with them (that note only — the chat's next message
-    /// still names the file only), `a` opens the file and the review goes with them. The note is kept while
-    /// the card waits. The token is a fake, the claude a logging stand-in.
+    /// still names the file only), and the review's the same. The note is kept while the card waits. The token
+    /// is a fake, the claude a logging stand-in.
     #[test]
     fn a_note_or_review_on_a_key_named_file_asks_before_its_lines_go() {
         let (dir, env, _, log, mut ed) = key_chat("key-notes");
@@ -3782,7 +3790,8 @@ mod tests {
         send(&mut ed);
         turn_done(&mut ed);
         assert!(!last().contains("tarae-fake-token"), "y was for that note only");
-        // The review's comment on it: `n` names it, `a` opens it and sends its lines
+        // The review's comment on it: `n` names it, `y` sends its lines — a key is opened once at a time
+        // (`Caps::storable`): nothing opened for the conversation
         let draft = |ed: &mut Editor| ed.session.notes.list[0].thread.iter_mut().for_each(|e| e.draft = true);
         draft(&mut ed);
         crate::codereview::send(&mut ed);
@@ -3791,12 +3800,9 @@ mod tests {
         assert!(!m.contains("tarae-fake-token") && m.contains("(named like a key — not sent)"), "{m}");
         draft(&mut ed);
         crate::codereview::send(&mut ed);
-        let m = answered(&mut ed, "a");
-        assert!(m.contains("API_KEY=tarae-fake-token"), "a: opened, its lines go: {m}");
-        assert!(
-            ed.session.chat.as_ref().unwrap().allowed.keys.contains(&env),
-            "opened for this conversation"
-        );
+        let m = answered(&mut ed, "y");
+        assert!(m.contains("API_KEY=tarae-fake-token"), "y: its lines go: {m}");
+        assert!(!ed.session.chat.as_ref().unwrap().allowed.keys.contains(&env), "nothing opened");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3919,7 +3925,7 @@ mod tests {
         }
         let (at, folder, q, id) = card(&ed);
         assert_eq!((at, folder.clone()), (Some(shots.join("b.png")), Some(shots.clone())));
-        assert!(q.contains(&format!("a and A allow everything in {}", shots.display())), "{q}");
+        assert!(q.contains(&format!("a, s and A allow everything in {}", shots.display())), "{q}");
         // `a`: the folder for this chat, and the one waiting beside it goes through without a card
         crate::reads::answer(
             &mut ed,
@@ -3974,7 +3980,7 @@ mod tests {
         assert_eq!(f.as_deref(), Some(shots.as_path()));
         assert!(rev2 > rev, "settles again before `a` counts");
         let q = &ed.offers[0].question;
-        assert!(q.contains(&format!("a and A allow everything in {}", shots.display())), "{q}");
+        assert!(q.contains(&format!("a, s and A allow everything in {}", shots.display())), "{q}");
         std::fs::remove_dir_all(&shots).ok();
     }
 

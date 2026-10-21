@@ -217,8 +217,11 @@ impl Editor {
         let sandboxed = self.config.llm.sandbox
             && !matches!(self.sandbox, Availability::Missing(_) | Availability::Bypass);
         let (llm, store) = (self.config.llm.clone(), self.allow_path.clone());
-        let chats: Vec<(PathBuf, crate::allow::Allowed)> = all()
-            .map(|s| (s.root.clone(), s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default()))
+        let chats: Vec<(PathBuf, crate::allow::Allowed, crate::allow::Allowed)> = all()
+            .map(|s| {
+                let chat = s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
+                (s.root.clone(), s.allowed.clone(), chat)
+            })
             .collect();
         let writes: crate::gitrepo::Writes = std::sync::Arc::new(move || {
             if !sandboxed {
@@ -226,9 +229,9 @@ impl Editor {
             }
             let kept = crate::allow::Store::read(store.as_deref());
             let mut all = Vec::new();
-            for (root, chat) in &chats {
+            for (root, session, chat) in &chats {
                 let project = kept.get(&crate::sandbox::profile_path(root));
-                let caps = crate::caps::Caps::granted(root, &project, chat);
+                let caps = crate::caps::Caps::granted(root, &project, session, chat);
                 let w = crate::tools::with_allowed(&llm, &caps, None);
                 all.extend(crate::sandbox::write_places(root, &w.llm));
             }

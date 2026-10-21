@@ -140,12 +140,13 @@ pub enum What {
     ProtectedMade { then: Box<crate::tools::MadeThen>, made: Vec<crate::snapshot::Made> },
     /// Review at the end (`edits.rs`): `y` lets Claude's edits go in as it makes them.
     ReviewAtEnd,
-    /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `A` always
-    /// (those two only when `keep`), `n` no.
-    /// `folder`: what `a`/`A` allow instead of the file — its folder, beside other reads (#102).
+    /// Claude's Read, Grep or Glob outside the project (`reads.rs`): `y` once, `a` this chat, `s` this session,
+    /// `A` always (those three only when `keep`), `n` no.
+    /// `folder`: what `a`/`s`/`A` allow instead of the file — its folder, beside other reads (#102).
     Read { pending: Box<crate::reads::Pending>, keep: bool, folder: Option<PathBuf> },
     /// The user opens the sandbox for what it blocked in `run` (`blocked.rs`): `y` once (it runs again with
-    /// it), `a` this chat, `A` always — and runs again — `n` no.
+    /// it), `a` this chat, `s` this session, `A` always — as far as `Caps::storable` lets it last — and runs
+    /// again — `n` no.
     Grant { grant: crate::allow::Grant, run: Box<crate::blocked::BlockedRun> },
     /// The user runs `run` again outside the sandbox, once (`blocked.rs`): `y` · `n`.
     Outside { run: Box<crate::blocked::BlockedRun> },
@@ -613,10 +614,22 @@ impl Offer {
         }
     }
 
-    /// Whether `s` answers it — for this session: a host's card, or a host to grant from what a run was refused.
+    /// Whether `s` answers it — for this session: a host's card, or a card that grants what may be kept that
+    /// long (`top`).
     pub fn for_session(&self) -> bool {
-        self.host().is_some()
-            || matches!(&self.what, What::Grant { grant: crate::allow::Grant::Host(..), .. })
+        self.host().is_some() || self.top() >= Some(crate::allow::Scope::Session)
+    }
+
+    /// For a card that grants (what the sandbox blocked, a read outside the project, a run reading there): the
+    /// longest its yes may last — `Caps::storable` of what it grants (plan §2.3). None for the rest.
+    pub fn top(&self) -> Option<crate::allow::Scope> {
+        use crate::allow::Scope;
+        match &self.what {
+            What::Grant { grant, .. } => Some(crate::caps::Caps::storable(grant)),
+            What::Read { keep, .. } => Some(if *keep { Scope::Always } else { Scope::Once }),
+            What::Run(r) if r.keep => Some(Scope::Always),
+            _ => None,
+        }
     }
 
     /// The stuck run it asks about, if it's that card (`w` shows what it waits in).
@@ -732,7 +745,7 @@ impl Offer {
         match &self.what {
             // (a host lasts for the session, `s` — never the conversation's)
             What::Grant { grant: crate::allow::Grant::Host(..), .. } => false,
-            What::Grant { grant, .. } => !grant.as_outside(),
+            What::Grant { .. } => self.top() >= Some(crate::allow::Scope::ThisChat),
             What::NoSandbox { .. } | What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
             What::Run(r) => {
@@ -845,7 +858,9 @@ impl Offer {
                 false => vec![('y', "This run"), ('a', "This socket, this chat"), ('n', "No")],
             },
             W::Run(r) if r.socket.is_some() => vec![('y', "This run"), ('n', "No")],
-            W::Run(r) if r.keep => vec![('y', "Run"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
+            W::Run(r) if r.keep => {
+                vec![('y', "Run"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
+            }
             // (this command again for the rest of the chat — the card says which)
             W::Run(r) if r.again.is_some() => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
@@ -858,19 +873,27 @@ impl Offer {
                 vec![('y', "Keep, run"), ('r', "Remove, run"), ('v', "See them"), ('n', "No")]
             }
             W::Read { keep: true, .. } => {
-                vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")]
+                vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
             }
             W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
             // (as the host's own card)
             W::Grant { grant: crate::allow::Grant::Host(..), .. } => {
                 vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")]
             }
-            // (Docker's socket: this run's only — #193)
-            W::Grant { grant, .. } if grant.as_outside() => vec![('y', "This run"), ('n', "No")],
-            W::Grant { grant, .. } if !grant.keepable() => {
-                vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
-            }
-            W::Grant { .. } => vec![('y', "Once"), ('a', "This chat"), ('A', "Always"), ('n', "No")],
+            // (as far as it may be kept: Docker's socket and a key this run's only, another socket this chat's)
+            W::Grant { .. } => match self.top() {
+                Some(crate::allow::Scope::Always) => vec![
+                    ('y', "Once"),
+                    ('a', "This chat"),
+                    ('s', "This session"),
+                    ('A', "Always"),
+                    ('n', "No"),
+                ],
+                Some(crate::allow::Scope::ThisChat) => {
+                    vec![('y', "This run"), ('a', "This chat"), ('n', "No")]
+                }
+                _ => vec![('y', "This run"), ('n', "No")],
+            },
             W::Outside { .. } => vec![('y', "Run"), ('n', "No")],
             W::Preflight { .. } => vec![('y', "Run them"), ('n', "Not now")],
             W::BranchDelete { .. } => vec![('y', "Delete"), ('n', "Keep it")],
@@ -1243,7 +1266,7 @@ impl crate::editor::Editor {
             Code::Char(c @ ('s' | 'g')) if (c == 's' && o.stashes()) || (c == 'g' && o.held().is_some()) => {
                 self.offer_held(c)
             }
-            Code::Char('s') if o.for_session() => self.offer_host_session(),
+            Code::Char('s') if o.for_session() => self.offer_for_session(),
             Code::Char('a') if o.for_session() => self.set_status("this card asks y, s, A or n"),
             Code::Char('X') if o.aborts() => self.offer_abort(),
             Code::Char('b') if o.base_steps() => self.offer_session_base(),
@@ -1455,21 +1478,25 @@ impl crate::editor::Editor {
         self.push_offer(card);
     }
 
-    /// `s` on a host's card (or a host's grant): that host for every run of this session.
-    fn offer_host_session(&mut self) {
+    /// `s`: yes for this session — a host for every run of it, or what a grant's, a read's or a run's card
+    /// opens, kept with the session (`Session.allowed`).
+    pub fn offer_for_session(&mut self) {
         if !self.offers.first().is_some_and(Offer::for_session) {
             return;
         }
         let o = self.offers.remove(0);
         self.offer_said(&o, 's');
         self.card_answered(o.id);
+        let session = Some(crate::allow::Scope::Session);
         match o.what {
             What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session)
             }
-            What::Grant { grant, run } => {
-                crate::blocked::grant_answer(self, o.id, grant, *run, Some(crate::allow::Scope::Session))
+            What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, session),
+            What::Read { pending, keep, folder } => {
+                crate::reads::answer(self, o.id, *pending, session, keep, folder)
             }
+            What::Run(card) => crate::tools::run_answer(self, o.id, *card, session),
             _ => {}
         }
     }

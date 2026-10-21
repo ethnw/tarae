@@ -767,11 +767,15 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
         own: Some(own),
         then: None,
     };
-    let keep = p.look.keys.iter().all(|k| crate::allow::keepable(k, crate::allow::home().as_deref()));
+    let keep = p
+        .look
+        .keys
+        .iter()
+        .all(|k| crate::caps::Caps::storable(&crate::allow::Grant::Key(k.clone())) == Scope::Always);
     let mut q = format!("{}\n\n{is} named like a key, and {what}. {y}.", p.look.given);
     if keep {
         let only = if p.look.keys.len() == 1 { "that file only" } else { "those files only" };
-        q.push_str(&format!("\n\na and A open {it} to Claude and its commands too — {only}."));
+        q.push_str(&format!("\n\na, s and A open {it} to Claude and its commands too — {only}."));
     }
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class))
         .about(&p.look.given);
@@ -1059,7 +1063,10 @@ pub fn next(ed: &mut Editor) {
     let Some(p) = c.reads.pop_front() else { return };
     let home = crate::allow::home();
     let keepable = |at: &Path| crate::allow::keepable(at, home.as_deref());
-    let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(|k| keepable(k));
+    // (a file named like a key: once at a time — `Caps::storable`)
+    let key_kept =
+        |k: &PathBuf| crate::caps::Caps::storable(&crate::allow::Grant::Key(k.clone())) == Scope::Always;
+    let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(key_kept);
     // (beside another read waiting or let through once: its folder for longer — #102)
     let others = others(c);
     let folder = match (&p.look.at, keep) {
@@ -1122,13 +1129,13 @@ pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
     q.push_str("\n\nWhat it reads goes to Claude.");
     if keep && !look.keys.is_empty() {
         let (them, only) = if look.keys.len() == 1 { ("it", "that file") } else { ("them", "those files") };
-        q.push_str(&format!("\n\na and A open {them} to its commands too — {only} only."));
+        q.push_str(&format!("\n\na, s and A open {them} to its commands too — {only} only."));
     }
     if !keep && look.at.is_some() {
         q.push_str(" Only once — a place like this is never kept.");
     }
     if let Some(f) = folder {
-        q.push_str(&format!("\n\na and A allow everything in {} — not only this file.", f.display()));
+        q.push_str(&format!("\n\na, s and A allow everything in {} — not only this file.", f.display()));
     }
     q
 }
@@ -1191,10 +1198,11 @@ pub fn answer(
         crate::allow::grant_keys(ed, &p.look.keys, scope);
     }
     // The ones waiting that this lets through
+    let session = ed.session.allowed.clone();
     if let Some(c) = ed.session.chat.as_mut().filter(|_| longer) {
         let opened = |w: &Pending| {
-            w.look.at.as_ref().is_some_and(|a| a.starts_with(&root) || c.allowed.reads(a))
-                && w.look.keys.iter().all(|k| c.allowed.keys.contains(k))
+            w.look.at.as_ref().is_some_and(|a| a.starts_with(&root) || c.allowed.reads(a) || session.reads(a))
+                && w.look.keys.iter().all(|k| c.allowed.keys.contains(k) || session.keys.contains(k))
         };
         let (through, wait): (Vec<_>, Vec<_>) = c.reads.drain(..).partition(opened);
         c.reads.extend(wait);
@@ -1334,7 +1342,7 @@ mod tests {
         let folder = format!("In {}, .env and hosts.yml hold token-like lines.", crate::allow::tilde(&out));
         let q = ed.offers[0].question.clone();
         assert!(warned(&ed).starts_with(&file) && warned(&ed).ends_with(&folder), "{q}");
-        assert!(q.contains(&format!("a and A allow everything in {}", out.display())), "{q}");
+        assert!(q.contains(&format!("a, s and A allow everything in {}", out.display())), "{q}");
         assert!(ed.offers[0].rev > rev && !q.contains("tarae-fake-token"), "{q}");
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1372,7 +1380,7 @@ mod tests {
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
         let covered = |l: &Look, kept: &Allowed, chat: &Allowed| {
-            covered(l, &crate::caps::Caps::granted(root, kept, chat), &Made::default())
+            covered(l, &crate::caps::Caps::granted(root, kept, &Allowed::default(), chat), &Made::default())
         };
         assert!(covered(&l(Some("/r/p/src/a.rs")), &none, &none));
         assert!(!covered(&l(Some("/r/pq/a.rs")), &none, &none), "by path parts");
@@ -1515,7 +1523,7 @@ mod tests {
         let Some(log) = crate::log::path() else { return };
         let root = Path::new("/r/p");
         let none = Allowed::default();
-        let caps = crate::caps::Caps::granted(root, &none, &none);
+        let caps = crate::caps::Caps::granted(root, &none, &none, &none);
         let at = |tool: &str, input: Value| covered(&look(tool, &input, root), &caps, &Made::default());
         assert!(at("Read", json!({ "file_path": log })));
         assert!(at("Grep", json!({ "pattern": "ready", "path": log })));

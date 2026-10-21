@@ -47,7 +47,8 @@ impl Why {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Default(Why),
-    /// The user's answer: kept for the project (`Always`), or this conversation's (`ThisChat`).
+    /// The user's answer: kept for the project (`Always`), this session's (`Session`), or this conversation's
+    /// (`ThisChat`).
     Grant(Scope),
 }
 
@@ -105,16 +106,39 @@ pub struct Caps {
 }
 
 impl Caps {
-    /// The checkout `root` and the answers: kept for the project, then this conversation's — no default found
-    /// beyond the checkout (a run's policy has its own: `tools::with_allowed` takes the answers only).
-    pub fn granted(root: &Path, kept: &Allowed, chat: &Allowed) -> Caps {
+    /// The checkout `root` and the answers: kept for the project, this session's, then this conversation's — no
+    /// default found beyond the checkout (a run's policy has its own: `tools::with_allowed` takes the answers
+    /// only).
+    pub fn granted(root: &Path, kept: &Allowed, session: &Allowed, chat: &Allowed) -> Caps {
         let mut c = Caps { root: root.to_path_buf(), ..Caps::default() };
         if !root.as_os_str().is_empty() {
             c.read.push(Entry { what: root.to_path_buf(), source: Source::Default(Why::Checkout) });
         }
         c.add_answers(kept, Source::Grant(Scope::Always));
+        c.add_answers(session, Source::Grant(Scope::Session));
         c.add_answers(chat, Source::Grant(Scope::ThisChat));
         c
+    }
+
+    /// The longest an answer about `g` may last (plan §2.3) — the top scope its card offers, and what an answer
+    /// is cut to. Once only: a place that holds keys, home itself or above it (that's everything), a file named
+    /// like a key, Docker's socket (as much as the sandbox off — #193). This conversation at most: another
+    /// socket (a server's socket is the server). The rest may be kept for the project.
+    pub fn storable(g: &Grant) -> Scope {
+        Caps::storable_in(g, crate::allow::home().as_deref())
+    }
+
+    /// `storable` for home `home`.
+    pub fn storable_in(g: &Grant, home: Option<&Path>) -> Scope {
+        match g {
+            Grant::Read(p) if !crate::allow::keepable(p, home) => Scope::Once,
+            Grant::Key(_) => Scope::Once,
+            Grant::Socket(_) if g.as_outside() => Scope::Once,
+            Grant::Socket(_) => Scope::ThisChat,
+            Grant::Read(_) | Grant::Write(_) | Grant::Port(_) | Grant::Host(..) | Grant::Terminals => {
+                Scope::Always
+            }
+        }
     }
 
     /// The defaults found (`allow::defaults_in`), and what's never one.
@@ -146,10 +170,10 @@ impl Caps {
     }
 
     /// The answers, as a run's policy is widened by them (`tools::with_allowed`): the kept ones first, then this
-    /// conversation's, each kind in `Allowed`'s order.
+    /// session's, then this conversation's, each kind in `Allowed`'s order.
     pub fn grants(&self) -> Vec<Grant> {
         let mut out = Vec::new();
-        for s in [Source::Grant(Scope::Always), Source::Grant(Scope::ThisChat)] {
+        for s in [Scope::Always, Scope::Session, Scope::ThisChat].map(Source::Grant) {
             let of = |source: Source| source == s;
             out.extend(self.read.iter().filter(|e| of(e.source)).map(|e| Grant::Read(e.what.clone())));
             out.extend(self.write.iter().filter(|e| of(e.source)).map(|e| Grant::Write(e.what.clone())));
@@ -203,16 +227,17 @@ impl Caps {
             kept: crate::sandbox::kept_places(home, &here),
             later: crate::sandbox::RunsLater::new(home, &vars, &[]),
             home: Some(home.to_path_buf()),
-            ..Caps::granted(root, &Allowed::default(), &Allowed::default())
+            ..Caps::granted(root, &Allowed::default(), &Allowed::default(), &Allowed::default())
         }
     }
 
-    /// (Tests: the answers in `scopes` — the first kept for the project, the second this conversation's.)
+    /// (Tests: the answers in `scopes` — the first kept for the project, the second this conversation's, the
+    /// third this session's.)
     #[cfg(test)]
     pub fn answered(scopes: &[&Allowed]) -> Caps {
         let none = Allowed::default();
         let at = |i: usize| scopes.get(i).copied().unwrap_or(&none);
-        Caps::granted(Path::new(""), at(0), at(1))
+        Caps::granted(Path::new(""), at(0), at(2), at(1))
     }
 
     /// All of it, a line each, each path as `shown` says it, sorted within each part — `src/snapshots/caps.txt`
@@ -250,6 +275,8 @@ pub struct Basis {
     pub root: PathBuf,
     /// `$state/sandbox.json` (None: nothing kept — tests).
     pub store: Option<PathBuf>,
+    /// This session's answers.
+    pub session: Allowed,
     /// This conversation's answers.
     pub chat: Allowed,
     /// The temp folders read by default (`Editor.read_temp`).
@@ -263,7 +290,7 @@ impl Basis {
     pub fn granted(&self) -> Caps {
         let kept =
             crate::allow::Store::read(self.store.as_deref()).get(&crate::sandbox::profile_path(&self.root));
-        Caps::granted(&self.root, &kept, &self.chat)
+        Caps::granted(&self.root, &kept, &self.session, &self.chat)
     }
 
     /// The whole value, for home and the variables as the process has them. A worker's: it reads the store and
@@ -294,6 +321,7 @@ impl crate::editor::Editor {
         Basis {
             root: self.session.root.clone(),
             store: self.allow_path.clone(),
+            session: self.session.allowed.clone(),
             chat: self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default(),
             temp: self.read_temp,
             outside: self.read_outside,
@@ -313,7 +341,7 @@ impl crate::editor::Editor {
         s.caps_asked += 1;
         let generation = s.caps_asked;
         let chat = s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-        let basis = Basis { root: s.root.clone(), store, chat, temp, outside };
+        let basis = Basis { root: s.root.clone(), store, session: s.allowed.clone(), chat, temp, outside };
         self.events.shared_jobs().spawn(move || {
             let caps = Arc::new(basis.build());
             move |ed: &mut crate::editor::Editor| caps_landed(ed, id, generation, caps)
@@ -359,7 +387,7 @@ mod tests {
             keys: vec!["/p/.env".into()],
             ..Allowed::default()
         };
-        let mut caps = Caps::granted(Path::new("/p"), &kept, &chat);
+        let mut caps = Caps::granted(Path::new("/p"), &kept, &Allowed::default(), &chat);
         caps.read.push(Entry { what: "/t".into(), source: Source::Default(Why::Temp) });
         assert_eq!(
             caps.grants(),
@@ -417,7 +445,8 @@ mod tests {
     /// No checkout, nothing read by being in it: an empty path holds every path.
     #[test]
     fn no_checkout_reads_nothing() {
-        let caps = Caps::granted(Path::new(""), &Allowed::default(), &Allowed::default());
+        let none = Allowed::default();
+        let caps = Caps::granted(Path::new(""), &none, &none, &none);
         assert!(!caps.reads(Path::new("/etc/hosts")) && !Caps::default().reads(Path::new("/etc/hosts")));
     }
 
@@ -433,5 +462,36 @@ mod tests {
         for c in [Class::OtherCheckout, Class::Temp, Class::Toolchain] {
             assert!(Caps::default().by_default(c), "{c:?}");
         }
+    }
+
+    /// cardauto 6 (plan §2.3): the longest each grant may be kept — once only for a place holding keys, home
+    /// or above it, a file named like a key, Docker's socket; this conversation for another socket; the rest
+    /// for the project.
+    #[test]
+    fn what_may_be_kept_and_for_how_long() {
+        let home = Path::new("/h");
+        let s = |g: Grant| Caps::storable_in(&g, Some(home));
+        for (g, top) in [
+            (Grant::Read("/h/code/x".into()), Scope::Always),
+            (Grant::Read("/opt/x".into()), Scope::Always),
+            (Grant::Read("/h".into()), Scope::Once),
+            (Grant::Read("/".into()), Scope::Once),
+            (Grant::Read("/h/.ssh/config".into()), Scope::Once),
+            (Grant::Read("/h/.config/gh".into()), Scope::Once),
+            (Grant::Key("/p/.env".into()), Scope::Once),
+            (Grant::Socket("/run/docker.sock".into()), Scope::Once),
+            (Grant::Socket("/p/.tarae/x.sock".into()), Scope::ThisChat),
+            (Grant::Write("/h/w".into()), Scope::Always),
+            (Grant::Port(5432), Scope::Always),
+            (Grant::Host("example.invalid".into(), 443), Scope::Always),
+            (Grant::Terminals, Scope::Always),
+        ] {
+            assert_eq!(s(g.clone()), top, "{g:?}");
+        }
+        assert!(
+            Scope::Once < Scope::ThisChat
+                && Scope::ThisChat < Scope::Session
+                && Scope::Session < Scope::Always
+        );
     }
 }
