@@ -497,15 +497,19 @@ fn visual(cx: &mut Context, dir: Direction, extend: bool, n: usize) {
     let tab = cx.editor.config.tab_width;
     let sticky = cx.editor.sticky.take();
     let doc = cx.editor.doc_mut();
+    let given = doc.rows.clone();
+    let given = given.as_deref();
     let ranges = doc.selection().ranges().to_vec();
     let xs: Vec<usize> = match sticky {
         Some(x) if x.len() == ranges.len() => x,
-        _ => ranges.iter().map(|&r| crate::wrap::x_of(&doc.text, r.cursor(&doc.text), width, tab)).collect(),
+        _ => (ranges.iter())
+            .map(|&r| crate::wrap::x_of(&doc.text, given, r.cursor(&doc.text), width, tab))
+            .collect(),
     };
     let moved = ranges
         .iter()
         .zip(&xs)
-        .map(|(&r, &x)| crate::wrap::move_rows(&doc.text, r, dir, n, extend, x, width, tab))
+        .map(|(&r, &x)| crate::wrap::move_rows(&doc.text, given, r, dir, n, extend, x, width, tab))
         .collect();
     let primary = doc.selection().primary_index();
     doc.set_selection(Selection::new(moved, primary));
@@ -2390,7 +2394,7 @@ fn chat_point(cx: &mut Context) {
 
 /// The chat's `esc`: from its input to its view mode.
 fn chat_view(cx: &mut Context) {
-    crate::view::chat_view(cx.editor);
+    crate::chatdoc::view(cx.editor);
 }
 /// The terminal's `C-\` from its program: its view mode, at the row in sight.
 fn terminal_view(cx: &mut Context) {
@@ -2413,27 +2417,34 @@ fn window_keys(cx: &mut Context) {
     }
 }
 fn view_leave(cx: &mut Context) {
-    match crate::rundoc::swapped(cx.editor) {
-        true => crate::rundoc::leave_key(cx.editor),
-        false => crate::view::leave_key(cx.editor),
+    match crate::docpane::swapped(cx.editor) {
+        Some(_) => crate::docpane::leave_key(cx.editor),
+        None => crate::view::leave_key(cx.editor),
     }
 }
 /// The terminal's `C-\` in its view mode: to the code whatever is selected — the round's next stop, one key
 /// (`esc` collapses a selection first, the reader's two steps).
 fn view_code(cx: &mut Context) {
-    crate::view::ask(cx.editor, crate::view::After::Leave);
+    match crate::docpane::swapped(cx.editor) {
+        Some(_) => crate::docpane::ask(cx.editor, crate::docpane::After::Leave),
+        None => crate::view::ask(cx.editor, crate::view::After::Leave),
+    }
 }
+/// View mode's `i`/`a`: the chat's input, the terminal's program.
 fn view_input(cx: &mut Context) {
-    crate::view::ask(cx.editor, crate::view::After::Input);
+    match crate::docpane::swapped(cx.editor) {
+        Some(_) => crate::docpane::ask(cx.editor, crate::docpane::After::Input),
+        None => crate::view::ask(cx.editor, crate::view::After::Input),
+    }
 }
 /// View mode's `enter`: what's selected to the chat as quotes (`quote.rs`), the input with the keys; nothing
 /// selected, the surface's own — the chat's input, the terminal's program (`view_input`); on a run panel's output,
 /// your run waiting behind there, else the chat's input.
 fn view_take(cx: &mut Context) {
-    let take = crate::view::wide(cx.editor.doc());
-    if crate::rundoc::swapped(cx.editor) {
-        use crate::rundoc::After;
-        return crate::rundoc::ask(cx.editor, if take { After::Take } else { After::Enter });
+    let take = crate::docpane::wide(cx.editor.doc());
+    if crate::docpane::swapped(cx.editor).is_some() {
+        use crate::docpane::After;
+        return crate::docpane::ask(cx.editor, if take { After::Take } else { After::Enter });
     }
     crate::view::ask(cx.editor, if take { crate::view::After::Take } else { crate::view::After::Enter });
 }
@@ -2451,13 +2462,13 @@ fn preflight_output(cx: &mut Context) {
 /// the chat's view mode. In a view mode (its `space >`) or on a run panel's output: its selection, as `enter` quotes
 /// it; none, the chat's view.
 fn quote(cx: &mut Context) {
-    if crate::rundoc::swapped(cx.editor) {
-        use crate::rundoc::After;
-        let take = crate::view::wide(cx.editor.doc());
-        return crate::rundoc::ask(cx.editor, if take { After::Take } else { After::ChatView });
+    if crate::docpane::swapped(cx.editor).is_some() {
+        use crate::docpane::After;
+        let take = crate::docpane::wide(cx.editor.doc());
+        return crate::docpane::ask(cx.editor, if take { After::Take } else { After::ChatView });
     }
     if crate::view::swapped(cx.editor) {
-        let take = crate::view::wide(cx.editor.doc());
+        let take = crate::docpane::wide(cx.editor.doc());
         let after = if take { crate::view::After::Take } else { crate::view::After::ChatView };
         return crate::view::ask(cx.editor, after);
     }
@@ -2474,8 +2485,8 @@ fn view_copy(cx: &mut Context) {
 fn view_latest(cx: &mut Context) {
     match cx.count {
         Some(_) => goto_line(cx),
-        None if crate::rundoc::swapped(cx.editor) => {
-            crate::rundoc::ask(cx.editor, crate::rundoc::After::Latest)
+        None if crate::docpane::swapped(cx.editor).is_some() => {
+            crate::docpane::ask(cx.editor, crate::docpane::After::Latest)
         }
         None => crate::view::ask(cx.editor, crate::view::After::Latest),
     }

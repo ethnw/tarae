@@ -375,7 +375,12 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     render_frame(editor, &mut frame, w, h)?;
     // (the chat's view mode asked for before its rows were laid out: made from these, drawn with it)
     // (and a run panel's output laid out for another size than its panel just drew: its cursor kept in sight)
-    if crate::follow::reading(editor) | crate::view::wanted(editor) | crate::rundoc::resized(editor) {
+    // (and the chat's, its view mode with the keys)
+    if crate::follow::reading(editor)
+        | crate::chatdoc::wanted(editor)
+        | crate::rundoc::resized(editor)
+        | crate::chatdoc::resized(editor)
+    {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
@@ -508,8 +513,17 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         prompt_card: Default::default(),
         spots: Default::default(),
     };
+    // (the conversation laid out for this frame, the transcript's document following it — keys act on what's drawn)
+    if lay.chat_w > 0
+        && let Some(c) = editor.session.chat.as_ref()
+    {
+        let laid = chat_laid(c, editor, &ui, lay.chat_w);
+        crate::chatdoc::sync(editor, &laid);
+        *editor.screen.chat_laid.borrow_mut() = laid;
+    }
     editor.refresh_search(focus_lay.text_rows);
     crate::view::refresh_search(editor);
+    crate::chatdoc::refresh_search(editor);
     crate::rundoc::refresh_search(editor);
     // Follow took the editor to an edit being written: its rows where the review will show them (`writing.rs`) —
     // the topmost item's, the change the review opens on
@@ -3522,11 +3536,9 @@ fn draw(
         card.draw(editor, ui, out)?;
     }
     // (a view mode's own sequence under way — `g`, `z`, `m` on the conversation — lists its keys too)
-    let viewing = crate::view::has_keys(editor).and(editor.session.view.as_ref());
+    let viewing = crate::view::viewing(editor).is_some_and(|(_, k)| !k.pending.is_empty());
     let output = crate::rundoc::keyed(editor).is_some_and(|(_, o)| !o.keys.pending.is_empty());
-    if (!editor.pending.is_empty() || output || viewing.is_some_and(|v| !v.pending().is_empty()))
-        && editor.picker.is_none()
-    {
+    if (!editor.pending.is_empty() || output || viewing) && editor.picker.is_none() {
         draw_which_key(editor, ui, lay, out)?;
     }
     let picker_cursor = match &editor.picker {
@@ -6865,9 +6877,13 @@ fn fit_segments(left: &mut Vec<Seg>, right: &mut Vec<Seg>, width: usize) {
     let total = |l: &Vec<Seg>, r: &Vec<Seg>| l.iter().chain(r).map(|s| s.text.width()).sum::<usize>();
     // A blank spacer right after a segment with the same `keep` belongs to it — they go together, or a
     // stray gap is left behind (and the fill that should separate left from right goes missing)
+    // — and a key hint's words go with its key (`  i`, ` type`): never one without the other
     let drop = |v: &mut Vec<Seg>, i: usize| {
-        let keep = v.remove(i).keep;
-        if v.get(i).is_some_and(|s| s.keep == keep && s.text.trim().is_empty()) {
+        let s = v.remove(i);
+        let key = matches!(s.keep, HINTS | VIEW_HINTS) && s.text.starts_with("  ");
+        if v.get(i).is_some_and(|n| {
+            n.keep == s.keep && (n.text.trim().is_empty() || key && !n.text.starts_with("  "))
+        }) {
             v.remove(i);
         }
     };
@@ -6916,10 +6932,15 @@ fn draw_statusline(
         Mode::Insert => "INSERT",
         Mode::Select => "SELECT",
     });
-    // (a view mode's own `v`: said after its surface)
-    let view = editor.session.view.as_ref().filter(|_| matches!(keys, Keys::View(_)));
-    let mode = match view.map(|v| v.mode()) {
-        Some(Mode::Select) => format!("{mode} · SELECT"),
+    // (a view mode's own `v`: said after its surface — the terminal's; the chat's is normal mode on its document,
+    // said as a run's output says it, below)
+    let view = crate::view::viewing(editor).filter(|_| matches!(keys, Keys::View(_)));
+    let mode = match (word, view.map(|(_, k)| k.mode)) {
+        (Keys::View(crate::view::Surface::Chat), _) => {
+            let select = crate::chatdoc::transcript(editor).is_some_and(|t| t.pane.keys.mode == Mode::Select);
+            format!("{} · {mode}", if select { "SELECT" } else { "NORMAL" })
+        }
+        (_, Some(Mode::Select)) => format!("{mode} · SELECT"),
         _ => mode.to_string(),
     };
     // (a run panel's output: its own mode, then what it's of — `● normal · tests`)
@@ -7105,10 +7126,10 @@ fn draw_statusline(
         .chat
         .as_ref()
         .filter(|_| lay.chat_w == 0)
-        .and_then(|c| c.input.lines().map(str::trim).find(|l| !l.is_empty()))
+        .and_then(|c| c.input.text().lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string))
     {
         left.push(Seg { text: "  unsent ".into(), style: accent, keep: 225 });
-        left.push(Seg { text: fit_ellipsis(text, 24), style: dim, keep: 225 });
+        left.push(Seg { text: fit_ellipsis(&text, 24), style: dim, keep: 225 });
     }
     if !lay.header {
         let modified = if doc.is_modified() { " ●" } else { "" };
@@ -7176,7 +7197,14 @@ fn draw_statusline(
     // (in a view mode or on a run's output, where its cursor is on its document — the row and column, the
     // selections)
     let on_output = output.filter(|_| matches!(keys, Keys::Output(_))).map(|(_, o)| (o.doc(), o.keys.mode));
-    let (at_doc, at_mode) = view.map(|v| (v.doc(), v.mode())).or(on_output).unwrap_or((doc, editor.mode));
+    let viewed = match view {
+        Some((crate::view::Surface::Chat, k)) => {
+            crate::chatdoc::transcript(editor).and_then(|t| t.pane.doc_in()).map(|d| (d, k.mode))
+        }
+        Some((_, k)) => editor.session.view.as_ref().map(|v| (v.doc(), k.mode)),
+        None => None,
+    };
+    let (at_doc, at_mode) = viewed.or(on_output).unwrap_or((doc, editor.mode));
     let sel = at_doc.selection();
     let pos = cursor_idx(at_mode, sel.primary(), &at_doc.text);
     let line = mv::line_of(&at_doc.text, pos);
@@ -7246,9 +7274,14 @@ fn draw_statusline(
         right.push(gap(210));
     }
     // (the search of where the keys are: a view mode's its own — its `/` being typed too —, never the code's)
-    let searching = editor.session.view.as_ref().filter(|v| v.prompt).or(view);
-    let (hits, at) = match (searching, output.filter(|_| matches!(word, Keys::Output(_)))) {
-        (Some(v), _) => (v.hits(), v.doc().selection().primary()),
+    let chat = crate::chatdoc::transcript(editor)
+        .filter(|t| t.keyed && (t.pane.prompt || keys == Keys::View(crate::view::Surface::Chat)))
+        .and_then(|t| Some((t.pane.hits(), t.pane.doc_in()?.selection().primary())));
+    let terminal = (editor.session.view.as_ref())
+        .filter(|v| v.prompt || keys == Keys::View(crate::view::Surface::Terminal))
+        .map(|v| (v.hits(), v.doc().selection().primary()));
+    let (hits, at) = match (chat.or(terminal), output.filter(|_| matches!(word, Keys::Output(_)))) {
+        (Some(s), _) => s,
         (None, Some((_, o))) => (o.hits(), o.doc().selection().primary()),
         (None, None) => (editor.search_hits.as_ref(), sel.primary()),
     };
@@ -7257,6 +7290,7 @@ fn draw_statusline(
         let count = match h.current(at) {
             Some(i) => format!("{i:>w$}/{n}{}", if h.capped { "+" } else { "" }, w = n.to_string().len()),
             None if n == 0 && !h.capped => "no matches".to_string(),
+            None if n == 1 && !h.capped => "1 match".to_string(),
             None => format!("{n}{} matches", if h.capped { "+" } else { "" }),
         };
         right.push(Seg { text: format!("/{}  ", fit_ellipsis(&h.pattern, 24)), style: dim, keep: 205 });
@@ -7426,7 +7460,7 @@ const INBOX: u8 = 245;
 const SHUTTLE: u8 = 238;
 
 /// The status line's view-mode hints (`i type  esc code`): the first to fold when narrow — below the branch and
-/// the hunks; the mode word (`● view · chat`) and a shuttle's name never (quote-plan §6).
+/// the hunks; the mode word (`● normal · chat`) and a shuttle's name never (quote-plan §6).
 const VIEW_HINTS: u8 = 70;
 
 /// …and its step lit a moment after each: as long-lived on the line, apart from the chip (not its click).
@@ -9023,15 +9057,14 @@ fn which_key_columns(
 const WHICH_KEY_CUT_MIN: usize = 6;
 
 fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
-    let view = crate::view::has_keys(editor)
-        .zip(editor.session.view.as_ref())
-        .filter(|(_, v)| editor.pending.is_empty() && !v.pending().is_empty());
+    let view =
+        crate::view::viewing(editor).filter(|(_, k)| editor.pending.is_empty() && !k.pending.is_empty());
     // (a run panel's output's own sequence: normal mode's with `[run]` over it)
     let output = crate::rundoc::keyed(editor)
         .map(|(_, o)| &o.keys)
         .filter(|k| editor.pending.is_empty() && !k.pending.is_empty());
     let (entries, keys) = match (view, output) {
-        (Some((s, v)), _) => (editor.keymaps.view_children(s, v.mode(), v.pending()), v.pending()),
+        (Some((s, k)), _) => (editor.keymaps.view_children(s, k.mode, &k.pending), k.pending.as_slice()),
         (None, Some(k)) => (editor.keymaps.run_children(k.mode, &k.pending), k.pending.as_slice()),
         (None, None) => (editor.keymaps.children(editor.mode, &editor.pending), editor.pending.as_slice()),
     };
@@ -10962,7 +10995,7 @@ fn draw_review_rail(
 ///                                     2.1s
 ///   ──────────────────────────── draft ──    ← the input's border
 ///   › input…
-///   enter send  esc view  C-r apply
+///   enter send  esc normal  C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
 /// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
@@ -11052,7 +11085,7 @@ fn session_tabs(
             end = put(&mut spans, " •".into(), dim);
         }
         // (a message typed in its chat, not sent — its input isn't on screen)
-        if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.trim().is_empty()) {
+        if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.blank()) {
             end = put(&mut spans, " unsent".into(), dim);
         }
         spots.push((start, end, Spot::Session(l.id)));
@@ -11115,14 +11148,13 @@ fn session_tabs(
 /// The chat title's `› N granted`, as wide as its widest (` › 99+ granted`) whatever the count.
 pub(crate) const GRANTED_W: usize = 14;
 
-fn draw_chat(
-    c: &crate::chat::Chat,
-    editor: &Editor,
-    ui: &Ui,
-    lay: &Layout,
-    out: &mut impl Write,
-) -> io::Result<Option<(u16, u16)>> {
+/// The conversation as the chat lays it out `chat_w` wide: each message's rows — laid out only when its key changed
+/// (`Msg.cache`) — the air before a question and a run of tool rows, what a live run waits on under its row
+/// (`chatdoc::Laid`). `render_frame` lays it out before drawing, the transcript's document follows it
+/// (`chatdoc::sync`), `draw_chat` adds the rows of its own after it (`thinking…`, the empty chat's words).
+fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> crate::chatdoc::Laid {
     use crate::chat::{Role, State};
+    use crate::chatdoc::Of;
     use crate::markdown::{self as md, Span};
     let t = &editor.theme;
     let card = panel_style(ui, editor);
@@ -11130,67 +11162,9 @@ fn draw_chat(
     let faint = Style { fg: ui.linenr.fg, ..card };
     let accent = Style { fg: ui.accent.fg, ..card };
     let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
-    use crate::chrome::{GAP, MEASURE, PAD, PAD_R};
-    let x0 = lay.edit_w;
-    // (text width: the gutter, the padding on both sides — prose keeps a measure in it, the rest margin)
-    let w = lay.chat_w.saturating_sub(GAP + PAD + PAD_R).max(8);
-    let mw = w.min(MEASURE);
-    // (the whole height, its title on the screen's first row — `chrome.rs`)
-    let top = 0;
-    let rows = lay.body_h;
-    let lang = editor.doc().syntax.as_ref().map(|s| s.lang.name.clone());
-    // ── Input (wrapped, up to 5 rows) + cursor position
-    let placeholder = format!("Ask about {}…", editor.doc().display_name_short());
-    let mut input_rows: Vec<String> = vec![String::new()];
-    let (mut cur_row, mut cur_col) = (0, 0);
-    let mut col = 0;
-    for (b, ch) in c.input.char_indices() {
-        if b == c.cursor {
-            (cur_row, cur_col) = (input_rows.len() - 1, col);
-        }
-        let cw = ch.width().unwrap_or(0);
-        if ch == '\n' || col + cw > w - 2 {
-            input_rows.push(String::new());
-            col = 0;
-            if ch == '\n' {
-                continue;
-            }
-        }
-        input_rows.last_mut().unwrap().push(ch);
-        col += cw;
-    }
-    if c.cursor >= c.input.len() {
-        (cur_row, cur_col) = (input_rows.len() - 1, col);
-    }
-    let first_input = input_rows.len().saturating_sub(5).min(cur_row);
-    let input_h = input_rows.len().min(5);
-    // ── Claude's plan, pinned under the title (one row when the panel is short) + a divider under it
-    let room = rows.saturating_sub(input_h + 4);
-    let plan_rows = match &c.plan {
-        Some(p) => plan_block(p, w, if room >= 16 { PLAN_ROWS } else { 1 }, card, faint, dim, accent, strong),
-        None => Vec::new(),
-    };
-    let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
-    // ── The sessions over it all, when there's more than one: their row and a row of air under it (a row of
-    // text, unlike the header's rule, needs one before the messages)
-    let tabs_h = if editor.sessions.is_empty() { 0 } else { 2 };
-    // ── What the conversation costs, under it all (once something was reported)
     let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
-    let now_ms = crate::usage::now_ms();
-    let warm = crate::keepwarm::said(&editor.session, &editor.config.llm, &editor.limits, now_ms);
-    let usage_row = usage_spans(
-        &editor.session.usage,
-        &warm,
-        &editor.limits,
-        editor.session.billing,
-        now_ms,
-        w,
-        [accent, dim, faint, warn_fg],
-    );
-    let usage_h = usize::from(usage_row.is_some());
-    // ── Message rows (filled from the bottom)
-    // (tabs + title·divider + plan + divider·hint + usage)
-    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h + usage_h);
+    let (w, mw) = chat_widths(chat_w);
+    let lang = editor.doc().syntax.as_ref().map(|s| s.lang.name.clone());
     use crate::chat::{ChatRow, Laid, LaidKey};
     let sp = |text: String, style: Style| Span { text, style };
     let plain = |spans: Vec<Span>| ChatRow { spans, ..ChatRow::default() };
@@ -11299,6 +11273,7 @@ fn draw_chat(
                 }));
                 if writing && let Some(l) = lines.last_mut() {
                     l.spans.push(sp("▍".into(), accent));
+                    l.tail += 1;
                 }
             }
             // Thinking: an aside — faint bar, italic; finished ones fold to two rows
@@ -11317,14 +11292,17 @@ fn draw_chat(
                 for (k, row) in shown.iter().enumerate() {
                     let mut r = vec![sp("▎ ".into(), faint)];
                     r.extend(row.iter().cloned());
+                    // (its bar isn't the text's, nor the `…` that says rows are folded away)
+                    let (mut skip, mut tail) = (2, 0);
                     if live && k == 0 && body.len() > keep {
                         r.insert(1, sp("… ".into(), faint));
+                        skip += 2;
                     }
                     if !live && k + 1 == shown.len() && body.len() > keep {
                         r.push(sp("…".into(), faint));
+                        tail += 1;
                     }
-                    // (its bar isn't the text's)
-                    lines.push(ChatRow { spans: r, skip: 2, ..ChatRow::default() });
+                    lines.push(ChatRow { spans: r, skip, tail, ..ChatRow::default() });
                 }
             }
             // `◦ read  src/lib.rs  L10–49` — one quiet row per call; a run of them stays together
@@ -11333,18 +11311,28 @@ fn draw_chat(
                 let in_hand = m.is_call(hand);
                 let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
                 let glyph = knot(look, in_hand, &styles);
-                let (spans, ran) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, w, false, &styles);
+                let (spans, ran, tail) =
+                    trail_row_at(look, m.ran.as_ref(), glyph, &stamps, w, false, &styles);
+                // (its knot and the space after it, and its stamps, aren't the text's)
                 lines.push(ChatRow {
                     spans,
                     link: look.link.clone(),
                     call: Some(m.call.clone()),
                     ran,
+                    skip: 2,
+                    tail,
                     ..ChatRow::default()
                 });
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
                 let timing = m.text.ends_with('s') && m.text[..m.text.len() - 1].parse::<f32>().is_ok();
+                // (its time at the row's end — the blanks before it aren't the text's)
+                let right = |text: &str| ChatRow {
+                    spans: vec![sp(format!("{text:>w$}"), faint)],
+                    skip: w.saturating_sub(text.chars().count()),
+                    ..ChatRow::default()
+                };
                 // The last turn's end: how to replay its stops (in the code — or `C-]` from here), left
                 // of its time
                 if timing && turn_end(i) && stops > 0 {
@@ -11358,10 +11346,10 @@ fn draw_chat(
                             sp(format!("{}{}", " ".repeat(gap), m.text), faint),
                         ]));
                     } else {
-                        lines.push(plain(vec![sp(format!("{:>w$}", m.text), faint)]));
+                        lines.push(right(&m.text));
                     }
                 } else if timing {
-                    lines.push(plain(vec![sp(format!("{:>w$}", m.text), faint)]));
+                    lines.push(right(&m.text));
                 } else {
                     // As many rows as it takes (how to install claude is a few lines — #163), each line of it
                     // wrapped, hanging under its text. A compaction is a beat of its own mid-answer, not the
@@ -11389,10 +11377,10 @@ fn draw_chat(
         lines
     };
     // The conversation as pieces: each message's kept rows, and the frame's own between and after them
-    // (`view::Laid` — what its view mode is made of; a row of air shared)
+    // (`chatdoc::Laid` — what its transcript follows; a row of air shared)
     let blank: std::sync::Arc<[ChatRow]> = std::sync::Arc::from(vec![ChatRow::default()]);
     let own = |row: ChatRow| -> std::sync::Arc<[ChatRow]> { std::sync::Arc::from(vec![row]) };
-    let mut pieces: crate::view::Laid = Vec::new();
+    let mut pieces: crate::chatdoc::Laid = Vec::new();
     let mut total = 0;
     for (i, m) in c.msgs.iter().enumerate() {
         // (air before a question, and before a run of tool rows — where it is, not what it is)
@@ -11402,7 +11390,7 @@ fn draw_chat(
             _ => false,
         };
         if air {
-            pieces.push((None, blank.clone()));
+            pieces.push((Of::Air, blank.clone()));
             total += 1;
         }
         let key = LaidKey { version: m.version(), len: m.text.len(), width: w, look, state: state(i, m) };
@@ -11421,7 +11409,7 @@ fn draw_chat(
             rows
         });
         total += rows.len();
-        pieces.push((Some(i), rows));
+        pieces.push((Of::Msg(i), rows));
         // (the live command or tests waiting on what isn't their own — another cargo's lock — said under it, not
         // left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157. The clock's: never kept)
         let Some(look) = m.look.as_ref().filter(|_| m.role == Role::Tool && exploring && i + 1 == n) else {
@@ -11464,7 +11452,7 @@ fn draw_chat(
                 row.push(sp("  ".into(), faint));
                 row.extend(hint);
             }
-            pieces.push((None, own(plain(row))));
+            pieces.push((Of::Own, own(plain(row))));
             total += 1;
             // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the name cut,
             // the time and the key whole)
@@ -11476,11 +11464,104 @@ fn draw_chat(
                 let mut row = vec![sp(format!("  {}", fit_ellipsis(&label, room)), dim), sp(ran, faint)];
                 row.push(sp("  ".into(), faint));
                 row.extend(hint);
-                pieces.push((None, own(plain(row))));
+                pieces.push((Of::Own, own(plain(row))));
                 total += 1;
             }
         }
     }
+    pieces
+}
+
+/// The chat's text width `chat_w` wide (the gutter, the padding on both sides off) and its measure — prose keeps
+/// one in it, the rest is margin.
+fn chat_widths(chat_w: usize) -> (usize, usize) {
+    use crate::chrome::{GAP, MEASURE, PAD, PAD_R};
+    let w = chat_w.saturating_sub(GAP + PAD + PAD_R).max(8);
+    (w, w.min(MEASURE))
+}
+
+fn draw_chat(
+    c: &crate::chat::Chat,
+    editor: &Editor,
+    ui: &Ui,
+    lay: &Layout,
+    out: &mut impl Write,
+) -> io::Result<Option<(u16, u16)>> {
+    use crate::chat::{ChatRow, Role, State};
+    use crate::chatdoc::Of;
+    use crate::markdown::Span;
+    let t = &editor.theme;
+    let card = panel_style(ui, editor);
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let accent = Style { fg: ui.accent.fg, ..card };
+    let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
+    use crate::chrome::{GAP, PAD};
+    let x0 = lay.edit_w;
+    let (w, _) = chat_widths(lay.chat_w);
+    // (the whole height, its title on the screen's first row — `chrome.rs`)
+    let top = 0;
+    let rows = lay.body_h;
+    // ── Input (wrapped, up to 5 rows) + cursor position
+    let placeholder = format!("Ask about {}…", editor.doc().display_name_short());
+    let mut input_rows: Vec<String> = vec![String::new()];
+    let (mut cur_row, mut cur_col) = (0, 0);
+    let mut col = 0;
+    let (typed, cursor) = (c.input.text(), c.input.cursor());
+    for (b, ch) in typed.char_indices() {
+        if b == cursor {
+            (cur_row, cur_col) = (input_rows.len() - 1, col);
+        }
+        let cw = ch.width().unwrap_or(0);
+        if ch == '\n' || col + cw > w - 2 {
+            input_rows.push(String::new());
+            col = 0;
+            if ch == '\n' {
+                continue;
+            }
+        }
+        input_rows.last_mut().unwrap().push(ch);
+        col += cw;
+    }
+    if cursor >= typed.len() {
+        (cur_row, cur_col) = (input_rows.len() - 1, col);
+    }
+    let first_input = input_rows.len().saturating_sub(5).min(cur_row);
+    let input_h = input_rows.len().min(5);
+    // ── Claude's plan, pinned under the title (one row when the panel is short) + a divider under it
+    let room = rows.saturating_sub(input_h + 4);
+    let plan_rows = match &c.plan {
+        Some(p) => plan_block(p, w, if room >= 16 { PLAN_ROWS } else { 1 }, card, faint, dim, accent, strong),
+        None => Vec::new(),
+    };
+    let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
+    // ── The sessions over it all, when there's more than one: their row and a row of air under it (a row of
+    // text, unlike the header's rule, needs one before the messages)
+    let tabs_h = if editor.sessions.is_empty() { 0 } else { 2 };
+    // ── What the conversation costs, under it all (once something was reported)
+    let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
+    let now_ms = crate::usage::now_ms();
+    let warm = crate::keepwarm::said(&editor.session, &editor.config.llm, &editor.limits, now_ms);
+    let usage_row = usage_spans(
+        &editor.session.usage,
+        &warm,
+        &editor.limits,
+        editor.session.billing,
+        now_ms,
+        w,
+        [accent, dim, faint, warn_fg],
+    );
+    let usage_h = usize::from(usage_row.is_some());
+    // ── Message rows (filled from the bottom)
+    // (tabs + title·divider + plan + divider·hint + usage)
+    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h + usage_h);
+    let sp = |text: String, style: Style| Span { text, style };
+    let plain = |spans: Vec<Span>| ChatRow { spans, ..ChatRow::default() };
+    let own = |row: ChatRow| -> std::sync::Arc<[ChatRow]> { std::sync::Arc::from(vec![row]) };
+    let exploring = c.busy() && c.msgs.last().is_some_and(|m| m.role == Role::Tool);
+    // (the conversation as this frame laid it out — `render_frame`, the transcript synced to it)
+    let mut pieces = editor.screen.chat_laid.borrow().clone();
+    let mut total: usize = pieces.iter().map(|(_, r)| r.len()).sum();
     let mut lines: Vec<Vec<Span>> = Vec::new();
     let thought_live = c.msgs.last().is_some_and(|m| m.role == Role::Thought);
     // (compacting can take a minute — said for what it is, whatever was going on before it)
@@ -11544,25 +11625,24 @@ fn draw_chat(
         lines = std::iter::repeat_n(Vec::new(), pad).chain(intro).collect();
     }
     total += lines.len();
-    pieces.extend(lines.into_iter().map(|l| (None, own(plain(l)))));
-    // In its view mode the chat holds still: the rows it was made of, from the document's top — else the
-    // newest, `scroll` up from the bottom
-    let view = crate::view::chat_view_of(editor);
-    let (from, to, drawn) = match view {
-        Some(v) => {
-            let total = v.rows();
-            let from = v.doc().top.min(total.saturating_sub(1));
-            (from, (from + area).min(total), &v.laid)
+    pieces.extend(lines.into_iter().map(|l| (Of::Own, own(plain(l)))));
+    // In its view mode the chat holds still: from its transcript's top row (the frame's own rows trail its rows) —
+    // else the newest, `scroll` up from the bottom
+    let view = crate::chatdoc::transcript(editor).filter(|t| t.keyed && t.pane.doc_in().is_some());
+    let (from, to) = match view {
+        Some(t) => {
+            let from = t.top_row().min(total.saturating_sub(1));
+            (from, (from + area).min(total))
         }
         None => {
             let scroll = c.scroll.min(total.saturating_sub(area));
-            (total.saturating_sub(area + scroll), total - scroll, &pieces)
+            (total.saturating_sub(area + scroll), total - scroll)
         }
     };
     // (only the rows on screen are looked at again — the rest stays where it's kept)
     let mut shown: Vec<&ChatRow> = Vec::with_capacity(to - from);
     let mut at = 0;
-    for (_, rows) in drawn {
+    for (_, rows) in &pieces {
         let (a, b) = (from.max(at), to.min(at + rows.len()));
         if a < b {
             shown.extend(&rows[a - at..b - at]);
@@ -11582,13 +11662,19 @@ fn draw_chat(
     chat_row_start(out, x0, y, edge(y), card)?;
     apply(out, if editor.session.is_at(At::Chat) { strong } else { dim })?;
     queue!(out, Print("claude"))?;
-    // Its view mode: `● view` — held still; once something came after what it holds, said (`G` catches up)
-    let came = view.is_some_and(|v| v.came(crate::view::seen(c)));
-    let (held, after) = match view {
-        None => ("", ""),
-        Some(_) if came && w >= 44 => (" ● view", " · new text after"),
-        Some(_) if came => (" ● view", " · new"),
-        Some(_) => (" ● view", ""),
+    // Normal mode on its document (`v`: select), as a run's output says it — held still; once something came after
+    // what it holds, said (`G` catches up)
+    let came = view.is_some() && crate::chatdoc::came(editor);
+    let select = crate::chatdoc::transcript(editor).is_some_and(|t| t.pane.keys.mode == Mode::Select);
+    let held = match view {
+        None => "",
+        Some(_) if select => " ● select",
+        Some(_) => " ● normal",
+    };
+    let after = match view {
+        Some(_) if came && w >= 46 => " · new text after",
+        Some(_) if came => " · new",
+        _ => "",
     };
     apply(out, accent)?;
     queue!(out, Print(held))?;
@@ -11727,25 +11813,18 @@ fn draw_chat(
     // (what this frame laid out, and where its rows are: the view mode is made of them, the wheel finds its row)
     *editor.screen.chat_laid.borrow_mut() = pieces.clone();
     editor.screen.chat_view.set(Some((y, w, area, from)));
-    // (its view mode's selections and cursors, painted over the rows they're on — its cursors only while it has
-    // the keys: a card given them, a picker over it, its selections alone)
+    // (its view mode's selections, matches and cursors, painted over the rows they're on — its cursors only while
+    // it has the keys: a card given them, a picker over it, its selections alone)
     let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
-    let painted = |line: usize, spans: &[Span], y: usize| -> Option<Vec<Span>> {
-        let v = view?;
+    let painted = |row: usize, r: Option<&ChatRow>, spans: &[Span], y: usize| -> Option<Vec<Span>> {
+        let t = view?;
+        let (d, s) = (t.pane.doc_in()?, t.row(row)?);
+        let skip = r.map_or(0, |r| r.skip);
+        let (p, cursors) = chat_paint(d, t.pane.hits(), s, skip, spans, ui, view_cursor)?;
         // (where its cursors land on screen: recorded, as the code's are)
-        if view_cursor {
-            let d = v.doc();
-            let ls = mv::line_start(&d.text, line.min(mv::last_line(&d.text)));
-            for r in d.selection().ranges().iter().map(|r| r.cursor(&d.text)) {
-                if mv::line_of(&d.text, r) == line {
-                    let col = d.text.byte_slice(ls..r).to_string().width();
-                    if col < w {
-                        editor.screen.cursors.borrow_mut().push((text_x + col, y));
-                    }
-                }
-            }
-        }
-        view_paint(v, line, spans, ui, view_cursor)
+        let mut at = editor.screen.cursors.borrow_mut();
+        at.extend(cursors.into_iter().filter(|&x| x < w).map(|x| (text_x + x, y)));
+        Some(p)
     };
     for i in 0..area {
         chat_row_start(out, x0, y, edge(y), card)?;
@@ -11759,7 +11838,7 @@ fn draw_chat(
                     if let Some(call) = &r.call {
                         chat_calls.push((y, call.clone()));
                     }
-                    match painted(from + i, &r.spans, y) {
+                    match painted(from + i, Some(r), &r.spans, y) {
                         Some(p) => chat_spans(out, &p, card, w)?,
                         None => chat_spans(out, &r.spans, card, w)?,
                     }
@@ -11772,14 +11851,14 @@ fn draw_chat(
                     }
                     let mut spots = editor.screen.chat_ids.borrow_mut();
                     spots.extend(ids.into_iter().map(|(a, b, id)| (y, text_x + a, text_x + b, id)));
-                    match painted(from + i, &l, y) {
+                    match painted(from + i, Some(r), &l, y) {
                         Some(p) => chat_spans(out, &p, card, w)?,
                         None => chat_spans(out, &l, card, w)?,
                     }
                 }
             },
             // (a cursor past the last row: an empty conversation's)
-            None => match painted(from + i, &[], y) {
+            None => match painted(from + i, None, &[], y) {
                 Some(p) => chat_spans(out, &p, card, w)?,
                 None => 0,
             },
@@ -11872,7 +11951,7 @@ fn draw_chat(
     // (in its view mode the input keeps what's typed, faint, its cursor hidden — `i` comes back to it)
     let typing = editor.session.is_at(At::Chat) && view.is_none();
     let border = edge_style(ui, card, Region::Chat);
-    let draft = !editor.session.is_at(At::Chat) && !c.input.trim().is_empty() && w >= used + 12;
+    let draft = !editor.session.is_at(At::Chat) && !c.input.blank() && w >= used + 12;
     let line = w - used - if draft { " draft ──".width() } else { 0 };
     put_line(out, border, &"─".repeat(line))?;
     if draft {
@@ -11922,13 +12001,8 @@ fn draw_chat(
         (bound("view_latest", "G"), "latest"),
         (bound("view_leave", "esc"), "code"),
     ];
-    let to_view = editor.keymaps.chat.keys_for("chat_view").into_iter().next();
-    // (nothing to read yet: `esc` goes to the code, as it says)
-    let esc = match &to_view {
-        Some(k) if !c.msgs.is_empty() => (k.as_str(), "view"),
-        // (`esc code` where the surface stays, `esc close` where it goes — the user, 2026-10-20)
-        _ => ("esc", "code"),
-    };
+    let esc = crate::chatinput::esc_said(editor);
+    let esc = (esc.0.as_str(), esc.1);
     if view.is_some() {
         hints.extend(viewing.iter().filter_map(|(k, d)| Some((k.as_deref()?, *d))));
     } else if !editor.session.is_at(At::Chat) {
@@ -11942,7 +12016,7 @@ fn draw_chat(
             hints.push((c_q.as_str(), "answer card"));
         }
         // (Enter queues what's typed for this turn's end — #23; ↑ takes it back)
-        if !c.input.trim().is_empty() {
+        if !c.input.blank() {
             hints.push(("enter", "queue"));
         } else if c.queued.is_some() {
             hints.push(("↑", "edit queued"));
@@ -12240,50 +12314,92 @@ fn chat_markdown(
     chat_markdown_drawn(lines, (w, w), styles, well).0
 }
 
-/// A row of a view's document (`view.rs`) with its selections and cursors painted over its spans: a selection's
-/// background over the spans' own colours, a cursor in the code's style (the primary's apart, as the code's).
-/// What's on the line's end — a cursor on the line break, a selection over it — is the cell after its text.
-/// None: nothing of the view's on this line. `cursor`: its cursors drawn — it has the keys (`Editor::cursor_in`).
-fn view_paint(
-    v: &crate::view::View,
-    line: usize,
+/// A row of the chat's transcript (`chatdoc::Shown`) with its view mode's selections, matches and cursors painted
+/// over its spans: a selection's background over the spans' own colours, a cursor in the code's style (the
+/// primary's apart, as the code's). Its first `skip` characters, and what follows its text, are the drawer's — but
+/// the cell after its text stands for its line's break or the space a wrap took (`Shown.end`): painted there (a
+/// blank of the drawer's), else a cell added. None: nothing of the view's on its line. And the cells its cursors
+/// are at (`cursor`: drawn — it has the keys, `Editor::cursor_in`).
+fn chat_paint(
+    d: &crate::document::Document,
+    hits: Option<&crate::search::SearchHits>,
+    s: crate::chatdoc::Shown,
+    skip: usize,
     spans: &[crate::markdown::Span],
     ui: &Ui,
     cursor: bool,
-) -> Option<Vec<crate::markdown::Span>> {
+) -> Option<(Vec<crate::markdown::Span>, Vec<usize>)> {
     use crate::markdown::Span;
-    let marks = view_marks(v, line, ui, cursor)?;
-    let d = v.doc();
-    let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));
-    let style_at = |at: usize, base: Style| marks_at(&marks, at, base);
-    let mut out: Vec<Span> = Vec::new();
-    let mut at = 0;
+    let marks = view_marks(d, hits, s.line, ui, cursor)?;
+    let ls = mv::line_start(&d.text, s.line);
+    let cursors: Vec<usize> = match cursor {
+        true => d.selection().ranges().iter().filter_map(|r| r.cursor(&d.text).checked_sub(ls)).collect(),
+        false => Vec::new(),
+    };
+    let (to, end) = (s.start - ls + s.len, s.end.map(|e| e - ls));
     let push = |text: &str, style: Style, out: &mut Vec<Span>| match out.last_mut() {
         Some(last) if last.style == style => last.text.push_str(text),
         _ => out.push(Span { text: text.to_string(), style }),
     };
-    for s in spans {
-        for g in unicode_segmentation::UnicodeSegmentation::graphemes(s.text.as_str(), true) {
-            push(g, style_at(at, s.style), &mut out);
-            at += g.len();
+    let mut out: Vec<Span> = Vec::new();
+    let mut drawn_at = Vec::new();
+    // (the characters seen, the next text byte of the line, the cells drawn, the end's cell painted)
+    let (mut k, mut at, mut cells, mut ended) = (0, s.start - ls, 0, false);
+    for sp in spans {
+        for g in unicode_segmentation::UnicodeSegmentation::graphemes(sp.text.as_str(), true) {
+            let byte = match () {
+                _ if k >= skip && at < to => {
+                    let here = at;
+                    // (a line break or a tab in a row is a byte of the text — `chatdoc::body`)
+                    at += g
+                        .chars()
+                        .map(|c| if matches!(c, '\n' | '\r' | '\t') { 1 } else { c.len_utf8() })
+                        .sum::<usize>();
+                    Some(here)
+                }
+                _ if k >= skip && !ended && end.is_some() && g.trim().is_empty() => {
+                    ended = true;
+                    end
+                }
+                _ => None,
+            };
+            let style = match byte {
+                Some(b) => {
+                    if cursors.contains(&b) {
+                        drawn_at.push(cells);
+                    }
+                    marks_at(&marks, b, sp.style)
+                }
+                None => sp.style,
+            };
+            push(g, style, &mut out);
+            cells += g.width();
+            k += g.chars().count();
         }
     }
-    // (the line break's cell: after the row's text when nothing is drawn there — the row's own trailing
-    // blanks, a code well's padding, were painted above)
-    if at == le - ls {
-        let cell = style_at(at, Style::default());
+    // (nothing of the drawer's after its text: the end's cell added when something is on it)
+    if !ended && let Some(e) = end {
+        let cell = marks_at(&marks, e, Style::default());
         if cell != Style::default() {
+            if cursors.contains(&e) {
+                drawn_at.push(cells);
+            }
             out.push(Span { text: " ".into(), style: cell });
         }
     }
-    Some(out)
+    Some((out, drawn_at))
 }
 
 /// A view's marks on its document's `line`: byte ranges of the line, each with the style it patches — its
-/// selections, then its cursors over them (`cursor`: drawn — it has the keys). A cursor's or a selection's
-/// place on the line break is the line's length. None: nothing of the view's on the line.
-fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Option<Marks> {
-    let d = v.doc();
+/// search's matches, its selections, then its cursors over them (`cursor`: drawn — it has the keys). A cursor's or
+/// a selection's place on the line break is the line's length. None: nothing of the view's on the line.
+fn view_marks(
+    d: &crate::document::Document,
+    hits: Option<&crate::search::SearchHits>,
+    line: usize,
+    ui: &Ui,
+    cursor: bool,
+) -> Option<Marks> {
     let text = &d.text;
     if line > mv::last_line(text) {
         return None;
@@ -12295,7 +12411,7 @@ fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Opti
     let mut cursors: Vec<(usize, usize, Style)> = Vec::new();
     // Its own search's matches (as the code's are drawn): under its selections, the one in hand over them
     let mut current = None;
-    if let Some(h) = v.hits() {
+    if let Some(h) = hits {
         let accent_bg = |t: f32| blend(ui.accent.fg, ui.tint, t);
         let hit = Style { bg: accent_bg(0.22), ..Style::default() };
         let p = sel.primary();
@@ -12340,7 +12456,7 @@ fn view_marks(v: &crate::view::View, line: usize, ui: &Ui, cursor: bool) -> Opti
 fn terminal_row_marks(v: &crate::view::View, r: usize, ui: &Ui, cursor: bool) -> (Option<Marks>, Vec<usize>) {
     let d = v.doc();
     let line = d.top + r;
-    let Some(marks) = view_marks(v, line, ui, cursor) else { return (None, Vec::new()) };
+    let Some(marks) = view_marks(d, v.hits(), line, ui, cursor) else { return (None, Vec::new()) };
     let ls = mv::line_start(&d.text, line);
     let cursors = d.selection().ranges().iter().map(|s| s.cursor(&d.text));
     let at = cursors.filter(|&c| cursor && mv::line_of(&d.text, c) == line).map(|c| c - ls).collect();
@@ -12555,7 +12671,8 @@ fn knot_stamps(
 
 /// `trail_row`, and the columns of its trail when where it ran is on it — its verdict, where it ran, what it
 /// warned of: `ok · sandbox ▲1` (a click there says why — cardburden 4b). `knot` leads it; `stamps` (a
-/// change's) end it at the measure's edge — folded when the target would keep under 8 cells.
+/// change's) end it at the measure's edge — folded when the target would keep under 8 cells; and the characters
+/// they take at its end (none when folded).
 fn trail_row_at(
     look: &crate::chat::Look,
     ran: Option<&crate::chat::Ran>,
@@ -12564,7 +12681,7 @@ fn trail_row_at(
     w: usize,
     slim: bool,
     st: &TrailStyles,
-) -> (Vec<crate::markdown::Span>, Option<(usize, usize)>) {
+) -> (Vec<crate::markdown::Span>, Option<(usize, usize)>, usize) {
     use crate::markdown::Span;
     let sp = |text: String, style: Style| Span { text, style };
     let end = w.min(crate::chrome::MEASURE);
@@ -12573,12 +12690,14 @@ fn trail_row_at(
     let stamped = stamps_w > 0 && end >= stamps_w + 2 + 1 + verb_w + 8;
     let w = if stamped { end - stamps_w - 2 } else { w };
     let (mut row, mark) = trail_spans(look, ran, knot, w, slim, st);
+    let mut tail = 0;
     if stamped {
         let used: usize = row.iter().map(|s| s.text.width()).sum();
         row.push(sp(" ".repeat(end - stamps_w - used), st.faint));
         row.extend(stamps.iter().cloned());
+        tail = stamps.iter().map(|s| s.text.chars().count()).sum();
     }
-    (row, mark)
+    (row, mark, tail)
 }
 
 fn trail_spans(
@@ -12703,7 +12822,7 @@ fn follow_thread(
             ),
             _ => (g.look.clone(), knot(&g.look, true, st)),
         };
-        let (row, _) = trail_row_at(&look, None, glyph, &[], inner, false, st);
+        let (row, ..) = trail_row_at(&look, None, glyph, &[], inner, false, st);
         let mut rows = vec![(row, g.look.link.clone().filter(|_| links))];
         rows.extend(thought_rows(why, inner, card, st.faint, editor).into_iter().map(|r| (r, None)));
         let knots = (0..rows.len()).map(|i| i == 0).collect();
@@ -12745,7 +12864,7 @@ fn follow_thread(
                 let look = gaze.filter(|_| in_hand).map_or(look, |g| &g.look);
                 let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
                 let glyph = knot(look, in_hand, st);
-                let (row, _) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, inner, false, st);
+                let (row, ..) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, inner, false, st);
                 voice_under = false;
                 vec![(row, look.link.clone().filter(|_| links))]
             }
@@ -16626,31 +16745,35 @@ mod tests {
         assert!(terminal_row_marks(v, row, &ui, false).1.is_empty(), "no cursor without the keys");
     }
 
-    /// A view's selection and cursor painted over a chat row's spans (`view_paint`): the selection's ground over
-    /// the spans' own colours, the cursor in the code's style on the line break's cell after the text; a row the
-    /// view has nothing on comes back as it was.
+    /// The chat's view mode painted over a transcript row's spans (`chat_paint`): the drawer's lead left as it was,
+    /// the selection's ground over the spans' own colours, the cursor in the code's style on the line break's cell
+    /// after the text, its cell said; a row the view has nothing on comes back as it was.
     #[test]
     fn a_views_selection_is_painted_over_a_rows_spans() {
         use crate::markdown::Span;
-        let ed = crate::view::tests::viewing("<esc>x");
+        let ed = crate::chatdoc::view_tests::viewing("<esc>x");
         let ui = Ui::new(&ed);
-        let v = crate::view::chat_view_of(&ed).unwrap();
-        let d = v.doc();
+        let t = crate::chatdoc::transcript(&ed).unwrap();
+        let d = t.pane.doc();
         let line = mv::line_of(&d.text, d.selection().primary().from());
+        let row = d.rows.as_deref().unwrap().index(line, 0);
+        let s = t.row(row).unwrap();
+        assert_eq!(s.len, "The latest answer starts here.".len());
         let red = Style { fg: Some(crossterm::style::Color::Red), ..Style::default() };
         let spans = vec![
+            Span { text: "▎ ".into(), style: Style::default() },
             Span { text: "The latest".into(), style: red },
             Span { text: " answer starts here.".into(), style: Style::default() },
         ];
-        let p = view_paint(v, line, &spans, &ui, true).expect("the selected row is painted");
+        let (p, cursors) = chat_paint(d, None, s, 2, &spans, &ui, true).expect("the selected row is painted");
         let text: String = p.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(text, "The latest answer starts here. ", "the text, and the line break's cell");
-        assert!(
-            p.iter().all(|s| s.style.bg.is_some() && s.style.bg == p[0].style.bg || s.text == " "),
-            "{p:?}"
+        assert_eq!(
+            text, "▎ The latest answer starts here. ",
+            "the lead, the text, and the line break's cell"
         );
-        assert_eq!(p[0].style.fg, Some(crossterm::style::Color::Red), "the span's own colour kept");
-        assert_eq!(p[0].style.bg, ui.selection_primary.bg);
+        assert_eq!((p[0].text.as_str(), p[0].style), ("▎ ", Style::default()), "the lead isn't the text");
+        assert_eq!(p[1].style.fg, Some(crossterm::style::Color::Red), "the span's own colour kept");
+        assert_eq!(p[1].style.bg, ui.selection_primary.bg);
         assert_eq!(
             p.last().unwrap().style,
             Style::default()
@@ -16658,11 +16781,13 @@ mod tests {
                 .patch(ui.cursor_primary),
             "the cursor on the line break"
         );
-        assert!(view_paint(v, line + 1, &spans, &ui, true).is_none(), "nothing on the next row");
+        assert_eq!(cursors, [2 + 30], "its cell: after the lead and the text");
+        let next = t.row(row + 1).unwrap();
+        assert!(chat_paint(d, None, next, 0, &spans, &ui, true).is_none(), "nothing on the next row");
         // (without the keys: the selection's ground, no cursor)
-        let p = view_paint(v, line, &spans, &ui, false).unwrap();
-        assert!(p.iter().all(|s| s.style.bg == ui.selection_primary.bg), "{p:?}");
-        assert_eq!(p.iter().map(|s| s.text.as_str()).collect::<String>(), "The latest answer starts here. ");
+        let (p, cursors) = chat_paint(d, None, s, 2, &spans, &ui, false).unwrap();
+        assert!(p[1..].iter().all(|s| s.style.bg == ui.selection_primary.bg), "{p:?}");
+        assert!(cursors.is_empty());
     }
 
     /// The cells a frame shows a cursor in: painted in a cursor's style (the code's block, a view's —
@@ -16706,7 +16831,6 @@ mod tests {
                 c.msgs.push(Msg::new(Role::User, "why does it fail?", ""));
                 c.msgs.push(Msg::new(Role::Assistant, "Because the answer says so.", ""));
                 c.input = "a draft".into();
-                c.cursor = c.input.len();
                 // (up beside the code, the keys in the code)
                 ed.session.chat = Some(c);
                 ed.session.at = crate::session::At::Chat;
@@ -16857,6 +16981,101 @@ mod tests {
         );
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         assert!(worst < budget, "delta {delta:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// Keys in the chat's view mode — normal mode on its transcript, a document of 200 messages — while Claude
+    /// writes, a delta before each key (the document follows it at the frame): within the frame budget, as the
+    /// code's keys are.
+    #[test]
+    fn perf_budget_key_to_frame_in_the_chats_view() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_in_the_chats_view") {
+            return;
+        }
+        let budget = frame_budget();
+        let keys = [
+            "esc", "k", "C-u", "/", "e", "v", "e", "r", "y", "ret", "n", "x", "x", "w", "e", "g", "g", "j",
+            "C-d", "G",
+        ];
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = long_chat(200);
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 45).unwrap();
+            let took = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+                    m.text.push_str(&format!(" word{i}"));
+                    m.changed();
+                    key_to_frame(&mut ed, &mut buf, k, 160, 45)
+                })
+                .collect();
+            assert_eq!(ed.keys_to().region.name(), "view:chat", "the keys were the transcript's");
+            took
+        });
+        measured("key_to_frame_in_the_chats_view", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// The streaming frame 2,000 messages into the conversation (`perf_budget_chat_frame_long_conversation`'s, ten
+    /// times longer): what a frame costs while Claude writes doesn't grow with the conversation — its transcript makes
+    /// only the answer's own rows again (`chatdoc::given`). A measurement, not a budget.
+    #[test]
+    fn perf_chat_frame_2000_messages() {
+        if crate::test_results::unoptimized("term::tests::perf_chat_frame_2000_messages") {
+            return;
+        }
+        let deltas: Vec<String> = (0..24).map(|i| format!(" word{i}")).collect();
+        let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
+        let (worst, _) = worst_of_best(&keys, || {
+            let mut ed = long_chat(2000);
+            ed.wet_ink = true;
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 45).unwrap();
+            keys.iter()
+                .map(|d| {
+                    let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+                    m.text.push_str(d);
+                    m.changed();
+                    buf.clear();
+                    let t = Instant::now();
+                    render(&mut ed, &mut buf, 160, 45).unwrap();
+                    t.elapsed()
+                })
+                .collect()
+        });
+        let line = format!("PERF chat_frame_2000_messages {:.3} noise=0.05\n", worst.as_secs_f64() * 1000.0);
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    }
+
+    /// Keys in the chat's view mode 2,000 messages in (`perf_budget_key_to_frame_in_the_chats_view`'s, ten times
+    /// longer), a delta before each. A measurement, not a budget.
+    #[test]
+    fn perf_key_to_frame_in_the_chats_view_2000_messages() {
+        if crate::test_results::unoptimized("term::tests::perf_key_to_frame_in_the_chats_view_2000_messages")
+        {
+            return;
+        }
+        let keys = [
+            "esc", "k", "C-u", "/", "e", "v", "e", "r", "y", "ret", "n", "x", "x", "w", "e", "g", "g", "j",
+            "C-d", "G",
+        ];
+        let (worst, _) = worst_of_best(&keys, || {
+            let mut ed = long_chat(2000);
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 160, 45).unwrap();
+            keys.iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
+                    m.text.push_str(&format!(" word{i}"));
+                    m.changed();
+                    key_to_frame(&mut ed, &mut buf, k, 160, 45)
+                })
+                .collect()
+        });
+        let line = format!("PERF key_to_frame_in_the_chats_view_2000 {:.3}\n", worst.as_secs_f64() * 1000.0);
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 
     /// The same frames inside zellij, a card up while Claude writes and the chat holding the keys: the hint row's
@@ -17927,7 +18146,7 @@ mod tests {
             (l.debug_h, l.text_rows + l.debug_h)
         };
         let mut r = Run::for_test(task("cargo fmt"));
-        r.output = vec![(false, "formatted".into())];
+        r.output = [(false, "formatted")].into_iter().collect();
         ed.session.task_run = Some(r);
         let (h, total) = lay(&ed);
         assert_eq!(h, TASK_PANEL_MIN, "one line: a small panel");
@@ -18564,6 +18783,79 @@ mod tests {
         assert_eq!(fit(31), [" NOR ", "  tarae · main", "  a.rs", "1:1 "], "drops encoding, then language");
         // One cell less and `a.rs` would touch `1:1` — the branch goes instead
         assert_eq!(fit(30), [" NOR ", "  a.rs", "1:1 "]);
+    }
+
+    /// A key hint goes whole: room for half of `  i type` drops the pair, never leaves ` type` alone.
+    #[test]
+    fn statusline_drops_a_key_hint_with_its_words() {
+        let seg = |t: &str, keep| Seg { text: t.into(), style: Style::default(), keep };
+        let mut l = vec![
+            seg("● view", 255),
+            seg("  enter", HINTS),
+            seg(" quote", HINTS),
+            seg("  i", HINTS),
+            seg(" type", HINTS),
+            seg("  esc", HINTS),
+            seg(" code", HINTS),
+        ];
+        fit_segments(&mut l, &mut Vec::new(), 23);
+        let texts: Vec<&str> = l.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["● view", "  esc", " code"]);
+        // (a view mode's own pairs, after the mode word, alike)
+        for s in &mut l {
+            s.keep = if s.keep == HINTS { VIEW_HINTS } else { s.keep };
+        }
+        l.splice(1..1, [seg("  i", VIEW_HINTS), seg(" type", VIEW_HINTS)]);
+        fit_segments(&mut l, &mut Vec::new(), 21);
+        let texts: Vec<&str> = l.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["● view", "  esc", " code"]);
+    }
+
+    /// The chat's search at 80 cells (the `transcript-search` shot, where ` code` was left alone): the right side
+    /// folds its encoding and language first, then the view's pairs go — dropping `  esc` alone would leave room
+    /// enough, so ` code` must go with it.
+    #[test]
+    fn statusline_keeps_hint_pairs_whole_beside_a_search() {
+        let seg = |t: &str, keep| Seg { text: t.into(), style: Style::default(), keep };
+        let mut l = vec![
+            seg(" ●", 255),
+            seg(" normal · chat ", 255),
+            seg("  enter", VIEW_HINTS),
+            seg(" quote", VIEW_HINTS),
+            seg("  i", VIEW_HINTS),
+            seg(" type", VIEW_HINTS),
+            seg("  esc", VIEW_HINTS),
+            seg(" code", VIEW_HINTS),
+            seg("   main", 80),
+            seg("  +1", 85),
+            seg("  −1", 85),
+        ];
+        let mut r = vec![
+            seg("/moves into the map in t…  ", 205),
+            seg("1/1", 206),
+            seg("   ", 206),
+            seg("rust", 60),
+            seg("   ", 60),
+            seg("utf-8 LF", 40),
+            seg("   ", 40),
+            seg("8:123 ", 250),
+        ];
+        fit_segments(&mut l, &mut r, 80);
+        let texts: Vec<&str> = l.iter().chain(&r).map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                " ●",
+                " normal · chat ",
+                "   main",
+                "  +1",
+                "  −1",
+                "/moves into the map in t…  ",
+                "1/1",
+                "   ",
+                "8:123 "
+            ]
+        );
     }
 
     /// Same budget with 20k cursors (`%s` of a word on every line): a cell finds its range and cursor by

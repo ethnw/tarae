@@ -254,7 +254,7 @@ mod tests {
                 cmd: cmd.clone(),
                 cwd: PathBuf::new(),
             });
-            run.output = vec![(false, out.to_string())];
+            run.output = [(false, out)].into_iter().collect();
             ed.session.task_run = Some(run);
             ed.toasts.clear();
             if !ran(ed, passed) {

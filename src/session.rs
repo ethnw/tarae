@@ -130,6 +130,8 @@ pub struct Session {
     pub view: Option<crate::view::View>,
     /// The run panels' output as documents (`rundoc.rs`): the task panel's and the tests' — following their runs.
     pub outputs: crate::rundoc::Outputs,
+    /// The document pane a key's command has swapped in as `current` (`docpane::swap`).
+    pub swapped: Option<crate::docpane::Which>,
     /// A terminal is being started (on a worker) · what it printed and its exit code, if they came before
     /// it was in place.
     pub terminal_starting: bool,
@@ -371,6 +373,7 @@ impl Session {
             terminal: None,
             view: None,
             outputs: Default::default(),
+            swapped: None,
             terminal_run: 0,
             terminal_starting: false,
             terminal_early: Default::default(),
@@ -1312,8 +1315,10 @@ impl Editor {
         self.session.waiting_told = waits;
         // (the texts of its turns read back go again: their files have them — #218)
         crate::checkpoint::shed(&mut self.session);
-        // (a view mode ends as its session goes behind — kept for next time, its document freed)
+        // (a view mode ends as its session goes behind — the terminal's document freed, the chat's where you were
+        // kept)
         crate::view::leave(self);
+        crate::chatdoc::leave(self);
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         if waits {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));

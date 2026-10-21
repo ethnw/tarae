@@ -412,7 +412,7 @@ impl<'a> Measure<'a> {
     /// `l`'s soft-wrapped rows (one whole row when it doesn't wrap).
     pub fn wrapped(&self, l: usize) -> Vec<crate::wrap::Row> {
         match self.wrap {
-            Some(w) => crate::wrap::rows(&self.doc.text, l, w, self.tab),
+            Some(w) => crate::wrap::line_rows(&self.doc.text, self.doc.rows.as_deref(), l, w, self.tab),
             None => vec![crate::wrap::Row { start: 0, col: 0, end_col: usize::MAX, x0: 0 }],
         }
     }

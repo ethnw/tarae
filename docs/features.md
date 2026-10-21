@@ -248,7 +248,9 @@ configs carry over as they are.
     command ran, `o` a preflight step's whole output, `esc` (a selection collapses first) to the code, `q` closes the
     panel once its run has ended. `C-w`, `:` and `space` are the editor's, as from every panel; `]x` / `[x` (the
     detail follows the failure), `]q` / `[q`, the palette and the chat act on the editor. The wheel over it scrolls
-    it without taking the keys. `[keys.run]` lays your keys over normal mode's there.
+    it without taking the keys. `[keys.run]` lays your keys over normal mode's there. Claude's conversation is one
+    too — its view mode ([claude-integration](claude-integration.md#reading-the-conversation-view-mode)) — and the
+    chat's input a small buffer in insert mode.
   Tasks come from the project — `cargo check`/`clippy`/
   `build`, `go build`/`vet`, `tsc`, every `npm run` script, `ruff`/`mypy`, `make`, as the language packs say — and from `[task.<name>] cmd =
   "…"` (optional `cwd`) in the config. It runs in the background with its output below the code; every

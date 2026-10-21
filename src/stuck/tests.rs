@@ -316,7 +316,8 @@ fn a_stuck_run_is_captured_then_asked_about() {
     assert!(o.question.contains(&format!("pid {pid} · ")), "its threads on the card: {}", o.question);
     let answers = o.answers(false);
     assert_eq!(answers, [('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")]);
-    let out: Vec<&str> = ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.as_str()).collect();
+    let out: Vec<String> =
+        ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.into_owned()).collect();
     let head = "── tarae: no output for 11 min, 0% CPU — what each of its threads waits in ──";
     let at = out.iter().position(|l| *l == head).unwrap_or_else(|| panic!("{out:?}"));
     assert!(out[at + 1].starts_with(&format!("pid {pid} · ")), "{out:?}");

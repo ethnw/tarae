@@ -32,6 +32,139 @@ impl Row {
     }
 }
 
+/// A document's rows as its surface laid them out (the chat's transcript, `chatdoc.rs`): `j`/`k`, the pages and the
+/// `z` moves count these, never `rows`' own breaks — its layout wraps the text, the text stays one line a
+/// paragraph. Every line has a row at least; starts are bytes of the document. Held in parts — the surface's
+/// pieces, each its own `Arc` — so the parts before one laid out again stay as they were, shared (the chat's answer
+/// being written: only its own rows are made again, whatever the conversation's length).
+#[derive(Clone, Debug, Default)]
+pub struct Given {
+    parts: Vec<std::sync::Arc<Part>>,
+    /// Where each part's rows and lines begin.
+    rows0: Vec<usize>,
+    lines0: Vec<usize>,
+    /// Rows and lines in all.
+    rows: usize,
+    lines: usize,
+}
+
+/// Whole lines' rows (`Given`): every row, in order, and where each of its lines' rows begin in them (its lines
+/// counted from its first).
+#[derive(Debug, Default)]
+pub struct Part {
+    pub rows: Vec<Row>,
+    pub first: Vec<usize>,
+}
+
+impl Part {
+    fn of(&self, line: usize) -> &[Row] {
+        let Some(&a) = self.first.get(line) else { return &[] };
+        let b = self.first.get(line + 1).copied().unwrap_or(self.rows.len());
+        &self.rows[a..b.max(a)]
+    }
+}
+
+impl Given {
+    /// Of one part.
+    #[cfg(test)]
+    pub fn new(rows: Vec<Row>, first: Vec<usize>) -> Given {
+        let mut g = Given::default();
+        g.push(std::sync::Arc::new(Part { rows, first }));
+        g
+    }
+
+    /// Its parts, in order.
+    pub fn parts(&self) -> &[std::sync::Arc<Part>] {
+        &self.parts
+    }
+
+    /// Only its first `n` parts kept.
+    pub fn keep(&mut self, n: usize) {
+        if n >= self.parts.len() {
+            return;
+        }
+        self.parts.truncate(n);
+        self.rows0.truncate(n);
+        self.lines0.truncate(n);
+        (self.rows, self.lines) = match self.parts.last() {
+            Some(p) => (self.rows0[n - 1] + p.rows.len(), self.lines0[n - 1] + p.first.len()),
+            None => (0, 0),
+        };
+    }
+
+    /// `part` after the others: its lines and rows the next.
+    pub fn push(&mut self, part: std::sync::Arc<Part>) {
+        self.rows0.push(self.rows);
+        self.lines0.push(self.lines);
+        self.rows += part.rows.len();
+        self.lines += part.first.len();
+        self.parts.push(part);
+    }
+
+    /// Its rows in all.
+    pub fn len(&self) -> usize {
+        self.rows
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    /// Row `i`.
+    pub fn get(&self, i: usize) -> Option<&Row> {
+        let (p, k) = self.part_of(i)?;
+        self.parts[p].rows.get(k)
+    }
+
+    /// The part row `i` is in, and which of its rows it is (an empty part never: the next starts where it does).
+    pub fn part_of(&self, i: usize) -> Option<(usize, usize)> {
+        if i >= self.rows {
+            return None;
+        }
+        let p = self.rows0.partition_point(|&a| a <= i) - 1;
+        Some((p, i - self.rows0[p]))
+    }
+
+    /// Line `line`'s rows (one whole row past the last line: there's none).
+    pub fn of(&self, line: usize) -> &[Row] {
+        if line >= self.lines {
+            return &[];
+        }
+        let p = self.lines0.partition_point(|&a| a <= line) - 1;
+        self.parts[p].of(line - self.lines0[p])
+    }
+
+    /// Row `k` of `line`, counted from the first row.
+    pub fn index(&self, line: usize, k: usize) -> usize {
+        if line >= self.lines {
+            return self.rows;
+        }
+        let p = self.lines0.partition_point(|&a| a <= line) - 1;
+        let (part, l) = (&self.parts[p], line - self.lines0[p]);
+        self.rows0[p] + part.first[l] + k.min(part.of(l).len().saturating_sub(1))
+    }
+
+    /// The line row `i` is of, and which of its rows it is (past the last row: its last line's).
+    pub fn place(&self, i: usize) -> (usize, usize) {
+        let Some((p, k)) = self.part_of(i) else {
+            let line = self.lines.saturating_sub(1);
+            let first = if self.lines == 0 { 0 } else { self.index(line, 0) };
+            return (line, i.saturating_sub(first));
+        };
+        let part = &self.parts[p];
+        let l = part.first.partition_point(|&a| a <= k).saturating_sub(1);
+        (self.lines0[p] + l, k - part.first.get(l).copied().unwrap_or(0))
+    }
+}
+
+/// `line`'s rows: the ones `given` (a surface's own layout), else wrapped at `width` cells.
+pub fn line_rows(text: &Rope, given: Option<&Given>, line: usize, width: usize, tab: usize) -> Vec<Row> {
+    match given.map(|g| g.of(line)).filter(|r| !r.is_empty()) {
+        Some(r) => r.to_vec(),
+        None => rows(text, line, width, tab),
+    }
+}
+
 /// The rows of `line` at `width` cells.
 pub fn rows(text: &Rope, line: usize, width: usize, tab: usize) -> Vec<Row> {
     let (start, end) = (mv::line_start(text, line), mv::line_end(text, line));
@@ -104,9 +237,9 @@ pub fn row_of(rows: &[Row], pos: usize) -> usize {
 }
 
 /// Screen x of `pos` within its row.
-pub fn x_of(text: &Rope, pos: usize, width: usize, tab: usize) -> usize {
+pub fn x_of(text: &Rope, given: Option<&Given>, pos: usize, width: usize, tab: usize) -> usize {
     let line = mv::line_of(text, pos);
-    let rows = rows(text, line, width, tab);
+    let rows = line_rows(text, given, line, width, tab);
     let r = rows[row_of(&rows, pos)];
     r.x0 + mv::visual_col(text, pos, tab).saturating_sub(r.col)
 }
@@ -121,10 +254,12 @@ pub fn pos_in_row(text: &Rope, line: usize, rows: &[Row], k: usize, x: usize, ta
     }
 }
 
-/// `j`/`k` over screen rows: `n` rows in `dir` keeping screen x `x` (sticky across moves).
+/// `j`/`k` over screen rows: `n` rows in `dir` keeping screen x `x` (sticky across moves) — the rows `given`, else
+/// wrapped at `width`.
 #[allow(clippy::too_many_arguments)]
 pub fn move_rows(
     text: &Rope,
+    given: Option<&Given>,
     r: Range,
     dir: Direction,
     n: usize,
@@ -133,23 +268,24 @@ pub fn move_rows(
     width: usize,
     tab: usize,
 ) -> Range {
+    let rows = |line| line_rows(text, given, line, width, tab);
     let head = r.cursor(text);
     let last = mv::last_line(text);
     let mut line = mv::line_of(text, head);
-    let mut rs = rows(text, line, width, tab);
+    let mut rs = rows(line);
     let mut k = row_of(&rs, head);
     for _ in 0..n {
         match dir {
             Direction::Forward if k + 1 < rs.len() => k += 1,
             Direction::Forward if line < last => {
                 line += 1;
-                rs = rows(text, line, width, tab);
+                rs = rows(line);
                 k = 0;
             }
             Direction::Backward if k > 0 => k -= 1,
             Direction::Backward if line > 0 => {
                 line -= 1;
-                rs = rows(text, line, width, tab);
+                rs = rows(line);
                 k = rs.len() - 1;
             }
             _ => break,
@@ -203,14 +339,50 @@ mod tests {
     #[test]
     fn rows_moves_keep_the_screen_x() {
         let t = Rope::from_str("aaaa bbbb cccc\nzz\n");
-        let r = move_rows(&t, Range::point(1), Direction::Forward, 1, false, 1, 8, 4);
+        let r = move_rows(&t, None, Range::point(1), Direction::Forward, 1, false, 1, 8, 4);
         assert_eq!(r, Range::point(6), "next row of the same line");
-        let r = move_rows(&t, r, Direction::Forward, 2, false, 1, 8, 4);
+        let r = move_rows(&t, None, r, Direction::Forward, 2, false, 1, 8, 4);
         assert_eq!(r, Range::point(16), "then into the next line");
-        let r = move_rows(&t, Range::point(16), Direction::Backward, 1, false, 7, 8, 4);
+        let r = move_rows(&t, None, Range::point(16), Direction::Backward, 1, false, 7, 8, 4);
         assert_eq!(r, Range::point(14), "x past the last row's end: the line end, like j/k");
-        let r = move_rows(&t, Range::point(16), Direction::Backward, 2, false, 7, 8, 4);
+        let r = move_rows(&t, None, Range::point(16), Direction::Backward, 2, false, 7, 8, 4);
         assert_eq!(r, Range::point(9), "x past a middle row's end: its last char");
-        assert_eq!(x_of(&t, 6, 8, 4), 1);
+        assert_eq!(x_of(&t, None, 6, 8, 4), 1);
+    }
+
+    /// Rows a surface gave: `j`/`k` step by them — a row the width alone would never break — its cells before the
+    /// text kept out of the screen x.
+    #[test]
+    fn given_rows_are_the_ones_moved_over() {
+        let t = Rope::from_str("aaaa bbbb\nzz\n");
+        let row = |start, col, end_col, x0| Row { start, col, end_col, x0 };
+        let g = Given::new(
+            vec![row(0, 0, 5, 2), row(5, 5, usize::MAX, 4), row(10, 0, usize::MAX, 2)],
+            vec![0, 2],
+        );
+        assert_eq!((g.of(0).len(), g.of(1).len(), g.index(1, 0), g.place(1)), (2, 1, 2, (0, 1)));
+        // (the same rows in two parts, an empty one between: the same answers)
+        let mut parts = Given::default();
+        for (rows, first) in [(vec![row(0, 0, 5, 2), row(5, 5, usize::MAX, 4)], vec![0]), (vec![], vec![])] {
+            parts.push(std::sync::Arc::new(Part { rows, first }));
+        }
+        parts.push(std::sync::Arc::new(Part { rows: vec![row(10, 0, usize::MAX, 2)], first: vec![0] }));
+        for i in 0..4 {
+            assert_eq!((parts.get(i), parts.place(i)), (g.get(i), g.place(i)), "row {i}");
+        }
+        for l in 0..3 {
+            assert_eq!((parts.of(l), parts.index(l, 1)), (g.of(l), g.index(l, 1)), "line {l}");
+        }
+        parts.keep(1);
+        assert_eq!((parts.len(), parts.of(1).len(), parts.index(1, 0)), (2, 0, 2), "its first part kept");
+        let r = move_rows(&t, Some(&g), Range::point(1), Direction::Forward, 1, false, 3, 80, 4);
+        assert_eq!(
+            r,
+            Range::point(5),
+            "its second row, though 80 cells hold the line: x 3 is the row's first"
+        );
+        let r = move_rows(&t, Some(&g), r, Direction::Forward, 1, false, 3, 80, 4);
+        assert_eq!(r, Range::point(11), "the next line's row");
+        assert_eq!(x_of(&t, Some(&g), 6, 80, 4), 5, "its cells before the text, then its column in the row");
     }
 }

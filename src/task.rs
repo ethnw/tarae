@@ -272,8 +272,8 @@ const OUTPUT_KEPT: usize = 20_000;
 pub struct Run {
     pub task: Task,
     pub state: State,
-    /// (is stderr, line).
-    pub output: Vec<(bool, String)>,
+    /// Its lines, kept once (`runout.rs`) — the task panel's document shares them.
+    pub output: crate::runout::Output,
     /// Every line's bytes it printed, a newline each — what was cut from `output` too.
     pub output_bytes: usize,
     /// What `keep` did to `output`'s lines, in order — a line's index before one isn't its index after; the run
@@ -386,7 +386,7 @@ impl Run {
             (self.section, self.cut) = (self.output.len(), None);
         }
         self.output_bytes += line.len() + 1;
-        self.output.push((err, line));
+        self.output.push(err, &line);
     }
 
     /// The output trimmed to what's kept (see `STEP_KEPT`) — once the step in hand is `slack` lines over.
@@ -398,7 +398,7 @@ impl Run {
                 Some(c) => c,
                 None => {
                     let at = self.section + STEP_HEAD;
-                    self.output.insert(at, (false, String::new()));
+                    self.output.insert(at, false, "");
                     self.trims.push(Trim::Insert(at));
                     (at, 0)
                 }
@@ -407,8 +407,9 @@ impl Run {
             self.output.drain(from..from + excess);
             self.trims.push(Trim::Drain(from, from + excess));
             self.cut = Some((marker, before + excess));
-            self.output[marker].1 = format!("… {} lines not kept …", before + excess);
-            self.trims.push(Trim::Set(marker, self.output[marker].1.clone()));
+            let said = format!("… {} lines not kept …", before + excess);
+            self.output.set(marker, &said);
+            self.trims.push(Trim::Set(marker, said));
             self.scroll = self.scroll.map(|t| if t >= from + excess { t - excess } else { t.min(from) });
         }
         let n = self.output.len();
@@ -494,7 +495,7 @@ impl Run {
         Run {
             task,
             state: State::Passed,
-            output: Vec::new(),
+            output: Default::default(),
             trims: Trims::default(),
             output_bytes: 0,
             started: Instant::now(),
@@ -1084,7 +1085,7 @@ impl Editor {
         self.session.task_run = Some(Run {
             task,
             state: State::Running,
-            output: Vec::new(),
+            output: Default::default(),
             trims: Trims::default(),
             output_bytes: 0,
             started: Instant::now(),
@@ -1219,8 +1220,8 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        let out: Vec<&str> =
-            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.as_str()).collect();
+        let out: Vec<String> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.into_owned()).collect();
         assert_eq!(out, ["Successfully rebased"]);
     }
 
@@ -1264,7 +1265,7 @@ mod tests {
             batch(&mut r, (0..1000).map(|i| format!("test t{chunk}_{i} ... ok")).collect(), false);
         }
         batch(&mut r, vec!["test tricky ... FAILED".into(), "failures:".into(), "    tricky".into()], false);
-        let lines = |r: &Run| r.output.iter().map(|l| l.1.clone()).collect::<Vec<_>>();
+        let lines = |r: &Run| r.output.iter().map(|l| l.1.into_owned()).collect::<Vec<_>>();
         let out = lines(&r);
         assert!(out.len() <= STEP_KEPT + TRIM_SLACK + 1, "{}", out.len());
         assert_eq!(out[1], "test t0_0 ... ok", "its start");
@@ -1285,7 +1286,11 @@ mod tests {
         assert!(out.contains(&"    tricky".to_string()), "the failed test's name is kept");
         assert!(out.contains(&"── clippy ──".to_string()) && out.last().unwrap() == "warning: w7_999");
         let top = r.scroll.expect("still scrolled back");
-        assert_eq!(r.output[top].1, "test tricky ... FAILED", "the line scrolled to stays in sight");
+        assert_eq!(
+            r.output.line(top).unwrap(),
+            "test tricky ... FAILED",
+            "the line scrolled to stays in sight"
+        );
         // All of it is bounded
         for chunk in 0..40 {
             batch(&mut r, vec![format!("── s{chunk} ──")], true);

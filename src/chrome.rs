@@ -148,7 +148,7 @@ impl Keys {
             Keys::Slot(Slot::Plugin) => "PANEL",
             Keys::Card => "CARD",
             Keys::Point => "POINT",
-            Keys::View(crate::view::Surface::Chat) => "VIEW · CHAT",
+            Keys::View(crate::view::Surface::Chat) => "CHAT",
             Keys::View(crate::view::Surface::Terminal) => "VIEW · TERMINAL",
             Keys::Output(crate::rundoc::Run::Task) => "TASK",
             Keys::Output(crate::rundoc::Run::Preflight) => "PREFLIGHT",

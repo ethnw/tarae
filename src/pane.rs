@@ -159,11 +159,9 @@ impl crate::editor::Editor {
         if let Some(o) = self.offers.first().filter(|_| self.screen.offer_card.is_some()) {
             out.push(Floating::Card(o.id));
         }
-        let viewing = crate::view::has_keys(self).and(self.session.view.as_ref());
+        let viewing = crate::view::viewing(self).is_some_and(|(_, k)| !k.pending.is_empty());
         let output = crate::rundoc::keyed(self).is_some_and(|(_, o)| !o.keys.pending.is_empty());
-        if (!self.pending.is_empty() || output || viewing.is_some_and(|v| !v.pending().is_empty()))
-            && self.picker.is_none()
-        {
+        if (!self.pending.is_empty() || output || viewing) && self.picker.is_none() {
             out.push(Floating::WhichKey);
         }
         if self.picker.is_some() {

@@ -1115,7 +1115,7 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         .as_ref()
         .and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": l.is_at(At::Side) })));
     let chat = l.chat.as_ref().map(|c| {
-        json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": l.is_at(At::Chat),
+        json!({ "conversation": c.conversation, "input": c.input.text(), "cursor": c.input.cursor(), "focused": l.is_at(At::Chat),
                 "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end,
                 "at_end_yours": c.edits.at_end_yours })
     });
@@ -1718,7 +1718,7 @@ mod tests {
         });
         let c = ed.session.chat.as_ref().unwrap();
         assert_eq!(
-            (c.input.as_str(), c.cursor, ed.session.is_at(crate::session::At::Chat), c.scroll),
+            (c.input.text().as_str(), c.input.cursor(), ed.session.is_at(crate::session::At::Chat), c.scroll),
             ("half 한", 5, true, 2)
         );
         assert!(!c.follow.on);
@@ -1868,7 +1868,8 @@ mod tests {
             ed.open(&back.join("b.txt")).unwrap();
             ed.sidebar_show(Mode::Files);
             let mut c = crate::chat::Chat::new();
-            (c.conversation, c.input, c.cursor) = (Some("c-back".into()), "half a thought".into(), 4);
+            c.conversation = Some("c-back".into());
+            c.input.set_at("half a thought", 4);
             ed.session.chat = Some(c);
             ed.session.at = crate::session::At::Chat;
         });
@@ -1888,7 +1889,7 @@ mod tests {
         assert_eq!(l.split.leaves().len(), 2 + crate::pane::SURFACES.len(), "in its tree with its surfaces");
         assert_eq!(l.sidebar.as_ref().map(|s| s.mode), Some(Mode::Files), "its side panel");
         let c = l.chat.as_ref().expect("its chat");
-        assert_eq!((c.input.as_str(), c.cursor), ("half a thought", 4), "its draft");
+        assert_eq!((c.input.text().as_str(), c.input.cursor()), ("half a thought", 4), "its draft");
         settle_until(&mut ed, |ed| {
             let c = session_at(ed, &back).chat.as_ref().unwrap();
             c.msgs.iter().any(|m| m.text == "Hello from back.")
@@ -1945,7 +1946,7 @@ mod tests {
         assert!(md(&ed).is_some(), "its server, now it's in front");
         assert!(!ed.session.chat.as_ref().unwrap().running(), "its claude waits for a message");
         let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.cursor) = ("go on".into(), 5);
+        c.input.set("go on");
         crate::chat::send(&mut ed);
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !argv().contains("--resume c-back") {

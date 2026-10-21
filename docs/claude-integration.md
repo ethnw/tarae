@@ -352,37 +352,48 @@ each one while the chat keeps the keys.
 | `C-t` | Choose the model (`:effort` — how hard it thinks) |
 | `esc` | The conversation's view mode ([below](#reading-the-conversation-view-mode)); `esc` again, back to the code. An empty conversation has nothing to read: `esc` goes straight to the code |
 
+The input is a small buffer in insert mode: what insert mode does in the code it does here — `A-backspace` a word
+back, `A-d` / `A-del` a word on, `C-k` to the line's end, `C-h` a character, `↑` `↓` a line in a message of
+several, `tab` a tab once you've typed. Where the chat's own keys above meet insert mode's, the chat's win (`C-d`,
+`C-r`, `C-s`, `C-u` in an empty input, the pages). Your `[keys.insert]` reach it, `[keys.chat]` over them.
+
 ### Reading the conversation: view mode
 
 `esc` from the input puts a cursor on the conversation — `space >` does from anywhere (the chat opened or
-brought back if it isn't up), and so does the wheel over it: the status line says `● view · chat`, the chat's
-title `● view`, and what you'd typed stays in the input, faint. It's the code's normal mode on the chat's rows, a line
-per row as you see it: `j` `k` `w` `b` `e` `f` `x` `v` `mi` `%` `s` `/` `n` `*`, counts and the `z` views all
-work, and the selection and cursor are painted over the rows in the code's colours. Nothing edits there, and a key
-that would (`d`, `p`, the `space` menu, `:`) is said, not done.
+brought back if it isn't up), and so does the wheel over it: the status line says `● normal · chat` (`● select ·
+chat` under `v`), as a run's output says its own, the chat's title `● normal`, and what you'd typed stays in the
+input, faint (the input's hint names the way there: `esc normal`). The conversation is a read-only document — its
+text, a line a paragraph as written, the chat wrapping it into the rows you see — and this is the code's normal mode
+on it: `j` `k` `w` `b` `e` `f` `x` `v` `mi` `%` `s` `/` `n` `*`, counts and the `z` views all work, `j` `k` and the
+pages a row as drawn, `x` a paragraph whole, a search and `w` across a wrap; the selection and cursor are painted over
+the rows in the code's colours. The bars, the indents and the stamps the chat draws aren't text, nor is what the
+frame adds below a message (what a run waits on, `thinking…`). Nothing edits there: a key that would (`d`, `p`) is
+put back and said — `the conversation is read-only — i types, esc code`. `:`, `space` and `C-w` are the editor's,
+as from every panel.
 
 | Key | In view mode |
 |---|---|
-| `↑` `↓` | A line up or down, the cursor carried along at the edge |
+| `↑` `↓` | A row up or down, the cursor carried along at the edge |
 | `←` `→` | A page back (older) or on (newer) |
-| `y` | Copy what's selected, the rows as drawn — to the clipboard, and to `p` in the code |
+| `y` | Copy what's selected, as written (a paragraph one line) — to the clipboard, and to `p` in the code |
 | `enter` | Quote what's selected to Claude ([below](#quoting-what-you-read)) — nothing selected, back to the input |
-| `G` | The latest: the conversation caught up, the cursor on its last row (`5G`: row 5) |
+| `G` | The latest: the conversation caught up, the cursor on its last line (`5G`: line 5) |
 | `i` `a` | Back to the input, your text as it was |
 | `esc` `q` | A selection collapses first; with none, back to the code |
 
-It holds still while you read: Claude's answer streaming in doesn't move it, and the title says
-`● view · new text after` once something came — `G` catches up; leaving lets it go on, the rows you were
-reading still in sight and what came below them. Next time it opens where
-you left it in this conversation; the first time, on the last answer's first row. The wheel over the conversation
-opens it too, at the row under the pointer; rolled back down to the end with nothing selected, it closes and the
-keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the input; `C-d`
-`C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
-`[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound. The terminal has the same
-view mode, `C-\` from its program; the run panels' output — a task's, a preflight's, the tests' failure — is a
-read-only document with the code's normal mode on it once the keys are there ([features](features.md)): one set of
-keys to read any of them, `enter` quoting a selection from each. `space` in a view mode is its own menu: `space >`
-quotes, `space l` the chat, `space I` the inbox, `space ?` the palette; on a run's output it's the editor's.
+It holds still while you read: Claude's answer streaming in doesn't move it — not the rows in sight, not your
+selection: words arriving where your cursor is go under and after it, the cursor keeping its cell — and the title
+says `● normal · new text after` once something came; `G` catches up. Leaving lets it go on, the rows you were
+reading still in sight and what came below them. Next time it opens where you left it in this conversation; the
+first time, on the last answer's first row. A click on the conversation puts the cursor on that character; the
+wheel over it opens it too, at the row under the pointer; rolled back down to the end with nothing selected, it
+closes and the keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the
+input; `C-d` `C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it whole, and `[keys.view]` and
+`[keys.view.chat]` lay theirs over — the hints follow the keys you bound. The terminal has a view mode of its own,
+`C-\` from its program (`space` there is its own menu: `space >` quotes, `space l` the chat, `space I` the inbox,
+`space ?` the palette); the run panels' output — a task's, a preflight's, the tests' failure — is a read-only
+document as the conversation is ([features](features.md)): one set of keys to read any of them, `enter` quoting a
+selection from each.
 
 ### Quoting what you read
 

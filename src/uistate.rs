@@ -32,7 +32,11 @@ use crate::sizes::Slot;
 /// `chat-view`.
 /// 9: `keys.waiting` (the card that takes the keys once they've been quiet — friction 60) and a card's `waits`
 /// (`keys quiet`).
-pub const V: u64 = 10;
+/// 10: a card's `session` is the session it's about (a bring card's: the one it brings) — `shown_in` where it
+/// stands; since added: a card's `refused`, a session's `answer`.
+/// 11: the chat's `view` `line`/`lines` count the transcript document's lines — a paragraph each (`chatdoc.rs`),
+/// a drawn row before.
+pub const V: u64 = 11;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -412,20 +416,25 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
-        // `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing under way
-        // `C-w` and the chat's chords go on (to `chat::key`'s, which takes only those then)
-        let viewing = crate::view::has_keys(self).filter(|_| !pending);
-        if let Some(s) = viewing {
-            let view = self.session.view.as_ref().expect("has_keys: a view");
+        // `chatdoc::key`, `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing
+        // under way `C-w` goes on, and from the chat's `:` and its chords (to `chat::key`'s, which takes only the
+        // chords then)
+        let viewing = crate::view::viewing(self).filter(|_| !pending);
+        if let Some((s, keys)) = viewing {
+            let chat = s == crate::view::Surface::Chat;
+            let prompt = match chat {
+                true => crate::chatdoc::transcript(self).is_some_and(|t| t.pane.prompt),
+                false => self.session.view.as_ref().is_some_and(|v| v.prompt),
+            };
             if self.prompt.is_some() {
-                if view.prompt {
+                if prompt {
                     v.push(layer(Region::Prompt, Filter::All));
                 }
-            } else if view.pending().is_empty() && !view.waits() {
-                v.push(layer(Region::View(s), Filter::Except(crate::view::passes(self))));
-                if s == crate::view::Surface::Chat {
-                    let chords = crate::view::passes(self).into_iter().filter(|k| k.code != Code::Char('w'));
-                    let chords: Vec<Key> = chords.collect();
+            } else if keys.pending.is_empty() && !keys.waits() {
+                let passes = if chat { crate::chatdoc::passes(self) } else { crate::view::passes() };
+                v.push(layer(Region::View(s), Filter::Except(passes.clone())));
+                if chat {
+                    let chords = passes.into_iter().filter(|k| crate::chatdoc::chord(*k)).collect();
                     v.push(layer(Region::Chat, Filter::Only(chords)));
                 }
             } else {
@@ -604,13 +613,12 @@ impl Editor {
             Region::EditReview => vec!['y', 'n', 'a', 'q'],
             _ => Vec::new(),
         };
-        let view =
-            crate::view::has_keys(self).and(self.session.view.as_ref()).filter(|_| self.pending.is_empty());
+        let view = crate::view::viewing(self).filter(|_| self.pending.is_empty());
         let mut pending: Vec<String> = self.count.iter().map(|n| n.to_string()).collect();
         pending.extend(self.pending.iter().map(Key::to_string));
         // (a view mode's own count and keys, while it has them — a run panel's output's too)
-        if let Some(v) = view {
-            pending = v.pending_keys();
+        if let Some((_, k)) = view {
+            pending = k.pending_keys();
         }
         let output = crate::rundoc::keyed(self).map(|(_, o)| o).filter(|_| self.pending.is_empty());
         if let Some(o) = output {
@@ -623,7 +631,7 @@ impl Editor {
             held,
             pending: pending.join(" "),
             char_next: self.on_next_char.is_some()
-                || view.is_some_and(|v| v.char_next())
+                || view.is_some_and(|(_, k)| k.char_next())
                 || output.is_some_and(|o| o.keys.char_next()),
             drawn: self.drawn(region),
             under,

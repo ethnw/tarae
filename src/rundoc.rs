@@ -13,13 +13,17 @@
 //! the rows in sight, said in its head — and `G` catches up.
 //!
 //! The code keeps `doc()` (§2.3): each key's commands run with the output's document swapped in as `current`
-//! (`swap`) and put back before the key's handler returns — frames, jobs, servers and `context()` see the code's.
-//! A key whose command took the code to another buffer (`C-o`, `ga`, `gf`) gives the code the keys.
+//! (`docpane::swap` — the pattern every document pane shares) and put back before the key's handler returns —
+//! frames, jobs, servers and `context()` see the code's. A key whose command took the code to another buffer
+//! (`C-o`, `ga`, `gf`) gives the code the keys.
 
+use std::borrow::Cow;
+
+use crate::docpane::{After, Pane, Which};
 use crate::document::Document;
-use crate::editor::{CharFn, Editor, Mode};
+use crate::editor::{Editor, Mode};
 use crate::key::{Code, Key};
-use crate::keymap::{Lookup, MappableCommand};
+use crate::keymap::MappableCommand;
 use crate::movement as mv;
 use crate::selection::{Range, Selection};
 use crate::session::At;
@@ -160,129 +164,30 @@ pub fn heading(l: &str) -> Option<&str> {
     l.strip_prefix("── ").and_then(|l| l.strip_suffix(" ──"))
 }
 
-/// The keys' state of a document that isn't the code's: its own mode (`v` selects), a sequence, count or awaited
-/// character under way, its own search — never the code's (§2.3: each pane its own search and selection), traded
-/// with the editor's for each key (`swap`).
-pub struct Keys {
-    pub mode: Mode,
-    pub pending: Vec<Key>,
-    count: Option<usize>,
-    on_next_char: Option<(CharFn, Option<usize>)>,
-    char_for: String,
-    sticky: Option<Vec<usize>>,
-    search_origin: Option<usize>,
-    search: Option<String>,
-    search_hl: bool,
-}
-
-impl Default for Keys {
-    fn default() -> Self {
-        Keys {
-            mode: Mode::Normal,
-            pending: Vec::new(),
-            count: None,
-            on_next_char: None,
-            char_for: String::new(),
-            sticky: None,
-            search_origin: None,
-            search: None,
-            search_hl: false,
-        }
-    }
-}
-
-impl Keys {
-    /// Nothing under way: the next key starts something.
-    fn idle(&self) -> bool {
-        self.pending.is_empty() && self.on_next_char.is_none() && self.count.is_none()
-    }
-
-    /// Its count and keys under way, as the status line says them (`Editor::pending_display`).
-    pub fn pending_display(&self) -> String {
-        let mut s = self.count.map(|c| c.to_string()).unwrap_or_default();
-        for k in &self.pending {
-            s.push_str(&k.to_string());
-        }
-        if self.on_next_char.is_some() {
-            s.push_str(&self.char_for);
-            s.push('…');
-        }
-        s
-    }
-
-    /// Its count and keys under way, each a word (the state's `keys.pending`).
-    pub fn pending_keys(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.count.iter().map(|n| n.to_string()).collect();
-        v.extend(self.pending.iter().map(Key::to_string));
-        v
-    }
-
-    /// The next key is taken as a character (`f`, `t`) — or a count is under way: the next key is its.
-    pub fn char_next(&self) -> bool {
-        self.on_next_char.is_some()
-    }
-
-    pub fn waits(&self) -> bool {
-        self.count.is_some() || self.on_next_char.is_some()
-    }
-}
-
-/// What a key on an output asks for once it's done (its commands run with the document swapped in).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum After {
-    /// `esc` with nothing selected: to the code.
-    Leave,
-    /// `G`: on the latest line, caught up.
-    Latest,
-    /// `enter` (or `space >`) on a selection: quoted to the chat (`quote.rs`).
-    Take,
-    /// `enter` with nothing selected: your run waiting behind, else the chat's input.
-    Enter,
-    /// `space >` with nothing selected: the chat's view mode.
-    ChatView,
-    /// Commands of `EDITORS`: run on the editor.
-    Editor,
-}
-
-/// A run panel's document and its keys' state.
+/// A run panel's document pane (its document, keys' state, search — `docpane::Pane`) and what it was made of.
 pub struct Output {
-    /// None only while a key's command has it swapped in (`swap`).
-    doc: Option<Document>,
+    pub pane: Pane,
     made: Made,
     /// Its panel had the keys at the last `sync` — another now: they came (landed in sight) or went.
     keyed: bool,
-    pub keys: Keys,
-    /// The matches its search shows (`refresh_search`).
-    hits: Option<crate::search::SearchHits>,
-    /// A prompt a key of its opened (`/`, `s`) is up: its keys apply here.
-    pub prompt: bool,
     /// Its lines when the keys came, or `G` caught up — more since: what came waits below (`came`).
     seen: usize,
-    /// The rows and columns it was last kept in sight at (`resized`).
-    size: Option<(usize, usize)>,
-    after: Option<After>,
-    deferred: Vec<MappableCommand>,
+}
+
+impl std::ops::Deref for Output {
+    type Target = Pane;
+    fn deref(&self) -> &Pane {
+        &self.pane
+    }
+}
+
+impl std::ops::DerefMut for Output {
+    fn deref_mut(&mut self) -> &mut Pane {
+        &mut self.pane
+    }
 }
 
 impl Output {
-    pub fn doc(&self) -> &Document {
-        self.doc.as_ref().expect("an output's document is in it outside a key's command")
-    }
-
-    fn doc_mut(&mut self) -> &mut Document {
-        self.doc.as_mut().expect("an output's document is in it outside a key's command")
-    }
-
-    /// The matches its search shows now.
-    pub fn hits(&self) -> Option<&crate::search::SearchHits> {
-        self.hits.as_ref()
-    }
-
-    /// Its lines (a last line break ends the last, as the panels' lines are kept).
-    pub fn lines(&self) -> usize {
-        mv::last_line(&self.doc().text) + 1
-    }
-
     /// Something more came since the keys came or `G` (`↓ output after` in its head).
     pub fn came(&self) -> bool {
         self.keyed && self.lines() > self.seen
@@ -292,11 +197,6 @@ impl Output {
     pub fn failure(&self) -> bool {
         self.made.picked.is_some()
     }
-
-    /// More than one character selected, or several cursors — what `esc` collapses first.
-    pub fn selects(&self) -> bool {
-        crate::view::selects(self.doc())
-    }
 }
 
 /// The session's two: the task panel's (a task, a preflight) and the tests'.
@@ -304,8 +204,6 @@ impl Output {
 pub struct Outputs {
     task: Option<Output>,
     tests: Option<Output>,
-    /// The output a key's command has swapped in as `current` (`swap`).
-    swapped: Option<Slot>,
 }
 
 impl Outputs {
@@ -317,7 +215,7 @@ impl Outputs {
         }
     }
 
-    fn get_mut(&mut self, slot: Slot) -> Option<&mut Output> {
+    pub(crate) fn get_mut(&mut self, slot: Slot) -> Option<&mut Output> {
         match slot {
             Slot::Task => self.task.as_mut(),
             Slot::Test => self.tests.as_mut(),
@@ -334,13 +232,13 @@ impl Outputs {
 
     /// Its document, while it's in (not swapped in for a key).
     pub fn doc(&self, slot: Slot) -> Option<&Document> {
-        self.get(slot).and_then(|o| o.doc.as_ref())
+        self.get(slot).and_then(|o| o.doc_in())
     }
 }
 
 /// A key's command runs with an output's document as `current` (`commands.rs` asks before it acts on the panel).
 pub fn swapped(ed: &Editor) -> bool {
-    ed.session.outputs.swapped.is_some()
+    matches!(crate::docpane::swapped(ed), Some(Which::Output(_)))
 }
 
 /// What the task panel's run is: a preflight's while the preflight's run is it.
@@ -420,17 +318,17 @@ fn made(ed: &Editor, slot: Slot) -> Option<Made> {
 /// `slot`'s lines from the run's line `from` on: the task's output; the tests' detail — the failure picked's
 /// message, else the output; nothing printed yet, the command (a command of several lines: its first and `…`, as
 /// the panel shows it).
-fn lines(ed: &Editor, slot: Slot, from: usize) -> Vec<(Kind, &str)> {
-    fn out(o: &[(bool, String)], from: usize) -> Vec<(Kind, &str)> {
-        o.iter().skip(from).map(|(e, l)| (Kind::Out(*e), l.as_str())).collect()
+fn lines(ed: &Editor, slot: Slot, from: usize) -> Vec<(Kind, Cow<'_, str>)> {
+    fn out(o: &crate::runout::Output, from: usize) -> Vec<(Kind, Cow<'_, str>)> {
+        o.iter_from(from).map(|(e, l)| (Kind::Out(e), l)).collect()
     }
     match slot {
         Slot::Test => {
             let Some(r) = ed.session.test_run.as_ref() else { return Vec::new() };
             match r.picked() {
-                Some(c) if c.message.is_empty() => vec![(Kind::Faint, "failed (no message)")],
+                Some(c) if c.message.is_empty() => vec![(Kind::Faint, "failed (no message)".into())],
                 Some(c) => (c.message.iter().enumerate().skip(from))
-                    .map(|(i, m)| (Kind::Message { first: i == 0 }, m.as_str()))
+                    .map(|(i, m)| (Kind::Message { first: i == 0 }, m.as_str().into()))
                     .collect(),
                 None if r.output.is_empty() => Vec::new(),
                 None => out(&r.output, from),
@@ -453,26 +351,35 @@ fn command(ed: &Editor, slot: Slot) -> String {
     }
 }
 
-/// The text and colours of `lines`, from byte `at` on: a line each (a tab two spaces, as the panels drew one),
-/// each ending in its line break; its colours as global capture ids (`Document.paint`).
-fn text_of(lines: &[(Kind, &str)], at: usize, preflight: bool) -> (String, Vec<(usize, usize, u32)>) {
+/// The text and colours of `lines`, from byte `at` on: a line each as printed (a tab stays one — drawn as the
+/// code's are), each ending in its line break; its colours as global capture ids (`Document.paint`).
+fn text_of(lines: &[(Kind, Cow<'_, str>)], at: usize, preflight: bool) -> (String, Vec<(usize, usize, u32)>) {
+    let text = lines.iter().flat_map(|(_, l)| [l.as_ref(), "\n"]).collect();
+    (text, paint_of(lines.iter().map(|(k, l)| (*k, Cow::Borrowed(l.as_ref()))), at, preflight))
+}
+
+/// The colours of `lines` laid out as `text_of` lays them, from byte `at` on — one line at a time, no text made.
+fn paint_of<'a>(
+    lines: impl Iterator<Item = (Kind, Cow<'a, str>)>,
+    at: usize,
+    preflight: bool,
+) -> Vec<(usize, usize, u32)> {
     use crate::syntax::capture_id;
-    let mut text = String::new();
     let mut paint = Vec::new();
-    for &(kind, l) in lines {
-        let from = at + text.len();
-        let line = l.replace('\t', "  ");
+    let mut from = at;
+    for (kind, l) in lines {
+        let line: &str = &l;
         let end = from + line.len();
         let whole = |c: &str| (from < end).then(|| (from, end, capture_id(c)));
         match kind {
-            Kind::Out(_) if preflight && let Some(name) = heading(&line) => {
+            Kind::Out(_) if preflight && let Some(name) = heading(line) => {
                 // (a step's heading recedes, its name dim)
                 let (a, b) = (from + "── ".len(), from + "── ".len() + name.len());
                 paint.push((from, a, capture_id("ui.linenr")));
                 paint.push((a, b, capture_id("ui.virtual")));
                 paint.push((b, end, capture_id("ui.linenr")));
             }
-            Kind::Out(err) => paint.extend(match class(err, &line) {
+            Kind::Out(err) => paint.extend(match class(err, line) {
                 Class::Pass => whole("diff.plus"),
                 Class::Fail => whole("error"),
                 Class::Warn => whole("markup.bold"),
@@ -483,19 +390,35 @@ fn text_of(lines: &[(Kind, &str)], at: usize, preflight: bool) -> (String, Vec<(
             Kind::Message { first: false } => {}
             Kind::Faint => paint.extend(whole("ui.linenr")),
         }
-        text.push_str(&line);
-        text.push('\n');
+        from = end + 1;
     }
-    (text, paint)
+    paint
 }
 
-/// `slot`'s whole text and colours as its run holds it now.
-fn whole(ed: &Editor, slot: Slot, m: Made) -> (String, Vec<(usize, usize, u32)>) {
-    if m.waiting {
-        let cmd = command(ed, slot);
-        return text_of(&[(Kind::Faint, cmd.as_str())], 0, false);
+/// The run's output `slot`'s document holds as it is — its own rope (`share`): not a failure's message, nor the
+/// command while nothing is printed.
+fn shared(ed: &Editor, slot: Slot, m: Made) -> Option<&crate::runout::Output> {
+    if m.picked.is_some() || m.waiting {
+        return None;
     }
-    text_of(&lines(ed, slot, 0), 0, m.preflight)
+    match slot {
+        Slot::Test => ed.session.test_run.as_ref().map(|r| &r.output),
+        _ => ed.session.task_run.as_ref().map(|r| &r.output),
+    }
+}
+
+/// `slot`'s whole text and colours as its run holds it now — a run's output its own rope from the start, nodes
+/// shared: a long output is never copied first (the freed copy's pages stayed in the footprint).
+fn whole(ed: &Editor, slot: Slot, m: Made) -> (ropey::Rope, Vec<(usize, usize, u32)>) {
+    if let Some(o) = shared(ed, slot, m) {
+        let lines = o.iter().map(|(e, l)| (Kind::Out(e), l));
+        return (o.text().clone(), paint_of(lines, 0, m.preflight));
+    }
+    let (text, paint) = match m.waiting {
+        true => text_of(&[(Kind::Faint, command(ed, slot).into())], 0, false),
+        false => text_of(&lines(ed, slot, 0), 0, m.preflight),
+    };
+    (ropey::Rope::from_str(&text), paint)
 }
 
 /// Every event (`focus_sync`) and before a frame: each run panel's document follows its run, and its keys coming
@@ -546,7 +469,7 @@ fn replay(d: &mut Document, mut lines: usize, trims: &[crate::task::Trim], mut t
             }
             Trim::Set(at, text) if *at < lines => {
                 let (a, b) = (mv::line_start(&d.text, *at), mv::line_end(&d.text, *at));
-                Change { from: a, to: b, insert: text.replace('\t', "  ") }
+                Change { from: a, to: b, insert: text.clone() }
             }
             _ => continue,
         };
@@ -563,7 +486,7 @@ fn replay(d: &mut Document, mut lines: usize, trims: &[crate::task::Trim], mut t
 fn follow(ed: &mut Editor, slot: Slot) {
     let Some(m) = made(ed, slot) else {
         if let Some(o) = ed.session.outputs.place(slot).take() {
-            crate::event::drop_later(o.doc);
+            crate::event::drop_later(o.pane.into_doc());
         }
         return;
     };
@@ -618,7 +541,8 @@ fn follow(ed: &mut Editor, slot: Slot) {
         }
         _ => {
             let (text, paint) = whole(ed, slot, m);
-            let mut doc = Document::from_str(ed.alloc_id(), &text);
+            let mut doc = Document::from_str(ed.alloc_id(), "");
+            doc.text = text;
             doc.wrap = Some(false);
             doc.throwaway = true;
             doc.paint = paint;
@@ -626,27 +550,25 @@ fn follow(ed: &mut Editor, slot: Slot) {
             match place.as_mut() {
                 Some(o) => {
                     // (its search stays the pane's; the keys land on it again, as they came)
-                    let old = std::mem::replace(o.doc.as_mut().expect("an output, above"), doc);
-                    crate::event::drop_later(old);
-                    (o.made, o.keyed, o.hits) = (m, false, None);
-                    o.keys.mode = Mode::Normal;
+                    crate::event::drop_later(o.pane.replace(doc));
+                    (o.made, o.keyed) = (m, false);
                 }
-                None => {
-                    *place = Some(Output {
-                        doc: Some(doc),
-                        made: m,
-                        keyed: false,
-                        keys: Keys::default(),
-                        hits: None,
-                        prompt: false,
-                        seen: 0,
-                        size: None,
-                        after: None,
-                        deferred: Vec::new(),
-                    })
-                }
+                None => *place = Some(Output { pane: Pane::new(doc), made: m, keyed: false, seen: 0 }),
             }
         }
+    }
+    share(ed, slot, m);
+}
+
+/// A document of the run's output holds its lines as the run keeps them (`runout.rs`): its text is the run's own
+/// rope, nodes shared — one copy of a long output, not two. (The same text by how it's made — its length checked, a
+/// slip left unshared rather than shown wrong.)
+fn share(ed: &mut Editor, slot: Slot, m: Made) {
+    let Some(rope) = shared(ed, slot, m).map(|o| o.text().clone()) else { return };
+    if let Some(d) = ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut())
+        && d.text.len_bytes() == rope.len_bytes()
+    {
+        d.text = rope;
     }
 }
 
@@ -671,11 +593,7 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
     o.keyed = keys;
     if !keys {
         let top = o.doc().top;
-        let prompt = std::mem::take(&mut o.prompt);
-        o.keys = Keys { search: o.keys.search.take(), search_hl: o.keys.search_hl, ..Keys::default() };
-        let collapse = o.doc().selection().primary().cursor(&o.doc().text);
-        o.doc_mut().set_selection(Selection::point(collapse));
-        if prompt {
+        if o.pane.dropped() {
             ed.prompt = None;
         }
         match slot {
@@ -707,30 +625,12 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
 
 /// The cursor's line in sight, the scrolloff margin kept (one line a row: nothing wraps), and its column.
 fn in_sight(ed: &mut Editor, slot: Slot) {
-    let (rows, cols) = viewport(ed, slot);
-    let so = ed.config.scrolloff.min(rows.saturating_sub(1) / 2);
-    let tab = ed.config.tab_width;
+    let size = viewport(ed, slot);
+    let (so, tab) = (ed.config.scrolloff, ed.config.tab_width);
     let Some(o) = ed.session.outputs.get_mut(slot) else { return };
-    o.size = Some((rows, cols));
-    let Some(d) = o.doc.as_mut() else { return };
-    let last = mv::last_line(&d.text);
-    let cursor = d.selection().primary().cursor(&d.text);
-    let line = mv::line_of(&d.text, cursor);
-    let mut top = d.top.min(last);
-    if line < top + so {
-        top = line.saturating_sub(so);
-    } else if line + so >= top + rows {
-        top = (line + so + 1).saturating_sub(rows);
-    }
-    // (no further down than the last line at the bottom)
-    let top = top.min((last + 1).saturating_sub(rows));
-    d.set_top(top);
-    let col = mv::visual_col(&d.text, cursor, tab);
-    if col < d.left {
-        d.left = col;
-    } else if col >= d.left + cols {
-        d.left = col + 1 - cols;
-    }
+    o.size = Some(size);
+    let Some(d) = o.doc_in_mut() else { return };
+    crate::docpane::in_sight(d, size, so, tab);
     pin(ed, slot);
 }
 
@@ -766,16 +666,9 @@ pub fn refresh_search(ed: &mut Editor) {
     let typed = ed.prompt.as_ref().filter(|p| matches!(p.kind, crate::editor::PromptKind::Search { .. }));
     let typed = typed.map(|p| p.text.clone());
     let Some(slot) = has_keys(ed) else { return };
-    let Some(o) = ed.session.outputs.get_mut(slot).filter(|o| o.doc.is_some()) else { return };
-    let pattern = match (o.prompt, typed) {
-        (true, Some(t)) => Some(t).filter(|t| !t.is_empty()),
-        _ => o.keys.search.clone().filter(|_| o.keys.search_hl),
-    };
-    o.hits = match pattern {
-        Some(p) if o.hits.as_ref().is_some_and(|h| h.holds(o.doc(), &p)) => o.hits.take(),
-        Some(p) => crate::search::SearchHits::of(o.doc(), &p),
-        None => None,
-    };
+    if let Some(o) = ed.session.outputs.get_mut(slot) {
+        o.pane.refresh_search(typed);
+    }
 }
 
 /// `esc` with its keys: its matches no longer shown (the code's stay as they are).
@@ -785,77 +678,15 @@ pub fn search_unshown(ed: &mut Editor) {
     }
 }
 
-/// The editor's mode, keys under way and search, and the output's, change places.
-fn trade(ed: &mut Editor, k: &mut Keys) {
-    std::mem::swap(&mut ed.mode, &mut k.mode);
-    std::mem::swap(&mut ed.pending, &mut k.pending);
-    std::mem::swap(&mut ed.count, &mut k.count);
-    std::mem::swap(&mut ed.on_next_char, &mut k.on_next_char);
-    std::mem::swap(&mut ed.char_for, &mut k.char_for);
-    std::mem::swap(&mut ed.sticky, &mut k.sticky);
-    std::mem::swap(&mut ed.search_origin, &mut k.search_origin);
-    std::mem::swap(&mut ed.search, &mut k.search);
-    std::mem::swap(&mut ed.search_hl, &mut k.search_hl);
-}
-
-/// Runs `f` with `slot`'s document as `current`, its mode, keys under way and size as the editor's — all put back
-/// before it returns. What it did to the text is put back too, said (it's read-only), and insert mode ends there;
-/// a command that took the code to another buffer gives the code the keys (the code's jumps are its own then).
+/// Runs `f` with `slot`'s document swapped in (`docpane::swap`): an edit or typing put back is said (it's
+/// read-only), the cursor kept in sight after.
 fn swap<R>(ed: &mut Editor, slot: Slot, f: impl FnOnce(&mut Editor) -> R) -> Option<R> {
-    let (rows, cols) = viewport(ed, slot);
-    let o = ed.session.outputs.get_mut(slot)?;
-    let doc = o.doc.take()?;
-    let mut keys = std::mem::take(&mut o.keys);
-    let (id, version, before) = (doc.id, doc.version(), doc.snapshot());
-    let code = ed.doc().id;
-    ed.docs.push(doc);
-    ed.current = ed.docs.len() - 1;
-    trade(ed, &mut keys);
-    ed.session.outputs.swapped = Some(slot);
-    let viewport = std::mem::replace(&mut ed.viewport, (rows, cols));
-    let focus = ed.session.focus;
-    let jumps = ed.session.views.iter().find(|w| w.id == focus).map(|w| w.jumps.clone());
-    let prompt = ed.prompt.is_some();
-    let r = f(ed);
-    ed.viewport = viewport;
-    ed.session.outputs.swapped = None;
-    let at = ed.docs.iter().rposition(|d| d.id == id).expect("the output's document is still in");
-    // (a command that showed the code another buffer — `C-o`, `ga`, `gf` — left it current)
-    let moved = ed.current != at;
-    let now = ed.docs[ed.current].id;
-    let mut doc = ed.docs.remove(at);
-    let back = if moved { now } else { code };
-    let index = |id| ed.docs.iter().position(|d| d.id == id);
-    ed.current = index(back).or_else(|| index(code)).unwrap_or(0);
-    if !moved && let (Some(jumps), Some(w)) = (jumps, ed.session.views.iter_mut().find(|w| w.id == focus)) {
-        w.jumps = jumps;
-    }
-    trade(ed, &mut keys);
-    // Read-only: an edit put back, insert mode left — said
-    let edited = doc.version() != version;
-    if edited {
-        doc.put_back(before);
-    }
-    let typing = keys.mode == Mode::Insert;
-    if typing {
-        keys.mode = Mode::Normal;
-        ed.insert_rec = None;
-    }
-    let o = ed.session.outputs.get_mut(slot).expect("an output lasts through its key");
-    o.doc = Some(doc);
-    o.keys = keys;
-    // (a prompt it opened — `/`, `s` — is its until it closes)
-    o.prompt = match ed.prompt.is_some() {
-        true => o.prompt || !prompt,
-        false => false,
-    };
-    if edited || typing {
+    let size = viewport(ed, slot);
+    let (r, done) = crate::docpane::swap(ed, Which::Output(slot), size, f)?;
+    if done.refused() {
         let what = run_of(ed, slot).map_or("this output", what);
         let out = bound(ed, "view_leave", "esc").map(|k| format!(" — {k} code")).unwrap_or_default();
         ed.set_status(format!("{what} is read-only{out}"));
-    }
-    if moved {
-        ed.session.at = At::Code;
     }
     in_sight(ed, slot);
     Some(r)
@@ -868,29 +699,6 @@ fn what(r: Run) -> &'static str {
         Run::Preflight => "the preflight's output",
         Run::Tests => "the tests' output",
     }
-}
-
-/// A command on an output asks for what's done after its key (`After`).
-pub fn ask(ed: &mut Editor, after: After) {
-    if let Some(o) = ed.session.outputs.swapped.and_then(|s| ed.session.outputs.get_mut(s)) {
-        o.after = Some(after);
-    }
-}
-
-/// `esc` on an output: a selection collapses to the primary cursor first (and `v` ends); nothing selected, to the
-/// code.
-pub fn leave_key(ed: &mut Editor) {
-    let select = ed.mode == Mode::Select;
-    let doc = ed.doc_mut();
-    let sel = doc.selection();
-    let r = sel.primary();
-    if crate::view::selects(doc) || select {
-        let c = r.cursor(&doc.text);
-        doc.set_selection(Selection::single(Range::point(c)));
-        ed.mode = Mode::Normal;
-        return;
-    }
-    ask(ed, After::Leave);
 }
 
 /// Whether `key` is `C-w` (or `A-C-w`) or `:`: the editor's, from an output as from every panel.
@@ -923,7 +731,9 @@ pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     if o.keys.idle() && passes(key) {
         return None;
     }
-    swap(ed, slot, |ed| key_in(ed, slot, key));
+    swap(ed, slot, |ed| {
+        crate::docpane::key_in(ed, key, |ed, mode, keys| ed.keymaps.run_lookup(mode, keys), editors)
+    });
     after(ed, slot);
     Some(Handler::Output)
 }
@@ -936,60 +746,10 @@ fn editors(ed: &Editor, c: &MappableCommand) -> bool {
     }
 }
 
-/// `key` with the output's document swapped in: the awaited character (`f`), a count, the command.
-fn key_in(ed: &mut Editor, slot: Slot, key: Key) {
-    if let Some((f, count)) = ed.on_next_char.take() {
-        let ch = match (key.code, key.ctrl || key.alt) {
-            (Code::Char(c), false) => Some(c),
-            (Code::Enter, _) => Some('\n'),
-            (Code::Tab, _) => Some('\t'),
-            _ => None,
-        };
-        if let Some(ch) = ch {
-            ed.with_group_count(count, |cx| f(cx, ch));
-        }
-        return;
-    }
-    if ed.pending.is_empty()
-        && let Some(c @ '0'..='9') = key.plain_char()
-        && (c != '0' || ed.count.is_some())
-    {
-        let digit = c.to_digit(10).unwrap_or(0) as usize;
-        ed.count = Some(ed.count.unwrap_or(0).saturating_mul(10).saturating_add(digit));
-        return;
-    }
-    ed.pending.push(key);
-    let cmds = match ed.keymaps.run_lookup(ed.mode, &ed.pending) {
-        Lookup::Pending => return,
-        Lookup::Matched(cmds) => Some(cmds.to_vec()),
-        Lookup::NotFound => None,
-    };
-    let keys = std::mem::take(&mut ed.pending);
-    let count = ed.count.take();
-    match cmds {
-        // (the editor's own, once the document is put back — `tab`, `]x`, `space ?`)
-        Some(cmds) if cmds.iter().all(|c| editors(ed, c)) => {
-            if let Some(o) = ed.session.outputs.get_mut(slot) {
-                o.deferred = cmds;
-            }
-            ask(ed, After::Editor);
-        }
-        Some(cmds) => {
-            ed.run(&cmds, count);
-            if ed.on_next_char.is_some() {
-                ed.char_for = keys.iter().map(Key::to_string).collect();
-            }
-        }
-        // (as in the code: a key bound to nothing does nothing)
-        None => {}
-    }
-}
-
 /// What a command asked for, once its key is done.
 fn after(ed: &mut Editor, slot: Slot) {
     let Some(o) = ed.session.outputs.get_mut(slot) else { return };
-    let Some(a) = o.after.take() else { return };
-    let deferred = std::mem::take(&mut o.deferred);
+    let Some((a, deferred)) = o.take_after() else { return };
     match a {
         After::Leave => ed.session.leave(At::Slot),
         After::Latest => {
@@ -1011,7 +771,12 @@ fn after(ed: &mut Editor, slot: Slot) {
                 crate::chat::open(ed);
             }
         }
-        After::ChatView => crate::view::chat_view(ed),
+        // (`i` isn't bound on an output — normal mode's, refused — but bound by yours: the chat's input)
+        After::Input => {
+            ed.session.leave(At::Slot);
+            crate::chat::open(ed);
+        }
+        After::ChatView => crate::chatdoc::view(ed),
         After::Editor => ed.run(&deferred, None),
     }
 }
@@ -1091,7 +856,7 @@ pub fn bound(ed: &Editor, name: &str, like: &str) -> Option<String> {
 
 /// Whether `enter` quotes on the output with the keys now: something selected.
 pub fn quotes(ed: &Editor) -> bool {
-    keyed(ed).is_some_and(|(_, o)| crate::view::wide(o.doc()))
+    keyed(ed).is_some_and(|(_, o)| crate::docpane::wide(o.doc()))
 }
 
 /// Whether `enter` runs your run waiting behind on the output with the keys (nothing selected).
@@ -1124,7 +889,7 @@ pub fn wheel(ed: &mut Editor, slot: Slot, up: bool) {
 /// character, as a click in the code puts it.
 pub fn click(ed: &mut Editor, slot: Slot, row: usize, col: usize) {
     ed.bottom_take_keys();
-    let Some(d) = ed.session.outputs.get_mut(slot).and_then(|o| o.doc.as_mut()) else { return };
+    let Some(d) = ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut()) else { return };
     let line = (d.top + row).min(mv::last_line(&d.text));
     let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));
     let text = d.text.byte_slice(ls..le).to_string();
@@ -1149,7 +914,7 @@ pub fn step(ed: &mut Editor, name: &str) {
     let Some(at) = at else { return ed.set_status("that step hasn't printed anything yet") };
     ed.bottom_take_keys();
     let rows = rows(ed, Slot::Task);
-    let Some(d) = ed.session.outputs.get_mut(Slot::Task).and_then(|o| o.doc.as_mut()) else { return };
+    let Some(d) = ed.session.outputs.get_mut(Slot::Task).and_then(|o| o.doc_in_mut()) else { return };
     let at = at.min(mv::last_line(&d.text));
     d.set_selection(Selection::point(mv::line_start(&d.text, at)));
     // (its heading at the top, as `zt` puts it — the next move keeps the scrolloff margin)
@@ -1164,7 +929,7 @@ pub fn step(ed: &mut Editor, name: &str) {
 /// since — shapes, never text.
 pub fn state(ed: &Editor) -> Option<serde_json::Value> {
     let (run, o) = keyed(ed)?;
-    let d = o.doc.as_ref()?;
+    let d = o.doc_in()?;
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
     Some(serde_json::json!({
         "surface": run.name(),

@@ -57,8 +57,8 @@ fn stuck_cards(ed: &Editor) -> usize {
 }
 
 fn stops_said(ed: &Editor) -> usize {
-    let out = ed.session.task_run.as_ref().map(|r| r.output.as_slice()).unwrap_or_default();
-    out.iter().filter(|(_, l)| l.starts_with(STOPPED)).count()
+    let Some(r) = ed.session.task_run.as_ref() else { return 0 };
+    r.output.iter().filter(|(_, l)| l.starts_with(STOPPED)).count()
 }
 
 fn input(sim: &mut Sim, ed: &mut Editor, pid: u32, ys: &std::cell::Cell<usize>) -> String {

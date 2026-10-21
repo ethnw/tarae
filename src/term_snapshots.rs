@@ -5461,7 +5461,7 @@ fn blocked_npm_run(s: &mut Shot) {
     r.took = Some(Duration::from_millis(2410));
     r.by_claude = true;
     r.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
-    r.output = vec![(true, "npm ERR! code EPERM".into()), (true, "npm ERR! syscall open".into())];
+    r.output = [(true, "npm ERR! code EPERM"), (true, "npm ERR! syscall open")].into_iter().collect();
     s.ed.session.task_run = Some(r);
 }
 

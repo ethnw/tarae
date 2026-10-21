@@ -259,7 +259,7 @@ pub fn code(ed: &mut Editor) {
     match from_code(ed) {
         Some(Ok(taken)) => add(ed, taken),
         Some(Err(e)) => ed.set_status(e),
-        None => crate::view::chat_view(ed),
+        None => crate::chatdoc::view(ed),
     }
 }
 

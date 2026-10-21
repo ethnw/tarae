@@ -603,7 +603,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     let run = ed.session.task_run.as_ref().filter(|r| r.by_claude && r.task.cmd == entry.run);
     match answer {
         None => {
-            let tail = run.map(|r| tail(&r.output)).unwrap_or_default();
+            let tail = run.map(|r| tail(&r.output.to_vec())).unwrap_or_default();
             v.fail(
                 Check::Timeout,
                 format!("not over in {}: {tail}", crate::term::duration(entry.timeout.as_secs_f32())),
@@ -764,10 +764,11 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
         v.fail(Check::Sandbox, words);
     }
     let passed = r.state == crate::task::State::Passed;
-    let report = g.report_with(&r.output, crate::sandbox::Told::default(), passed);
+    let output = r.output.to_vec();
+    let report = g.report_with(&output, crate::sandbox::Told::default(), passed);
     let seen = g.watch().map(|w| w.blocked().seen).unwrap_or_default();
     let said = match g {
-        crate::sandbox::Guard::In(p) => p.said_in_output(&r.output, &seen),
+        crate::sandbox::Guard::In(p) => p.said_in_output(&output, &seen),
         _ => Vec::new(),
     };
     // (in Seatbelt's words too where the plain ones name no target: `opening apps` is a mach service; an asks
@@ -785,7 +786,7 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
     match &entry.expect {
         Expect::Pass => {
             if !passed {
-                v.fail(Check::Exit, format!("{:?}: {}", r.state, tail(&r.output)));
+                v.fail(Check::Exit, format!("{:?}: {}", r.state, tail(&output)));
             }
             if report.blocked {
                 // (a line each: one line of them all is cut where it's shown)

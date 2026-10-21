@@ -361,8 +361,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             if !rest.is_empty()
                 && let Some(c) = &mut editor.session.chat
             {
-                c.input = rest.to_string();
-                c.cursor = rest.len();
+                c.input.set(rest);
                 crate::chat::send(editor);
             }
             Ok(())

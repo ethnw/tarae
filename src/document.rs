@@ -228,6 +228,9 @@ pub type DocId = u64;
 /// The id of every `Document::previewed` — no buffer's.
 pub const PREVIEWED: DocId = DocId::MAX;
 
+/// The id of the chat's input (`chatinput.rs`) — no buffer's; swapped in for its keys one at a time.
+pub const CHAT_INPUT: DocId = DocId::MAX - 1;
+
 /// File → rope. A missing file gives an empty rope (created on save).
 pub fn read_file(path: &Path) -> Result<Rope> {
     match File::open(path) {
@@ -316,6 +319,9 @@ pub struct Document {
     pub paint: Vec<(usize, usize, u32)>,
     /// Soft wrap for this buffer alone (`z w`, `:soft-wrap`) — None: `editor.soft-wrap` decides (#156).
     pub wrap: Option<bool>,
+    /// Its rows as the surface showing it laid them out (the chat's transcript, `chatdoc.rs`) — the moves count
+    /// these, not soft wrap's own (`wrap::Given`). None: a buffer's own wrapping.
+    pub rows: Option<std::sync::Arc<crate::wrap::Given>>,
     /// Address of non-file content (jdtls jdt:// class source) — reopening uses this buffer. Read-only.
     pub virtual_uri: Option<String>,
     /// Spots the jump lists point at (id → selection) — they follow edits like diagnostics do.
@@ -417,6 +423,7 @@ impl Document {
             base_seq: 0,
             base_parsing: false,
             fold_counts: Default::default(),
+            rows: None,
             indent_unit: std::cell::Cell::new(None),
             diff_of: None,
             conflicts: Vec::new(),
@@ -627,6 +634,11 @@ impl Document {
     /// pushed with it — it has no history to undo.
     pub fn put_back(&mut self, before: Snapshot) {
         self.restore(before);
+        (self.undo, self.redo) = (Vec::new(), Vec::new());
+    }
+
+    /// Its undo and redo steps let go — a document no key undoes (the chat's input, after each key).
+    pub fn drop_history(&mut self) {
         (self.undo, self.redo) = (Vec::new(), Vec::new());
     }
 

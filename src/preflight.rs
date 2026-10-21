@@ -216,8 +216,8 @@ pub struct Preflight {
     /// The run's key (`key`): a marker without it is a step's own output.
     key: String,
     /// Its run's output, kept once it failed — `:preflight-output` reads it after another run took the task
-    /// panel (frictions34 42).
-    pub kept: Vec<(bool, String)>,
+    /// panel (frictions34 42). (A clone of the run's: its text shared until the run's goes.)
+    pub kept: crate::runout::Output,
 }
 
 impl Preflight {
@@ -244,7 +244,7 @@ impl Preflight {
             title,
             left_out,
             key,
-            kept: Vec::new(),
+            kept: Default::default(),
         }
     }
 
@@ -353,20 +353,19 @@ impl Preflight {
 
     /// Step `k`'s output in `output` (the run's, as kept): the lines under its heading, up to the next
     /// step's. None: it hasn't printed its heading (or it's gone from what's kept).
-    pub fn output_of(&self, k: usize, output: &[(bool, String)]) -> Option<Vec<String>> {
+    pub fn output_of(&self, k: usize, output: &crate::runout::Output) -> Option<Vec<String>> {
         let heading = |s: &StepRun| format!("── {} ──", s.name);
         let head = heading(self.steps.get(k)?);
-        let start = output.iter().position(|l| l.1 == head)? + 1;
+        let start = output.position(|l| l == head)? + 1;
         let others: Vec<String> =
             self.steps.iter().enumerate().filter(|(i, _)| *i != k).map(|(_, s)| heading(s)).collect();
-        let end =
-            output[start..].iter().position(|l| others.contains(&l.1)).map_or(output.len(), |e| start + e);
-        Some(output[start..end].iter().map(|l| l.1.clone()).collect())
+        let lines = output.iter_from(start).map(|(_, l)| l).take_while(|l| !others.iter().any(|o| o == l));
+        Some(lines.map(|l| l.into_owned()).collect())
     }
 
     /// The step whose output a key asks for: one named (`which`), else the first that failed, else the one
     /// whose output is at line `top` of the panel (None: its end — the last that started).
-    pub fn step_for(&self, which: &str, top: Option<usize>, output: &[(bool, String)]) -> Option<usize> {
+    pub fn step_for(&self, which: &str, top: Option<usize>, output: &crate::runout::Output) -> Option<usize> {
         let which = which.trim();
         if !which.is_empty() {
             return self.steps.iter().position(|s| s.name == which);
@@ -378,7 +377,7 @@ impl Preflight {
         match top {
             Some(top) => (0..self.steps.len()).filter(started).rfind(|&k| {
                 let head = format!("── {} ──", self.steps[k].name);
-                output.iter().position(|l| l.1 == head).is_some_and(|at| at <= top)
+                output.position(|l| l == head).is_some_and(|at| at <= top)
             }),
             None => (0..self.steps.len()).rfind(started),
         }
@@ -390,7 +389,7 @@ impl Preflight {
         &self,
         which: &str,
         top: Option<usize>,
-        output: &[(bool, String)],
+        output: &crate::runout::Output,
     ) -> Result<(String, Vec<String>), String> {
         let k = self.step_for(which, top, output).ok_or_else(|| match which.trim() {
             "" => "no step has printed anything yet".to_string(),
@@ -406,7 +405,7 @@ impl Preflight {
 
     /// What its end says, the set named: a quick one passed points at the full one; a failure, at `]q` when
     /// the run put `places` in the list, and the first test that failed (`failure`, in `output`).
-    pub fn said(&self, places: usize, output: &[(bool, String)]) -> String {
+    pub fn said(&self, places: usize, output: &crate::runout::Output) -> String {
         let mut out = format!("{}: {}", self.title, self.summary());
         if !self.passed() {
             if let Some(f) = self.step_text("", None, output).ok().and_then(|(_, l)| failure(&l)) {
@@ -892,11 +891,11 @@ impl Editor {
         p.finish();
         let run = self.session.task_run.as_ref().filter(|r| r.generation() == generation);
         let places = run.map_or(0, |r| r.found.0 + r.found.1);
-        let output = run.map_or(&[][..], |r| r.output.as_slice());
-        let (said, passed, title) = (p.said(places, output), p.passed(), p.title);
+        let output = run.map(|r| r.output.clone()).unwrap_or_default();
+        let (said, passed, title) = (p.said(places, &output), p.passed(), p.title);
         // (a failed one's output outlives the panel's next run — frictions34 42)
         if !passed {
-            p.kept = output.to_vec();
+            p.kept = output;
         }
         if passed {
             self.set_success(said);
@@ -1092,21 +1091,27 @@ mod tests {
             p
         };
         assert_eq!(
-            ran(Set::Quick, &all, &[0, 0]).said(0, &[]),
+            ran(Set::Quick, &all, &[0, 0]).said(0, &Default::default()),
             "quick preflight: all 2 passed · 1m 02s — the full set (2 more steps) runs before publish: \
              :preflight-full"
         );
         assert_eq!(
-            ran(Set::Quick, &all, &[0, 1]).said(3, &[]),
+            ran(Set::Quick, &all, &[0, 1]).said(3, &Default::default()),
             "quick preflight: 1 of 2 passed — test failed · 1m 02s — ]q goes to the first"
         );
-        assert_eq!(ran(Set::Full, &all, &[0, 0, 0, 0]).said(0, &[]), "full preflight: all 4 passed · 1m 02s");
+        assert_eq!(
+            ran(Set::Full, &all, &[0, 0, 0, 0]).said(0, &Default::default()),
+            "full preflight: all 4 passed · 1m 02s"
+        );
         let one = [step("fmt", "")];
-        assert_eq!(ran(Set::Quick, &one, &[0]).said(0, &[]), "preflight: all 1 passed · 1m 02s");
+        assert_eq!(
+            ran(Set::Quick, &one, &[0]).said(0, &Default::default()),
+            "preflight: all 1 passed · 1m 02s"
+        );
         let p = Preflight::new(1, &all[..3], Set::Quick, KEY.into());
         assert_eq!((p.steps.len(), p.left_out), (2, 1));
         // (frictions34 42: the first test that failed, from the failed step's output)
-        let output: Vec<(bool, String)> = [
+        let output: crate::runout::Output = [
             "── fmt ──",
             "── test ──",
             "test a ... FAILED",
@@ -1114,8 +1119,9 @@ mod tests {
             "thread 'a' panicked at x.rs:1:2:",
             "no",
         ]
-        .map(|l| (false, l.to_string()))
-        .into();
+        .map(|l| (false, l))
+        .into_iter()
+        .collect();
         assert_eq!(
             ran(Set::Quick, &all, &[0, 1]).said(0, &output),
             "quick preflight: 1 of 2 passed — test failed · 1m 02s — a: panicked at x.rs:1:2: no"

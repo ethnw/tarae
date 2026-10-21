@@ -294,9 +294,9 @@ pub struct Screen {
     pub writing_head: Option<usize>,
     /// Column where the chat pane starts.
     pub chat_x: Option<usize>,
-    /// The chat's rows as this frame laid them out (`view::Laid`) — its view mode is made of them — and where
-    /// its conversation was drawn: (first screen row, width, rows, the document line on its first row).
-    pub chat_laid: std::cell::RefCell<crate::view::Laid>,
+    /// The chat's rows as this frame laid them out (`chatdoc::Laid` — its transcript follows them) and where its
+    /// conversation was drawn (`chat_view`: first screen row, width, rows, which of its rows is on the first).
+    pub chat_laid: std::cell::RefCell<crate::chatdoc::Laid>,
     /// The cells a cursor was painted in this frame (x, y) — the code's block and others, a view's: with the
     /// terminal's own cursor, one place on screen (`Editor::cursor_in`; the test that counts them).
     pub cursors: std::cell::RefCell<Vec<(usize, usize)>>,
@@ -1890,13 +1890,20 @@ impl Editor {
     /// For the status line — pending count and keys.
     pub fn pending_display(&self) -> String {
         // (a view mode's own, while it has the keys)
-        if let Some(v) =
-            crate::view::has_keys(self).and(self.session.view.as_ref()).filter(|_| self.pending.is_empty())
-        {
-            return v.pending_display();
+        if let Some((_, k)) = crate::view::viewing(self).filter(|_| self.pending.is_empty()) {
+            return k.pending_display();
         }
         if let Some((_, o)) = crate::rundoc::keyed(self).filter(|_| self.pending.is_empty()) {
             return o.keys.pending_display();
+        }
+        // (the chat's input's — the `j` of an `[insert]` sequence, held until the next key)
+        if let Some(c) = self.session.chat.as_ref().filter(|c| {
+            self.pending.is_empty()
+                && self.session.is_at(crate::session::At::Chat)
+                && !crate::chatdoc::keyed(self)
+                && !c.input.pane.keys.pending.is_empty()
+        }) {
+            return c.input.pane.keys.pending_display();
         }
         let mut s = self.count.map(|c| c.to_string()).unwrap_or_default();
         for k in &self.pending {
@@ -1967,7 +1974,8 @@ impl Editor {
 
     /// Insert-mode auto-pairs for this document — empty when turned off.
     pub fn pairs(&self) -> &'static [(char, char)] {
-        if !self.config.auto_pairs {
+        // (the chat's input is prose: what's typed is what's there)
+        if !self.config.auto_pairs || self.session.swapped == Some(crate::docpane::Which::Input) {
             return &[];
         }
         self.lang_spec().and_then(|s| s.auto_pairs.as_deref()).unwrap_or(syntax::DEFAULT_PAIRS)
@@ -2118,8 +2126,7 @@ impl Editor {
             && let Some(c) = self.session.chat.as_mut()
         {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
-            c.input.insert_str(c.cursor, &text);
-            c.cursor += text.len();
+            c.input.insert_str(&text);
             // (minimized, its input isn't on screen: it comes back with what was pasted — never text unseen)
             if c.compact() {
                 c.unfolded = true;
@@ -2150,8 +2157,7 @@ impl Editor {
             && self.mode != Mode::Insert;
         if reviewing && let Some(c) = self.session.chat.as_mut() {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
-            c.input.insert_str(c.cursor, &text);
-            c.cursor += text.len();
+            c.input.insert_str(&text);
             self.session.at = At::Chat;
             return self.set_status("pasted into the chat — the file is under review (i pastes there)");
         }
@@ -2560,6 +2566,16 @@ impl Editor {
                         if !call.is_some_and(|call| crate::follow::replay_call(self, &call)) {
                             crate::chat::jump(self, link.clone());
                         }
+                        return;
+                    }
+                    // The conversation's text: its view mode, the cursor on the character pressed (as the code's)
+                    let text_x = cx + crate::chrome::GAP + crate::chrome::PAD;
+                    if let Some(row) = s
+                        .chat_view
+                        .get()
+                        .and_then(|(y0, _, rows, first)| (y >= y0 && y < y0 + rows).then(|| first + (y - y0)))
+                    {
+                        crate::chatdoc::click(self, row, x.saturating_sub(text_x));
                     }
                 }
                 // The wheel over the conversation: its view mode at that point (tmux's copy mode by the wheel —
@@ -2568,7 +2584,7 @@ impl Editor {
                     let line = s.chat_view.get().and_then(|(y0, _, rows, first)| {
                         (y >= y0 && y < y0 + rows).then(|| first + (y - y0))
                     });
-                    return crate::view::chat_wheel(self, line, m.kind == K::ScrollUp);
+                    return crate::chatdoc::wheel(self, line, m.kind == K::ScrollUp);
                 }
                 _ => {}
             }
@@ -3894,7 +3910,9 @@ impl Editor {
         self.status = None;
         // Esc in normal mode = clear search highlight (and still does its other work) — the pane's own: a view
         // mode's esc clears its matches, the code's only the code's esc (not the chat's, a panel's)
-        if key.code == Code::Esc && self.prompt.is_none() && crate::view::has_keys(self).is_some() {
+        if key.code == Code::Esc && self.prompt.is_none() && crate::chatdoc::has_keys(self) {
+            crate::chatdoc::search_unshown(self);
+        } else if key.code == Code::Esc && self.prompt.is_none() && crate::view::has_keys(self).is_some() {
             crate::view::search_unshown(self);
         } else if key.code == Code::Esc && self.prompt.is_none() && crate::rundoc::has_keys(self).is_some() {
             crate::rundoc::search_unshown(self);
@@ -3946,7 +3964,11 @@ impl Editor {
             self.picker_key(key);
             return;
         }
-        // A surface's view mode (the chat's conversation): its moves and selections on its document
+        // The chat's view mode: normal mode on its transcript, the chat's table over it
+        if let Some(h) = crate::chatdoc::key(self, key) {
+            return took(h);
+        }
+        // The terminal's view mode: its moves and selections on its rows
         if let Some(h) = crate::view::key(self, key) {
             return took(h);
         }
@@ -4915,8 +4937,8 @@ mod tests {
         let listed: Vec<(PathBuf, usize)> =
             ed.session.qlist.as_ref().unwrap().items.iter().map(|i| (i.path.clone(), i.line)).collect();
         assert_eq!(listed, [(dir.join("a.rs"), 1)], "the failure's place");
-        let out: Vec<&str> =
-            ed.session.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        let out: Vec<String> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.into_owned()).collect();
         assert_eq!(out[..3], ["── fmt ──", "formatted", "── clippy ──"], "{out:?}");
         assert!(!out.iter().any(|l| l.contains("tarae-preflight")), "{out:?}");
         let mut bytes = Vec::new();
@@ -5035,8 +5057,8 @@ mod tests {
         assert_eq!(tab.label, "quick preflight");
         settle_for(&mut ed, done);
         assert_eq!(ran(&ed), ["fmt", "test"]);
-        let out: Vec<&str> =
-            ed.session.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        let out: Vec<String> =
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.into_owned()).collect();
         assert!(!out.iter().any(|l| l.contains("ran perf") || l.contains("ran linux")), "{out:?}");
         assert!(said(&ed).starts_with("quick preflight: all 2 passed · "), "{}", said(&ed));
         assert!(
@@ -7611,7 +7633,7 @@ mod tests {
         assert!(ed.session.chat.as_ref().unwrap().compact());
         feed(&mut ed, "m");
         feed(&mut ed, "y draft y");
-        let input = |ed: &Editor| ed.session.chat.as_ref().unwrap().input.clone();
+        let input = |ed: &Editor| ed.session.chat.as_ref().unwrap().input.text();
         assert_eq!(input(&ed), "my draft y");
         assert!(!made.exists() && ed.offers.len() == 1);
         assert!(draw(&mut ed).contains("C-q to answer it"));
@@ -7702,13 +7724,13 @@ mod tests {
         ed.session.chat.as_mut().unwrap().unfolded = true;
         feed(&mut ed, "second<ret>");
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.queued.as_deref(), c.input.as_str()), (Some("second"), ""));
+        assert_eq!((c.queued.as_deref(), c.input.text().as_str()), (Some("second"), ""));
         let s = draw(&mut ed);
         assert!(s.contains("queued second") && s.contains("↑ edit queued"), "{s}");
         // ↑: back to edit — out of the queue; Enter queues it again
         feed(&mut ed, "<up>");
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.queued.as_deref(), c.input.as_str()), (None, "second"));
+        assert_eq!((c.queued.as_deref(), c.input.text().as_str()), (None, "second"));
         feed(&mut ed, " too<ret>");
         assert_eq!(ed.session.chat.as_ref().unwrap().queued.as_deref(), Some("second too"));
         assert_eq!(sent(&log), 1, "nothing goes while Claude works");
@@ -8153,7 +8175,7 @@ mod tests {
             ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
         });
         let out: Vec<String> =
-            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.clone()).collect();
+            ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.into_owned()).collect();
         assert_eq!(out, ["none"]);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -12724,7 +12746,7 @@ mod tests {
             cmd: "true".into(),
             cwd: dir.clone(),
         });
-        run.output = vec![(false, "one".into())];
+        run.output = [(false, "one")].into_iter().collect();
         ed.session.task_run = Some(run);
         ed.session.leave(crate::session::At::Side);
         draw(&mut ed, 140);
@@ -12802,7 +12824,7 @@ mod tests {
             cmd: "true".into(),
             cwd: dir.clone(),
         });
-        run.output = vec![(false, "one".into())];
+        run.output = [(false, "one")].into_iter().collect();
         ed.session.task_run = Some(run);
         draw(&mut ed);
         let (h, top) = (ed.screen.bottom_h, ed.screen.text_top + ed.screen.body_h - ed.screen.bottom_h);
@@ -15019,16 +15041,18 @@ mod tests {
         feed(&mut ed, "n");
         assert_eq!(ed.session.chat.as_ref().unwrap().input, "guard_and_go non");
         // Nothing being typed: a card that comes leaves the chat the keys — `C-q` hands them over
-        let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.cursor) = (String::new(), 0);
+        ed.session.chat.as_mut().unwrap().input.clear();
         ed.offers.clear();
         ed.push_offer(card("Claude wants to run"));
         assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         settle(&mut ed);
         feed(&mut ed, "a");
-        assert_eq!((ed.offers.len(), ed.session.chat.as_ref().unwrap().input.as_str()), (1, "a"), "typed");
-        let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.cursor) = (String::new(), 0);
+        assert_eq!(
+            (ed.offers.len(), ed.session.chat.as_ref().unwrap().input.text().as_str()),
+            (1, "a"),
+            "typed"
+        );
+        ed.session.chat.as_mut().unwrap().input.clear();
         feed(&mut ed, "<C-q>y");
         assert!(ed.offers.is_empty(), "y answered it");
         // (in the code from here)

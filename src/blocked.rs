@@ -246,7 +246,7 @@ impl Editor {
         // (a run on a commit's tree: not offered — its tree is gone, so neither a grant nor a run outside could
         // run it again where it ran — review of #212)
         let task = self.session.task_run.as_ref().filter(|r| r.base.is_none()).and_then(|r| {
-            let (denials, env) = denials(r.guard.as_ref(), &r.output)?;
+            let (denials, env) = denials(r.guard.as_ref(), &r.output.to_vec())?;
             Some((
                 r.started,
                 BlockedRun {
@@ -262,7 +262,7 @@ impl Editor {
         let test = self.session.test_run.as_ref().and_then(|r| {
             let job = Job::Tests(Box::new(r.target.clone()));
             let from = from(r.guard.as_ref());
-            let (denials, env) = denials(r.guard.as_ref(), &r.output)?;
+            let (denials, env) = denials(r.guard.as_ref(), &r.output.to_vec())?;
             let key = Some(RunKey { tests: true, generation: r.generation() });
             let keys = keys(r.guard.as_ref());
             Some((r.started, BlockedRun { denials, from, env, key, keys, ..BlockedRun::of(job) }))

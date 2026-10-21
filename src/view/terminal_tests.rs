@@ -288,7 +288,7 @@ fn a_flood_while_searching_leaves_the_search_and_the_view_as_they_are() {
     assert_eq!(at(&ed).0, "line 2", "the search over the same rows");
     assert_eq!(ed.doc().text.to_string(), "fn main() {}\n", "the code untouched");
     feed(&mut ed, "G");
-    assert_eq!(view(&ed).mode(), Mode::Select, "its `v` came along as it caught up");
+    assert_eq!(view(&ed).keys.mode, Mode::Select, "its `v` came along as it caught up");
     assert!(!ed.session.terminal.as_ref().unwrap().came(), "caught up");
 }
 
@@ -345,7 +345,7 @@ fn another_conversation_leaves_the_terminals_view_alone() {
     let (mut ed, _sent) = term(Config::default(), 3);
     feed(&mut ed, "<C-\\>");
     print(&mut ed, "\r\nlater-output\r\n$ ");
-    forget(&mut ed);
+    crate::chatdoc::forget(&mut ed);
     assert!(terminal_viewed(&ed), "still viewed");
     assert!(ed.session.terminal.as_ref().unwrap().came(), "its output still held");
     feed(&mut ed, "<C-\\>");
@@ -387,26 +387,20 @@ fn tab_steps_to_the_slots_other_tab_and_back() {
     assert_eq!(ed.slot(), Some(tabs[(at + 2) % 3]), "the one before: {tabs:?}");
 }
 
-/// `space` in its view mode does what it does in the chat's — one code path (`view::key` → `key_in`): view mode's
-/// own menu (`[view.space]`, its which-key), never the code's — a key the code's menu has and it doesn't (`space T`)
-/// said, with the way to type and the way out, nothing hidden (friction 87).
+/// `space` in its view mode: its own menu (`[view.terminal.space]`, its which-key), never the code's — a key the
+/// code's menu has and it doesn't (`space T`) said, with the way to type and the way out, nothing hidden (friction
+/// 87). (The chat's `space` is the editor's menu: its view mode is normal mode on its transcript.)
 #[test]
-fn space_in_view_mode_is_said_as_in_the_chats() {
+fn space_in_view_mode_is_said() {
     let (mut ed, _sent) = term(Config::default(), 3);
     feed(&mut ed, "<C-\\><space>");
-    assert_eq!(ed.session.view.as_ref().unwrap().pending().len(), 1, "a prefix under way");
+    assert_eq!(ed.session.view.as_ref().unwrap().keys.pending.len(), 1, "a prefix under way");
     assert!(frame(&mut ed).contains("Quote or view chat"), "its which-key: view mode's rows");
     feed(&mut ed, "T");
     let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
     assert_eq!(said, "space T isn't in view mode — i types in the program, esc to the code");
     assert_eq!(region(&ed), "view:terminal");
     assert!(ed.session.terminal.as_ref().unwrap().visible, "nothing hidden");
-    let chat = crate::view::tests::viewing("<esc><space>T");
-    let said = chat.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-    assert_eq!(
-        said, "space T isn't in view mode — i types, esc to the code",
-        "the chat's, the same sentence"
-    );
 }
 
 /// A blank row at the screen's bottom is a line of its own: the view's last rows are the screen's, `G` shows it
@@ -785,7 +779,7 @@ fn a_new_size_reads_it_again_and_the_cursor_is_drawn_on_its_cell() {
     assert_ne!(view(&ed).rows(), before, "settled: read again at its new size");
     assert!(!terminal_settling(&ed) && ed.tick_wanted().is_none(), "nothing more wanted: idle stays idle");
     assert_eq!(at(&ed), ("가나 end".into(), "가나 e".into()), "the same line, the same selection");
-    assert_eq!(view(&ed).mode(), Mode::Select, "its `v` kept");
+    assert_eq!(view(&ed).keys.mode, Mode::Select, "its `v` kept");
     // (smaller, then back to the size it was read at: vt100 dropped the bottom rows and brought them back blank —
     // read again all the same, the view what the screen shows)
     crate::term::render(&mut ed, &mut bytes, W, H).unwrap();

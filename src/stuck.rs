@@ -380,7 +380,7 @@ fn ask(ed: &mut Editor, mut s: Stuck, lines: Vec<String>, peers: Vec<String>) {
                 return;
             };
             s.at = r.output.len();
-            r.output.extend(std::iter::once(head).chain(lines.iter().cloned()).map(|l| (false, l)));
+            r.output.extend(std::iter::once(&head).chain(lines.iter()).map(|l| (false, l)));
             format!("Claude's tests {} in the test pane", r.target.label)
         }
     };
@@ -485,7 +485,7 @@ pub fn stop(ed: &mut Editor, s: &Stuck) {
             (r.pid(), r.containers.take())
         }),
         _ => ed.session.test_run.as_mut().filter(|r| r.trace.id() == s.run).map(|r| {
-            r.output.push((false, line));
+            r.output.push(false, &line);
             (r.pid(), r.containers.take())
         }),
     }

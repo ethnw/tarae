@@ -719,7 +719,7 @@ mod tests {
         });
         let r = ed.session.task_run.as_ref().unwrap();
         assert_eq!(r.state, crate::task::State::Passed);
-        let out: Vec<&str> = r.output.iter().map(|(_, l)| l.as_str()).collect();
+        let out: Vec<String> = r.output.iter().map(|(_, l)| l.into_owned()).collect();
         assert_eq!(out, ["TWOne"], "it read the saved file");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -746,7 +746,8 @@ mod tests {
         assert_eq!(ed.session.id, second);
         assert!(ed.session.task_run.is_none(), "not the session in front's");
         let s = ed.sessions.iter().find(|s| s.id == first).unwrap();
-        let out: Vec<&str> = s.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.as_str()).collect();
+        let out: Vec<String> =
+            s.task_run.as_ref().unwrap().output.iter().map(|(_, l)| l.into_owned()).collect();
         assert_eq!(out, ["TWOne"]);
         std::fs::remove_dir_all(dir).ok();
     }

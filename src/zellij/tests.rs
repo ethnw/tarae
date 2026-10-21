@@ -307,7 +307,7 @@ fn from_the_chats_view_mode_the_twin_is_one_esc() {
     let mut ed = editor(true);
     chatting(&mut ed);
     keys(&mut ed, "esc");
-    assert!(crate::view::chat_view_of(&ed).is_some(), "in its view mode");
+    assert!(crate::chatdoc::has_keys(&ed), "in its view mode");
     card(&mut ed);
     assert!(!ed.card_has_keys());
     assert_eq!(ed.key_said("C-q"), "esc");
@@ -510,7 +510,6 @@ fn the_chats_message_waiting_on_its_card_says_the_way_to_it() {
         let mut ed = editor(zellij);
         let mut c = Chat::new();
         c.input = "look at this".into();
-        c.cursor = c.input.len();
         ed.session.chat = Some(c);
         ed.session.at = crate::session::At::Chat;
         let key_file = ed.session.root.join(".env");

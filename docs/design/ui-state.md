@@ -65,7 +65,7 @@ JSON for programs, and a short text form for people and Claude, from the same st
 
 ```json
 {
-  "v": 3,
+  "v": 11,
   "tarae": { "pid": 4182, "boot": "9f3ac1d0", "version": "0.9.0" },
   "frame": 4812,
   "input": 1033,
@@ -118,8 +118,8 @@ side git · 4 rows · in hand git:src/term.rs
 
 - **`keys`** — the field that would have stopped all four slips.
   - `to`: the element id that takes the next key.
-  - `region`: `code` · `prompt` · `picker` · `chat` · `view:chat` (the chat's view mode — `view.rs`, its
-    handler `chat-view`, V 8) · `view:terminal` (the terminal's — tarae's keys on its panel, its handler
+  - `region`: `code` · `prompt` · `picker` · `chat` · `view:chat` (the chat's view mode — normal mode on its
+    transcript, a read-only document, `chatdoc.rs`; its handler `chat-view`, V 8) · `view:terminal` (the terminal's — tarae's keys on its panel, its handler
     `terminal-view`; there's no `slot:terminal`) · `output:task` · `output:preflight` · `output:tests` (panes P2c,
     `rundoc.rs`: a run panel's output as a read-only document, normal mode on it with `[run]` over — their handler
     `output`; no `slot:task` or `slot:tests`) · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (`:procs`,
@@ -148,7 +148,8 @@ side git · 4 rows · in hand git:src/term.rs
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
 - **`sessions[].view`** (V 8, the front session's only) — a surface's view mode (`chat` · `terminal`), or a run's
   output with the keys (`task` · `preflight` · `tests` — `rundoc::state`, the same shape): `surface`,
-  the cursor's `line` of `lines`, `selections`, `selects` (wider than a character), `mode` (`normal` · `select`),
+  the cursor's `line` of `lines` (V 11: the chat's count its transcript's lines, a paragraph each — a drawn row
+  before), `selections`, `selects` (wider than a character), `mode` (`normal` · `select`),
   `held` (something came since it was made — the terminal's: its program's output waiting). Shapes, never text; Claude's level never has it.
 - **`sessions[].with`** (the front session's only; absent when empty) — what goes with the chat input's next
   message, in the order added: `{kind: "pointed", id}` · `{kind: "screen", cols, rows}` · `{kind: "quote", from,
@@ -310,7 +311,8 @@ Short, so they can be read in prose and typed. Unique within one tarae process.
 
 - `v` is the schema version.
 - Adding a field doesn't change it. Readers ignore fields they don't know.
-- Removing or renaming a field, or changing what one means, bumps `v`.
+- Removing or renaming a field, or changing what one means, bumps `v`. Each bump and its reason is on `uistate::V`
+  — now 11: the chat's `view` `line` / `lines` count its transcript's lines, a paragraph each (panes P2c).
 - The text form isn't a contract (people and Claude read it). The JSON is.
 - A golden test pins the JSON of one fixed scene (two sessions, a card, a review, a run), the way the
   `term_snapshots` pin frames. A change to the shape shows up as a diff in review.

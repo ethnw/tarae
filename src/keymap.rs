@@ -235,10 +235,11 @@ pub struct Keymaps {
     /// modes look keys up in is built from these and `normal`/`select` (`views`).
     view: Node,
     view_on: Vec<(&'static str, Node)>,
-    /// Per surface: normal mode kept to `view::COMMANDS`, then `[view]`, then the surface's — and the same
-    /// over `select` (view mode's `v`).
+    /// Per surface: normal mode (the chat's whole, the terminal's kept to `view::COMMANDS`), then `[view]`, then
+    /// the surface's — and the same over `select` (view mode's `v`).
     views: Vec<(&'static str, Node, Node)>,
-    /// The chat's input (`[chat]`): what its keys run before it types them — `esc` → its view mode.
+    /// The chat's input (`[chat]`), over `insert` on its document (`chatinput.rs`) — `esc` → its view mode, `C-a`/`C-e`
+    /// a line's ends, `A-ret` a new line.
     pub chat: Node,
     /// The keys taken from the terminal's program (`[terminal]`) — `C-\` → its view mode; every other key is the
     /// program's. A user's `[keys.terminal]` merges over it as every table does; `to_program` gives one back.
@@ -335,14 +336,33 @@ impl Keymaps {
                 if let Some((_, n)) = self.view_on.iter().find(|(name, _)| *name == table) {
                     on.merge(n.clone());
                 }
-                // (the space menu is the editor's — in view mode `space` is view mode's own, `[view.space]`: what
-                // it has of the editor's there)
-                let space = Key::plain(crate::key::Code::Char(' '));
-                let mut normal = self.normal.filtered(&keep);
-                normal.map.remove(&space);
+                let (mut normal, mut select) = match table {
+                    // (the chat's conversation is normal mode on a read-only document: the whole of it, `space` the
+                    // editor's menu — but the chat's chords stay the chat's where normal mode binds them to more
+                    // than a move: `C-s` the screen, `C-o` pointing, `C-c`)
+                    "chat" => {
+                        let chords = |n: &Node| -> Node {
+                            let mut n = n.clone();
+                            n.map.retain(|k, t| {
+                                !crate::chatdoc::chord(*k)
+                                    || matches!(t, KeyTrie::Leaf(c) if c.iter().all(|c| matches!(c, MappableCommand::Static(s) if keep(s.name))))
+                            });
+                            n
+                        };
+                        (chords(&self.normal), chords(&self.select))
+                    }
+                    // (the terminal's: the space menu is the editor's — there `space` is view mode's own,
+                    // `[view.terminal.space]`: what it has of the editor's)
+                    _ => {
+                        let space = Key::plain(crate::key::Code::Char(' '));
+                        let mut normal = self.normal.filtered(&keep);
+                        normal.map.remove(&space);
+                        let mut select = self.select.filtered(&keep);
+                        select.map.remove(&space);
+                        (normal, select)
+                    }
+                };
                 normal.merge(on.clone());
-                let mut select = self.select.filtered(&keep);
-                select.map.remove(&space);
                 select.merge(on);
                 (table, normal, select)
             })
@@ -355,7 +375,7 @@ impl Keymaps {
     }
 
     /// Merges the user's `[keys]` table. As in helix, `keys.normal` does not spill into select. View mode is
-    /// normal mode on another document: `keys.normal` spills into it (kept to `view::COMMANDS`), `keys.view`
+    /// normal mode on another document: `keys.normal` spills into it (the terminal's kept to `view::COMMANDS`), `keys.view`
     /// and `keys.view.<surface>` over it (decided 2026-10-20). `keys.terminal` merges over the keys taken from the
     /// program like the rest; a key bound to `to_program` there goes back to it.
     pub fn merge_user(&mut self, keys: &toml::Table, warnings: &mut Vec<String>) {
@@ -837,11 +857,12 @@ mod tests {
         node_tables(&mut out, &km.run, &mut Vec::new(), "### On the output (`[keys.run]`)");
 
         out.push_str(
-            "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input), the \
-             terminal's scrollback and screen (`C-\\` from its program, `C-w j` to its panel). Normal mode's moves, \
-             selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not \
-             done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the \
-             editor's. Its own keys go over them, and each surface's over those.\n",
+            "\n## View mode\n\nA cursor on what a surface shows. The chat's conversation (`esc` from its input) is \
+             normal mode on a read-only document — all of it, yours too (`[keys.normal]` spills in), `space` the \
+             editor's menu; an edit is put back and said. The terminal's scrollback and screen (`C-\\` from its \
+             program, `C-w j` to its panel): normal mode's moves, selections, search and counts (yours too), the \
+             rest said, not done; `space` its own menu, what it has of the editor's. `enter` quotes what's selected \
+             to the chat. Its own keys go over them, and each surface's over those.\n",
         );
         node_tables(&mut out, &km.view, &mut Vec::new(), "### Its own keys (`[keys.view]`)");
         for (name, node) in &km.view_on {

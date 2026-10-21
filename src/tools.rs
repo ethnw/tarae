@@ -626,7 +626,7 @@ pub fn tests_done(ed: &mut Editor) {
     let failed = ed.session.test_run.as_ref().is_some_and(|r| matches!(r.state, RunState::Failed(_)));
     let known = rules_known(ed, failed);
     let Some(r) = ed.session.test_run.as_mut() else { return };
-    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output.to_vec(), known, !failed));
     let guard = said.as_ref().map(|s| format!("\n{}\n", s.text)).unwrap_or_default();
     let loopback = said.as_ref().filter(|_| failed).and_then(|s| loopback_of(&s.open));
     if let Some(head) = r.tell.take() {
@@ -651,7 +651,7 @@ pub fn tests_done(ed: &mut Editor) {
     let job = Job::Tests(Box::new(r.target.clone()));
     let key = crate::blocked::RunKey { tests: true, generation: r.generation() };
     let ended_failed = matches!(r.state, RunState::Failed(_));
-    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
+    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.to_vec()));
     rules_told(ed, said.as_ref());
     crate::reads::run_ended(ed);
     let text = format!("{text}{}", env_left_out(ed, env));
@@ -4174,7 +4174,7 @@ pub fn run_done(ed: &mut Editor) {
         ed.session.task_run.as_ref().is_some_and(|r| matches!(r.state, State::Failed(_) | State::Stopped(_)));
     let known = rules_known(ed, failed);
     let Some(r) = ed.session.task_run.as_mut() else { return };
-    let said = r.guard.as_ref().map(|g| g.report_with(&r.output, known, !failed));
+    let said = r.guard.as_ref().map(|g| g.report_with(&r.output.to_vec(), known, !failed));
     // (what a warning with `start` said as it started — a manifest tool's changes, piece F — Claude reads too)
     let started: Vec<String> = r
         .ran
@@ -4243,7 +4243,7 @@ pub fn run_done(ed: &mut Editor) {
     let (label, cmd) = (r.task.name.clone(), r.task.cmd.clone());
     let job = Job::Command(cmd.clone(), r.task.cwd.clone());
     let key = crate::blocked::RunKey { tests: false, generation: r.generation() };
-    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.clone()));
+    let env = r.guard.as_ref().and_then(|g| g.run_env()).cloned().map(|e| (e, r.output.to_vec()));
     // (its chat row says where it ran, and what it warned of — the run's own record, cardburden 4)
     if let Some(ran) = r.ran.clone() {
         crate::chat::mark_ran(ed, &cmd, ran);
@@ -4715,7 +4715,7 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         .unwrap_or_default();
     let mut out = format!("{verdict}{took}\n{waited}{silent}{filtered}$ {}\n", r.task.cmd);
     // (#219: a run that failed for space says so first — the rest of its errors follow from it)
-    if !matches!(r.state, State::Passed) && r.output.iter().any(|(_, l)| disk_full_said(l)) {
+    if !matches!(r.state, State::Passed) && r.output.iter().any(|(_, l)| disk_full_said(&l)) {
         out.push_str(
             "The disk is full (\"No space left on device\" in its output) — nothing builds until there's room. Tell \
              the user: space W shows each session's build folder; x there drops an idle one's.\n",
@@ -4752,8 +4752,10 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
     }
     // Tests that skipped themselves (`test_results::SELF_SKIP`) — libtest calls them ok. Its output's lines and
     // its own file's (`said_skip`), which a filter on the output can't drop (frictions29 #29)
-    let mut skipped: Vec<&str> =
-        r.output.iter().filter_map(|(_, l)| l.strip_prefix(crate::test_results::SELF_SKIP)).collect();
+    let said: Vec<String> = (r.output.iter())
+        .filter_map(|(_, l)| l.strip_prefix(crate::test_results::SELF_SKIP).map(str::to_string))
+        .collect();
+    let mut skipped: Vec<&str> = said.iter().map(String::as_str).collect();
     // (counted as added: a skip said twice — two binaries, two calls — is one)
     let mut unseen = 0;
     for s in &r.ended.skipped {
@@ -4803,18 +4805,18 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
     };
     out.push_str("\nOutput:\n");
     if lines.len() <= OUTPUT_WHOLE {
-        for (_, l) in lines {
-            out.push_str(&cut(l));
+        for (_, l) in lines.iter() {
+            out.push_str(&cut(&l));
             out.push('\n');
         }
     } else {
-        for (_, l) in &lines[..OUTPUT_HEAD] {
-            out.push_str(&cut(l));
+        for (_, l) in lines.iter().take(OUTPUT_HEAD) {
+            out.push_str(&cut(&l));
             out.push('\n');
         }
         out.push_str(&format!("… {} lines …\n", lines.len() - OUTPUT_HEAD - OUTPUT_TAIL));
-        for (_, l) in &lines[lines.len() - OUTPUT_TAIL..] {
-            out.push_str(&cut(l));
+        for (_, l) in lines.iter_from(lines.len() - OUTPUT_TAIL) {
+            out.push_str(&cut(&l));
             out.push('\n');
         }
     }
@@ -4906,8 +4908,8 @@ fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
     if r.state != RunState::Passed && fails.is_empty() {
         let from = r.output.len().saturating_sub(TAIL);
         out.push_str(&format!("\nOutput (last {} lines):\n", r.output.len() - from));
-        for (_, line) in &r.output[from..] {
-            out.push_str(line);
+        for (_, line) in r.output.iter_from(from) {
+            out.push_str(&line);
             out.push('\n');
         }
     }
@@ -5357,6 +5359,15 @@ mod tests {
     }
 
     /// A run where no test ran is reported as that — not "passed" — with the output to see why.
+    #[test]
+    fn a_tab_reaches_the_report_as_printed() {
+        let output = vec!["assertion failed".to_string(), "\tleft: 3".into()];
+        let mut r = crate::testing::TestRun::finished("math::adds", Vec::new(), output);
+        r.state = crate::testing::RunState::Failed(Some(101));
+        let text = super::report(elsewhere(), &r, super::Waited::No);
+        assert!(text.contains("assertion failed\n\tleft: 3\n"), "{text}");
+    }
+
     #[test]
     fn a_run_where_no_test_ran_is_not_passed() {
         let output = vec![
@@ -8526,17 +8537,19 @@ mod tests {
     fn run_report_says_which_tests_skipped_themselves() {
         use crate::task::{Run, Task};
         let mut r = Run::for_test(Task { name: "t".into(), cmd: "cargo test".into(), cwd: "/p".into() });
-        r.output = vec![
-            (false, "test sandbox::tests::real ... ok".into()),
-            (true, "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox".into()),
-            (false, "test result: ok. 1 passed".into()),
-        ];
+        r.output = [
+            (false, "test sandbox::tests::real ... ok"),
+            (true, "tarae-test: skipped sandbox::tests::real — Seatbelt can't start inside a sandbox"),
+            (false, "test result: ok. 1 passed"),
+        ]
+        .into_iter()
+        .collect();
         let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(
             text.contains("1 test skipped itself — libtest says ok, but nothing was checked:\n  sandbox::tests::real — Seatbelt"),
             "{text}"
         );
-        r.output.retain(|(err, _)| !err);
+        r.output = r.output.to_vec().into_iter().filter(|(err, _)| !err).collect();
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("skipped"));
         // frictions29 #29: a filter on its output dropped the line — the run's own file has it (`said_skip`),
         // counted all the same and said as not in the output; one in both counted once
@@ -8549,7 +8562,7 @@ mod tests {
             text.contains("2 tests skipped themselves — libtest says ok, but nothing was checked (2 not in the output you kept):"),
             "{text}"
         );
-        r.output.push((true, "tarae-test: skipped term::tests::pty — no pty opens here".into()));
+        r.output.push(true, "tarae-test: skipped term::tests::pty — no pty opens here");
         let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(
             text.contains("2 tests skipped themselves — libtest says ok, but nothing was checked (1 not in"),
@@ -8614,15 +8627,16 @@ mod tests {
     fn a_run_that_failed_for_space_says_the_disk_is_full() {
         use crate::task::{Run, State, Task};
         let mut r = Run::for_test(Task { name: "b".into(), cmd: "cargo build".into(), cwd: "/p".into() });
-        r.output =
-            vec![(true, "error: failed to write `target/x`: No space left on device (os error 28)".into())];
+        r.output = [(true, "error: failed to write `target/x`: No space left on device (os error 28)")]
+            .into_iter()
+            .collect();
         r.state = State::Failed(Some(101));
         let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(text.contains("\nThe disk is full"), "{text}");
         r.state = State::Passed;
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("The disk is full"));
         r.state = State::Failed(Some(1));
-        r.output = vec![(true, "error: something else".into())];
+        r.output = [(true, "error: something else")].into_iter().collect();
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("The disk is full"));
     }
 
@@ -8664,7 +8678,7 @@ mod tests {
         let mut r = Run::for_test(Task { name: "b".into(), cmd: "cargo build".into(), cwd: "/p".into() });
         r.state = State::Failed(Some(101));
         r.output = (0..1000).map(|i| (false, format!("line {i}"))).collect();
-        r.output[0].1 = "x".repeat(2000);
+        r.output.set(0, &"x".repeat(2000));
         r.found = (1, 0);
         let place = crate::quickfix::Item {
             path: "/p/src/a.rs".into(),
@@ -8689,7 +8703,7 @@ mod tests {
         );
         assert!(!text.contains("line 100\n"));
         r.output.truncate(3);
-        r.output[0].1 = "line 0".into();
+        r.output.set(0, "line 0");
         r.state = State::Passed;
         let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
         assert!(text.contains("Output:\n") && text.ends_with("line 2\n") && !text.contains("…"), "{text}");

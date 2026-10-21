@@ -1,28 +1,27 @@
-//! View mode — a cursor on what a surface shows (`target/sb/quote-plan.md` §3): the surface's rows as a read-only
-//! document, Helix's moves, selections, search and counts on it (`COMMANDS`, the keymap's `[view]` tables), drawn
-//! by the surface's own drawer with the selections painted over its rows (`term::view_paint`). The chat's: `esc`
-//! from its input, `i` back; `esc` again to the code. The terminal's: `C-\` from its program, `i` back; `esc` or
-//! `C-\` to the code (tarae's keys on its panel are its view mode). It holds still while it lasts — the chat
-//! draws the rows it was made of, the terminal keeps its program's output back (`Terminal::hold`) — `G`
-//! catches up.
+//! View mode — a cursor on what a surface shows (`target/sb/quote-plan.md` §3). The chat's is normal mode on its
+//! transcript, a document of its own (`chatdoc.rs`, panes P2c); here the words they share (`Surface`, `Was`,
+//! `has_keys`, `bound`) and the terminal's: its rows as a read-only document, Helix's moves, selections, search and
+//! counts on it (`COMMANDS`, the keymap's `[view]` tables), drawn by its own drawer with the selections painted
+//! over its cells (`term::view_marks`). `C-\` from its program, `i` back; `esc` or `C-\` to the code (tarae's keys
+//! on its panel are its view mode). It holds still while it lasts — its program's output kept back
+//! (`Terminal::hold`) — `G` catches up. (The terminal becomes a terminal buffer after the engine, §2.1e: this
+//! module folds away then.)
 //!
 //! The document is in no pane and never the front buffer: each key's command runs with it swapped in as
 //! `current` (`swap`) and put back before the key's handler returns — frames, jobs, servers and `context()` see
 //! the pane's document only.
 
-use std::sync::Arc;
-
-use crate::chat::ChatRow;
+use crate::docpane::Keys;
 use crate::document::Document;
-use crate::editor::{CharFn, Editor, Mode};
+use crate::editor::{Editor, Mode};
 use crate::key::{Code, Key};
 use crate::keymap::Lookup;
 use crate::movement as mv;
 use crate::selection::{Range, Selection};
 use crate::session::At;
 
-/// What has a view mode: the chat's conversation, the terminal's scrollback and screen. (The run panels' output is
-/// a document of its own with normal mode's keys — `rundoc.rs`.)
+/// What has a view mode: the chat's conversation (normal mode on its transcript — `chatdoc.rs`), the terminal's
+/// scrollback and screen. (The run panels' output is a document of its own with normal mode's keys — `rundoc.rs`.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Surface {
     Chat,
@@ -33,7 +32,7 @@ pub enum Surface {
 pub const TABLES: &[&str] = &["chat", "terminal"];
 
 impl Surface {
-    /// Its name in the state (`view:chat`) and the status line (`● view · chat`).
+    /// Its name in the state (`view:chat`) and the status line (`● normal · chat`, `● view · terminal`).
     pub fn name(self) -> &'static str {
         match self {
             Surface::Chat => "chat",
@@ -47,8 +46,9 @@ impl Surface {
     }
 }
 
-/// Commands of the editor's that view mode's `space` has (`[view.space]`): run once the key's command is done and
-/// the view's document put back — they open a picker or go to the chat, never on the view's buffer.
+/// Commands of the editor's that view mode's `space` has (`[view.terminal.space]`; the chat's `space` is the
+/// editor's menu): run once the key's command is done and the view's document put back — they open a picker or go
+/// to the chat, never on the view's buffer.
 pub const EDITORS: &[&str] = &["chat_open", "inbox", "command_palette"];
 
 /// Where the keys were when the wheel brought a view mode — back there when the wheel takes it back down,
@@ -160,63 +160,46 @@ pub const COMMANDS: &[&str] = &[
     "view_take",
 ];
 
-/// The chat's rows as a frame laid them out, in order: each message's kept rows (with its index), and the
-/// frame's own between them (air, a wait, the empty chat's words) — `term::draw_chat` records them
-/// (`Screen.chat_laid`), a view's snapshot keeps them.
-pub type Laid = Vec<(Option<usize>, Arc<[ChatRow]>)>;
-
-/// What a command in view mode asks for once its key is done (it runs with the document swapped in — the view
-/// can't end under it).
+/// What a command in the terminal's view mode asks for once its key is done (it runs with the document swapped in
+/// — the view can't end under it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum After {
     /// `esc` with nothing selected: to the code.
     Leave,
-    /// `i`, `a`, `enter`: the surface's input.
+    /// `i`, `a`, `enter`: its program.
     Input,
     /// `G`: caught up, on the latest line.
     Latest,
     /// `enter` on a selection: quoted to the chat (`quote.rs`).
     Take,
-    /// `enter` with nothing selected: the surface's own — the chat's input, the terminal's program.
+    /// `enter` with nothing selected: its program.
     Enter,
-    /// `space >` with nothing selected, off the chat: the chat's view mode.
+    /// `space >` with nothing selected: the chat's view mode.
     ChatView,
     /// A command of `EDITORS` (`space l`, `space I`, `space ?`): run on the editor.
     Editor,
 }
 
-/// A surface's view mode: its document, the keys' state while they're its, and what it was made of.
+/// The terminal's view mode: its document, the keys' state while they're its, and what it was made of.
 pub struct View {
-    pub surface: Surface,
     /// None only while a key's command has it swapped in (`swap`).
     doc: Option<Document>,
-    /// The rows it was made of — the chat draws these while it lasts (held still).
-    pub laid: Laid,
-    /// What the surface held when it was made (`seen`) — another now: something came after.
-    pub seen: u64,
-    /// Its own mode (`v` selects), and a key sequence, count or awaited character under way — never the code's.
-    mode: Mode,
-    pending: Vec<Key>,
-    count: Option<usize>,
-    on_next_char: Option<(CharFn, Option<usize>)>,
-    char_for: String,
-    sticky: Option<Vec<usize>>,
-    search_origin: Option<usize>,
-    /// Its own search — what `n`/`N` repeat, whether its matches are shown, the matches on its rows: never the
-    /// code's, and the code's never touched by it (`target/sb/panes-plan.md` §2.3).
-    search: Option<String>,
-    search_hl: bool,
+    /// Its own mode (`v` selects), a key sequence, count or awaited character under way, its own search — what
+    /// `n`/`N` repeat, whether its matches are shown: never the code's, and the code's never touched by it
+    /// (`target/sb/panes-plan.md` §2.3).
+    pub keys: Keys,
+    /// The matches on its rows (`refresh_search`).
     hits: Option<crate::search::SearchHits>,
     /// A prompt its `/`, `?` or `s` opened is up: its keys apply here.
     pub prompt: bool,
     /// Entered by the wheel: where the keys were.
     pub by_wheel: Option<Was>,
     after: Option<After>,
-    /// The terminal's: what it was made of, and which of its lines wrapped into the next — with the blanks its line
-    /// lost at its end — a quote joins them again.
-    made: Option<Made>,
+    /// What it was made of, and which of its lines wrapped into the next — with the blanks its line lost at its end
+    /// — a quote joins them again.
+    made: Made,
     wraps: Vec<Option<usize>>,
-    /// The terminal's: a new panel size seen, not settled yet (`terminal_resized`).
+    /// A new panel size seen, not settled yet (`terminal_resized`).
     settling: Option<(u16, u16)>,
     /// `EDITORS`' commands its key asked for (`After::Editor`).
     deferred: Vec<crate::keymap::MappableCommand>,
@@ -231,57 +214,9 @@ impl View {
         self.doc.as_mut().expect("a view's document is in it outside a key's command")
     }
 
-    /// Its mode (the status line, the state).
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    /// Its key sequence under way (which-key, the state).
-    pub fn pending(&self) -> &[Key] {
-        &self.pending
-    }
-
-    /// Its count and keys under way, as the status line says them (`Editor::pending_display`).
-    pub fn pending_display(&self) -> String {
-        let mut s = self.count.map(|c| c.to_string()).unwrap_or_default();
-        for k in &self.pending {
-            s.push_str(&k.to_string());
-        }
-        if self.on_next_char.is_some() {
-            s.push_str(&self.char_for);
-            s.push('…');
-        }
-        s
-    }
-
-    /// Its count and keys under way, each a word (the state's `keys.pending`).
-    pub fn pending_keys(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.count.iter().map(|n| n.to_string()).collect();
-        v.extend(self.pending.iter().map(Key::to_string));
-        v
-    }
-
-    /// The next key is taken as a character (`f`, `t`).
-    pub fn char_next(&self) -> bool {
-        self.on_next_char.is_some()
-    }
-
-    /// A count or an awaited character (`f`) under way: the next key is its, whatever it is.
-    pub fn waits(&self) -> bool {
-        self.count.is_some() || self.on_next_char.is_some()
-    }
-
     /// Rows it was made of.
     pub fn rows(&self) -> usize {
-        match self.made {
-            Some(m) => m.lines,
-            None => self.laid.iter().map(|(_, r)| r.len()).sum(),
-        }
-    }
-
-    /// Something came since it was made (`● view · new text after`).
-    pub fn came(&self, now: u64) -> bool {
-        now != self.seen
+        self.made.lines
     }
 
     /// More than one character selected, or several cursors — what `esc` collapses first, `enter` quotes.
@@ -290,86 +225,15 @@ impl View {
     }
 }
 
-/// A range of `doc`'s selection is wider than a character — what `enter` quotes (several plain cursors aren't).
-pub fn wide(d: &Document) -> bool {
-    d.selection().ranges().iter().any(|r| crate::graphemes::next_boundary(&d.text, r.from()) < r.to())
-}
+use crate::docpane::{selects, wide};
 
-/// `doc` has more than one character selected, or several cursors.
-pub fn selects(d: &Document) -> bool {
-    let sel = d.selection();
-    sel.ranges().len() > 1
-        || sel.ranges().iter().any(|r| crate::graphemes::next_boundary(&d.text, r.from()) < r.to())
-}
-
-/// What the conversation holds now, as one number: what came changes it.
-pub fn seen(c: &crate::chat::Chat) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    c.msgs.len().hash(&mut h);
-    if let Some(m) = c.msgs.last() {
-        (m.version(), m.text.len()).hash(&mut h);
+/// The view mode with the keys now and its keys' state — the chat's transcript's or the terminal's (the status
+/// line, which-key, the state).
+pub fn viewing(ed: &Editor) -> Option<(Surface, &Keys)> {
+    match has_keys(ed)? {
+        Surface::Chat => Some((Surface::Chat, &crate::chatdoc::transcript(ed)?.pane.keys)),
+        Surface::Terminal => Some((Surface::Terminal, &ed.session.view.as_ref()?.keys)),
     }
-    (c.state as u8).hash(&mut h);
-    h.finish()
-}
-
-/// A drawn row as a line of the document: its spans' text, line breaks and tabs as spaces (one byte each —
-/// the painter splits the spans at the same offsets), blanks at its end off.
-fn row_text(r: &ChatRow, out: &mut String) {
-    let from = out.len();
-    for s in &r.spans {
-        out.extend(s.text.chars().map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c }));
-    }
-    let kept = out[from..].trim_end().len();
-    out.truncate(from + kept);
-}
-
-fn chat_doc(ed: &mut Editor, laid: &Laid) -> Document {
-    let mut text = String::new();
-    let mut first = true;
-    for r in laid.iter().flat_map(|(_, rows)| rows.iter()) {
-        if !first {
-            text.push('\n');
-        }
-        first = false;
-        row_text(r, &mut text);
-    }
-    let mut doc = Document::from_str(ed.alloc_id(), &text);
-    doc.wrap = Some(false);
-    doc.throwaway = true;
-    doc
-}
-
-/// The document line of message `msg`'s row `row`.
-fn line_at(laid: &Laid, msg: usize, row: usize) -> Option<usize> {
-    let mut at = 0;
-    for (m, rows) in laid {
-        if *m == Some(msg) {
-            return Some(at + row.min(rows.len().saturating_sub(1)));
-        }
-        at += rows.len();
-    }
-    None
-}
-
-/// The message and its row a document line is — a line of the frame's own is the message before it's last row.
-fn place_at(laid: &Laid, line: usize) -> Option<(usize, usize)> {
-    let mut at = 0;
-    let mut last = None;
-    for (m, rows) in laid {
-        if let Some(m) = m {
-            if line < at + rows.len() {
-                return Some((*m, line - at));
-            }
-            last = Some((*m, rows.len().saturating_sub(1)));
-        }
-        at += rows.len();
-        if line < at {
-            return last;
-        }
-    }
-    last
 }
 
 /// Before drawing: the matches the view's search shows on its own rows — the pattern its `/` prompt is typing,
@@ -380,7 +244,7 @@ pub fn refresh_search(ed: &mut Editor) {
     let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some()) else { return };
     let pattern = match (v.prompt, typed) {
         (true, Some(t)) => Some(t).filter(|t| !t.is_empty()),
-        _ => v.search.clone().filter(|_| v.search_hl),
+        _ => v.keys.search.clone().filter(|_| v.keys.search_hl),
     };
     v.hits = match pattern {
         Some(p) if v.hits.as_ref().is_some_and(|h| h.holds(v.doc(), &p)) => v.hits.take(),
@@ -392,7 +256,7 @@ pub fn refresh_search(ed: &mut Editor) {
 /// `esc` with the view's keys: its matches no longer shown (the code's stay as they are).
 pub fn search_unshown(ed: &mut Editor) {
     if let Some(v) = ed.session.view.as_mut() {
-        v.search_hl = false;
+        v.keys.search_hl = false;
     }
 }
 
@@ -405,38 +269,32 @@ impl View {
 
 /// The surface whose view mode has the keys now.
 pub fn has_keys(ed: &Editor) -> Option<Surface> {
-    let v = ed.session.view.as_ref()?;
-    match v.surface {
-        Surface::Chat => ed
-            .session
-            .chat
-            .as_ref()
-            .filter(|c| ed.session.is_at(At::Chat) && !c.compact())
-            .map(|_| Surface::Chat),
-        Surface::Terminal => terminal_holds(ed, v).then_some(Surface::Terminal),
+    if crate::chatdoc::has_keys(ed) {
+        return Some(Surface::Chat);
     }
+    let v = ed.session.view.as_ref()?;
+    terminal_holds(ed, v).then_some(Surface::Terminal)
 }
 
 /// The terminal's view still has its surface: tarae's keys on its panel, in front, the same run.
 fn terminal_holds(ed: &Editor, v: &View) -> bool {
-    let run = v.made.map(|m| m.generation);
     ed.session.is_at(At::Slot)
         && ed.slot() == Some(crate::sizes::Slot::Terminal)
-        && ed.session.terminal.as_ref().is_some_and(|t| t.visible && Some(t.generation()) == run)
+        && ed.session.terminal.as_ref().is_some_and(|t| t.visible && t.generation() == v.made.generation)
 }
 
 /// The terminal is in its view mode.
 pub fn terminal_viewed(ed: &Editor) -> bool {
-    ed.session.view.as_ref().is_some_and(|v| v.surface == Surface::Terminal)
+    ed.session.view.is_some()
 }
 
 /// The terminal in its view mode (drawn with the painter on its cells).
 pub fn terminal_view_of(ed: &Editor) -> Option<&View> {
-    ed.session.view.as_ref().filter(|v| v.surface == Surface::Terminal)
+    ed.session.view.as_ref()
 }
 
 /// Where the keys are now, as the wheel would give them back.
-fn was(ed: &Editor) -> Was {
+pub fn was(ed: &Editor) -> Was {
     if let Some(s) = has_keys(ed) {
         Was::View(s)
     } else if ed.session.program_has_keys() {
@@ -449,7 +307,7 @@ fn was(ed: &Editor) -> Was {
 }
 
 /// The keys back where the wheel found them.
-fn give_back(ed: &mut Editor, was: Was) {
+pub fn give_back(ed: &mut Editor, was: Was) {
     let chat = ed.session.chat.is_some() && matches!(was, Was::Chat | Was::View(Surface::Chat));
     let program =
         was == Was::Program && ed.session.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none());
@@ -462,7 +320,7 @@ fn give_back(ed: &mut Editor, was: Was) {
         t.parser.screen_mut().set_scrollback(0);
     }
     match was {
-        Was::View(Surface::Chat) => chat_view(ed),
+        Was::View(Surface::Chat) => crate::chatdoc::view(ed),
         Was::View(Surface::Terminal) if ed.session.terminal.as_ref().is_some_and(|t| t.visible) => {
             terminal_enter(ed, Land::InSight, None)
         }
@@ -470,183 +328,26 @@ fn give_back(ed: &mut Editor, was: Was) {
     }
 }
 
-/// Another surface's view ends as this one's comes (one view at a time).
-fn take_over(ed: &mut Editor, surface: Surface) {
-    if ed.session.view.as_ref().is_some_and(|v| v.surface != surface) {
-        leave(ed);
-    }
-}
-
-/// The chat in its view mode (drawn held still, the painter on it).
-pub fn chat_view_of(ed: &Editor) -> Option<&View> {
-    ed.session.view.as_ref().filter(|v| v.surface == Surface::Chat)
-}
-
-/// `esc` from the chat's input, `space >` from anywhere: its view mode, landed where you were in this
-/// conversation, else on the last answer's first row, else the last row. Nothing to read — an empty
-/// conversation — the input's `esc` goes to the code (as it did), `space >` to the input, said. The minimized
-/// chat keeps its `esc` (to the code); `space >` brings it back. A chat not drawn yet (closed, minimized) is
-/// viewed once the frame lays its rows out (`wanted`).
-pub fn chat_view(ed: &mut Editor) {
-    let from_input = ed.session.is_at(At::Chat);
-    let Some(c) = ed.session.chat.as_mut() else {
-        crate::chat::open(ed);
-        return want(ed);
-    };
-    if c.compact() {
-        match from_input {
-            true => ed.session.at = At::Code,
-            false => {
-                c.unfolded = true;
-                want(ed);
-            }
-        }
-        return;
-    }
-    if c.msgs.is_empty() {
-        ed.session.at = if from_input { At::Code } else { At::Chat };
-        if !from_input {
-            ed.set_status("nothing to view yet — the conversation is empty: type a question");
-        }
-        return;
-    }
-    // (`space >` from elsewhere with the chat out of sight: once a frame lays it out; the input's `esc` has it in
-    // sight — made of what the last frame laid)
-    if ed.screen.chat_view.get().is_none() && !from_input {
-        return want(ed);
-    }
-    let c = ed.session.chat.as_ref().expect("the chat, above");
-    let laid = ed.screen.chat_laid.borrow().clone();
-    let line = c.view_at.and_then(|(m, r)| line_at(&laid, m, r)).or_else(|| {
-        let from = c.msgs.iter().rposition(|m| m.role == crate::chat::Role::User).map_or(0, |i| i + 1);
-        let answer = (from..c.msgs.len())
-            .find(|&i| c.msgs[i].role == crate::chat::Role::Assistant)
-            .or_else(|| c.msgs.iter().rposition(|m| m.role == crate::chat::Role::Assistant))?;
-        // (its first row is the air above it)
-        line_at(&laid, answer, 1)
-    });
-    enter(ed, laid, line, None);
-}
-
-/// The chat's view mode asked for before its rows were laid out: made once a frame has (`wanted`).
-fn want(ed: &mut Editor) {
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.view_wanted = true;
-        ed.session.at = At::Chat;
-    }
-}
-
-/// After a frame (`term::render`): the view asked for before the chat was drawn, made now — true when it was
-/// (the frame is drawn again with it).
-pub fn wanted(ed: &mut Editor) -> bool {
-    let chat_keys = ed.session.is_at(At::Chat);
-    let Some(c) = ed.session.chat.as_mut().filter(|c| c.view_wanted) else { return false };
-    c.view_wanted = false;
-    if !chat_keys || ed.screen.chat_view.get().is_none() {
-        return false;
-    }
-    // (opened on an empty conversation: the input keeps the keys, said)
-    if c.msgs.is_empty() {
-        ed.set_status("nothing to view yet — the conversation is empty: type a question");
-        return true;
-    }
-    chat_view(ed);
-    true
-}
-
-/// The wheel over the chat's conversation, up: its view mode at that point, the cursor on `line` (the row
-/// under the pointer), the keys its — back where they were when the wheel takes it back down. An empty
-/// conversation: nothing to read, nothing done.
-pub fn chat_wheel(ed: &mut Editor, line: Option<usize>, up: bool) {
-    if ed.session.chat.as_ref().is_none_or(|c| c.msgs.is_empty()) {
-        return;
-    }
-    if chat_view_of(ed).is_none() {
-        if !up {
-            if let Some(c) = ed.session.chat.as_mut() {
-                c.scroll = c.scroll.saturating_sub(3);
-            }
-            return;
-        }
-        let was = was(ed);
-        let laid = ed.screen.chat_laid.borrow().clone();
-        enter(ed, laid, line, Some(was));
-    }
-    ed.session.at = At::Chat;
-    swap(ed, |ed| ed.scroll_view(if up { -3 } else { 3 }, false));
-    // (back down to the end, by the wheel, nothing selected: done reading)
-    let Some(v) = ed.session.view.as_ref() else { return };
-    let at_end = v.doc().top + ed.screen.chat_view.get().map_or(1, |a| a.2) >= v.rows();
-    if !up
-        && at_end
-        && !v.selects()
-        && !v.prompt
-        && let Some(was) = v.by_wheel
-    {
-        leave(ed);
-        give_back(ed, was);
-    }
-}
-
-/// A view mode's state, its keys under way none yet.
-fn made(
-    surface: Surface,
-    doc: Document,
-    laid: Laid,
-    seen: u64,
-    by_wheel: Option<Was>,
-    made: Option<Made>,
-) -> View {
+/// The terminal's view mode's state, its keys under way none yet.
+fn made(doc: Document, by_wheel: Option<Was>, made: Made, wraps: Vec<Option<usize>>) -> View {
     View {
-        surface,
         doc: Some(doc),
-        laid,
-        seen,
-        mode: Mode::Normal,
-        pending: Vec::new(),
-        count: None,
-        on_next_char: None,
-        char_for: String::new(),
-        sticky: None,
-        search_origin: None,
-        search: None,
-        search_hl: false,
+        keys: Keys::default(),
         hits: None,
         prompt: false,
         by_wheel,
         after: None,
         made,
-        wraps: Vec::new(),
+        wraps,
         settling: None,
         deferred: Vec::new(),
     }
 }
 
-/// A view of the chat made from `laid`, the cursor on `line` (else the last), what's on screen as it was.
-fn enter(ed: &mut Editor, laid: Laid, line: Option<usize>, by_wheel: Option<Was>) {
-    take_over(ed, Surface::Chat);
-    let mut doc = chat_doc(ed, &laid);
-    let last = mv::last_line(&doc.text);
-    let line = line.unwrap_or(last).min(last);
-    doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
-    // (the rows in sight stay where they are: the window the chat showed)
-    doc.set_top(ed.screen.chat_view.get().map_or(0, |a| a.3).min(last));
-    let seen = ed.session.chat.as_ref().map_or(0, seen);
-    ed.session.view = Some(made(Surface::Chat, doc, laid, seen, by_wheel, None));
-    // (the keys are the chat's now — not the program's, nor tarae's on the slot)
-    if ed.session.chat.is_some() {
-        ed.session.at = At::Chat;
-    }
-    in_sight(ed);
-}
-
-/// The rows it shows (rows, width) — as the last frame drew the chat's; the terminal's screen.
+/// The rows it shows (rows, width): the terminal's screen.
 fn viewport(ed: &Editor) -> (usize, usize) {
     let Some(v) = ed.session.view.as_ref() else { return (20, 60) };
-    if let Some(m) = v.made {
-        return (usize::from(m.size.0).max(1), usize::from(m.size.1).max(1));
-    }
-    ed.screen.chat_view.get().map_or((20, 60), |a| (a.2.max(1), a.1.max(1)))
+    (usize::from(v.made.size.0).max(1), usize::from(v.made.size.1).max(1))
 }
 
 // ── The terminal ────────────────────────────────────────────────────────────────────────────────
@@ -713,7 +414,6 @@ fn terminal_doc(ed: &mut Editor) -> Option<(Document, usize, Vec<Option<usize>>)
 /// The terminal's view mode: held still from now (its program's output kept back), its rows read, the cursor
 /// where `land` says, the rows in sight as they were — tarae's keys on its panel.
 fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
-    take_over(ed, Surface::Terminal);
     let Some(t) = ed.session.terminal.as_mut() else { return };
     t.hold();
     t.visible = true;
@@ -742,9 +442,7 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     doc.set_selection(Selection::point(mv::line_start(&doc.text, line)));
     doc.set_top(top.min(last));
     let made_of = Made { generation, size, back, lines: last + 1 };
-    let mut view = made(Surface::Terminal, doc, Vec::new(), generation, by_wheel, Some(made_of));
-    view.wraps = wraps;
-    ed.session.view = Some(view);
+    ed.session.view = Some(made(doc, by_wheel, made_of, wraps));
     ed.session.at = At::Slot;
     ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
     in_sight(ed);
@@ -778,7 +476,7 @@ pub fn terminal_wheel(ed: &mut Editor, row: Option<usize>, up: bool) {
     }
     swap(ed, |ed| ed.scroll_view(if up { -3 } else { 3 }, false));
     let Some(v) = ed.session.view.as_ref() else { return };
-    let at_end = v.made.is_some_and(|m| v.doc().top >= m.back);
+    let at_end = v.doc().top >= v.made.back;
     if !up
         && at_end
         && !v.selects()
@@ -831,11 +529,8 @@ pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
 /// have no line yet, the scrollback's are unchanged.
 pub fn terminal_resized(ed: &mut Editor) {
     let now = ed.session.terminal.as_ref().map(|t| t.parser.screen().size());
-    let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some() && v.surface == Surface::Terminal)
-    else {
-        return;
-    };
-    let Some(m) = v.made else { return };
+    let Some(v) = ed.session.view.as_mut().filter(|v| v.doc.is_some()) else { return };
+    let m = v.made;
     let Some(now) = now else { return };
     // (back at the size it was made at counts as a change too: vt100 drops a shrunk screen's bottom rows and
     // brings them back blank — what it shows isn't what the view was made of)
@@ -867,7 +562,7 @@ pub fn terminal_resized(ed: &mut Editor) {
     doc.set_selection(sel);
     doc.set_top(top);
     v.doc = Some(doc);
-    v.made = Some(Made { size: now, back, lines: last + 1, ..m });
+    v.made = Made { size: now, back, lines: last + 1, ..m };
     v.settling = None;
     in_sight(ed);
 }
@@ -877,6 +572,7 @@ fn in_sight(ed: &mut Editor) {
     let (rows, _) = viewport(ed);
     let so = ed.config.scrolloff.min(rows.saturating_sub(1) / 2);
     let Some(v) = ed.session.view.as_mut() else { return };
+    let m = v.made;
     let d = v.doc_mut();
     let last = mv::last_line(&d.text);
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
@@ -890,9 +586,7 @@ fn in_sight(ed: &mut Editor) {
     top = top.min((last + 1).saturating_sub(rows));
     d.set_top(top);
     // (the terminal shows what's in sight by its scrollback offset)
-    if let Some(m) = v.made
-        && let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == m.generation)
-    {
+    if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == m.generation) {
         t.parser.screen_mut().set_scrollback(m.back.saturating_sub(top));
     }
 }
@@ -907,19 +601,8 @@ fn swap<R>(ed: &mut Editor, f: impl FnOnce(&mut Editor) -> R) -> Option<R> {
     let current = ed.current;
     ed.docs.push(doc);
     ed.current = ed.docs.len() - 1;
-    let trade = |ed: &mut Editor, v: &mut View| {
-        std::mem::swap(&mut ed.mode, &mut v.mode);
-        std::mem::swap(&mut ed.pending, &mut v.pending);
-        std::mem::swap(&mut ed.count, &mut v.count);
-        std::mem::swap(&mut ed.on_next_char, &mut v.on_next_char);
-        std::mem::swap(&mut ed.char_for, &mut v.char_for);
-        std::mem::swap(&mut ed.sticky, &mut v.sticky);
-        std::mem::swap(&mut ed.search_origin, &mut v.search_origin);
-        std::mem::swap(&mut ed.search, &mut v.search);
-        std::mem::swap(&mut ed.search_hl, &mut v.search_hl);
-    };
     let mut v = ed.session.view.take()?;
-    trade(ed, &mut v);
+    crate::docpane::trade(ed, &mut v.keys);
     ed.session.view = Some(v);
     let viewport = std::mem::replace(&mut ed.viewport, (rows, cols));
     let focus = ed.session.focus;
@@ -934,7 +617,7 @@ fn swap<R>(ed: &mut Editor, f: impl FnOnce(&mut Editor) -> R) -> Option<R> {
     let doc = ed.docs.remove(at);
     ed.current = current;
     let mut v = ed.session.view.take().expect("the view lasts through its key");
-    trade(ed, &mut v);
+    crate::docpane::trade(ed, &mut v.keys);
     v.doc = Some(doc);
     // (a prompt it opened — `/`, `s` — is its until it closes)
     v.prompt = match ed.prompt.is_some() {
@@ -958,11 +641,8 @@ pub fn ask(ed: &mut Editor, after: After) {
 pub fn leave_key(ed: &mut Editor) {
     let select = ed.mode == Mode::Select;
     let doc = ed.doc_mut();
-    let sel = doc.selection();
-    let r = sel.primary();
-    let wide = sel.ranges().len() > 1 || crate::graphemes::next_boundary(&doc.text, r.from()) < r.to();
-    if wide || select {
-        let c = r.cursor(&doc.text);
+    if selects(doc) || select {
+        let c = doc.selection().primary().cursor(&doc.text);
         doc.set_selection(Selection::single(Range::point(c)));
         ed.mode = Mode::Normal;
         return;
@@ -970,74 +650,29 @@ pub fn leave_key(ed: &mut Editor) {
     ask(ed, After::Leave);
 }
 
-/// Ends the view: where it was kept for next time (the chat's `view_at`), the surface no longer held — the rows
-/// you were reading still in sight, what came while it held below them — the document freed. The keys stay
-/// where they are — the caller says where they go.
+/// Ends the view: the terminal no longer held — what its program wrote meanwhile onto its screen; scrolled back,
+/// it stays on the rows you read — the document freed. The keys stay where they are — the caller says where they
+/// go.
 pub fn leave(ed: &mut Editor) {
-    let (rows, _) = viewport(ed);
     let Some(v) = ed.session.view.take() else { return };
-    if let Some(m) = v.made {
-        // (the terminal: what its program wrote meanwhile onto its screen — scrolled back, it stays on the rows
-        // you read)
-        if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == m.generation) {
-            t.release();
-        }
-        return close_prompt(ed, &v);
+    if let Some(t) = ed.session.terminal.as_mut().filter(|t| t.generation() == v.made.generation) {
+        t.release();
     }
-    let d = v.doc();
-    let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
-    // (the chat's scroll counts from the live bottom: what the last frame laid out, rows that came included —
-    // the snapshot's count would shift the view by them)
-    let live: usize = ed.screen.chat_laid.borrow().iter().map(|(_, r)| r.len()).sum();
-    let total = if live > 0 { live } else { v.rows() };
-    if let Some(c) = ed.session.chat.as_mut() {
-        c.view_at = place_at(&v.laid, line);
-        c.scroll = total.saturating_sub(d.top + rows);
-    }
-    close_prompt(ed, &v);
-}
-
-/// A prompt the view opened (`/`, `s`) goes with it.
-fn close_prompt(ed: &mut Editor, v: &View) {
     if ed.prompt.is_some() && v.prompt {
         ed.prompt = None;
     }
 }
 
-/// Ends the view and keeps nothing of it: the conversation it was made of is gone (`C-l` a new one, `C-p` an
-/// earlier one) — its rows and its place are another conversation's.
-pub fn forget(ed: &mut Editor) {
-    // (only the chat's: a terminal's view isn't the conversation's — taken here, its held output would never go out)
-    if ed.session.view.as_ref().is_some_and(|v| v.surface == Surface::Chat)
-        && let Some(v) = ed.session.view.take()
-    {
-        close_prompt(ed, &v);
-    }
-}
-
-/// The view caught up: made again from what the last frame laid out (the terminal's: from its screen, what
-/// came taken in), the cursor on the latest line.
+/// The view caught up: made again from its screen, what came taken in, the cursor on the latest line — its own
+/// mode, keys under way and search come along (a `v`, a count before `G`).
 fn catch_up(ed: &mut Editor) {
-    let Some((by_wheel, surface)) = ed.session.view.as_ref().map(|v| (v.by_wheel, v.surface)) else { return };
-    if surface == Surface::Terminal {
-        // (the view's own mode and keys under way come along: a `v`, a count before `G`)
-        let Some(old) = ed.session.view.take() else { return };
-        if let Some(t) = ed.session.terminal.as_mut() {
-            t.release();
-        }
-        terminal_enter(ed, Land::Latest, by_wheel);
-        if let Some(v) = ed.session.view.as_mut() {
-            (v.mode, v.pending, v.count, v.on_next_char, v.char_for) =
-                (old.mode, old.pending, old.count, old.on_next_char, old.char_for);
-            let last = v.rows();
-            v.doc_mut().set_top(last);
-        }
-        return in_sight(ed);
+    let Some(old) = ed.session.view.take() else { return };
+    if let Some(t) = ed.session.terminal.as_mut() {
+        t.release();
     }
-    let laid = ed.screen.chat_laid.borrow().clone();
-    enter(ed, laid, None, by_wheel);
-    // (the last line at the bottom of the view)
+    terminal_enter(ed, Land::Latest, old.by_wheel);
     if let Some(v) = ed.session.view.as_mut() {
+        v.keys = old.keys;
         let last = v.rows();
         v.doc_mut().set_top(last);
     }
@@ -1048,19 +683,13 @@ fn catch_up(ed: &mut Editor) {
 fn after(ed: &mut Editor) {
     let Some(v) = ed.session.view.as_mut() else { return };
     let Some(a) = v.after.take() else { return };
-    let surface = v.surface;
     let deferred = std::mem::take(&mut v.deferred);
-    match (a, surface) {
-        (After::Leave, Surface::Chat) => {
-            leave(ed);
-            ed.session.leave(At::Chat);
-        }
-        (After::Leave, _) => {
+    match a {
+        After::Leave => {
             leave(ed);
             ed.session.leave(At::Slot);
         }
-        (After::Input | After::Enter, Surface::Chat) => leave(ed),
-        (After::Input | After::Enter, _) => {
+        After::Input | After::Enter => {
             if ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_some()) {
                 return ed.set_status("its program has ended — q close, esc code");
             }
@@ -1071,13 +700,10 @@ fn after(ed: &mut Editor) {
                 t.parser.screen_mut().set_scrollback(0);
             }
         }
-        (After::Latest, _) => catch_up(ed),
-        (After::Take, surface) => take(ed, surface),
-        (After::ChatView, Surface::Chat) => {
-            ed.set_status("this is the chat's view — select something, then enter or space > quotes it")
-        }
-        (After::ChatView, _) => chat_view(ed),
-        (After::Editor, _) => ed.run(&deferred, None),
+        After::Latest => catch_up(ed),
+        After::Take => take(ed),
+        After::ChatView => crate::chatdoc::view(ed),
+        After::Editor => ed.run(&deferred, None),
     }
 }
 
@@ -1088,9 +714,9 @@ pub fn swapped(ed: &Editor) -> bool {
 }
 
 /// `enter` on a selection: each range a quote over the chat's input (`quote.rs`), the view left, the input with
-/// the keys. The terminal's only where its rows go to Claude (`llm.screen-terminal`) — else said, nothing done.
-fn take(ed: &mut Editor, surface: Surface) {
-    if surface == Surface::Terminal && !ed.config.llm.screen_terminal {
+/// the keys — only where its rows go to Claude (`llm.screen-terminal`), else said, nothing done.
+fn take(ed: &mut Editor) {
+    if !ed.config.llm.screen_terminal {
         return ed.set_status("the terminal's rows don't go to Claude (llm.screen-terminal) — y copies them");
     }
     let Some(v) = ed.session.view.as_ref() else { return };
@@ -1103,61 +729,29 @@ fn take(ed: &mut Editor, surface: Surface) {
     crate::quote::add(ed, taken);
 }
 
-/// The view's selections as quotes, one a range (blank ones left out): the chat's rows joined where the layout
-/// wrapped them, a cut code row whole; the terminal's where the program's line wrapped, its lines of how many.
+/// The view's selections as quotes, one a range (blank ones left out): joined where the program's line wrapped,
+/// its lines of how many.
 fn taken(ed: &Editor, v: &View) -> Vec<crate::quote::Taken> {
-    use crate::chat::Role;
     use crate::quote::{Taken, lines, text_of};
     let d = v.doc();
-    let rows: Vec<&ChatRow> = v.laid.iter().flat_map(|(_, r)| r.iter()).collect();
-    let how = |l: usize| match v.surface {
-        Surface::Chat => rows.get(l).map_or((0, None), |r| (r.skip, r.join.map(usize::from))),
-        Surface::Terminal => (0, v.wraps.get(l.wrapping_sub(1)).copied().flatten()),
-    };
-    let rest = |l: usize| rows.get(l).and_then(|r| r.rest.clone());
+    let how = |l: usize| (0, v.wraps.get(l.wrapping_sub(1)).copied().flatten());
     let quote = |r: &Range| {
-        let (text, l0, l1) = text_of(&d.text, (r.from(), r.to()), &how, &rest);
-        // (blank rows around it — a screen's foot, the air between messages — aren't what was meant)
+        let (text, l0, l1) = text_of(&d.text, (r.from(), r.to()), &how, &|_| None);
+        // (blank rows around it — a screen's foot — aren't what was meant)
         let text = text.trim_start_matches('\n').trim_end().to_string();
         if text.trim().is_empty() {
             return None;
         }
         let n = lines(text.lines().count());
-        Some(match v.surface {
-            Surface::Terminal => {
-                // (the program's file name — `terminal::spawn`'s `argv[0]`, never a title the program sets)
-                let title = ed.session.terminal.as_ref().map_or_else(String::new, |t| t.title.clone());
-                let at = format!("{}-{} of {}", l0 + 1, l1 + 1, v.rows());
-                Taken {
-                    attrs: vec![("from", "terminal".into()), ("title", title), ("lines", at)],
-                    label: format!("terminal {n}"),
-                    text,
-                    redact: true,
-                    code: None,
-                }
-            }
-            Surface::Chat => {
-                // (whose words: one message's role, else the chat's)
-                let msgs = ed.session.chat.as_ref().map(|c| &c.msgs);
-                let role = |l: usize| place_at(&v.laid, l).and_then(|(m, _)| Some(msgs?.get(m)?.role));
-                let (role, label) = match (role(l0), role(l1)) {
-                    (Some(a), Some(b)) if a == b => match a {
-                        Role::User => ("user", "your message"),
-                        Role::Assistant => ("assistant", "Claude's answer"),
-                        Role::Thought => ("thinking", "Claude's thinking"),
-                        Role::Tool => ("tool calls", "Claude's tool calls"),
-                        Role::Note => ("note", "the chat"),
-                    },
-                    _ => ("several", "the chat"),
-                };
-                Taken {
-                    attrs: vec![("from", "chat".into()), ("role", role.into())],
-                    label: format!("{label} {n}"),
-                    text,
-                    redact: false,
-                    code: None,
-                }
-            }
+        // (the program's file name — `terminal::spawn`'s `argv[0]`, never a title the program sets)
+        let title = ed.session.terminal.as_ref().map_or_else(String::new, |t| t.title.clone());
+        let at = format!("{}-{} of {}", l0 + 1, l1 + 1, v.rows());
+        Some(Taken {
+            attrs: vec![("from", "terminal".into()), ("title", title), ("lines", at)],
+            label: format!("terminal {n}"),
+            text,
+            redact: true,
+            code: None,
         })
     };
     // (only the ranges wider than a character: a plain cursor beside them quotes nothing)
@@ -1170,34 +764,18 @@ fn windows(key: Key) -> bool {
     key.ctrl && key.code == Code::Char('w')
 }
 
-/// The chat's chords — the screen, pointing, the last code block, a new or earlier conversation, models, the
-/// turn's undo, stop, follow's hops: the chat's in its view mode too (§3.4), where view mode's table has no
-/// use for them (`C-d` `C-u` `C-f` `C-b` page there).
-pub const CHAT_CHORDS: &[char] = &['s', 'o', 'y', 'r', 'l', 'p', 't', 'z', 'c', ']', 'g'];
-
-/// `key` is one of the chat's chords that its view mode leaves to it.
-pub fn chat_chord(ed: &Editor, key: Key) -> bool {
-    let Some(v) = chat_view_of(ed) else { return false };
-    let chord = key.ctrl && !key.alt && matches!(key.code, Code::Char(c) if CHAT_CHORDS.contains(&c));
-    chord && ed.keymaps.view(Surface::Chat, v.mode).search(&[key]).is_none()
+/// The keys the terminal's view mode with nothing under way lets go on down the chain (`keys_to`'s layer): `C-w`.
+pub fn passes() -> Vec<Key> {
+    let ctrl = Key { code: Code::Char('w'), ctrl: true, alt: false, shift: false };
+    vec![ctrl, Key { alt: true, ..ctrl }]
 }
 
-/// The keys a view mode with nothing under way lets go on down the chain (`keys_to`'s layer): `C-w`, and the
-/// chat's chords.
-pub fn passes(ed: &Editor) -> Vec<Key> {
-    let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false, shift: false };
-    let mut v = vec![ctrl('w'), Key { alt: true, ..ctrl('w') }];
-    v.extend(CHAT_CHORDS.iter().map(|&c| ctrl(c)).filter(|&k| chat_chord(ed, k)));
-    v
-}
-
-/// A key while a view mode has them: the view's prompt's (`/`), else its table's — a command of
-/// `COMMANDS`, run on its document; a key it has no use for is said. `C-w` and a sequence of the editor's
-/// under way go on. Returns the handler that took it.
+/// A key while the terminal's view mode has them: the view's prompt's (`/`), else its table's — a command of
+/// `COMMANDS`, run on its document; a key it has no use for is said. `C-w` and a sequence of the editor's under
+/// way go on. Returns the handler that took it.
 pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
     use crate::uistate::Handler;
-    let surface = has_keys(ed)?;
-    if !ed.pending.is_empty() {
+    if has_keys(ed) != Some(Surface::Terminal) || !ed.pending.is_empty() {
         return None;
     }
     let v = ed.session.view.as_ref()?;
@@ -1208,23 +786,16 @@ pub fn key(ed: &mut Editor, key: Key) -> Option<crate::uistate::Handler> {
         swap(ed, |ed| ed.handle_prompt_key(key));
         return Some(Handler::Prompt);
     }
-    if v.pending.is_empty()
-        && v.on_next_char.is_none()
-        && v.count.is_none()
-        && (windows(key) || chat_chord(ed, key))
-    {
+    if v.keys.idle() && windows(key) {
         return None;
     }
-    swap(ed, |ed| key_in(ed, surface, key));
+    swap(ed, |ed| key_in(ed, key));
     after(ed);
-    Some(match surface {
-        Surface::Chat => Handler::ChatView,
-        Surface::Terminal => Handler::TerminalView,
-    })
+    Some(Handler::TerminalView)
 }
 
 /// `key` with the view's document swapped in: the awaited character (`f`), a count, the table's command.
-fn key_in(ed: &mut Editor, surface: Surface, key: Key) {
+fn key_in(ed: &mut Editor, key: Key) {
     if let Some((f, count)) = ed.on_next_char.take() {
         let ch = match (key.code, key.ctrl || key.alt) {
             (Code::Char(c), false) => Some(c),
@@ -1246,7 +817,7 @@ fn key_in(ed: &mut Editor, surface: Surface, key: Key) {
         return;
     }
     ed.pending.push(key);
-    let cmds = match ed.keymaps.view_lookup(surface, ed.mode, &ed.pending) {
+    let cmds = match ed.keymaps.view_lookup(Surface::Terminal, ed.mode, &ed.pending) {
         Lookup::Pending => return,
         Lookup::Matched(cmds) => Some(cmds.to_vec()),
         Lookup::NotFound => None,
@@ -1268,7 +839,7 @@ fn key_in(ed: &mut Editor, surface: Surface, key: Key) {
                 ed.char_for = keys.iter().map(Key::to_string).collect();
             }
         }
-        None => said(ed, surface, &keys),
+        None => said(ed, &keys),
     }
 }
 
@@ -1281,18 +852,17 @@ pub fn bound(ed: &Editor, surface: Surface, name: &str, like: &str) -> Option<St
     Some(if k == "ret" { "enter".into() } else { k.clone() })
 }
 
-/// A key view mode has no use for: said where the user looks, with the way to type (§3.1).
-fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
+/// A key the terminal's view mode has no use for: said where the user looks, with the way to type (§3.1).
+fn said(ed: &mut Editor, keys: &[Key]) {
     let seq: Vec<String> = keys.iter().map(Key::to_string).collect();
     // (the two ways on, as the status line says them — to type, to the code: its menus, `:`, its keys; an ended
     // program takes no typing)
-    let types = match surface {
-        Surface::Chat => Some("types"),
-        Surface::Terminal => typeable(ed).then_some("types in the program"),
-    };
+    let types = typeable(ed).then_some("types in the program");
     let ways: Vec<String> = [("view_input", "i", types), ("view_leave", "esc", Some("to the code"))]
         .iter()
-        .filter_map(|(cmd, like, what)| Some(format!("{} {}", bound(ed, surface, cmd, like)?, (*what)?)))
+        .filter_map(|(cmd, like, what)| {
+            Some(format!("{} {}", bound(ed, Surface::Terminal, cmd, like)?, (*what)?))
+        })
         .collect();
     let out = match ways.is_empty() {
         true => "its keys are its moves and selections".to_string(),
@@ -1301,41 +871,40 @@ fn said(ed: &mut Editor, surface: Surface, keys: &[Key]) {
     ed.set_status(format!("{} isn't in view mode — {out}", seq.join(" ")));
 }
 
-/// Whether `enter` quotes in the view mode now (`enter quote` said): something selected, on a surface whose rows go
-/// to Claude — not the terminal's while `llm.screen-terminal` is off (there `enter` only says why).
+/// Whether `enter` quotes in the view mode with the keys now (`enter quote` said): something selected, on a
+/// surface whose rows go to Claude — not the terminal's while `llm.screen-terminal` is off (there `enter` only says
+/// why).
 pub fn quotes(ed: &Editor) -> bool {
-    ed.session
-        .view
-        .as_ref()
-        .is_some_and(|v| wide(v.doc()) && (v.surface != Surface::Terminal || ed.config.llm.screen_terminal))
+    match has_keys(ed) {
+        Some(Surface::Chat) => crate::chatdoc::quotes(ed),
+        Some(Surface::Terminal) => {
+            ed.session.view.as_ref().is_some_and(|v| wide(v.doc()) && ed.config.llm.screen_terminal)
+        }
+        None => false,
+    }
 }
 
 /// Whether `i` has somewhere to type: the chat's input always, the terminal's program while it runs.
 pub fn typeable(ed: &Editor) -> bool {
-    match ed.session.view.as_ref().map(|v| v.surface) {
+    match has_keys(ed) {
         Some(Surface::Terminal) => ed.session.terminal.as_ref().is_some_and(|t| t.exited.is_none()),
         Some(Surface::Chat) | None => true,
     }
 }
 
 /// Every key and event: a view whose surface lost the keys (a click elsewhere, the chat closed or minimized,
-/// the terminal hidden, behind another tab or replaced) ends, kept for next time; tarae's keys on the terminal's
-/// panel are its view mode (`C-w j`, a tab stepped to, its program ended while it fills the screen). Never
-/// inside a key's command (its document swapped in): after it.
+/// the terminal hidden, behind another tab or replaced) ends; tarae's keys on the terminal's panel are its view
+/// mode (`C-w j`, a tab stepped to, its program ended while it fills the screen). Never inside a key's command (its
+/// document swapped in): after it. The chat's transcript takes the keys coming and going too (`chatdoc::sync_keys`).
 pub fn sync(ed: &mut Editor) {
+    crate::chatdoc::sync_keys(ed);
     if ed.session.view.as_ref().is_some_and(|v| v.doc.is_none()) {
         return;
     }
-    if let Some(v) = ed.session.view.as_ref() {
-        let gone = match v.surface {
-            Surface::Chat => {
-                !(ed.session.is_at(At::Chat) && ed.session.chat.as_ref().is_some_and(|c| !c.compact()))
-            }
-            Surface::Terminal => !terminal_holds(ed, v),
-        };
-        if gone {
-            leave(ed);
-        }
+    if let Some(v) = ed.session.view.as_ref()
+        && !terminal_holds(ed, v)
+    {
+        leave(ed);
     }
     if ed.session.view.is_some() || !ed.session.is_at(At::Slot) {
         return;
@@ -1350,32 +919,33 @@ pub fn sync(ed: &mut Editor) {
 
 #[cfg(test)]
 pub(crate) mod terminal_tests;
-#[cfg(test)]
-pub(crate) mod tests;
 
 /// The surface whose view mode opened the prompt that's up (`/`, `?`, `s`): its word on the status line under it.
 pub fn prompt_from(ed: &Editor) -> Option<Surface> {
     let s = has_keys(ed)?;
-    (ed.prompt.is_some() && ed.session.view.as_ref().is_some_and(|v| v.prompt)).then_some(s)
+    let up = match s {
+        Surface::Chat => crate::chatdoc::transcript(ed).is_some_and(|t| t.pane.prompt),
+        Surface::Terminal => ed.session.view.as_ref().is_some_and(|v| v.prompt),
+    };
+    (ed.prompt.is_some() && up).then_some(s)
 }
 
 /// The state's `view`: its surface, the cursor's line, selections and whether something came since — shapes,
 /// never text.
 pub fn state(ed: &Editor) -> Option<serde_json::Value> {
+    if has_keys(ed) == Some(Surface::Chat) {
+        return crate::chatdoc::state(ed);
+    }
     let v = ed.session.view.as_ref()?;
     let d = v.doc();
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
-    let held = match v.surface {
-        Surface::Chat => v.came(ed.session.chat.as_ref().map_or(v.seen, seen)),
-        Surface::Terminal => ed.session.terminal.as_ref().is_some_and(|t| t.came()),
-    };
     Some(serde_json::json!({
-        "surface": v.surface.name(),
+        "surface": Surface::Terminal.name(),
         "line": line + 1,
         "lines": v.rows(),
         "selections": d.selection().ranges().len(),
         "selects": v.selects(),
-        "mode": if v.mode == Mode::Select { "select" } else { "normal" },
-        "held": held,
+        "mode": if v.keys.mode == Mode::Select { "select" } else { "normal" },
+        "held": ed.session.terminal.as_ref().is_some_and(|t| t.came()),
     }))
 }

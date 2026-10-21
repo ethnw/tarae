@@ -319,6 +319,9 @@ pub struct ChatRow {
     pub skip: usize,
     pub join: Option<bool>,
     pub rest: Option<std::sync::Arc<str>>,
+    /// Its last characters that aren't the text's either — a change's stamps, the writing caret, a folded
+    /// thought's `…` (`chatdoc.rs` leaves them out of the transcript's document).
+    pub tail: usize,
 }
 
 /// What goes with the input's next message, each kind in the order added (`Chat.with`).
@@ -399,9 +402,8 @@ struct Proc {
 
 pub struct Chat {
     pub msgs: Vec<Msg>,
-    pub input: String,
-    /// Cursor within the input (bytes).
-    pub cursor: usize,
+    /// What's being typed: a small document in insert mode (`chatinput.rs`).
+    pub input: crate::chatinput::Input,
     pub state: State,
     pub started: Instant,
     /// How many lines scrolled up from the bottom (0 = follow the bottom).
@@ -509,12 +511,12 @@ pub struct Chat {
     /// runs, then what wrote its latest answer (empty after `:model` until the next answer says).
     pub models: Vec<crate::llm::ModelInfo>,
     pub model: String,
-    /// Where its view mode was last left, in this conversation: a message and a row of it (`view.rs` lands
-    /// there next time).
-    pub view_at: Option<(usize, usize)>,
     /// Its view mode was asked for before its rows were laid out (closed, minimized): made after the next frame
-    /// (`view::wanted`).
+    /// (`chatdoc::wanted`).
     pub view_wanted: bool,
+    /// The conversation as a read-only document, following what the frames lay out (`chatdoc.rs`) — its view mode is
+    /// normal mode on it, its selection where you were. None until the chat is first drawn.
+    pub transcript: Option<crate::chatdoc::Transcript>,
     /// Its tool calls this turn whose result hasn't come yet, in the order claude made them (#87: claude
     /// makes them one after another, so what comes after a run card waits on it unseen).
     pub calls: Vec<Called>,
@@ -817,8 +819,7 @@ impl Chat {
     pub(crate) fn new() -> Self {
         Chat {
             msgs: Vec::new(),
-            input: String::new(),
-            cursor: 0,
+            input: Default::default(),
             state: State::Idle,
             started: Instant::now(),
             scroll: 0,
@@ -855,8 +856,8 @@ impl Chat {
             queued_quotes: Vec::new(),
             queued_screen: None,
             queued_pointed: Vec::new(),
-            view_at: None,
             view_wanted: false,
+            transcript: None,
             sends: Vec::new(),
             hosts_next: Vec::new(),
             screen: None,
@@ -1190,7 +1191,7 @@ fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
         crate::hosts::chat_ended(ed);
     }
     // (a view mode — `C-p` picks from it — was of the conversation left: it goes)
-    crate::view::forget(ed);
+    crate::chatdoc::forget(ed);
     let Some(c) = &mut ed.session.chat else { return };
     if other {
         c.conversation_left();
@@ -1205,7 +1206,6 @@ fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
     c.conversation = Some(saved.id.clone());
     c.resume = Some(saved.id.clone());
     c.scroll = 0;
-    c.view_at = None;
     c.follow.new_turn();
     // (its turns, cost so far and cache, as far as they were kept)
     match &saved.usage {
@@ -1297,8 +1297,7 @@ pub const RESTARTED: &str = "tarae restarted — same conversation";
 pub fn restore(ed: &mut Editor, r: Restored) {
     let mut c = Chat::new();
     c.follow.on = r.follow;
-    c.cursor = if r.input.is_char_boundary(r.cursor) { r.cursor } else { r.input.len() };
-    c.input = r.input;
+    c.input.set_at(&r.input, r.cursor);
     c.edits.at_end = r.at_end;
     c.edits.at_end_yours = r.at_end_yours;
     ed.session.chat = Some(c);
@@ -1401,7 +1400,7 @@ pub fn reset(ed: &mut Editor) {
     // while a session has one conversation at a time)
     crate::hosts::chat_ended(ed);
     // (its view mode — `C-l` is one of its chords — was the conversation that goes: it goes with it)
-    crate::view::forget(ed);
+    crate::chatdoc::forget(ed);
     let Some(c) = &mut ed.session.chat else {
         open(ed);
         if let Some(c) = &mut ed.session.chat {
@@ -1425,7 +1424,6 @@ pub fn reset(ed: &mut Editor) {
     c.state = State::Idle;
     c.scroll = 0;
     c.follow.new_turn();
-    c.view_at = None;
     c.conversation = None;
     c.resume = None;
     c.switched = None;
@@ -2392,7 +2390,7 @@ fn hold_queued(ed: &mut Editor) {
 /// user's answer on a card their pointing raised (`reads::point`), said, the input kept.
 pub fn send(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
-    let question = c.input.trim().to_string();
+    let question = c.input.text().trim().to_string();
     // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
     // one joins it. So it does while the project's settings are read (`claudetrust.rs` — their card doesn't
     // hold it: claude runs held back meanwhile): sent once it starts
@@ -2415,7 +2413,6 @@ pub fn send(ed: &mut Editor) {
         c.with = std::iter::repeat_n(With::Quote, left).collect();
         c.queue(question, false);
         c.input.clear();
-        c.cursor = 0;
         if left > 0 {
             ed.set_status(format!(
                 "{} stay over the input for the next message — the queued one carries {} quotes, {} KB at most",
@@ -2442,7 +2439,6 @@ pub fn send(ed: &mut Editor) {
     if !question.is_empty() && submit_input(ed, &question) {
         let c = ed.session.chat.as_mut().expect("just sent");
         c.input.clear();
-        c.cursor = 0;
     }
 }
 
@@ -3291,8 +3287,7 @@ pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
     c.unfolded = true;
     match key.code {
         Code::Char(x) if !key.ctrl && !key.alt && !x.is_whitespace() => {
-            c.input.insert(c.cursor, x);
-            c.cursor += x.len_utf8();
+            c.input.insert_str(x.encode_utf8(&mut [0; 4]))
         }
         _ => {
             ed.set_status(format!("{key} brought the chat back — it wasn't typed; its input is in sight now"))
@@ -3312,8 +3307,9 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if !ed.pending.is_empty() {
         return false;
     }
-    // (its view mode has the keys — what reaches here is the chat's chords, and `C-w`: the windows')
-    if crate::view::chat_view_of(ed).is_some() && !crate::view::chat_chord(ed, key) {
+    // (its view mode has the keys — what reaches here is the chat's chords, and `C-w`: the windows'; a prompt it
+    // let up — `:` — takes them all)
+    if crate::chatdoc::keyed(ed) && (ed.prompt.is_some() || !crate::chatdoc::chat_chord(ed, key)) {
         return false;
     }
     let page = page(ed);
@@ -3321,31 +3317,28 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if !ed.session.is_at(At::Chat) {
         return false;
     }
+    // (a sequence of the input's under way: the key goes on with it, or what it typed goes in before the key)
+    if !crate::chatdoc::keyed(ed) && crate::chatinput::under_way(ed, key) {
+        return crate::chatinput::key(ed, key);
+    }
     let Some(c) = ed.session.chat.as_mut() else { return false };
     // An empty input: `C-w` is the windows' (sizes — `C-w >` widens the chat), nothing to delete
     if key.ctrl && key.code == Code::Char('w') && c.input.is_empty() {
         return false;
     }
-    // The input's rows of the keymap (`[chat]` — `esc` to its view mode) before what it types
-    if let Some(crate::keymap::KeyTrie::Leaf(cmds)) = ed.keymaps.chat.search(&[key]) {
-        let cmds = cmds.clone();
-        ed.run(&cmds, None);
-        return true;
+    // The input's rows of the keymap (`[chat]` — `esc` to its view mode, a line's ends) before the chat's own keys:
+    // run on its document
+    if ed.keymaps.chat.search(&[key]).is_some() {
+        return crate::chatinput::key(ed, key);
     }
-    let ch = |c: &Chat| c.input[..c.cursor].chars().next_back().map_or(0, char::len_utf8);
     match (key.code, key.ctrl, key.alt) {
         (Code::Esc, ..) => ed.session.at = At::Code,
-        (Code::Enter, false, true) | (Code::Char('j'), true, _) => {
-            c.input.insert(c.cursor, '\n');
-            c.cursor += 1;
-        }
         (Code::Enter, ..) => send(ed),
         (Code::Char('c'), true, _) => {
             if c.busy() {
                 stop(ed);
             } else {
                 c.input.clear();
-                c.cursor = 0;
             }
         }
         (Code::Char('l'), true, _) => reset(ed),
@@ -3382,30 +3375,6 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         // clears up to the cursor, as readline's; `↑` scrolls only from an empty input too)
         (Code::Char('d'), true, _) => c.scroll = c.scroll.saturating_sub(half),
         (Code::Char('u'), true, _) if c.input.is_empty() => c.scroll += half,
-        (Code::Char('u'), true, _) => {
-            c.input.drain(..c.cursor);
-            c.cursor = 0;
-        }
-        (Code::Char('w'), true, _) => {
-            let before = &c.input[..c.cursor];
-            let trimmed = before.trim_end();
-            let start = trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1);
-            c.input.drain(start..c.cursor);
-            c.cursor = start;
-        }
-        (Code::Char('a'), true, _) | (Code::Home, ..) => c.cursor = 0,
-        (Code::Char('e'), true, _) | (Code::End, ..) => c.cursor = c.input.len(),
-        (Code::Left, ..) => c.cursor -= ch(c),
-        (Code::Right, ..) => c.cursor += c.input[c.cursor..].chars().next().map_or(0, char::len_utf8),
-        (Code::Backspace, ..) => {
-            let n = ch(c);
-            c.input.drain(c.cursor - n..c.cursor);
-            c.cursor -= n;
-        }
-        (Code::Delete, ..) if c.cursor < c.input.len() => {
-            let n = c.input[c.cursor..].chars().next().map_or(0, char::len_utf8);
-            c.input.drain(c.cursor..c.cursor + n);
-        }
         // (its quotes and those quoted since past one message's limits: none is lost — said, the way to make room)
         (Code::Up, ..)
             if c.input.is_empty()
@@ -3422,9 +3391,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         }
         // The queued message back to edit — or drop (#23): it's out of the queue while it's in the input
         (Code::Up, ..) if c.input.is_empty() && c.queued.is_some() => {
-            c.input = c.queued.take().unwrap_or_default();
+            c.input.set(&c.queued.take().unwrap_or_default());
             c.queued_gone();
-            c.cursor = c.input.len();
             // (its quotes over the input again, ahead of those quoted since — which keep their places among the
             // screen and what's pointed at; they all fit, the arm above said)
             let mut own = std::mem::take(&mut c.queued_quotes);
@@ -3456,18 +3424,14 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         }
         // Tab in an empty chat = cycles through example questions
         (Code::Tab, ..) if c.msgs.is_empty() => {
+            let typed = c.input.text();
             let next =
-                SUGGESTIONS.iter().position(|s| *s == c.input).map_or(0, |i| (i + 1) % SUGGESTIONS.len());
-            c.input = SUGGESTIONS[next].to_string();
-            c.cursor = c.input.len();
+                SUGGESTIONS.iter().position(|s| *s == typed).map_or(0, |i| (i + 1) % SUGGESTIONS.len());
+            c.input.set(SUGGESTIONS[next]);
         }
-        (Code::Char(x), false, false) => {
-            c.input.insert(c.cursor, x);
-            c.cursor += x.len_utf8();
-        }
-        // (a `C-`/`A-` key the chat has no use for: said, not dropped — the keys stay the chat's)
-        (Code::Char(_), ..) => ed.key_unused(key, "the chat", "esc code"),
-        _ => {}
+        // (the rest is its document's: insert mode's keys — what they don't bind typed, a `C-`/`A-` key nothing
+        // binds said)
+        _ => return crate::chatinput::key(ed, key),
     }
     true
 }
@@ -3846,10 +3810,10 @@ mod tests {
         assert_eq!(scroll(&ed), 18, "a page");
         press(&mut ed, "pagedown");
         let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.cursor) = ("draft".into(), 5);
+        c.input.set("draft");
         press(&mut ed, "C-u");
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.input.as_str(), c.scroll), ("", 6), "with text: cleared, not scrolled");
+        assert_eq!((c.input.text().as_str(), c.scroll), ("", 6), "with text: cleared, not scrolled");
         press(&mut ed, "C-d");
         assert_eq!(scroll(&ed), 0);
     }
@@ -4459,7 +4423,7 @@ mod tests {
         ed.config.llm.args = vec!["-c".into(), script];
         open(&mut ed);
         let question = format!("{}\nend of the question", "x".repeat(200 * 1024));
-        ed.session.chat.as_mut().unwrap().input = question;
+        ed.session.chat.as_mut().unwrap().input.set(&question);
         let t = Instant::now();
         send(&mut ed);
         let took = t.elapsed();

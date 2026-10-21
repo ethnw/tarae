@@ -1043,14 +1043,14 @@ impl Editor {
             // (git's own words, its `error:`/`fatal:` lines — #188: "the task panel says why" sent you looking)
             Ended::Failed => {
                 self.session.rebase = None;
-                let why: Vec<&str> = self
+                let why: Vec<String> = self
                     .session
                     .task_run
                     .as_ref()
                     .filter(|t| t.generation() == generation)
-                    .map(|t| t.output.iter().map(|(_, l)| l.trim()).collect())
+                    .map(|t| t.output.iter().map(|(_, l)| l.trim().to_string()).collect())
                     .unwrap_or_default();
-                let why: Vec<&str> = why
+                let why: Vec<String> = why
                     .into_iter()
                     .filter(|l| l.starts_with("error:") || l.starts_with("fatal:"))
                     .take(2)

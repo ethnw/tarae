@@ -29,7 +29,6 @@ fn card(ed: &mut Editor, title: &str) -> u64 {
 fn chat(ed: &mut Editor, draft: &str) {
     let mut c = crate::chat::Chat::new();
     c.input = draft.into();
-    c.cursor = draft.len();
     ed.session.chat = Some(c);
     ed.session.at = crate::session::At::Chat;
 }

@@ -1,5 +1,5 @@
-//! View mode on the chat: keys in sequence, each followed by a frame (the conversation's document is what the
-//! last frame laid out — as on screen).
+//! The chat's view mode — normal mode on its transcript: keys in sequence, each followed by a frame (the transcript
+//! follows what the frame laid out — as on screen).
 
 use super::*;
 use crate::chat::{Chat, Msg, Role};
@@ -31,7 +31,6 @@ fn chat_with(config: Config, msgs: Vec<Msg>) -> Editor {
     let mut c = Chat::new();
     c.msgs = msgs;
     c.input = "a draft".into();
-    c.cursor = c.input.len();
     ed.session.chat = Some(c);
     ed.session.at = crate::session::At::Chat;
     frame(&mut ed);
@@ -78,13 +77,27 @@ fn feed(ed: &mut Editor, keys: &str) {
     }
 }
 
-fn view(ed: &Editor) -> &View {
-    chat_view_of(ed).expect("in the chat's view mode")
+fn view(ed: &Editor) -> &Transcript {
+    assert!(has_keys(ed), "in the chat's view mode");
+    transcript(ed).expect("its transcript")
+}
+
+fn doc(ed: &Editor) -> &Document {
+    view(ed).pane.doc()
+}
+
+/// The row of the transcript its cursor is on.
+fn cursor_row(ed: &Editor) -> usize {
+    let d = doc(ed);
+    let g = d.rows.as_deref().unwrap();
+    let c = d.selection().primary().cursor(&d.text);
+    let line = mv::line_of(&d.text, c);
+    g.index(line, crate::wrap::row_of(g.of(line), c))
 }
 
 /// The view's cursor line's text, and what's selected.
 fn at(ed: &Editor) -> (String, String) {
-    let d = view(ed).doc();
+    let d = doc(ed);
     let r = d.selection().primary();
     let line = mv::line_of(&d.text, r.cursor(&d.text));
     let l = d.text.line(line).to_string();
@@ -118,23 +131,23 @@ fn a_view_modes_search_is_its_own_and_the_codes_stays_the_codes() {
     assert_eq!(region(&ed), "view:chat");
     // Typing: the view's rows previewed, the code's untouched
     feed(&mut ed, "/need");
-    assert_eq!(view(&ed).hits().map(|h| (h.pattern.as_str(), h.matches.len())), Some(("need", 2)));
+    assert_eq!(view(&ed).pane.hits().map(|h| (h.pattern.as_str(), h.matches.len())), Some(("need", 2)));
     assert_eq!(code_search(&ed), before, "the code's search while the view's is typed");
     assert_eq!(ed.doc().selection().primary(), code_sel);
     feed(&mut ed, "le<ret>");
     assert_eq!(at(&ed).1, "needle", "the view's selection on its match");
-    let first = view(&ed).doc().selection().primary();
-    assert_eq!(view(&ed).hits().map(|h| h.matches.len()), Some(2), "its matches shown there");
+    let first = doc(&ed).selection().primary();
+    assert_eq!(view(&ed).pane.hits().map(|h| h.matches.len()), Some(2), "its matches shown there");
     assert_eq!(code_search(&ed), before, "the code's search after the view's");
     // `n`: the view's next match — the code's selection where it was
     feed(&mut ed, "n");
     assert_eq!(at(&ed).1, "needle");
-    assert_ne!(view(&ed).doc().selection().primary(), first, "n moved in the view");
+    assert_ne!(doc(&ed).selection().primary(), first, "n moved in the view");
     assert_eq!((ed.doc().selection().primary(), code_search(&ed)), (code_sel, before.clone()));
     // `esc`: the selection collapses, the view's matches go — the code's stay
     feed(&mut ed, "<esc>");
     assert_eq!(region(&ed), "view:chat");
-    assert!(view(&ed).hits().is_none(), "the view's matches unshown");
+    assert!(view(&ed).pane.hits().is_none(), "the view's matches unshown");
     assert_eq!(code_search(&ed), before, "the code's highlights stay");
     // The other way round: back in the code (the view's `esc` with nothing selected), `n` is the code's search
     feed(&mut ed, "<esc>");
@@ -144,14 +157,10 @@ fn a_view_modes_search_is_its_own_and_the_codes_stays_the_codes() {
     let r = d.selection().primary();
     assert_eq!(d.text.byte_slice(r.from()..r.to()).to_string(), "code", "the code's n: its own pattern");
     assert_ne!(r, code_sel, "n moved in the code");
-    // …and a view made again has a search of its own: none yet, said — never the code's
+    // …and back in the view, its `n` is its own search, kept with it — never the code's
     ed.session.at = crate::session::At::Chat;
-    feed(&mut ed, "<esc>");
-    let was = view(&ed).doc().selection().primary();
-    feed(&mut ed, "n");
-    assert_eq!(view(&ed).doc().selection().primary(), was, "nothing to repeat in the view");
-    let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
-    assert!(said.contains("no previous search"), "{said}");
+    feed(&mut ed, "<esc>n");
+    assert_eq!(at(&ed).1, "needle", "the view's own pattern");
     assert_eq!(code_search(&ed), (Some("code".into()), true, Some(("code".into(), 2))));
 }
 
@@ -162,7 +171,6 @@ fn a_view_modes_search_is_its_own_and_the_codes_stays_the_codes() {
 fn c_w_h_from_the_chats_input_goes_to_the_code_on_its_left() {
     let mut ed = editor();
     ed.session.chat.as_mut().unwrap().input.clear();
-    ed.session.chat.as_mut().unwrap().cursor = 0;
     assert_eq!(region(&ed), "chat");
     feed(&mut ed, "<C-w>h");
     assert_eq!(region(&ed), "code", "the code, on the chat's left");
@@ -222,22 +230,31 @@ fn c_w_h_from_the_chats_input_goes_to_the_code_on_its_left() {
 }
 
 /// `esc` from the chat's input: its view mode, the draft kept, the keys the view's (`view:chat`, the status
-/// line's `● view · chat`); `i`, `a`, `enter` each back to the input with the draft as it was.
+/// line's `● normal · chat` — normal mode on its document, said as a run's output says it; the input's hint
+/// `esc normal`); `i`, `a`, `enter` each back to the input with the draft as it was.
 #[test]
 fn esc_from_the_input_views_the_conversation_and_i_types_again() {
     for back in ["i", "a", "<ret>"] {
         let mut ed = editor();
+        let shown = frame(&mut ed);
+        assert!(shown.contains("esc normal"), "the input's hint names where esc goes:\n{shown}");
         feed(&mut ed, "<esc>");
         assert_eq!(region(&ed), "view:chat");
         let shown = frame(&mut ed);
         let status = shown.lines().last().unwrap_or_default().to_string();
-        assert!(status.contains("view · chat"), "the status line: {status}");
-        assert!(shown.contains("● view"), "the chat's title says it:\n{shown}");
+        assert!(status.contains("● normal · chat "), "the status line: {status}");
+        assert!(shown.contains("claude ● normal"), "the chat's title says it:\n{shown}");
+        let title = shown.lines().find(|l| l.contains("claude ●")).unwrap_or_default();
+        assert!(!(title.contains("view") || status.contains("view")), "no other word for it:\n{shown}");
         feed(&mut ed, back);
         assert_eq!(region(&ed), "chat", "{back}: the input again");
-        assert!(ed.session.view.is_none(), "{back}: the view is gone");
+        assert!(!keyed(&ed), "{back}: the view is gone");
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.input.as_str(), c.cursor), ("a draft", 7), "{back}: the draft as it was");
+        assert_eq!(
+            (c.input.text().as_str(), c.input.cursor()),
+            ("a draft", 7),
+            "{back}: the draft as it was"
+        );
     }
 }
 
@@ -248,7 +265,7 @@ fn it_lands_on_the_last_answer_then_where_you_were() {
     feed(&mut ed, "<esc>");
     assert_eq!(at(&ed).0, "The latest answer starts here.");
     feed(&mut ed, "gg");
-    let d = view(&ed).doc();
+    let d = doc(&ed);
     assert_eq!(mv::line_of(&d.text, d.selection().primary().head), 0, "gg: the first row");
     assert!(at(&ed).0.ends_with("why does insert clone the name?"), "the question's row: {:?}", at(&ed));
     // (the first needle after it: the first answer's)
@@ -277,40 +294,41 @@ fn moves_and_selections_run_on_the_transcript_never_the_code() {
     feed(&mut ed, "x");
     assert_eq!(at(&ed).1, "The latest answer starts here.\n");
     feed(&mut ed, "ggvj");
-    assert_eq!(view(&ed).mode(), Mode::Select);
-    assert!(frame(&mut ed).lines().last().unwrap_or_default().contains("view · chat · select"));
+    assert_eq!(view(&ed).pane.keys.mode, Mode::Select);
+    let shown = frame(&mut ed);
+    assert!(shown.lines().last().unwrap_or_default().contains("● select · chat "), "{shown}");
+    assert!(shown.contains("claude ● select"), "the chat's title too:\n{shown}");
     feed(&mut ed, "<esc>");
-    assert_eq!(view(&ed).mode(), Mode::Normal, "esc ends `v`, the view stays");
-    assert!(chat_view_of(&ed).is_some());
+    assert_eq!(view(&ed).pane.keys.mode, Mode::Normal, "esc ends `v`, the view stays");
+    assert!(has_keys(&ed));
     feed(&mut ed, "3j");
-    assert_eq!(mv::line_of(&view(&ed).doc().text, view(&ed).doc().selection().primary().head), 4);
+    assert_eq!(mv::line_of(&doc(&ed).text, doc(&ed).selection().primary().head), 4);
     feed(&mut ed, "%sneedle<ret>");
-    assert_eq!(view(&ed).doc().selection().ranges().len(), 2, "two needles, two selections");
+    assert_eq!(doc(&ed).selection().ranges().len(), 2, "two needles, two selections");
     assert_eq!(ed.mode, Mode::Normal, "the code's mode is its own");
     assert_eq!(ed.doc().selection(), &code_sel, "the code's selection untouched");
     assert_eq!(ed.doc().text.to_string(), "fn main() {}\nlet code = 1;\n");
 }
 
-/// What view mode has no use for — an edit, the space menu's acts on the code (`space x` — view mode's own
-/// `space` has only what it has of them), `:` — is said, the transcript as it was.
+/// The transcript is read-only: an edit, a paste, typing — put back and said, with the ways on; the view stays.
+/// `space` is the editor's menu, `:` the editor's command line (as from every pane).
 #[test]
-fn an_edit_or_a_menu_is_said_not_done() {
+fn an_edit_is_put_back_and_said() {
     let mut ed = editor();
     feed(&mut ed, "<esc>");
-    let text = view(&ed).doc().text.to_string();
-    for k in ["d", "<space>x", ":", "p", "u", "o"] {
+    let text = doc(&ed).text.to_string();
+    for k in ["d", "c", "o", "A"] {
         ed.status = None;
         feed(&mut ed, k);
         let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-        assert!(
-            said.contains("isn't in view mode")
-                && said.contains("i types")
-                && said.contains("esc to the code"),
-            "{k:?}: {said}"
-        );
-        assert_eq!(view(&ed).doc().text.to_string(), text, "{k:?}");
-        assert!(ed.picker.is_none() && ed.prompt.is_none(), "{k:?} opened nothing");
+        assert_eq!(said, "the conversation is read-only — i types, esc code", "{k:?}");
+        assert_eq!(doc(&ed).text.to_string(), text, "{k:?}");
+        assert_eq!((region(&ed), view(&ed).pane.keys.mode), ("view:chat".into(), Mode::Normal), "{k:?}");
     }
+    feed(&mut ed, "<space>");
+    assert!(view(&ed).pane.keys.pending.len() == 1, "space: a menu under way");
+    feed(&mut ed, "<esc>:");
+    assert!(ed.prompt.is_some() && !view(&ed).pane.prompt, "the editor's command line");
 }
 
 /// `esc` collapses a selection first, the view kept; with none, the keys go to the code.
@@ -318,42 +336,42 @@ fn an_edit_or_a_menu_is_said_not_done() {
 fn esc_collapses_then_leaves() {
     let mut ed = editor();
     feed(&mut ed, "<esc>xx");
-    assert!(view(&ed).selects());
+    assert!(view(&ed).pane.selects());
     feed(&mut ed, "<esc>");
-    assert!(!view(&ed).selects(), "collapsed");
+    assert!(!view(&ed).pane.selects(), "collapsed");
     assert_eq!(region(&ed), "view:chat");
     feed(&mut ed, "<esc>");
     assert_eq!(region(&ed), "code");
-    assert!(ed.session.view.is_none());
+    assert!(!keyed(&ed));
     assert_eq!(ed.session.chat.as_ref().unwrap().input, "a draft");
 }
 
-/// The arrows: `↑`/`↓` a line of the view (the cursor carried at the edge), `←`/`→` a page back and on.
+/// The arrows: `↑`/`↓` a row of the view (the cursor carried at the edge), `←`/`→` a page back and on — by the
+/// rows drawn, a paragraph's each its own.
 #[test]
-fn the_arrows_scroll_a_line_and_a_page() {
+fn the_arrows_scroll_a_row_and_a_page() {
     let mut ed = chat_with(Config::default(), long());
     feed(&mut ed, "<esc>");
-    let top = view(&ed).doc().top;
+    let top = view(&ed).top_row();
     feed(&mut ed, "<up>");
-    assert_eq!(view(&ed).doc().top, top - 1, "a line up");
+    assert_eq!(view(&ed).top_row(), top - 1, "a row up");
     feed(&mut ed, "<down>");
-    assert_eq!(view(&ed).doc().top, top);
-    let line = |ed: &Editor| mv::line_of(&view(ed).doc().text, view(ed).doc().selection().primary().head);
-    let before = line(&ed);
+    assert_eq!(view(&ed).top_row(), top);
+    let before = cursor_row(&ed);
     feed(&mut ed, "<left>");
     let rows = ed.screen.chat_view.get().unwrap().2;
-    assert_eq!(before - line(&ed), rows, "a page back");
+    assert_eq!(before - cursor_row(&ed), rows, "a page back");
     feed(&mut ed, "<right>");
-    assert_eq!(line(&ed), before, "a page on");
+    assert_eq!(cursor_row(&ed), before, "a page on");
 }
 
-/// It holds still: Claude's text arriving doesn't move it, the title says something came; `G` catches up, on
-/// the latest line.
+/// It holds still: Claude's text arriving is appended below what's in sight — the rows in sight and the cursor
+/// don't move — the title says something came; `G` catches up, on the latest line.
 #[test]
 fn it_holds_still_until_g_catches_up() {
-    let mut ed = editor();
+    let mut ed = chat_with(Config::default(), long());
     feed(&mut ed, "<esc>gg");
-    let rows = view(&ed).rows();
+    let (rows, at) = (view(&ed).rows(), doc(&ed).selection().clone());
     let shown = frame(&mut ed);
     assert!(!shown.contains("new text after"));
     let c = ed.session.chat.as_mut().unwrap();
@@ -362,15 +380,15 @@ fn it_holds_still_until_g_catches_up() {
     let shown = frame(&mut ed);
     assert!(shown.contains("new text after"), "said:\n{shown}");
     assert!(!shown.contains("A brand new answer."), "held still:\n{shown}");
-    assert_eq!(view(&ed).rows(), rows);
+    assert_eq!((view(&ed).top_row(), doc(&ed).selection()), (0, &at), "nothing moved");
+    assert!(view(&ed).rows() > rows, "what came is in it, below");
     feed(&mut ed, "G");
-    assert!(view(&ed).rows() > rows, "made again from what came");
     let shown = frame(&mut ed);
     assert!(
         shown.contains("A brand new answer.") && !shown.contains("new text after"),
         "caught up:\n{shown}"
     );
-    let d = view(&ed).doc();
+    let d = doc(&ed);
     assert_eq!(
         mv::line_of(&d.text, d.selection().primary().head),
         mv::last_line(&d.text),
@@ -378,22 +396,69 @@ fn it_holds_still_until_g_catches_up() {
     );
     // (a count: that line, as `goto_line`)
     feed(&mut ed, "2G");
-    assert_eq!(mv::line_of(&view(&ed).doc().text, view(&ed).doc().selection().primary().head), 1);
+    assert_eq!(mv::line_of(&doc(&ed).text, doc(&ed).selection().primary().head), 1);
 }
 
-/// `y` copies what's selected to the clipboard: the rows as drawn, a line each.
+/// What arrives never takes the selection along: `x` on the paragraph being written keeps those bytes while words come
+/// at its end, and when a message comes after it; a cursor on its line break keeps its cell, the words going on under
+/// and after it.
 #[test]
-fn y_copies_the_rows_as_drawn() {
-    let mut ed = editor();
-    feed(&mut ed, "<esc>xy");
+fn what_arrives_never_takes_the_selection_along() {
+    let mut msgs = convo();
+    msgs.pop();
+    let mut ed = chat_with(Config::default(), msgs);
+    feed(&mut ed, "<esc>Gx");
+    assert_eq!(at(&ed).1, "Its end, with another needle.\n");
+    let arrive = |ed: &mut Editor, f: &dyn Fn(&mut Chat)| {
+        let (sel, row) = (doc(ed).selection().clone(), cursor_row(ed));
+        f(ed.session.chat.as_mut().unwrap());
+        frame(ed);
+        assert_eq!((doc(ed).selection(), cursor_row(ed)), (&sel, row), "nothing moved");
+    };
+    let words = |c: &mut Chat| {
+        let m = c.msgs.last_mut().unwrap();
+        m.text.push_str(" More words came.");
+        m.changed();
+    };
+    arrive(&mut ed, &words);
+    let line = "Its end, with another needle. More words came.";
+    assert_eq!(at(&ed), (line.into(), "Its end, with another needle. ".into()));
+    // (a cursor on the line break: what comes there goes under it)
+    let under = |ed: &Editor| {
+        let d = doc(ed);
+        let c = d.selection().primary().cursor(&d.text);
+        d.text.byte_slice(c..crate::graphemes::next_boundary(&d.text, c)).to_string()
+    };
+    feed(&mut ed, "x;");
+    assert_eq!(under(&ed), "\n");
+    arrive(&mut ed, &words);
+    assert_eq!(under(&ed), " ", "the first word's space under it now");
+    feed(&mut ed, "x");
+    arrive(&mut ed, &|c| c.msgs.push(Msg::new(Role::User, "and then?", "")));
+}
+
+/// `y` copies what's selected as written: a paragraph the chat wrapped over several rows is one line — no
+/// hanging indent, no row breaks — to the clipboard and to `"`.
+#[test]
+fn y_copies_the_text_as_written() {
+    let para = "The name is cloned because insert takes the key by value, and first moves into the map in the \
+                same call; keying by the name alone means a second strand with the same name replaces the first.";
+    let msgs = vec![
+        Msg::new(Role::User, "why does insert clone the name?", ""),
+        Msg::new(Role::Assistant, para, ""),
+    ];
+    let mut ed = chat_with(Config::default(), msgs);
+    feed(&mut ed, "<esc>");
+    let d = doc(&ed);
+    let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
+    assert!(d.rows.as_deref().unwrap().of(line).len() > 2, "the paragraph drawn over several rows");
+    feed(&mut ed, "xy");
     let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the copy's result");
     ed.handle_event(ev);
-    assert!(crate::clipboard::written("The latest answer starts here.\n"));
+    let want = format!("{para}\n");
+    assert!(crate::clipboard::written(&want), "the paragraph, one line");
     // (and to `"`: `p` in the code pastes it too)
-    assert_eq!(
-        ed.registers.get(&'"').map(Vec::as_slice),
-        Some(&["The latest answer starts here.\n".to_string()][..])
-    );
+    assert_eq!(ed.registers.get(&'"').map(Vec::as_slice), Some(&[want][..]));
     assert_eq!(region(&ed), "view:chat");
 }
 
@@ -419,10 +484,10 @@ fn the_wheel_enters_view_mode_and_leaves_it_at_the_end() {
     };
     wheel(&mut ed, crate::event::MouseKind::ScrollUp);
     assert_eq!(region(&ed), "view:chat");
-    assert_eq!(view(&ed).doc().top, first - 3, "scrolled as the wheel took it");
+    assert_eq!(view(&ed).top_row(), first - 3, "scrolled as the wheel took it");
     assert!(rows > 5);
     wheel(&mut ed, crate::event::MouseKind::ScrollDown);
-    assert!(ed.session.view.is_none(), "back at the end: done reading");
+    assert!(!keyed(&ed), "back at the end: done reading");
     assert_eq!(region(&ed), "code", "the keys where they were");
     // (entered by a key, it stays)
     ed.session.at = crate::session::At::Chat;
@@ -448,7 +513,7 @@ fn your_keys_remap_view_mode_and_its_hints() {
     assert_eq!(at(&ed).1, "answer", "normal's `w`, remapped, in view mode too");
     // (`left` remapped to `page_down`: from the first row, a page on — the default would stay at the top)
     feed(&mut ed, "gg<left>");
-    let d = view(&ed).doc();
+    let d = doc(&ed);
     let rows = ed.screen.chat_view.get().unwrap().2;
     assert_eq!(mv::line_of(&d.text, d.selection().primary().head), rows, "left pages on");
     assert!(d.top > 0, "the view went with it");
@@ -492,6 +557,10 @@ fn the_chats_chords_work_in_view_mode() {
     );
     frame(&mut ed);
     assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some("no code block in the last answer"));
+    assert_eq!(region(&ed), "view:chat");
+    // (normal mode's `C-s` saves a selection: in the conversation it's the chat's — the screen attached)
+    feed(&mut ed, "<C-s>");
+    assert!(ed.session.chat.as_ref().unwrap().screen.is_some(), "the screen attached");
     assert_eq!(region(&ed), "view:chat");
     feed(&mut ed, "<C-w>z");
     assert_eq!(ed.zoomed_shows(), Some(crate::pane::Shows::Chat));
@@ -549,7 +618,7 @@ fn an_empty_conversation_has_nothing_to_view() {
         y: (y0 + 2) as u16,
         alt: false,
     });
-    assert!(ed.session.view.is_none(), "the wheel: nothing to view");
+    assert!(!keyed(&ed), "the wheel: nothing to view");
 }
 
 /// `q` leaves as `esc` does (tmux's copy mode, less) — a selection collapsing first.
@@ -568,7 +637,7 @@ fn q_leaves_view_mode_as_esc_does() {
 fn leaving_keeps_the_rows_you_read_when_text_came_after() {
     let mut ed = chat_with(Config::default(), long());
     feed(&mut ed, "<esc><up><up><up>");
-    let (top, held) = (view(&ed).doc().top, view(&ed).rows());
+    let (top, held) = (view(&ed).top_row(), view(&ed).rows());
     assert!(top > 0);
     let c = ed.session.chat.as_mut().unwrap();
     for i in 0..6 {
@@ -576,7 +645,7 @@ fn leaving_keeps_the_rows_you_read_when_text_came_after() {
     }
     assert!(frame(&mut ed).contains("new text after"));
     feed(&mut ed, "<esc>");
-    assert!(ed.session.view.is_none(), "left");
+    assert!(!keyed(&ed), "left");
     let first = ed.screen.chat_view.get().unwrap().3;
     assert_eq!(first, top, "the row on top before is on top now");
     let total: usize = ed.screen.chat_laid.borrow().iter().map(|(_, r)| r.len()).sum();
@@ -596,8 +665,8 @@ fn another_conversation_ends_the_view_and_keeps_nothing_of_it() {
     };
     let mut ed = editor();
     feed(&mut ed, "<esc>gg<C-l>");
-    assert!(ed.session.view.is_none(), "C-l: the view went");
-    assert_eq!(ed.session.chat.as_ref().unwrap().view_at, None);
+    assert!(!keyed(&ed), "C-l: the view went");
+    assert!(!transcript(&ed).unwrap().visited, "where it was is forgotten");
     assert_eq!(region(&ed), "chat");
     let mut ed = editor();
     feed(&mut ed, "<esc>gg");
@@ -612,8 +681,8 @@ fn another_conversation_ends_the_view_and_keeps_nothing_of_it() {
     };
     crate::chat::continue_with(&mut ed, saved);
     frame(&mut ed);
-    assert!(ed.session.view.is_none(), "C-p's pick: the view went");
-    assert_eq!(ed.session.chat.as_ref().unwrap().view_at, None);
+    assert!(!keyed(&ed), "C-p's pick: the view went");
+    assert!(!transcript(&ed).unwrap().visited, "where it was is forgotten");
 }
 
 /// A session switch ends the view mode in front — its prompt (`/`) closed, nothing of it riding into the session
@@ -626,12 +695,13 @@ fn a_session_switch_ends_the_view_and_its_prompt() {
     assert!(ed.session_switch(0));
     frame(&mut ed);
     feed(&mut ed, "<esc>gg/need");
-    assert!(ed.prompt.is_some() && view(&ed).prompt, "its search prompt up");
+    assert!(ed.prompt.is_some() && view(&ed).pane.prompt, "its search prompt up");
     assert!(ed.session_switch(id));
     assert!(ed.prompt.is_none(), "its prompt closed");
-    assert!(ed.session.view.is_none() && ed.sessions.iter().all(|s| s.view.is_none()), "no view anywhere");
     let behind = ed.sessions.iter().find(|s| s.id == 0).unwrap();
-    assert!(behind.chat.as_ref().unwrap().view_at.is_some(), "its place kept");
+    let t = behind.chat.as_ref().unwrap().transcript.as_ref().unwrap();
+    assert!(!t.keyed && !keyed(&ed), "no view anywhere");
+    assert!(t.visited, "its place kept");
 }
 
 /// `x enter` on the conversation: a chip over the input — Claude's answer, its row — the input with the keys and its
@@ -646,7 +716,7 @@ fn enter_quotes_the_selection_and_the_input_takes_the_keys() {
     assert_eq!(shown.lines().filter(|l| l.contains("enter quote")).count(), 2, "{shown}");
     feed(&mut ed, "<ret>");
     assert_eq!(region(&ed), "chat");
-    assert!(ed.session.view.is_none());
+    assert!(!keyed(&ed));
     let c = ed.session.chat.as_ref().unwrap();
     assert_eq!(c.input, "a draft");
     let q = &c.quotes[..];
@@ -657,7 +727,10 @@ fn enter_quotes_the_selection_and_the_input_takes_the_keys() {
     // Plain cursors, nothing wider than a character: `enter` types, `enter quote` isn't said
     let mut ed = editor();
     feed(&mut ed, "<esc>C");
-    assert!(view(&ed).selects() && !frame(&mut ed).contains("enter quote"), "two cursors, nothing to quote");
+    assert!(
+        view(&ed).pane.selects() && !frame(&mut ed).contains("enter quote"),
+        "two cursors, nothing to quote"
+    );
     feed(&mut ed, "<ret>");
     assert_eq!(region(&ed), "chat");
     assert!(ed.session.chat.as_ref().unwrap().quotes.is_empty());
@@ -694,8 +767,11 @@ fn a_quote_of_the_chat_is_the_text_not_its_rows() {
         vec![Msg::new(Role::User, "q", ""), Msg::new(Role::Assistant, answer, "")],
     );
     feed(&mut ed, "<esc>");
-    assert_eq!(at(&ed).0.split_whitespace().next(), Some("every"), "on the answer's first row");
-    assert!(!at(&ed).0.contains("some more"), "wrapped on screen: {}", at(&ed).0);
+    // (one line of the transcript, wrapped into the chat's rows)
+    assert_eq!(at(&ed).0, words, "on the answer's paragraph, one line");
+    let d = doc(&ed);
+    let line = mv::line_of(&d.text, d.selection().primary().head);
+    assert!(d.rows.as_deref().unwrap().of(line).len() > 1, "wrapped on screen");
     feed(&mut ed, "mip<ret>");
     let c = ed.session.chat.as_ref().unwrap();
     assert_eq!(c.quotes[0].text, words, "rejoined");
@@ -708,6 +784,97 @@ fn a_quote_of_the_chat_is_the_text_not_its_rows() {
     assert!(!shown.contains(&code), "cut on screen");
     feed(&mut ed, "<esc>/let<ret>x<ret>");
     assert_eq!(ed.session.chat.as_ref().unwrap().quotes[0].text, code);
+}
+
+/// A paragraph is one line of the transcript however it wraps: `j`/`k` step by its drawn rows, `x` takes it whole,
+/// a search finds across a wrap, and a resize moves no cursor — it stays on its character, kept in sight.
+#[test]
+fn a_paragraph_is_a_line_its_rows_are_drawn() {
+    let words = "every word of a paragraph long enough to wrap in the chat's narrow column twice over at least, \
+                 and then some more of them so that whatever the chat's width it wraps more than once";
+    let msgs =
+        vec![Msg::new(Role::User, "q", ""), Msg::new(Role::Assistant, format!("{words}\n\nAfter."), "")];
+    let mut ed = chat_with(Config::default(), msgs);
+    feed(&mut ed, "<esc>");
+    assert_eq!(at(&ed).0, words);
+    let (line, row) = (mv::line_of(&doc(&ed).text, doc(&ed).selection().primary().head), cursor_row(&ed));
+    // (`j`: its next drawn row, the same line)
+    feed(&mut ed, "j");
+    assert_eq!(cursor_row(&ed), row + 1, "a drawn row down");
+    assert_eq!(mv::line_of(&doc(&ed).text, doc(&ed).selection().primary().head), line, "the same paragraph");
+    feed(&mut ed, "k");
+    assert_eq!(cursor_row(&ed), row);
+    // (`x`: the paragraph, all its rows)
+    feed(&mut ed, "x");
+    assert_eq!(at(&ed).1, format!("{words}\n"));
+    // (a search across where it wraps: the paragraph's first word to its last)
+    feed(&mut ed, "<esc>gg/every.*once<ret>");
+    assert_eq!(at(&ed).1, words, "found across its rows");
+    // A resize: the same character under the cursor, still in sight
+    feed(&mut ed, "<esc>gg/whatever<ret>");
+    let before = doc(&ed).selection().primary();
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, W - 40, H).unwrap();
+    assert_eq!(doc(&ed).selection().primary(), before, "no cursor moved");
+    // (in sight at once, no key pressed: `resized` after the frame)
+    let area = ed.screen.chat_view.get().unwrap().2;
+    let (top, at_row) = (view(&ed).top_row(), cursor_row(&ed));
+    assert!((top..top + area).contains(&at_row), "in sight: row {at_row} of {top}..+{area}");
+}
+
+/// The chat drawn shorter while its view has the keys: the cursor kept in sight by that frame, no key pressed.
+#[test]
+fn a_shorter_chat_keeps_the_cursor_in_sight_at_once() {
+    let mut ed = chat_with(Config::default(), long());
+    feed(&mut ed, "<esc>G");
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, W, H - 14).unwrap();
+    let area = ed.screen.chat_view.get().unwrap().2;
+    let (top, at_row) = (view(&ed).top_row(), cursor_row(&ed));
+    assert!((top..top + area).contains(&at_row), "in sight: row {at_row} of {top}..+{area}");
+}
+
+/// A press on the conversation's text places the cursor there, as in the code and a run's output: from the input,
+/// its view mode on that character, the rows under the pointer where they were; in it, the cursor moved; past a
+/// row's text, its line's end.
+#[test]
+fn a_click_on_the_conversation_puts_the_cursor_on_that_character() {
+    let mut ed = editor();
+    let screen = frame(&mut ed);
+    let first = ed.screen.chat_view.get().unwrap().3;
+    let chat_x = ed.screen.chat_x.unwrap();
+    // (where a word is drawn in the chat's column)
+    let cell = |screen: &str, word: &str| {
+        screen.lines().enumerate().find_map(|(y, l)| {
+            let l: String = l.chars().skip(chat_x).collect();
+            let b = l.find(word)?;
+            Some((chat_x + l[..b].chars().count(), y))
+        })
+    };
+    let press = |ed: &mut Editor, (x, y): (usize, usize)| {
+        let m =
+            crate::event::Mouse { kind: crate::event::MouseKind::Down, x: x as u16, y: y as u16, alt: false };
+        ed.handle_mouse(m);
+        frame(ed)
+    };
+    let under = |ed: &Editor| {
+        let d = doc(ed);
+        let c = d.selection().primary().cursor(&d.text);
+        d.text.byte_slice(c..).to_string()
+    };
+    let screen = press(&mut ed, cell(&screen, "needle in").unwrap());
+    assert_eq!(region(&ed), "view:chat");
+    assert!(under(&ed).starts_with("needle in it."), "on the word pressed: {:?}", under(&ed));
+    assert_eq!(view(&ed).top_row(), first, "the rows under the pointer stay");
+    assert!(!view(&ed).pane.selects(), "a cursor, nothing selected");
+    // (in it: the cursor moves)
+    let screen = press(&mut ed, cell(&screen, "latest").unwrap());
+    assert!(under(&ed).starts_with("latest answer"), "{:?}", under(&ed));
+    // (past a row's text: its line's end, the cell after it)
+    let (x, y) = cell(&screen, "Its end, with").unwrap();
+    press(&mut ed, (x + 60, y));
+    assert!(under(&ed).starts_with('\n'), "at the line break: {:?}", under(&ed));
+    assert_eq!(at(&ed).0, "Its end, with another needle.");
 }
 
 /// The state lists the view's shape — never its text — and Claude's level none of it.

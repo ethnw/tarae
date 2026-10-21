@@ -258,7 +258,6 @@ fn settle(ed: &mut Editor) {
 fn chat(ed: &mut Editor, draft: &str) {
     let mut c = crate::chat::Chat::new();
     c.input = draft.into();
-    c.cursor = draft.len();
     ed.session.chat = Some(c);
     ed.session.at = crate::session::At::Chat;
 }
@@ -346,7 +345,7 @@ const SCENES: &[Scene] = &[
     ("the chat minimized, a draft in it", |ed| {
         chat_minimized(ed);
         let c = ed.session.chat.as_mut().unwrap();
-        (c.input, c.cursor) = ("half a thought".into(), 14);
+        c.input.set("half a thought");
     }),
     ("the chat, a prompt opened over it", |ed| {
         chat(ed, "hello");
@@ -614,6 +613,11 @@ const SCENES: &[Scene] = &[
     ("the chat's view mode, its search prompt", |ed| {
         chat_view(ed);
         feed(ed, &["/"]);
+    }),
+    // (`:` goes on from it, the editor's: the command line over the view, its keys the prompt's)
+    ("the chat's view mode, the command line over it", |ed| {
+        chat_view(ed);
+        feed(ed, &[":"]);
     }),
     ("a card over the chat's view mode", |ed| {
         chat_view(ed);
@@ -1074,7 +1078,7 @@ fn the_first_letter_into_the_minimized_chat_is_typed() {
     // Minimized again: Enter brings it back, sends nothing
     chat_minimized(&mut ed);
     let c = ed.session.chat.as_mut().unwrap();
-    (c.input, c.cursor) = ("hi".into(), 2);
+    c.input.set("hi");
     let queued = c.queued.clone();
     feed(&mut ed, &["<ret>"]);
     let c = ed.session.chat.as_ref().unwrap();
@@ -1202,7 +1206,6 @@ fn a_card_come_mid_turn_leaves_the_empty_chat_its_keys() {
     assert!(shown(&mut ed).contains("C-q to answer it"), "the card says how");
     // `C-q`: the card's, `n` answers it, the chat has them again
     ed.session.chat.as_mut().unwrap().input.clear();
-    ed.session.chat.as_mut().unwrap().cursor = 0;
     feed(&mut ed, &["<C-q>"]);
     assert!(matches!(ed.keys_to().region, Region::Card(_)), "{:?}", ed.keys_to().region);
     feed(&mut ed, &["n"]);

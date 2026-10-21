@@ -28,6 +28,7 @@ mod applies;
 mod board;
 mod brings;
 mod cardwait;
+mod chatstream;
 mod claudestart;
 mod commit;
 mod diskwatch;

@@ -150,8 +150,12 @@ impl Editor {
         doc.set_selection(Selection::single(r));
     }
 
-    /// `zj` / `zk` — the view moves `delta` lines; the cursor only moves if the view would leave it.
+    /// `zj` / `zk` — the view moves `delta` lines; the cursor only moves if the view would leave it. A document
+    /// whose rows are given (the chat's transcript) moves by its rows.
     pub fn scroll_view(&mut self, delta: isize, extend: bool) {
+        if let Some(g) = self.doc().rows.clone() {
+            return self.scroll_rows(&g, delta, extend);
+        }
         let last = mv::last_line(&self.doc().text);
         let top = (self.doc().top as isize + delta).clamp(0, last as isize) as usize;
         // (a folded doc comment is one line: the view steps over it)
@@ -172,6 +176,36 @@ impl Editor {
             self.cursor_to_line(first, extend);
         } else if line > bottom {
             self.cursor_to_line(bottom, extend);
+        }
+    }
+
+    /// `scroll_view` on a document whose rows are given (`wrap::Given` — the chat's transcript, a paragraph a
+    /// line): by its rows; the cursor carried along at the edge, the scrolloff margin kept where there's more beyond
+    /// it, to the start of the row it lands on.
+    fn scroll_rows(&mut self, g: &crate::wrap::Given, delta: isize, extend: bool) {
+        let area = self.viewport.0.max(1);
+        let so = self.config.scrolloff.min(area.saturating_sub(1) / 2);
+        let total = g.len();
+        let d = self.doc_mut();
+        let top = g.index(d.top, d.top_skip()).saturating_add_signed(delta).min(total.saturating_sub(area));
+        let (line, k) = g.place(top);
+        d.set_top(line);
+        d.top_rows = (k > 0).then_some((line, k));
+        let r = d.selection().primary();
+        let cursor = r.cursor(&d.text);
+        let cl = mv::line_of(&d.text, cursor);
+        let at = g.index(cl, crate::wrap::row_of(g.of(cl), cursor));
+        let lo = if top == 0 { 0 } else { top + so };
+        let hi =
+            if top + area >= total { total.saturating_sub(1) } else { (top + area).saturating_sub(1 + so) };
+        let to = match at {
+            _ if at < lo => lo,
+            _ if at > hi => hi.max(lo),
+            _ => return,
+        };
+        if let Some(row) = g.get(to) {
+            let r = r.put_cursor(&d.text, row.start, extend);
+            d.set_selection(Selection::single(r));
         }
     }
 

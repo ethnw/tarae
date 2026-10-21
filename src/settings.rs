@@ -912,7 +912,7 @@ const KEY_TABLES: &str = "\n# Keys — tables of your own, each merged over the 
 docs/reference/keymap.md)\n\
 # [keys.normal] [keys.select] [keys.insert] — the code's modes\n\
 # [keys.run] — a run panel's output, over normal mode's; [keys.view] [keys.view.chat] [keys.view.terminal] — view \
-mode; [keys.chat] — the chat's input\n\
+mode; [keys.chat] — the chat's input, over insert mode's\n\
 # [keys.terminal] — keys taken from the terminal's program (C-\\ = terminal_view); one bound to to_program goes \
 back to it, e.g. \"C-\\\\\" = \"to_program\"\n";
 

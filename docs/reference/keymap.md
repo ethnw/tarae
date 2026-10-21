@@ -459,7 +459,7 @@ A task's output, a preflight's, the tests' failure or output (`C-w j` to the pan
 
 ## View mode
 
-A cursor on what a surface shows — the chat's conversation (`esc` from its input), the terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done; `enter` quotes what's selected to the chat; `space` is its own menu, what it has of the editor's. Its own keys go over them, and each surface's over those.
+A cursor on what a surface shows. The chat's conversation (`esc` from its input) is normal mode on a read-only document — all of it, yours too (`[keys.normal]` spills in), `space` the editor's menu; an edit is put back and said. The terminal's scrollback and screen (`C-\` from its program, `C-w j` to its panel): normal mode's moves, selections, search and counts (yours too), the rest said, not done; `space` its own menu, what it has of the editor's. `enter` quotes what's selected to the chat. Its own keys go over them, and each surface's over those.
 
 ### Its own keys (`[keys.view]`)
 
@@ -475,8 +475,17 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `left` | `page_up` | Move page up |
 | `ret` | `view_take` | Quote it to the chat, or type |
 | `right` | `page_down` | Move page down |
-| `space` | … | More keys — see `space` below |
 | `up` | `scroll_up` | Scroll up a line |
+
+### The terminal's (`[keys.view.terminal]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `q` | `wclose` | Close this window or panel |
+| `backtab` | `slot_prev` | Previous bottom panel tab |
+| `C-\` | `view_code` | To the code, at once |
+| `space` | … | More keys — see `space` below |
+| `tab` | `slot_next` | Next tab of the bottom panel |
 
 ### `space`
 
@@ -487,19 +496,13 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | `space I` | `inbox` | What waits for your answer |
 | `space l` | `chat_open` | Chat with Claude |
 
-### The terminal's (`[keys.view.terminal]`)
-
-| Key | Command | Description |
-|---|---|---|
-| `q` | `wclose` | Close this window or panel |
-| `backtab` | `slot_prev` | Previous bottom panel tab |
-| `C-\` | `view_code` | To the code, at once |
-| `tab` | `slot_next` | Next tab of the bottom panel |
-
 ### The chat's input (`[keys.chat]`)
 
 | Key | Command | Description |
 |---|---|---|
+| `A-ret` | `insert_newline` | Insert newline char |
+| `C-a` | `goto_line_start` | Go to line start |
+| `C-e` | `goto_line_end_newline` | Go to end of line (after the last char) |
 | `esc` | `chat_view` | View the chat |
 
 ### Taken from the terminal's program (`[keys.terminal]` — every other key is the program's; `to_program` gives one of these back)

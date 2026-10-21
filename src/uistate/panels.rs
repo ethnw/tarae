@@ -309,7 +309,7 @@ impl Editor {
                 busy: c.busy(),
                 queued: c.queued.is_some() || !c.sends.is_empty(),
                 queued_said: c.queued_said().map(|q| q.0),
-                draft: c.input.clone(),
+                draft: c.input.text(),
                 follow: c.follow.on,
                 paused: c.follow.paused,
             });

@@ -25,6 +25,62 @@ fn task(lines: usize) -> Editor {
     ed
 }
 
+/// What a run's output costs in memory, kept once (`runout::Output`, the panel's document holding its rope): what a
+/// task panel's 20,000 lines add — the run, its document following it, frames drawn — against their text, as the
+/// bytes malloc holds in use (macOS: what's kept, not the pages a freed copy leaves dirty) and the footprint. Run
+/// alone (both are the process's). Measured against the code before (P2c step 1, d95b3f13: the lines a
+/// `Vec<(bool, String)>`, the document a copy) by the same scene there — target/sb/panes/p2c2/perf.md.
+#[test]
+fn perf_run_output_memory() {
+    if crate::test_results::unoptimized("rundoc::tests::perf_run_output_memory") {
+        return;
+    }
+    let me = std::process::id();
+    let footprint = || {
+        let os = crate::procs::tree(me).into_iter().find(|o| o.pid == me).unwrap();
+        os.footprint.unwrap_or(os.rss)
+    };
+    #[cfg(target_os = "macos")]
+    let in_use = || {
+        // SAFETY: a plain struct malloc fills, every zone's (a null zone)
+        let mut s: libc::malloc_statistics_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::malloc_zone_statistics(std::ptr::null_mut(), &mut s) };
+        s.size_in_use as u64
+    };
+    #[cfg(not(target_os = "macos"))]
+    let in_use = || 0u64;
+    let mb = |b: u64| b as f64 / (1 << 20) as f64;
+    let mut ed = Editor::new(Config::default());
+    ed.docs[0].text = ropey::Rope::from_str("fn main() {}\n");
+    frame(&mut ed);
+    let line = |i: usize| format!("test module_{i}::case_{i} ... ok");
+    let text: usize = (0..20_000).map(|i| line(i).len() + 1).sum();
+    let before = (in_use(), footprint());
+    let t = crate::task::Task { name: "t".into(), cmd: "cargo test".into(), cwd: std::env::temp_dir() };
+    let mut r = crate::task::Run::for_test(t);
+    for i in 0..20_000 {
+        r.push_line(i % 9 == 0, line(i), false);
+    }
+    let run = in_use();
+    ed.session.task_run = Some(r);
+    frame(&mut ed);
+    frame(&mut ed);
+    let lines = ed.session.outputs.doc(Slot::Task).map_or(0, |d| d.text.len_lines());
+    let after = (in_use(), footprint());
+    let more = |a: u64, b: u64| a.saturating_sub(b);
+    eprintln!(
+        "run output: 20,000 lines, {:.2} MB of text, its document {lines} lines — in use {:.2} MB more (the run \
+         {:.2}, its panel {:.2}; {:.1}× the text), footprint {:.2} MB more",
+        mb(text as u64),
+        mb(more(after.0, before.0)),
+        mb(more(run, before.0)),
+        mb(more(after.0, run)),
+        more(after.0, before.0) as f64 / text as f64,
+        mb(more(after.1, before.1)),
+    );
+    assert!(lines > 20_000, "the panel's document follows the run");
+}
+
 /// Two failed tests and a passing one, the first failure picked: its message is the detail; where they failed, a
 /// file in `dir`.
 fn tests(dir: &std::path::Path) -> Editor {
@@ -421,7 +477,7 @@ fn the_tests_output_follows_its_run_past_its_cut() {
     for batch in 0..6 {
         let r = ed.session.test_run.as_mut().unwrap();
         for i in 0..20 {
-            r.output.push((false, format!("line {}", 4990 + batch * 20 + i)));
+            r.output.push(false, &format!("line {}", 4990 + batch * 20 + i));
         }
         r.keep();
         frame(&mut ed);
@@ -550,6 +606,30 @@ fn the_window_keys_from_the_output_split_the_code() {
 
 /// What it's drawn with: the code's drawer, its colours as the panel had them — a failing line red, stderr faint,
 /// a passing one green — painted on its document.
+#[test]
+fn its_document_holds_the_runs_own_rope_and_a_tab_as_printed() {
+    let mut ed = task(2000);
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.push_line(false, "\tleft: 3".into(), false);
+    frame(&mut ed);
+    // (the same storage, not an equal copy: every chunk of the document's text is the run's own, at its address)
+    let chunks = |t: &ropey::Rope| t.chunks().map(|c| (c.as_ptr(), c.len())).collect::<Vec<_>>();
+    let run = chunks(ed.session.task_run.as_ref().unwrap().output.text());
+    assert!(run.len() > 1, "a rope of several nodes");
+    assert_eq!(chunks(&output(&ed, Slot::Task).text), run, "the run's rope, shared");
+    // (held after more comes, and after a trim)
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.push_line(false, "more".into(), false);
+    r.keep(0);
+    frame(&mut ed);
+    let run = chunks(ed.session.task_run.as_ref().unwrap().output.text());
+    assert_eq!(chunks(&output(&ed, Slot::Task).text), run, "still the run's own");
+    let d = output(&ed, Slot::Task);
+    let last = mv::last_line(&d.text);
+    assert_eq!(d.text.line(last - 1).to_string(), "\tleft: 3\n", "a tab kept as printed");
+    assert!(frame(&mut ed).contains("    left: 3"), "drawn as the code draws a tab");
+}
+
 #[test]
 fn its_lines_are_coloured_as_the_panel_coloured_them() {
     let mut ed = task(0);

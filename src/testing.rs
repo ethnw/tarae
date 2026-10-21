@@ -274,8 +274,8 @@ const OUTPUT_KEPT: usize = 5000;
 pub struct TestRun {
     pub target: Target,
     pub state: RunState,
-    /// (is stderr, line).
-    pub output: Vec<(bool, String)>,
+    /// Its lines, kept once (`runout.rs`) — the tests' detail shares them while it shows the output.
+    pub output: crate::runout::Output,
     /// What `keep` cut from `output` (its oldest lines past `OUTPUT_KEPT`) — the tests' detail replays them
     /// (`rundoc.rs`).
     pub trims: crate::task::Trims,
@@ -619,13 +619,13 @@ impl Editor {
         let Some(r) = &self.session.test_run else {
             return self.set_status("no test run yet — space x x runs the test at the cursor");
         };
-        let mut text: String = r.output.iter().map(|(_, l)| format!("{l}\n")).collect();
+        let mut text = r.output.text().to_string();
         if text.is_empty() {
             text = format!("(no output yet)\n$ {}\n", r.target.argv().join(" "));
         }
         // Opened at the picked failure's message, where the pane was looking
         let gist = r.picked().and_then(|c| c.message.first()).map(|m| m.trim()).filter(|m| !m.is_empty());
-        let line = gist.and_then(|g| r.output.iter().position(|(_, l)| l.contains(g)));
+        let line = gist.and_then(|g| r.output.position(|l| l.contains(g)));
         let title = format!("test output · {}", r.target.label);
         // One buffer per run's label: an earlier one gives way to this output
         let old: Vec<_> = self
@@ -776,7 +776,7 @@ impl Editor {
                             attach = Some((a, port, r.target.label.clone()));
                         }
                         r.parser.line(&r.target.cwd, &line, &mut r.cases);
-                        r.output.push((err, line));
+                        r.output.push(err, &line);
                     }
                     r.last_output = Instant::now();
                     r.keep();
@@ -878,7 +878,7 @@ impl Editor {
         self.session.test_run = Some(TestRun {
             target,
             state: RunState::Running,
-            output: Vec::new(),
+            output: Default::default(),
             trims: Default::default(),
             started: Instant::now(),
             took: None,
@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(r.detail_top(10), 90);
         r.scroll_by(-3, 10);
         assert_eq!(r.detail_top(10), 87);
-        r.output.push((false, "later".into()));
+        r.output.push(false, "later");
         assert_eq!(r.detail_top(10), 87, "held where the wheel left it");
         r.scroll_by(100, 10);
         assert_eq!((r.scroll, r.detail_top(10)), (None, 91), "back at the end: follows it");

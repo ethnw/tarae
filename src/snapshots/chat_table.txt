@@ -42,7 +42,7 @@
 39                                                                                           │
 40                                                                                           │  ────────────────────────────────────────────────────────
 41                                                                                           │  › Ask about demo.rs…
-42                                                                                           │  enter send  esc view  C-s screen  C-o point  C-l new
+42                                                                                           │  enter send  esc normal  C-s screen  C-o point  C-l new
 43  ● chat                                                                                                                        rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -132,7 +132,7 @@
 39                                                                                           a
 40                                                                                           a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 41                                                                                           a  A fff fffff ffffffff
-42                                                                                           a  DDDDD ffff  DDD ffff  DDD ffffff  DDD fffff  DDD fff
+42                                                                                           a  DDDDD ffff  DDD ffffff  DDD ffffff  DDD fffff  DDD fff
 43  a TTTT                                                                                                                        dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary

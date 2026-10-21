@@ -322,7 +322,7 @@ fn up_brings_a_queued_message_back_only_whole() {
     assert!(c.queued.is_some() && c.queued_quotes.len() == 5 && c.quotes.len() == 5, "nothing lost");
     feed(&mut ed, "<backspace><backspace><up>");
     let c = ed.session.chat.as_ref().unwrap();
-    assert_eq!((c.input.as_str(), c.quotes.len()), ("second", 8));
+    assert_eq!((c.input.text().as_str(), c.quotes.len()), ("second", 8));
 }
 
 /// A `y` given for a file named like a key an element carries stays with that element: taking off a chip pointed at
@@ -456,7 +456,7 @@ fn a_queued_message_keeps_its_own_screen_and_points() {
     feed(&mut ed, "second<ret><up>");
     let c = ed.session.chat.as_ref().unwrap();
     assert_eq!(
-        (c.input.as_str(), c.with_chips()),
+        (c.input.text().as_str(), c.with_chips()),
         ("second", vec!["screen 80×24".to_string(), "card#1".into()])
     );
     assert!(c.queued_screen.is_none() && c.queued_pointed.is_empty());
