@@ -625,7 +625,9 @@ fn docker_args(root: &Path, tree: Tree, pin: &str, platform: Option<&str>, what:
     // (seeded from the image the first time: the file's components and targets are fetched once)
     let of = platform.map(|p| format!("-{}", p.replace('/', "-"))).unwrap_or_default();
     mount(&mut a, format!("tarae-rustup-{pin}{of}:/usr/local/rustup"));
-    for e in ["CARGO_TARGET_DIR=/target", "CARGO_TERM_COLOR=never"] {
+    // (`TARAE_REFUSED_SUITE`: the must-be-refused suite runs — its snapshots are these tiers'; a plain `cargo
+    // test` on Linux skips it)
+    for e in ["CARGO_TARGET_DIR=/target", "CARGO_TERM_COLOR=never", "TARAE_REFUSED_SUITE=1"] {
         a.extend(["-e".to_string(), e.to_string()]);
     }
     a.extend([image(pin), "sh".into(), "-ec".into(), script(tree, what)]);

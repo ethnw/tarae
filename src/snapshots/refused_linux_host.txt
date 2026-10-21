@@ -1,0 +1,28 @@
+# must-be-refused suite (Linux host)
+# claim | id | verdict | witness
+1.1      | write-outside                  | refused  | direct=refused, append=refused, via-link=refused
+1.1, 1.6 | write-other-session            | refused  | checkout=refused, append=refused, run-dir=refused, runs-base=refused
+1.3, 1.9 | write-tarae-own                | refused  | config=refused, sandbox-json=refused, trust-json=refused, grammar=refused, plugin=refused, repo-config=refused, untrusted-held=true
+1.2, 1.7 | write-protected                | refused  | cargo-toml=refused, build-rs=refused, git-config=refused, git-hook=refused
+1.2      | make-protected                 | caught   | beside-protected=refused, new=caught, case=caught, symlink=caught
+1.2, 1.4 | hardlink-protected             | refused  | cargo-toml=refused, build-rs=refused, ssh-key=refused, dot-env=refused
+1.2      | move-protected-parent          | refused  | write-after-move=refused, unlink-after-move=refused
+1.2      | move-in-from-temp              | caught   | write-in-root=allowed, snapshot-flagged=crates/x/build.rs
+1.3, 1.4 | read-kept                      | refused  | ssh-key=refused, aws-creds=refused, dot-env=refused, sandbox-json=refused, home-file=refused, gitconfig=scrubbed, env=scrubbed
+1.5      | tcp-unopened-port              | refused  | connect=refused, accepted=0
+1.5      | tcp-own-non-loopback           | refused  | connect=refused, accepted=0
+1.5      | udp-sendto                     | refused  | loopback=refused, resolver=refused, port0=refused
+1.5      | raw-and-other-sockets          | refused  | raw-icmp=refused, raw-tcp=refused, dgram-icmp=refused
+1.5      | proxy-unlisted-and-other-token | refused  | unlisted-host=403, other-proxy-port=refused
+1.5      | link-local-metadata            | rule     | ipv4-link-local=true, ipv6-link-local=true, multicast=true, google-metadata=true, ec2-metadata=true
+1.9      | unix-sockets-outside           | refused  | other-run=refused, state-ui=refused, outside=refused, shared-tmp=refused, own-root=ok, own-run=ok
+1.6, 1.9 | signal-trace-procargs          | shared   | signals=refused, ptrace-environ=refused, cmdline-prio=shared, own-child=ok
+1.6      | sysv-and-posix-shm             | shared   | sysv=shared, posix=shared
+1.4, 1.9 | macos-apple-events-ls          | not-here | macos-only
+1.1      | macos-nested-sandbox-exec      | not-here | macos-only
+1.4      | linux-key-mount-and-link       | refused  | hardlink=refused, symlink-read=refused, bind-mount=system, open-tree=system
+1.9      | linux-userns-and-mount         | system   | unshare=system, clone=system, clone3=system, setns=system, mount+umount=system, pivot-root=system, no-userns-run.unshare=system, no-userns-run.clone=system, no-userns-run.clone3=system, no-userns-run.setns=system
+1.9      | linux-nested-seccomp-listener  | refused  | new-listener=refused, precedence=not-tried, plain-filter=allowed
+1.9      | linux-dangerous-syscalls       | refused  | io-uring=system, caps=refused, no-new-privs=refused, packet=refused, netlink-diag=refused, foreign-arch=refused
+1.6, 1.9 | linux-keeper-and-proc          | refused  | parent-is-keeper=true, signals=refused, ptrace=system, proc-files=refused, pidfd-getfd=system
+1.6, 1.9 | linux-tiocsti-and-ptys         | refused  | ctty=refused, other-pty=refused

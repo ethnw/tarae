@@ -457,11 +457,14 @@ Kept:
   `sandbox::keeper::tests::a_run_reads_no_details_outside_its_session` · `sandbox::keeper::tests::a_run_sees_only_its_sessions_processes` (with a PID namespace)
 - **Other terminals**: a run can't open your tty or another pty.
   test: `sandbox::tests::a_run_cant_open_another_terminal` (macOS) · `sandbox::keeper::tests::a_run_opens_only_the_ptys_it_makes`
-- **The keeper** (Linux): a run can't signal or trace it; it isn't dumpable; a run holds no capability and no
+- **The keeper** (Linux): a run can't trace it; from Landlock ABI 6, or inside the session's PID namespace
+  (as PID 1), a run can't signal it. Below ABI 6 without one, a run can kill it, and its runs fail closed
+  (they fail, what they left ends, tarae says so); it isn't dumpable; a run holds no capability and no
   descriptor but its stdio; makes no user namespace.
   test: `sandbox::keeper::tests::a_command_cant_signal_the_keeper` · `sandbox::keeper::tests::the_keeper_is_not_dumpable` ·
   `sandbox::keeper::tests::a_command_holds_no_capability` · `sandbox::keeper::tests::a_command_holds_only_its_stdio` ·
-  `sandbox::keeper::tests::a_run_makes_no_user_namespace_under_the_profile`
+  `sandbox::keeper::tests::a_run_makes_no_user_namespace_under_the_profile` ·
+  `sandbox::keeper::tests::a_killed_keeper_fails_closed_and_is_remade`
 - **tarae's UI socket** (which could drive the editor): refused to Claude's processes, and out of a run's reach.
   test: `sandbox::tests::claudes_runs_cant_reach_the_ui_state_socket` ·
   `uistate::tests::the_socket_answers_snapshots_and_refuses_claudes_processes`
