@@ -388,6 +388,21 @@ impl Keymaps {
         if mode == Mode::Select { select } else { normal }
     }
 
+    /// The window table's prefix in normal mode: the key whose next key moves between panes (`C-w`, or where yours
+    /// put the window keys) — what `window_keys` starts and the terminal's program gets once when it comes again.
+    /// None: no such table.
+    pub fn window_prefix(&self) -> Option<Key> {
+        let mut keys: Vec<Key> = self
+            .normal
+            .map
+            .iter()
+            .filter(|(_, t)| matches!(t, KeyTrie::Node(n) if !n.keys_for("jump_view_left").is_empty()))
+            .map(|(k, _)| *k)
+            .collect();
+        crate::sorting::by_key(&mut keys, |k| k.to_string());
+        keys.first().copied()
+    }
+
     /// The commands the terminal's program gives up `key` for (`[terminal]`) — None: it's the program's (not
     /// bound there, or bound to `to_program`).
     pub fn terminal_takes(&self, key: Key) -> Option<&[MappableCommand]> {

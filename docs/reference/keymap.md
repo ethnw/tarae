@@ -491,6 +491,7 @@ A cursor on what a surface shows — the chat's conversation (`esc` from its inp
 | Key | Command | Description |
 |---|---|---|
 | `C-\` | `terminal_view` | View the terminal |
+| `C-w` | `window_keys` | Window keys (C-w …) |
 
 ## Cards, reviews and panels
 

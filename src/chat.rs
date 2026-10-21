@@ -2143,7 +2143,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
 /// because follow mode minimized it while Claude worked (that comes back with the answer) — something else
 /// fills the screen (`C-w z`), or a review is read wide (`space v z`).
 pub(crate) fn out_of_sight(ed: &Editor) -> bool {
-    let zoomed = ed.zoomed().is_some_and(|z| z != crate::sizes::Zoom::Chat);
+    let zoomed = ed.zoomed_shows().is_some_and(|z| z != crate::pane::Shows::Chat);
     ed.last_frame.is_some() && ed.screen.chat_x.is_none() && (zoomed || ed.review_wide())
 }
 

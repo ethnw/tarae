@@ -1126,6 +1126,7 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         "docs": files,
         "current": index(current),
         "views": views,
+        "panes": l.panes.iter().map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect::<Vec<_>>(),
         "split": split_json(&l.split),
         "focus": l.focus,
         "sidebar": sidebar,
@@ -1400,14 +1401,27 @@ fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
             Some(view)
         })
         .collect();
+    // (the surfaces' panes: each of `pane::SURFACES` once)
+    let panes: Vec<crate::pane::Pane> = v["panes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let shows = crate::pane::Shows::of_name(p["shows"].as_str()?)?;
+            Some(crate::pane::Pane { id: p["id"].as_u64()?, shows })
+        })
+        .collect();
+    let every_surface =
+        crate::pane::SURFACES.iter().all(|s| panes.iter().filter(|p| p.shows == *s).count() == 1);
     let split = split_of(&v["split"]);
     let focus = v["focus"].as_u64();
     if let (Some(split), Some(focus)) = (split, focus) {
         let mut leaves = split.leaves();
         crate::sorting::sort(&mut leaves);
-        let mut ids: Vec<_> = views.iter().map(|w| w.id).collect();
+        let mut ids: Vec<_> = views.iter().map(|w| w.id).chain(panes.iter().map(|p| p.id)).collect();
         crate::sorting::sort(&mut ids);
         if leaves == ids
+            && every_surface
             && let Some(f) = views.iter().find(|w| w.id == focus)
             && let Some(i) = ed.docs.iter().position(|d| d.id == f.doc)
         {
@@ -1416,16 +1430,21 @@ fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
             (ed.docs[i].top, ed.docs[i].left) = (f.top, f.left);
             // Each pane an id of this tarae's own counter — the state's only tie its panes to its split (two
             // sessions' may be the same)
-            let first = ed.next_view;
-            ed.next_view += views.len() as u64;
+            let first = ed.next_pane;
+            ed.next_pane += ids.len() as u64;
             let new = |old| first + ids.iter().position(|&i| i == old).unwrap_or(0) as u64;
             let mut views = views;
             for v in &mut views {
                 v.id = new(v.id);
             }
+            let mut panes = panes;
+            for p in &mut panes {
+                p.id = new(p.id);
+            }
             let mut split = split;
             split.renumber(&new);
-            (ed.session.views, ed.session.split, ed.session.focus) = (views, split, new(focus));
+            (ed.session.views, ed.session.panes, ed.session.split, ed.session.focus) =
+                (views, panes, split, new(focus));
         }
     }
 }
@@ -1455,18 +1474,27 @@ fn mode_of(s: &str) -> Option<Mode> {
     })
 }
 
-/// A leaf is its view id; a node is `{"v": [...]}` (side by side) or `{"h": [...]}` (stacked).
+/// A leaf is its pane's id; a node is `{"v": [...]}` (side by side) or `{"h": [...]}` (stacked); a child with an
+/// even share is itself, the others `{"auto": child}` (the surface's own size) and `{"cells": n, "of": child}`.
+/// Ids and shares, no cells: the frame lays it out at its own size.
 fn split_json(s: &Split) -> Value {
+    use crate::split::Share;
     match s {
         Split::Leaf(id) => json!(id),
         Split::Node(dir, kids) => {
             let key = if *dir == Dir::Vertical { "v" } else { "h" };
-            json!({ key: kids.iter().map(split_json).collect::<Vec<_>>() })
+            let kid = |(share, k): &(Share, Split)| match share {
+                Share::Even => split_json(k),
+                Share::Auto => json!({ "auto": split_json(k) }),
+                Share::Cells(n) => json!({ "cells": n, "of": split_json(k) }),
+            };
+            json!({ key: kids.iter().map(kid).collect::<Vec<_>>() })
         }
     }
 }
 
 fn split_of(v: &Value) -> Option<Split> {
+    use crate::split::Share;
     if let Some(id) = v.as_u64() {
         return Some(Split::Leaf(id));
     }
@@ -1475,7 +1503,12 @@ fn split_of(v: &Value) -> Option<Split> {
         (_, Some(k)) => (Dir::Horizontal, k),
         _ => return None,
     };
-    let kids: Option<Vec<Split>> = kids.as_array()?.iter().map(split_of).collect();
+    let kid = |k: &Value| match (k.get("auto"), k.get("cells").and_then(Value::as_u64)) {
+        (Some(a), _) => Some((Share::Auto, split_of(a)?)),
+        (_, Some(n)) => Some((Share::Cells(u16::try_from(n).ok()?), split_of(&k["of"])?)),
+        _ => Some((Share::Even, split_of(k)?)),
+    };
+    let kids: Option<Vec<(Share, Split)>> = kids.as_array()?.iter().map(kid).collect();
     Some(Split::Node(dir, kids?)).filter(|s| matches!(s, Split::Node(_, k) if k.len() >= 2))
 }
 
@@ -1544,7 +1577,7 @@ mod tests {
         assert_eq!(doc_a.top, 1);
         assert_eq!(ed.doc().path.as_deref(), Some(b.as_path()), "the focused pane's file is current");
         assert_eq!(ed.doc().selection().primary().head, 3);
-        assert_eq!(ed.session.split.leaves().len(), 2, "both panes");
+        assert_eq!(ed.code_leaves().len(), 2, "both panes");
         let other = ed.session.views.iter().find(|v| v.id != ed.session.focus).unwrap();
         assert_eq!(other.doc, ed.doc().id, "the pane that showed the gone file shows the current one");
         std::fs::remove_dir_all(&dir).ok();
@@ -1570,11 +1603,23 @@ mod tests {
 
     #[test]
     fn split_trees_read_back() {
+        use crate::split::Share;
         let s = Split::Node(
             Dir::Vertical,
-            vec![Split::Leaf(1), Split::Node(Dir::Horizontal, vec![Split::Leaf(3), Split::Leaf(2)])],
+            vec![
+                (Share::Auto, Split::Leaf(4)),
+                (Share::Cells(30), Split::Leaf(1)),
+                (
+                    Share::Even,
+                    Split::Node(
+                        Dir::Horizontal,
+                        vec![(Share::Even, Split::Leaf(3)), (Share::Auto, Split::Leaf(2))],
+                    ),
+                ),
+            ],
         );
         assert_eq!(split_of(&split_json(&s)), Some(s));
+        assert_eq!(split_json(&crate::split::Split::Leaf(7)), json!(7));
         assert_eq!(split_of(&json!({"v": [1]})), None, "a node of one isn't a split");
         assert_eq!(split_of(&json!("x")), None);
     }
@@ -1839,7 +1884,8 @@ mod tests {
         assert_eq!(current.path.as_deref(), Some(back.join("b.txt").as_path()), "its current file");
         let a = ed.docs.iter().find(|d| d.path.as_deref() == Some(back.join("a.txt").as_path())).unwrap();
         assert_eq!(a.selection().primary(), Range::new(0, 3));
-        assert_eq!(l.split.leaves().len(), 2, "its two panes");
+        assert_eq!(l.views.len(), 2, "its two panes");
+        assert_eq!(l.split.leaves().len(), 2 + crate::pane::SURFACES.len(), "in its tree with its surfaces");
         assert_eq!(l.sidebar.as_ref().map(|s| s.mode), Some(Mode::Files), "its side panel");
         let c = l.chat.as_ref().expect("its chat");
         assert_eq!((c.input.as_str(), c.cursor), ("half a thought", 4), "its draft");
@@ -2020,29 +2066,35 @@ mod tests {
         let ids_of =
             |b: &Value| b["views"].as_array().unwrap().iter().map(|v| v["id"].clone()).collect::<Vec<_>>();
         let front_ids = ids_of(&blocks[0]);
+        let (front_panes, front_split) = (blocks[0]["panes"].clone(), blocks[0]["split"].clone());
         let behind = blocks.iter_mut().find(|b| b["root"] == json!(back)).unwrap();
         for (v, id) in behind["views"].as_array_mut().unwrap().iter_mut().zip(&front_ids) {
             v["id"] = id.clone();
         }
-        behind["split"] = json!({ "h": front_ids });
+        (behind["panes"], behind["split"]) = (front_panes, front_split);
         behind["focus"] = front_ids[1].clone();
         let mut ed = started_in(&dir, &front);
         restore(&mut ed, &state);
-        let all: Vec<u64> =
-            ed.sessions_in_order().iter().flat_map(|l| l.views.iter().map(|v| v.id)).collect();
+        let all: Vec<u64> = ed
+            .sessions_in_order()
+            .iter()
+            .flat_map(|l| l.views.iter().map(|v| v.id).chain(l.panes.iter().map(|p| p.id)))
+            .collect();
         let mut distinct = all.clone();
         distinct.sort_unstable();
         distinct.dedup();
-        assert_eq!(all.len(), distinct.len(), "every view's own id: {all:?}");
+        assert_eq!(all.len(), distinct.len(), "every pane's own id: {all:?}");
         for l in ed.sessions_in_order() {
             let mut leaves = l.split.leaves();
             leaves.sort_unstable();
-            let mut ids: Vec<u64> = l.views.iter().map(|v| v.id).collect();
+            let mut ids: Vec<u64> =
+                l.views.iter().map(|v| v.id).chain(l.panes.iter().map(|p| p.id)).collect();
             ids.sort_unstable();
-            assert_eq!((leaves.len(), &leaves), (2, &ids), "{}: its two panes, its split over them", l.name);
-            assert!(ids.contains(&l.focus), "{}: its focus one of them", l.name);
+            assert_eq!(l.views.len(), 2, "{}: its two code panes", l.name);
+            assert_eq!(leaves, ids, "{}: its split over every pane", l.name);
+            assert!(l.views.iter().any(|v| v.id == l.focus), "{}: its focus one of them", l.name);
         }
-        assert!(ed.next_view > *distinct.last().unwrap(), "the next one past them all");
+        assert!(ed.next_pane > *distinct.last().unwrap(), "the next one past them all");
         std::fs::remove_dir_all(&dir).ok();
     }
 

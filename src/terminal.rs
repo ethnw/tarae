@@ -467,7 +467,8 @@ fn ended(ed: &mut Editor, generation: u64, code: i32) {
         t.exited = Some(code);
         // (filling the screen, it goes on doing so — its last lines to read)
         if ed.session.is_at(At::Program) {
-            let full = ed.session.zoom == Some(crate::sizes::Zoom::Bottom);
+            let slot = ed.session.leaf(crate::pane::Shows::Slot);
+            let full = slot.is_some() && ed.session.zoom.map(|z| z.0) == slot;
             ed.session.at = if full { At::Slot } else { At::Code };
         }
     } else if ed.session.terminal_run == generation {
@@ -605,13 +606,21 @@ impl Editor {
     }
 
     /// Keys while the terminal has them: the keymap's `[terminal]` rows run their commands (`C-\` → its view
-    /// mode); `S-pageup`/`S-pagedown` scroll its past a page, as every terminal emulator's do (uxaudit Z2 — the
-    /// next key the program gets brings it back down); the rest go to the program.
+    /// mode, `C-w` the window prefix — its next key the editor's, `C-w` again the program's); `S-pageup`/`S-pagedown`
+    /// scroll its past a page, as every terminal emulator's do (uxaudit Z2 — the next key the program gets brings
+    /// it back down); the rest go to the program.
     pub fn terminal_key(&mut self, key: Key) -> bool {
         if !self.session.program_has_keys() {
             return false;
         }
-        if let Some(cmds) = self.keymaps.terminal_takes(key) {
+        // The window prefix taken from it (`window_keys`): its next key is the window table's — but the prefix
+        // again, which the program gets once (`C-w C-w`: the shell's delete-word)
+        if !self.pending.is_empty() {
+            if self.keymaps.window_prefix() != Some(key) || self.pending != [key] {
+                return false;
+            }
+            self.pending.clear();
+        } else if let Some(cmds) = self.keymaps.terminal_takes(key) {
             let cmds = cmds.to_vec();
             self.run(&cmds, None);
             return true;
@@ -1620,7 +1629,7 @@ mod tests {
         if no_pty_here("the_terminal_fills_the_screen_and_its_escape_stays_on_it") {
             return;
         }
-        use crate::sizes::Zoom;
+        use crate::pane::Shows;
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         ed.terminal_run(
@@ -1651,7 +1660,7 @@ mod tests {
         assert!(ed.session.is_at(crate::session::At::Slot) && !focus(&ed), "tarae's keys on it");
         assert!(crate::view::terminal_viewed(&ed), "its view mode");
         draw(&mut ed);
-        assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
+        assert_eq!(ed.zoomed_shows(), Some(Shows::Slot));
         assert_eq!(ed.screen.bottom_h, ed.screen.body_h, "all the rows");
         ed.handle_key(key('i'));
         assert!(focus(&ed) && !ed.session.is_at(crate::session::At::Slot), "the program's keys");
@@ -1660,13 +1669,13 @@ mod tests {
         }
         ed.handle_key(Key::plain(Code::Enter));
         assert_eq!(ed.doc().text.to_string(), "", "the buffer never saw them");
-        assert_eq!(ed.zoomed(), Some(Zoom::Bottom), "typing in it, it still fills the screen");
+        assert_eq!(ed.zoomed_shows(), Some(Shows::Slot), "typing in it, it still fills the screen");
         ed.handle_key(ctrl('\\'));
         assert!(
             !focus(&ed) && ed.session.is_at(crate::session::At::Slot),
             "C-\\: the keys stay on it, its view mode"
         );
-        assert_eq!(ed.zoomed(), Some(Zoom::Bottom));
+        assert_eq!(ed.zoomed_shows(), Some(Shows::Slot));
         ed.handle_key(Key::plain(Code::Esc));
         assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.session.zoom, None, "back to the code: it ended");

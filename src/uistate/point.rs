@@ -28,7 +28,7 @@ pub struct Spot {
 pub enum Of {
     Card(u64),
     Toast(u64),
-    Pane(crate::split::ViewId),
+    Pane(crate::split::PaneId),
 }
 
 /// An element with a label: its id, the cells a click on it takes, and where its label goes.

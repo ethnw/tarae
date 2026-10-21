@@ -219,6 +219,57 @@
       "doing": "waiting",
       "id": "s0",
       "name": "main",
+      "panes": [
+        {
+          "at": false,
+          "id": "pane#2",
+          "shows": "side"
+        },
+        {
+          "at": false,
+          "id": "pane#3",
+          "shows": "rail"
+        },
+        {
+          "at": true,
+          "id": "pane#1",
+          "rect": [
+            0,
+            2,
+            120,
+            33
+          ],
+          "shows": "code"
+        },
+        {
+          "at": false,
+          "id": "pane#4",
+          "rect": [
+            0,
+            35,
+            120,
+            4
+          ],
+          "shows": "slot"
+        },
+        {
+          "at": false,
+          "id": "pane#5",
+          "shows": "chat"
+        },
+        {
+          "at": false,
+          "float": true,
+          "id": "card#2",
+          "rect": [
+            72,
+            28,
+            47,
+            7
+          ],
+          "shows": "card"
+        }
+      ],
       "review": {
         "active_s": 0,
         "changes": 1,
@@ -295,6 +346,33 @@
       "doing": "waiting",
       "id": "s1",
       "name": "fix-login",
+      "panes": [
+        {
+          "at": false,
+          "id": "pane#7",
+          "shows": "side"
+        },
+        {
+          "at": false,
+          "id": "pane#8",
+          "shows": "rail"
+        },
+        {
+          "at": true,
+          "id": "pane#6",
+          "shows": "code"
+        },
+        {
+          "at": false,
+          "id": "pane#9",
+          "shows": "slot"
+        },
+        {
+          "at": false,
+          "id": "pane#10",
+          "shows": "chat"
+        }
+      ],
       "root": "tarae-uistate-golden",
       "sandbox": {
         "abi": null,

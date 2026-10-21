@@ -281,7 +281,10 @@ impl Screen {
 pub struct Screen {
     /// Per pane: (view, pane rect, line-number gutter width, per screen row `codeview::Row::origin`).
     #[allow(clippy::type_complexity)]
-    pub panes: Vec<(crate::split::ViewId, crate::split::Rect, usize, Vec<(usize, usize, usize, usize)>)>,
+    pub panes: Vec<(crate::split::PaneId, crate::split::Rect, usize, Vec<(usize, usize, usize, usize)>)>,
+    /// Every pane of the tree that had room, where it was laid out (panes P2b) — what `C-w h/j/k/l` hop between
+    /// and the dividers are found from. Filling the screen, the one pane.
+    pub leaves: Vec<(crate::split::PaneId, crate::split::Rect)>,
     /// The document each of `panes` drew (in their order) — its rows are that one's lines, whatever the pane
     /// shows since (`rows_of`).
     pub pane_docs: Vec<DocId>,
@@ -400,7 +403,7 @@ pub struct Screen {
 /// One pane of a split: what it shows (a document) + its scroll. Cursor and selection are the document's.
 #[derive(Clone, Debug)]
 pub struct View {
-    pub id: crate::split::ViewId,
+    pub id: crate::split::PaneId,
     pub doc: DocId,
     pub top: usize,
     pub left: usize,
@@ -412,7 +415,7 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(id: crate::split::ViewId, doc: DocId) -> Self {
+    pub fn new(id: crate::split::PaneId, doc: DocId) -> Self {
         Self { id, doc, top: 0, left: 0, top_rows: None, jumps: Default::default(), last_doc: None }
     }
 
@@ -433,7 +436,7 @@ pub struct Editor {
     pub sessions: Vec<crate::session::Session>,
     pub(crate) next_session: crate::event::SessionId,
     pub(crate) behind: bool,
-    pub(crate) next_view: crate::split::ViewId,
+    pub(crate) next_pane: crate::split::PaneId,
     pub mode: Mode,
     pub keymaps: Keymaps,
     pub config: EditorConfig,
@@ -840,7 +843,7 @@ impl Editor {
             sessions: Vec::new(),
             next_session: 0,
             behind: false,
-            next_view: 2,
+            next_pane: 1 + crate::pane::IDS,
             mode: Mode::Normal,
             keymaps: config.keymaps,
             config: config.editor,
@@ -1404,7 +1407,7 @@ impl Editor {
 
     // ── Splits ────────────────────────────────────────────────────────────
 
-    fn view_mut(&mut self, id: crate::split::ViewId) -> Option<&mut View> {
+    fn view_mut(&mut self, id: crate::split::PaneId) -> Option<&mut View> {
         self.session.views.iter_mut().find(|v| v.id == id)
     }
 
@@ -1425,7 +1428,7 @@ impl Editor {
 
     /// Moves focus to another pane: saves the current pane's scroll, then restores the new pane's
     /// document and scroll.
-    pub fn focus_view(&mut self, id: crate::split::ViewId) {
+    pub fn focus_view(&mut self, id: crate::split::PaneId) {
         if id == self.session.focus {
             return;
         }
@@ -1444,8 +1447,8 @@ impl Editor {
     /// Splits the current pane — the new pane shows the same document at the same spot; focus moves to it.
     pub fn split_view(&mut self, dir: crate::split::Dir) {
         self.sync_focus_view();
-        let id = self.next_view;
-        self.next_view += 1;
+        let id = self.next_pane;
+        self.next_pane += 1;
         let Some(cur) = self.session.views.iter().find(|v| v.id == self.session.focus).cloned() else {
             return;
         };
@@ -1460,61 +1463,77 @@ impl Editor {
             return false;
         }
         let gone = self.session.focus;
-        let order = self.session.split.leaves();
+        let order = self.code_leaves();
         let i = order.iter().position(|v| *v == gone).unwrap_or(0);
         self.session.split.remove(gone);
         self.session.views.retain(|v| v.id != gone);
-        let next = self.session.split.leaves()[i.saturating_sub(1).min(self.session.views.len() - 1)];
+        let next = self.code_leaves()[i.saturating_sub(1).min(self.session.views.len() - 1)];
         self.focus_view(next); // syncing the gone pane finds nothing
         true
     }
 
-    /// Keep only this pane.
+    /// The code's panes in the tree's order.
+    pub fn code_leaves(&self) -> Vec<crate::split::PaneId> {
+        let s = &self.session;
+        s.split.leaves().into_iter().filter(|id| s.views.iter().any(|v| v.id == *id)).collect()
+    }
+
+    /// Keep only this pane among the code's — the other surfaces keep their places (§2.6 Q4).
     pub fn only_view(&mut self) {
         self.sync_focus_view();
-        self.session.views.retain(|v| v.id == self.session.focus);
-        self.session.split = crate::split::Split::Leaf(self.session.focus);
+        let focus = self.session.focus;
+        for id in self.code_leaves().into_iter().filter(|&id| id != focus) {
+            self.session.split.remove(id);
+        }
+        self.session.views.retain(|v| v.id == focus);
     }
 
     /// Next pane (`C-w w`) / by direction (`C-w h j k l` — using the last frame's pane layout).
     pub fn cycle_view(&mut self, delta: isize) {
-        let order = self.session.split.leaves();
+        let order = self.code_leaves();
         let i = order.iter().position(|v| *v == self.session.focus).unwrap_or(0) as isize;
         let next = order[(i + delta).rem_euclid(order.len() as isize) as usize];
         self.focus_view(next);
     }
 
-    /// `C-w h/j/k/l`: to the pane that way — between the code's panes; past the code's edge what's beside it on
-    /// screen (the chat on the right, the side panel or the review's rail on the left, below the lowest pane the
-    /// bottom slot); from those, toward the code goes back to it (friction 88: `C-w h` from the chat's input did
-    /// nothing). Nothing that way is said. (P2b makes every surface a pane of the tree, §2.6.)
+    /// `C-w h/j/k/l`: to the pane that way, any kind (panes P2b, §2.6) — the nearest the tree laid out there in the
+    /// last frame (`Screen.leaves`); toward the code it's the code pane last focused when that one is there (friction
+    /// 88: `C-w h` from the chat's input went back to it). It lands where that surface takes the keys: a run panel's or
+    /// the terminal's view mode, the chat's input, the side panel on the row for where the code is. Nothing that way
+    /// is said.
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        let toward_code = match self.session.at {
-            At::Chat => dx < 0,
-            At::Side | At::Rail => dx > 0,
-            _ => self.bottom_has_keys() && dy < 0,
-        };
-        if toward_code {
-            self.session.at = At::Code;
+        let Some(from) = self.session.at_pane() else { return self.nothing_toward(dx, dy) };
+        let leaves = &self.screen.leaves;
+        // (from what has no room on screen — the minimized chat's input — a hop goes back to the code)
+        if self.screen.width.is_some() && from != self.session.focus && !leaves.iter().any(|l| l.0 == from) {
+            return self.focus_pane(self.session.focus);
+        }
+        match crate::split::neighbor_from(leaves, from, dx, dy, self.session.focus) {
+            Some(to) => self.focus_pane(to),
+            // (below the code with nothing in the slot: it says what shows there)
+            None if dy > 0 && self.session.is_at(At::Code) => self.bottom_take_keys(),
+            None => self.nothing_toward(dx, dy),
+        }
+    }
+
+    /// The keys to pane `id`, landing where its surface takes them.
+    pub fn focus_pane(&mut self, id: crate::split::PaneId) {
+        use crate::pane::Shows;
+        let Some(shows) = self.session.shows(id) else { return };
+        if shows != Shows::Slot {
             self.plugin_panel_unfocus();
             self.procs_unfocus();
-            return;
         }
-        if self.bottom_has_keys() || matches!(self.session.at, At::Chat | At::Side | At::Rail) {
-            return self.nothing_toward(dx, dy);
-        }
-        let chat = self.screen.chat_w > 0 && self.session.chat.as_ref().is_some_and(|c| !c.compact());
-        let side = self.screen.side_w > 0 && !self.side_folded();
-        match self.pane_toward(dx, dy) {
-            Some(v) => self.focus_view(v),
-            None if dy > 0 => self.bottom_take_keys(),
-            None if dx > 0 && chat => self.session.at = At::Chat,
-            // (the rail as `space e` gives it the keys: on the file in hand)
-            None if dx < 0 && self.review_rail_up() && self.screen.rail_w > 0 => {
-                crate::codereview::rail_focus(self)
+        match shows {
+            Shows::Code => {
+                self.focus_view(id);
+                self.session.at = At::Code;
             }
-            None if dx < 0 && side && self.session.sidebar.is_some() => self.side_focus(),
-            None => self.nothing_toward(dx, dy),
+            Shows::Chat => self.session.at = At::Chat,
+            Shows::Side => self.side_focus(),
+            // (the rail as `space e` gives it the keys: on the file in hand)
+            Shows::Rail => crate::codereview::rail_focus(self),
+            Shows::Slot => self.bottom_take_keys(),
         }
     }
 
@@ -1531,7 +1550,7 @@ impl Editor {
 
     /// The pane that way from the one in hand, as last drawn — none below: `C-w j` goes to the bottom slot (its
     /// header's `C-w j scroll` says so only then).
-    pub fn pane_toward(&self, dx: i32, dy: i32) -> Option<crate::split::ViewId> {
+    pub fn pane_toward(&self, dx: i32, dy: i32) -> Option<crate::split::PaneId> {
         let panes: Vec<_> = self.screen.panes.iter().map(|(v, r, _, _)| (*v, *r)).collect();
         crate::split::neighbor(&panes, self.session.focus, dx, dy)
     }
@@ -13266,9 +13285,11 @@ mod tests {
         assert!(ed.session.is_at(crate::session::At::Side));
         feed(&mut ed, "<C-w>q");
         assert!(ed.session.sidebar.is_none(), "C-w q closed the side panel");
-        // The code: its pane, as ever
+        // The code: its pane, as ever — the last one said, kept
         feed(&mut ed, "<C-w>q");
-        assert!(ed.status.as_ref().is_some_and(|s| s.0 == "only one window"), "{:?}", ed.status);
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.starts_with("the code keeps one pane"), "{said}");
+        assert_eq!(ed.session.views.len(), 1);
         // A rebase stopped at its conflicts isn't running, and `space m c` isn't its way out: said so, kept
         task_of_40_lines(&mut ed);
         ed.session.task_run.as_mut().unwrap().state = crate::task::State::Stopped("2 conflicts".into());
@@ -14126,14 +14147,15 @@ mod tests {
     fn splits_focus_scroll_and_close() {
         let mut ed = editor(&"x\n".repeat(100));
         ed.handle_event(crate::event::Event::Resize); // first sync
+        let first = ed.session.focus;
         feed(&mut ed, "<C-w>v");
         assert_eq!(ed.session.views.len(), 2);
-        assert_eq!(ed.session.focus, 2, "focus on the new pane");
+        assert_ne!(ed.session.focus, first, "focus on the new pane");
         // Scroll down in the new pane → the old pane stays put
         ed.doc_mut().top = 50;
         ed.handle_event(crate::event::Event::Resize);
         feed(&mut ed, "<C-w>w");
-        assert_eq!(ed.session.focus, 1);
+        assert_eq!(ed.session.focus, first);
         assert_eq!(ed.doc().top, 0, "scroll is per pane");
         feed(&mut ed, "<C-w>w");
         assert_eq!(ed.doc().top, 50);
@@ -14152,12 +14174,13 @@ mod tests {
         use crate::sidebar::Mode;
         let mut ed = editor("x\n");
         feed(&mut ed, "<C-w>v");
+        let came = ed.session.focus;
         let focus = |ed: &Editor| ed.session.sidebar.as_ref().map(|s| (s.mode, ed.session.is_at(At::Side)));
         feed(&mut ed, "<C-w>e");
         assert_eq!(focus(&ed), Some((Mode::Files, true)), "closed: opens, at files the first time");
         feed(&mut ed, "<C-w>e");
         assert_eq!(focus(&ed), Some((Mode::Files, false)), "back to the code");
-        assert_eq!(ed.session.focus, 2, "the window it came from");
+        assert_eq!(ed.session.focus, came, "the window it came from");
         feed(&mut ed, " o");
         feed(&mut ed, "<C-w>h");
         assert_eq!(focus(&ed), Some((Mode::Outline, true)), "in the panel: a window move doesn't leave it");
@@ -15956,13 +15979,15 @@ q = \"delete_selection\"\n",
     fn insert_edits_stay_with_their_document_across_panes() {
         let mut ed = editor("aaa");
         ed.handle_event(crate::event::Event::Resize);
+        let first = ed.session.focus;
         feed(&mut ed, ":vs<ret>:n<ret>");
+        let second = ed.session.focus;
         ed.handle_event(crate::event::Event::Resize); // focused pane shows the new scratch
         feed(&mut ed, "iB");
-        ed.focus_view(1);
+        ed.focus_view(first);
         feed(&mut ed, "x<esc>u");
         assert_eq!(text(&ed), "aaa", "x undone in its own document");
-        ed.focus_view(2);
+        ed.focus_view(second);
         assert_eq!(text(&ed), "B");
         feed(&mut ed, "u");
         assert_eq!(text(&ed), "");

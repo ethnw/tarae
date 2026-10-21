@@ -145,6 +145,7 @@ commands! {
         terminal_focus => "Terminal: give it the keys",
         terminal_view => "View the terminal",
         to_program => "Leave the key to the program",
+        window_keys => "Window keys (C-w …)",
         git_log => "Git log (each commit's diff)",
         git_branches => "Switch branch",
         conflict_ours => "Conflict: keep ours",
@@ -2232,7 +2233,7 @@ fn wclose(cx: &mut Context) {
         return;
     }
     if !cx.editor.close_view() {
-        cx.editor.set_status("only one window");
+        cx.editor.set_status("the code keeps one pane — C-w z fills the screen with this one");
     }
 }
 
@@ -2375,6 +2376,16 @@ fn terminal_view(cx: &mut Context) {
 fn to_program(cx: &mut Context) {
     cx.editor
         .set_status("to_program gives a key back to the terminal's program — bind it in [keys.terminal]");
+}
+/// `C-w` from the terminal's program (`[terminal]`, the user's decision 2026-10-21): the window prefix, as from
+/// every surface — normal mode's window table, wherever that is (`Keymaps::window_prefix`), its next key that
+/// table's (which-key shows it); the prefix again sends the program one (`terminal_key`), `esc` cancels. Bound
+/// anywhere else it starts the same prefix.
+fn window_keys(cx: &mut Context) {
+    match cx.editor.keymaps.window_prefix() {
+        Some(prefix) => cx.editor.pending = vec![prefix],
+        None => cx.editor.set_status("no window keys in normal mode — your [keys.normal] moved them all"),
+    }
 }
 fn view_leave(cx: &mut Context) {
     crate::view::leave_key(cx.editor);

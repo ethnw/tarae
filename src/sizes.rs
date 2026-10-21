@@ -5,7 +5,10 @@
 //! 32 and more on a wide screen, the bottom slot what its panel wants (a task's output — U2).
 //!
 //! `C-w <`/`>` narrow/widen the focused one (the chat, the side panel; from the code: the chat if it's open,
-//! else the side panel), `C-w -`/`+` the bottom slot, `C-w =` makes them all automatic again.
+//! else the side panel), `C-w -`/`+` the bottom slot, `C-w =` makes them all automatic again. A split of the
+//! code's you made sizes its panes instead (panes P2b, §5.4): from a code pane with another beside it that way,
+//! `C-w < > - +` and a drag of the divider between them set that pane's share in the tree (`Share::Cells` — the
+//! session's, not these global three); `C-w =` makes them even again.
 //!
 //! Beside each other (140 columns: side panel 32 + chat 56 left the code 52): an automatic chat narrows to
 //! leave the code `CODE_ROOM` (down to `CHAT_MIN`); if the code would still have less than `CODE_MIN`, the side
@@ -163,13 +166,19 @@ pub fn bottom(total: usize, kept: Option<u16>, natural: usize) -> usize {
     }
 }
 
-/// A border the mouse drags: the chat's left edge, the side panel's right edge, the bottom slot's top row.
+/// A border the mouse drags: the chat's left edge, the side panel's right edge, the bottom slot's top row, the
+/// divider right of a code pane with another beside it (the pane's id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Border {
     Chat,
     Side,
     Bottom,
+    Divider(crate::split::PaneId),
 }
+
+/// A code pane keeps at least this many columns and rows when its split is sized.
+pub const PANE_MIN_COLS: usize = 12;
+pub const PANE_MIN_ROWS: usize = 3;
 
 /// What `C-w <`/`>` sizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,14 +187,9 @@ enum Which {
     Side,
 }
 
-/// What `C-w z` fills the screen with: the code (that pane alone), the bottom slot, the chat, the side panel.
+/// What `C-w z` fills the screen with: a pane — a code pane alone, the bottom slot, the chat, the side panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Zoom {
-    Code(crate::split::ViewId),
-    Bottom,
-    Chat,
-    Side,
-}
+pub struct Zoom(pub crate::split::PaneId);
 
 /// What the bottom slot shows — one at a time: `:procs` while it's open (asked for just now), the debugger,
 /// then the terminal (when shown), a plugin's panel, and the test run or task started last.
@@ -339,7 +343,78 @@ impl crate::editor::Editor {
         if s.bottom_h > 0 && y == bottom_y && x >= s.slot_x && x < total - s.chat_w && !tab() {
             return Some(Border::Bottom);
         }
-        None
+        // (between two code panes side by side: the cell after the left one's last, the right one starting past it)
+        let code = |id: &crate::split::PaneId| self.session.views.iter().any(|v| v.id == *id);
+        let left = s.leaves.iter().filter(|l| code(&l.0)).find(|(_, r)| {
+            r.x + r.w == x
+                && (r.y..r.y + r.h).contains(&y)
+                && s.leaves.iter().any(|(id, b)| code(id) && b.x == x + 1 && (b.y..b.y + b.h).contains(&y))
+        });
+        left.map(|l| Border::Divider(l.0))
+    }
+
+    /// A split of yours around the code pane `id` along `dir`: its child holding the pane, that child's size along
+    /// `dir` as last laid out, and the room it and its siblings that aren't a surface's own share (None: no other
+    /// code pane beside it that way — the surfaces' sizes are sized instead).
+    fn own_split(&self, id: crate::split::PaneId, dir: crate::split::Dir) -> Option<(usize, usize, usize)> {
+        use crate::split::{Dir, Share, Split};
+        let mut tree = self.session.split.clone();
+        let (kids, i) = tree.parent_along(id, dir)?;
+        let along = |s: &Split| {
+            let rects: Vec<crate::split::Rect> =
+                self.screen.leaves.iter().filter(|l| s.holds(l.0)).map(|l| l.1).collect();
+            let (from, to) = match dir {
+                Dir::Vertical => (rects.iter().map(|r| r.x).min()?, rects.iter().map(|r| r.x + r.w).max()?),
+                Dir::Horizontal => (rects.iter().map(|r| r.y).min()?, rects.iter().map(|r| r.y + r.h).max()?),
+            };
+            Some(to - from)
+        };
+        let others: Vec<usize> = (0..kids.len()).filter(|&j| j != i && kids[j].0 != Share::Auto).collect();
+        if others.is_empty() {
+            return None;
+        }
+        let now = along(&kids[i].1)?;
+        let room = now + others.iter().filter_map(|&j| along(&kids[j].1)).sum::<usize>();
+        Some((i, now, room.saturating_sub(others.len() * Self::pane_min(dir))))
+    }
+
+    fn pane_min(dir: crate::split::Dir) -> usize {
+        match dir {
+            crate::split::Dir::Vertical => PANE_MIN_COLS,
+            crate::split::Dir::Horizontal => PANE_MIN_ROWS,
+        }
+    }
+
+    /// The code pane `id`'s child in its split along `dir` set to `n` cells (within its room) — said, the tree kept
+    /// with the session.
+    fn pane_size(
+        &mut self,
+        id: crate::split::PaneId,
+        dir: crate::split::Dir,
+        n: usize,
+        room: usize,
+    ) -> usize {
+        let n = n.clamp(Self::pane_min(dir), room.max(Self::pane_min(dir)));
+        if let Some((kids, i)) = self.session.split.parent_along(id, dir) {
+            kids[i].0 = crate::split::Share::Cells(n as u16);
+        }
+        n
+    }
+
+    /// `C-w < > - +` from a code pane with another beside it that way: that pane `STEP_COLS`/`STEP_ROWS` bigger or
+    /// smaller. False: no split of yours that way — the surfaces' sizes are the keys'.
+    fn size_own(&mut self, dir: crate::split::Dir, more: bool) -> bool {
+        let id = self.session.focus;
+        if !self.session.is_at(At::Code) {
+            return false;
+        }
+        let Some((_, now, room)) = self.own_split(id, dir) else { return false };
+        let step = if dir == crate::split::Dir::Vertical { STEP_COLS } else { STEP_ROWS };
+        let to = if more { now + step } else { now.saturating_sub(step) };
+        let n = self.pane_size(id, dir, to, room);
+        let unit = if dir == crate::split::Dir::Vertical { "columns" } else { "rows" };
+        self.say_size(format!("pane {n} {unit}"));
+        true
     }
 
     /// A border dragged to (`x`, `y`): the size it makes, within what this screen allows (kept when the
@@ -361,6 +436,15 @@ impl crate::editor::Editor {
                 let rows = (s.text_top + s.body_h).saturating_sub(y).clamp(BOTTOM_MIN, self.bottom_max());
                 self.sizes.bottom = Some(rows as u16);
             }
+            // (the divider at column `x`: the left pane's child ends there)
+            Border::Divider(id) => {
+                let dir = crate::split::Dir::Vertical;
+                let Some((_, now, room)) = self.own_split(id, dir) else { return };
+                let Some(r) = s.leaves.iter().find(|l| l.0 == id).map(|l| l.1) else { return };
+                // (the child's left edge: its width now back from the pane's right edge)
+                let start = (r.x + r.w).saturating_sub(now);
+                self.pane_size(id, dir, x.saturating_sub(start), room);
+            }
         }
     }
 
@@ -371,6 +455,17 @@ impl crate::editor::Editor {
             Border::Chat => ("chat", self.sizes.chat, "columns"),
             Border::Side => ("side panel", self.sizes.side, "columns"),
             Border::Bottom => ("bottom panel", self.sizes.bottom, "rows"),
+            Border::Divider(id) => {
+                let mut tree = self.session.split.clone();
+                let n = match tree.parent_along(id, crate::split::Dir::Vertical) {
+                    Some((kids, i)) => match kids[i].0 {
+                        crate::split::Share::Cells(n) => Some(n),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                ("pane", n, "columns")
+            }
         };
         if let Some(n) = n {
             self.say_size(format!("{what} {n} {unit}"));
@@ -387,6 +482,9 @@ impl crate::editor::Editor {
     /// `C-w >` / `C-w <` — the chat or the side panel `STEP_COLS` wider/narrower, from its width on screen;
     /// as far as leaves the code its room. Kept (global) — `C-w =` makes it automatic again.
     pub fn size_width(&mut self, wider: bool) {
+        if self.size_own(crate::split::Dir::Vertical, wider) {
+            return;
+        }
         let Some(total) = self.screen.width else { return };
         let Some(which) = self.sized() else {
             return self.set_status("nothing to widen — the chat (space l) and the side panel (space e) are");
@@ -422,6 +520,9 @@ impl crate::editor::Editor {
 
     /// `C-w +` / `C-w -` — the bottom slot `STEP_ROWS` taller/shorter (the code keeping `BOTTOM_CODE`).
     pub fn size_height(&mut self, taller: bool) {
+        if self.size_own(crate::split::Dir::Horizontal, taller) {
+            return;
+        }
         let now = self.screen.bottom_h;
         if now == 0 {
             return self.set_status("no panel at the bottom — tests, tasks and the terminal show there");
@@ -462,6 +563,7 @@ impl crate::editor::Editor {
     /// `C-w =` — every size automatic again.
     pub fn sizes_auto(&mut self) {
         self.sizes = Sizes::default();
+        self.session.split.even();
         self.sizes_keep();
         self.toasts.retain(|t| !t.text.ends_with(SIZE_TAIL));
         self.set_status("sizes automatic again");
@@ -527,26 +629,30 @@ impl crate::editor::Editor {
     /// What has the keys, as `C-w z` would fill the screen with it — None: the review's file list (it keeps
     /// its width).
     pub fn focused_area(&self) -> Option<Zoom> {
+        use crate::pane::Shows;
         let s = &self.session;
-        if s.is_at(At::Chat) && s.chat.as_ref().is_some_and(|c| !c.compact()) {
-            return Some(Zoom::Chat);
-        }
-        let rail = self.review_rail_up();
-        if rail && s.is_at(At::Rail) && s.code_review.is_some() {
+        let shows = if s.is_at(At::Chat) && s.chat.as_ref().is_some_and(|c| !c.compact()) {
+            Shows::Chat
+        } else if self.review_rail_up() && s.is_at(At::Rail) && s.code_review.is_some() {
             return None;
-        }
-        if !rail && s.is_at(At::Side) && s.sidebar.is_some() {
-            return Some(Zoom::Side);
-        }
-        if self.bottom_has_keys() {
-            return Some(Zoom::Bottom);
-        }
-        Some(Zoom::Code(s.focus))
+        } else if !self.review_rail_up() && s.is_at(At::Side) && s.sidebar.is_some() {
+            Shows::Side
+        } else if self.bottom_has_keys() {
+            Shows::Slot
+        } else {
+            Shows::Code
+        };
+        s.leaf(shows).map(Zoom)
     }
 
     /// What fills the screen now: `C-w z`'s, while it still has the keys.
     pub fn zoomed(&self) -> Option<Zoom> {
         self.session.zoom.filter(|z| Some(*z) == self.focused_area())
+    }
+
+    /// What the pane filling the screen shows (`zoomed`'s).
+    pub fn zoomed_shows(&self) -> Option<crate::pane::Shows> {
+        self.zoomed().and_then(|z| self.session.shows(z.0))
     }
 
     /// `C-w z` — what has the keys fills the screen; again, back as it was.
@@ -564,7 +670,7 @@ impl crate::editor::Editor {
             && s.side_w == 0
             && s.bottom_h == 0
             && !(self.session.code_review.is_some() && self.review_rail_up());
-        if matches!(z, Zoom::Code(_)) && alone {
+        if self.session.shows(z.0) == Some(crate::pane::Shows::Code) && alone {
             return self.set_status("the code has the whole screen already");
         }
         self.session.zoom = Some(z);
@@ -642,7 +748,7 @@ mod tests {
         assert_eq!(ed.session.at, At::Code, "the side panel closed");
         let _sent = crate::terminal::stand_in(&mut ed, 10, 80, 100);
         ed.session.zoom = ed.focused_area();
-        assert_eq!((ed.session.at, ed.zoomed()), (At::Program, Some(Zoom::Bottom)));
+        assert_eq!((ed.session.at, ed.zoomed_shows()), (At::Program, Some(crate::pane::Shows::Slot)));
         ed.session.terminal.as_mut().unwrap().visible = false;
         ed.focus_sync();
         assert_eq!((ed.session.at, ed.session.zoom), (At::Code, None), "hidden: the code's, the zoom over");

@@ -58,12 +58,13 @@ pub struct Session {
     /// the branch of the checkout tarae started in).
     pub branch: Option<String>,
     pub base: Option<String>,
-    /// Panes, the split tree and the focused pane. The focused pane's scroll is its document's top/left
-    /// (synced every event).
+    /// The code's panes (the focused one's scroll is its document's top/left — synced every event), the other
+    /// surfaces' panes (`pane.rs`), and the split tree that holds them all.
     pub views: Vec<View>,
+    pub panes: Vec<crate::pane::Pane>,
     pub split: crate::split::Split,
     /// The code pane last focused — what `doc()` means, wherever the keys are (`at`).
-    pub focus: crate::split::ViewId,
+    pub focus: crate::split::PaneId,
     /// Where the keys are: one value (`At`) — never a flag on each surface.
     pub at: At,
     /// `C-w z`: what fills the screen, while it keeps the keys (`Editor::zoomed`).
@@ -308,8 +309,10 @@ impl ToolWait {
 }
 
 impl Session {
-    /// A session for the checkout in `root` (a real path) — nothing open in it yet, its first pane `view`.
-    pub fn new(id: SessionId, root: PathBuf, view: crate::split::ViewId) -> Self {
+    /// A session for the checkout in `root` (a real path) — nothing open in it yet, its first code pane `view`, its
+    /// surfaces' the `pane::IDS` after it, laid out as today's screen (`pane::default_layout`).
+    pub fn new(id: SessionId, root: PathBuf, view: crate::split::PaneId) -> Self {
+        let (panes, split) = crate::pane::default_layout(view);
         let name =
             root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into());
         // (worked out once, here, as the root is made real here: the main loop names it with no look at the disk)
@@ -322,7 +325,8 @@ impl Session {
             branch: None,
             base: None,
             views: Vec::new(),
-            split: crate::split::Split::Leaf(view),
+            panes,
+            split,
             focus: view,
             at: At::Code,
             zoom: None,
@@ -414,6 +418,35 @@ impl Session {
     /// The keys are `at`'s.
     pub fn is_at(&self, at: At) -> bool {
         self.at == at
+    }
+
+    /// The pane showing surface `shows` (a code pane: the one last focused).
+    pub fn leaf(&self, shows: crate::pane::Shows) -> Option<crate::split::PaneId> {
+        match shows {
+            crate::pane::Shows::Code => Some(self.focus),
+            _ => self.panes.iter().find(|p| p.shows == shows).map(|p| p.id),
+        }
+    }
+
+    /// What pane `id` shows.
+    pub fn shows(&self, id: crate::split::PaneId) -> Option<crate::pane::Shows> {
+        match self.views.iter().any(|v| v.id == id) {
+            true => Some(crate::pane::Shows::Code),
+            false => self.panes.iter().find(|p| p.id == id).map(|p| p.shows),
+        }
+    }
+
+    /// The pane the keys are in (`at`'s): the code pane last focused, the chat's, the slot's (the terminal's
+    /// program, `:procs`, a plugin's panel are the slot's panels), the side panel's, the rail's.
+    pub fn at_pane(&self) -> Option<crate::split::PaneId> {
+        use crate::pane::Shows;
+        self.leaf(match self.at {
+            At::Code => Shows::Code,
+            At::Chat => Shows::Chat,
+            At::Program | At::Slot | At::Procs | At::Plugin => Shows::Slot,
+            At::Side => Shows::Side,
+            At::Rail => Shows::Rail,
+        })
     }
 
     /// The keys leave `at` for the code — nothing when they were elsewhere.
@@ -1158,8 +1191,8 @@ impl Editor {
     pub(crate) fn session_add(&mut self, root: PathBuf) -> SessionId {
         self.next_session += 1;
         let id = self.next_session;
-        let view = self.next_view;
-        self.next_view += 1;
+        let view = self.next_pane;
+        self.next_pane += crate::pane::IDS;
         let doc = self.alloc_id();
         self.docs.push(Document::from_str(doc, ""));
         let mut session = Session::new(id, root.clone(), view);

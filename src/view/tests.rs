@@ -494,7 +494,7 @@ fn the_chats_chords_work_in_view_mode() {
     assert_eq!(ed.status.as_ref().map(|s| s.0.as_str()), Some("no code block in the last answer"));
     assert_eq!(region(&ed), "view:chat");
     feed(&mut ed, "<C-w>z");
-    assert_eq!(ed.zoomed(), Some(crate::sizes::Zoom::Chat));
+    assert_eq!(ed.zoomed_shows(), Some(crate::pane::Shows::Chat));
     assert_eq!(region(&ed), "view:chat");
 }
 
@@ -526,7 +526,7 @@ fn space_gt_views_the_conversation_from_the_code() {
     let mut ed = editor();
     ed.session.leave(crate::session::At::Chat);
     frame(&mut ed);
-    ed.session.zoom = Some(crate::sizes::Zoom::Code(ed.session.focus));
+    ed.session.zoom = Some(crate::sizes::Zoom(ed.session.focus));
     frame(&mut ed);
     assert!(ed.screen.chat_view.get().is_none(), "the chat isn't drawn");
     feed(&mut ed, " >");

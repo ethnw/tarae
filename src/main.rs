@@ -107,6 +107,7 @@ mod outlines;
 mod packs;
 mod pairs;
 mod palette;
+mod pane;
 mod patch;
 mod paths;
 mod picker;

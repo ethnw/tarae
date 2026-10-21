@@ -540,6 +540,16 @@ const SCENES: &[Scene] = &[
         light_card(ed);
     }),
     ("the terminal's program", terminal),
+    // (panes P2b: `C-w` is tarae's inside the program — its next key the window table's, `C-w` again the program's)
+    ("the terminal's program, the window prefix taken from it", |ed| {
+        terminal(ed);
+        feed(ed, &["<C-w>"]);
+    }),
+    ("two code panes side by side, one sized", |ed| {
+        ed.split_view(crate::split::Dir::Vertical);
+        frame(ed);
+        feed(ed, &["<C-w>", ">"]);
+    }),
     ("the terminal in view mode, by C-w j", |ed| {
         terminal(ed);
         ed.bottom_take_keys();

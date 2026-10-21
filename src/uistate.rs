@@ -368,10 +368,14 @@ impl Editor {
         if !modal && !held && elsewhere {
             v.push(shortcut(Region::NextCard, Filter::Only(vec![ctrl('q')])));
         }
-        // `terminal_key`: the program has them all
+        // `terminal_key`: the program has them all — after the window prefix taken from it (`C-w`), only the prefix
+        // again (the program's one), the rest the window table's
         let program = self.session.program_has_keys();
-        if !modal && program {
+        let prefix: Vec<Key> = self.keymaps.window_prefix().into_iter().collect();
+        if !modal && program && self.pending.is_empty() {
             v.push(layer(Region::Program, Filter::All));
+        } else if !modal && program && !prefix.is_empty() && self.pending == prefix {
+            v.push(shortcut(Region::Program, Filter::Only(prefix)));
         }
         // `offer_key`: the front card's answers, in normal mode with nothing else holding the keys
         if let Some(o) = self.offers.first().filter(|_| self.card_has_keys()) {
@@ -937,6 +941,85 @@ pub struct SessionState {
     /// The edits its Claude is writing as their input streams (`writing.rs`) — drawn in their buffers, nothing
     /// applied or decided. Claude's level: its own session's only.
     pub writing: Vec<WritingState>,
+    /// Its panes (panes P2b, plan §5.2): every leaf of its tree, and over the front's the floating ones.
+    pub panes: Vec<PaneState>,
+}
+
+/// A pane: its id (`pane#N` for every leaf; a floating one's own — `card#12`, `picker`, `prompt`, `which-key`),
+/// what it shows (`code:src/a.rs`, `code` for a buffer with no file, `chat`, `side`, `rail`, `slot`; `card` …),
+/// where the last frame laid it out (the front session's, when it had room: x, y, width, height) and whether the
+/// keys are in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneState {
+    pub id: String,
+    pub shows: String,
+    pub rect: Option<(usize, usize, usize, usize)>,
+    pub at: bool,
+    pub float: bool,
+}
+
+impl PaneState {
+    pub fn json(&self) -> Value {
+        let mut v = json!({ "id": self.id, "shows": self.shows, "at": self.at });
+        if let Some((x, y, w, h)) = self.rect {
+            v["rect"] = json!([x, y, w, h]);
+        }
+        if self.float {
+            v["float"] = json!(true);
+        }
+        v
+    }
+}
+
+impl Editor {
+    /// Session `l`'s panes as the state lists them, the tree's order — the front's with their rects and the
+    /// floating ones over them.
+    fn panes_state(&self, l: &crate::session::Session, is_front: bool) -> Vec<PaneState> {
+        use crate::pane::{Floating, Shows};
+        let keys = is_front.then(|| self.keys_to().region);
+        let floats_keys = matches!(keys, Some(Region::Card(_) | Region::Picker | Region::Prompt));
+        let at = l.at_pane().filter(|_| !floats_keys);
+        let mut out: Vec<PaneState> = l
+            .split
+            .leaves()
+            .into_iter()
+            .filter_map(|id| {
+                let shows = match l.shows(id)? {
+                    Shows::Code => {
+                        let doc = l.views.iter().find(|v| v.id == id).map(|v| v.doc);
+                        let doc = doc.and_then(|d| self.docs.iter().find(|x| x.id == d));
+                        match doc.and_then(|d| d.path.as_deref()) {
+                            Some(p) => format!("code:{}", p.strip_prefix(&l.root).unwrap_or(p).display()),
+                            None => "code".into(),
+                        }
+                    }
+                    s => s.name().into(),
+                };
+                let rect = is_front
+                    .then(|| {
+                        self.screen.leaves.iter().find(|r| r.0 == id).map(|r| (r.1.x, r.1.y, r.1.w, r.1.h))
+                    })
+                    .flatten();
+                Some(PaneState { id: format!("pane#{id}"), shows, rect, at: at == Some(id), float: false })
+            })
+            .collect();
+        if is_front {
+            for f in self.floating() {
+                let (shows, has) = match f {
+                    Floating::Card(n) => ("card", keys == Some(Region::Card(n))),
+                    Floating::Picker => ("picker", keys == Some(Region::Picker)),
+                    Floating::Prompt => ("prompt", keys == Some(Region::Prompt)),
+                    Floating::WhichKey => ("which-key", false),
+                };
+                let rect = match f {
+                    Floating::Card(_) => self.screen.offer_card,
+                    _ => None,
+                };
+                out.push(PaneState { id: f.id(), shows: shows.into(), rect, at: has, float: true });
+            }
+        }
+        out
+    }
 }
 
 /// An item of an edit Claude is writing (`writing::listed`).
@@ -1383,6 +1466,7 @@ impl Editor {
                 _ => Vec::new(),
             },
             writing: crate::writing::listed(l.chat.as_ref(), &self.docs),
+            panes: self.panes_state(l, is_front),
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1621,6 +1705,7 @@ impl UiState {
                     v["account"] = json!({"organization": organization, "plan": plan});
                 }
                 v["sandbox"] = s.sandbox.as_ref().map_or(Value::Null, |g| g.json());
+                v["panes"] = s.panes.iter().map(PaneState::json).collect();
                 v
             })
             .collect();
