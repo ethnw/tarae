@@ -472,7 +472,7 @@ impl Offer {
     pub fn rank(&self) -> Rank {
         match () {
             _ if self.yours => Rank::Yours,
-            _ if self.claudes() || self.asker().is_some() => Rank::Claudes,
+            _ if self.claudes() => Rank::Claudes,
             _ => Rank::Other,
         }
     }
@@ -778,16 +778,19 @@ impl Offer {
         }
     }
 
-    /// Whether Claude's call waits on it — it goes with its session when another comes to the front.
+    /// Whether Claude's call waits on it — it goes with its session when another comes to the front (cardlost:
+    /// an `also` card stayed up there, and `asking_sync` told its call it was lost while its `y` ran it).
     pub fn claudes(&self) -> bool {
-        matches!(
-            self.what,
-            What::Run(_)
-                | What::NoSandbox { .. }
-                | What::Read { .. }
-                | What::Screen { .. }
-                | What::ChangeSet { .. }
-        ) || matches!(&self.what, What::ProtectedMade { then, .. } if then.call().is_some())
+        self.asker().is_some()
+            || matches!(
+                self.what,
+                What::Run(_)
+                    | What::NoSandbox { .. }
+                    | What::Read { .. }
+                    | What::Screen { .. }
+                    | What::ChangeSet { .. }
+            )
+            || matches!(&self.what, What::ProtectedMade { then, .. } if then.call().is_some())
     }
 
     /// Whether it's the protected-made card (`r` removes them, `v` shows them).

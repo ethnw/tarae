@@ -6193,6 +6193,60 @@ mod tests {
         assert_eq!(super::ADMITTED.with(|a| a.borrow().len()), before, "nothing ran");
     }
 
+    /// cardlost: an `also` card parks with its session when another comes to the front — it was left up there,
+    /// tagged with the front session, and its call was told it was lost ("nothing ran") while its `y` later ran
+    /// the command. Back in front, its `y` runs it and the call waits for the run's report.
+    #[test]
+    fn an_also_card_waits_in_its_session_while_another_is_in_front() {
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("also-park");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        for p in ["front", "back"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.join("front");
+        let other = ed.session_open(&dir.join("back")).unwrap();
+        assert!(ed.session_switch(0));
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let args = json!({ "command": "true", "also": { "port": 47021 }, "reason": "its test server" });
+        super::run(&mut ed, super::Call::of(generation, "p1", json!(21)), &args).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.offers.is_empty() {
+            assert!(std::time::Instant::now() < end, "its card");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+        let card = ed.offers[0].id;
+        let answered = || {
+            super::ANSWERED
+                .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(21)).map(|(_, r)| r.clone()))
+        };
+        // Another session to the front: the card waits in its own, its call still waiting on it
+        assert!(ed.session_switch(other));
+        ed.asking_sync();
+        assert_eq!(answered(), None, "its call was answered");
+        assert!(ed.offers.iter().all(|o| o.id != card), "up in the other session");
+        let i = ed.sessions.iter().position(|s| s.id == 0).unwrap();
+        assert!(ed.sessions[i].parked.iter().any(|o| o.id == card), "not parked with its session");
+        // Back: up again, and `y` runs it with the port open — the call waits for how the run ends
+        assert!(ed.session_switch(0));
+        assert_eq!(ed.offers.first().map(|o| o.id), Some(card));
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        also_key(&mut ed, 'y');
+        assert_eq!(super::ADMITTED.with(|a| a.borrow().len()), before + 1, "it ran");
+        let extra = super::ADMITTED.with(|a| a.borrow().last().map(|(_, e)| e.grant.clone()));
+        assert_eq!(extra, Some(Some(crate::allow::Grant::Port(47021))), "this run's grant");
+        assert_eq!(answered(), None, "answered before its run ended");
+        ed.session.task_run = None;
+    }
+
     /// cardauto §8.4: a report invites `also` only for what can matter — never for a run that passed (a cargo test
     /// run of this repository: taplo walking up from its folder, mDNSResponder, the test binary's own probes),
     /// nor for a look at a folder above the project or the run's own, a unix socket, a refusal with no address;
