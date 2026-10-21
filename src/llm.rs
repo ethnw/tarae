@@ -778,7 +778,7 @@ pub enum StreamEv {
     Answered(String),
     /// Its answer to our `initialize`: the models it offers (the chat's model picker), and the credential it runs
     /// on (`account.apiKeySource` — `limits.rs`; None: not said), known as it starts rather than with a turn.
-    Initialized { models: Vec<ModelInfo>, key_source: Option<String> },
+    Initialized { models: Vec<ModelInfo>, key_source: Option<String>, account: Option<crate::usage::Account> },
     /// A request goes out (`system` `status: "requesting"`), when it was read (unix ms) — `usage.rs`.
     Requesting(u64),
     /// A request's usage, as a line reported it (`message_start`, `message_delta`, an assistant message).
@@ -1115,6 +1115,7 @@ pub(crate) fn parse_line(ev: &serde_json::Value) -> Option<StreamEv> {
             Some(StreamEv::Initialized {
                 models: ModelInfo::list(&r["models"]),
                 key_source: r["account"]["apiKeySource"].as_str().map(String::from),
+                account: crate::usage::Account::of(&r["account"]),
             })
         }
         "control_response" if ev["response"]["request_id"] == crate::limits::REQUEST_ID => {

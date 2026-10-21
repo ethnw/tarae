@@ -815,6 +815,8 @@ pub struct SessionState {
     /// The credential its chat's claude last reported (`apiKeySource`: `none`, `apiKeyHelper` … — `limits.rs`)
     /// — None: none reported yet.
     pub key_source: Option<String>,
+    /// The account its chat's claude runs on: its organization and plan (`usage::Account` — never the email).
+    pub account: Option<(Option<String>, Option<String>)>,
     /// Who pays for its Claude: `subscription` · `api` (`billing.rs`).
     pub billing: &'static str,
     /// What its last sandboxed run's sandbox keeps apart and shares (`Session.sandbox`) — None: none yet.
@@ -1184,6 +1186,7 @@ impl Editor {
             usage: UsageState::of_session(l, &self.config.llm, &self.limits, now_ms),
             compacted: Some(l.compacted.clone()).filter(|c| c.count > 0),
             key_source: l.usage.key_source.clone(),
+            account: l.usage.account.as_ref().map(|a| (a.organization.clone(), a.plan.clone())),
             billing: l.billing.name(),
             sandbox: l.sandbox.clone(),
         };
@@ -1401,6 +1404,9 @@ impl UiState {
                 }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);
+                }
+                if let Some((organization, plan)) = &s.account {
+                    v["account"] = json!({"organization": organization, "plan": plan});
                 }
                 v["sandbox"] = s.sandbox.as_ref().map_or(Value::Null, |g| g.json());
                 v

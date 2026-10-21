@@ -843,6 +843,45 @@ fn snapshot_offer_quiet() {
     s.frames_both("offer_quiet");
 }
 
+/// frictions29 #25: a rebase's resolved card, Claude saying the commit's message no longer holds — `m` among its
+/// answers, the line saying what it does.
+#[test]
+fn snapshot_rebase_message_card() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.session.name = "feat".into();
+    crate::rebase::resolved_for_test(
+        &mut s.ed,
+        "Take grants back in every session",
+        Some("Keep grants per repository\n\nThe resolution keeps main's per-repository answers."),
+    );
+    let id = s.ed.session.id;
+    s.ed.rebase_offer(id).unwrap();
+    s.check("rebase_message_card");
+    s.frames_both("rebase_message_card");
+}
+
+/// frictions29 #27: a session's instruction file changed here and in the main checkout — the card says what `y`
+/// takes and what stays.
+#[test]
+fn snapshot_instructions_card() {
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let b = crate::instructions::Both {
+        root: "/stand-in/feat".into(),
+        rel: "CLAUDE.md".into(),
+        base: Some("rule one\n".into()),
+        here: "rule one\nmine\n".into(),
+        main: "rule one\nrule two\n".into(),
+        left: 1,
+    };
+    s.ed.push_offer(b.card());
+    s.check("instructions_card");
+    s.frames_both("instructions_card");
+}
+
 /// A tall card being read in its buffer (frictions15 #1): the bar over the status line says whose keys they
 /// are — the card's after `C-q` (`esc goes back`), the code's with a view key pending (`C-q answers it`) —
 /// where a hidden hold made `C-q` let go instead.
@@ -4176,10 +4215,12 @@ fn review_rail_scrolls_by_click_and_marks_by_click() {
         r.files.iter().filter(|f| r.viewed(&s.ed, f)).count()
     };
     assert_eq!(viewed(&s), 1, "marked once, not toggled back");
-    // A click on its name opens it, nothing more; `space v m` takes the mark back
+    // A click on its name opens it, nothing more; `space v m` keeps the mark (set-only), `space v M` takes it back
     s.ed.session.chat.as_mut().unwrap().focused = false;
     s.keys(" vm");
-    assert_eq!(viewed(&s), 0, "space v m toggles");
+    assert_eq!(viewed(&s), 1, "space v m only marks");
+    s.keys(" vM");
+    assert_eq!(viewed(&s), 0, "space v M unmarks");
     std::fs::remove_dir_all(&dir).ok();
 }
 

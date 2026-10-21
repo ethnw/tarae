@@ -104,6 +104,8 @@ pub struct Session {
     pub git_status: Option<crate::gitpanel::Status>,
     pub git_discard_asked: Option<(String, std::time::Instant)>,
     pub committing: Option<crate::gitpanel::Committing>,
+    /// Its instruction files' look at the main checkout's (`instructions.rs`): one at a time.
+    pub instructions: crate::instructions::Look,
     /// The commit message being opened is for ending the session after it (`worktree.rs`).
     pub commit_then_end: bool,
     /// Git work waiting its turn (one at a time) · one running · reads of the status asked for (the latest
@@ -316,6 +318,7 @@ impl Session {
             git_status: None,
             git_discard_asked: None,
             committing: None,
+            instructions: Default::default(),
             commit_then_end: false,
             git_queue: Default::default(),
             git_busy: false,

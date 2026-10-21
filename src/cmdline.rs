@@ -91,6 +91,7 @@ pub const COMMANDS: &[TypedCmd] = &[
         "Look again at what this repository's own git settings run, and trust them or not",
     ),
     c(&["claude-update"], Arg::None, "Look for a newer claude and install it (claude update, as you)"),
+    c(&["claude-restart"], Arg::None, "Start every chat's claude again, on the login it finds now"),
     c(&["granted", "sandbox-allowed"], Arg::None, "What you've let through — take one back"),
     c(&["sandbox-disallow"], Arg::None, "Take back what Claude may do without asking"),
     c(&["sandbox-blocked"], Arg::None, "What the sandbox blocked in Claude's last run: open it"),

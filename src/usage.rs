@@ -401,9 +401,69 @@ pub fn price_note(cli: Option<&str>) -> String {
     format!("Costs are the API price, per {table} — on a subscription, not what you pay.")
 }
 
+/// The account a chat's claude runs on, as its answer to `initialize` says it (`account` — frictions29 #3):
+/// the organization and the plan. The email is never kept: only a hash of it with the organization (`login`),
+/// in memory, tells one login from another (the user's rule: the email is never on screen, in the state or in
+/// shots).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub organization: Option<String>,
+    /// `subscriptionType` as claude says it (`max`, `pro`, `team` …) — None: an API key, a cloud provider.
+    pub plan: Option<String>,
+    pub login: u64,
+}
+
+impl Account {
+    /// From `initialize`'s `account` — None: nothing that tells a login (no email, no organization).
+    pub fn of(v: &Value) -> Option<Account> {
+        use std::hash::{Hash, Hasher};
+        let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(String::from);
+        let (email, organization) = (v["email"].as_str().filter(|s| !s.is_empty()), s("organization"));
+        if email.is_none() && organization.is_none() {
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (email, &organization).hash(&mut h);
+        Some(Account { organization, plan: s("subscriptionType"), login: h.finish() })
+    }
+
+    /// `Acme · plan max` — what's known of it.
+    pub fn said(&self) -> String {
+        match (&self.organization, &self.plan) {
+            (Some(o), Some(p)) => format!("{o} · plan {p}"),
+            (Some(o), None) => o.clone(),
+            (None, Some(p)) => format!("plan {p}"),
+            (None, None) => "not said".into(),
+        }
+    }
+}
+
+/// A chat's claude said its account (`Initialized`): kept on its session; another login than the last one seen
+/// makes the plan's limits unknown (they were the other account's) and is said on every chat still on another.
+pub fn account_seen(ed: &mut Editor, a: Account) {
+    let login = a.login;
+    ed.session.usage.account = Some(a);
+    if ed.limits.login == Some(login) {
+        return;
+    }
+    let before = ed.limits.login.replace(login);
+    if before.is_none() {
+        return;
+    }
+    ed.limits.forget();
+    for l in std::iter::once(&mut ed.session).chain(&mut ed.sessions) {
+        let other = l.usage.account.as_ref().is_some_and(|a| a.login != login);
+        if let Some(c) = l.chat.as_mut().filter(|c| other && c.running()) {
+            c.note("another Claude login since this claude started — :claude-restart moves every chat to it");
+        }
+    }
+}
+
 /// A session's Claude usage.
 #[derive(Debug, Default)]
 pub struct Usage {
+    /// The account its chat's claude runs on (`Account`) — None: not said yet.
+    pub account: Option<Account>,
     /// Its turns, oldest first — every conversation it had since tarae started (and a continued one's
     /// earlier turns).
     pub turns: Vec<Turn>,
@@ -873,6 +933,14 @@ fn limits_section(u: &Usage, limits: &crate::limits::Limits, now_ms: u64) -> Str
         _ => {}
     }
     out += "\n## Credential\n\n";
+    // (the organization and the plan — never the email: #3)
+    if let Some(a) = &u.account {
+        out += &format!("Account: {}.", a.said());
+        if limits.login.is_some_and(|l| l != a.login) {
+            out += " Another login since this claude started — :claude-restart moves every chat to it.";
+        }
+        out += "\n";
+    }
     match u.key_source.as_deref() {
         None => out += "Not reported yet — claude says it as a turn starts.\n",
         Some(k) => {

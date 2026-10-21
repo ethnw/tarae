@@ -3482,7 +3482,11 @@ mod tests {
         assert_eq!(board_notes(&ed).len(), 1, "pinned unchecked");
         let (took, generation) = (r.took, r.members[1].generation);
         for key_source in [Some("apiKeyHelper".to_string()), Some("apiKeyHelper".to_string())] {
-            on_event(&mut ed, generation, StreamEv::Initialized { models: Vec::new(), key_source });
+            on_event(
+                &mut ed,
+                generation,
+                StreamEv::Initialized { models: Vec::new(), key_source, account: None },
+            );
         }
         let stopped = ed.messages.iter().filter(|m| m.2.starts_with("the board stopped:")).count();
         assert_eq!(

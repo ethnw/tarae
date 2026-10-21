@@ -1381,6 +1381,14 @@ session's total, the turns' tool calls, what every request in the conversation s
 system prompt, the tools, CLAUDE.md and the first message), and today's total across sessions. It updates as turns
 end and as limits come.
 
+Which account a chat runs on is what its claude says as it starts: `:usage` says the organization and the plan
+(`Account: Acme · plan max`), `tarae state` too (`account`), and the chat's last row the plan beside the weekly
+window (`max · weekly 84 %`) — never the account's email, anywhere. A claude that starts on another login (you
+logged in again elsewhere) makes the plan's limits unknown until one on the new login says them, and every chat
+still on the old login says so, shows no weekly window, and what its claude says of the limits isn't kept (they
+are the other account's); `:claude-restart` starts every chat's claude again on its conversation — idle
+ones at once, a busy one when its turn ends — without `:restart`, which would end the terminal and what runs there.
+
 **Tool calls**, a row per turn: model requests, calls, calls a request, what a request carried, the time split
 into the model's, the tools' and — of the tools' — waiting for you (a card of Claude's, an edit to review), and the
 calls wasted: a range read again with nothing written since (Read's offset/limit, a read-only run's `sed -n`,
@@ -1565,7 +1573,8 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   accent, `¶1` the reviewer's, in its colour), and `]n` walks them
 - `space v s` sends every draft to Claude in one message, each with its lines as a diff. Claude answers every comment
   on its note and makes the changes, which come to you as the usual [edit review](#edits)
-- `space v m` marks a file viewed, again unmarks it. The mark is kept line by line: ended and opened again, the
+- `space v m` marks a file viewed; on one viewed already it says so (`already viewed — space v M unmarks`) and
+  changes nothing. `space v M` takes the mark off, said on the status line. The mark is kept line by line: ended and opened again, the
   review keeps it, and a change to the file asks only for what changed since. Its `◦` in the rail turns to the
   warning colour, and the rail's head says how many files changed since they were viewed. `]g` in such a file
   goes only to the changes new since the mark and says how much (`2 lines new · 1 line taken out since you
@@ -1823,7 +1832,8 @@ of repeating itself, and the log says where.
 | `]g` / `[g` | Next / previous change, across files |
 | `]u` / `[u` | Next / previous file not viewed yet (changed since viewed too) — the rail's head counts them |
 | `space n` | Draft a comment (or a reply) on this line |
-| `space v m` | Mark this file viewed (again: not viewed) |
+| `space v m` | Mark this file viewed |
+| `space v M` | Unmark it |
 | `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, `u` the next not viewed, Esc back |
 | click on a file's `◦` | Open it and mark it viewed |
 | `space v u` | Take the change at the cursor back |
@@ -1862,6 +1872,13 @@ its base up to it, fast-forward only. When the base has moved since the session 
   those files, a review shows them against the commit being replayed, and a card says they aren't staged yet and
   offers to continue (`y`: tarae stages them and runs `git rebase --continue`, which may stop again — the same
   loop) or abort (`X`: back to where the branch was). Markers left: the files are named, and the rebase waits
+- A resolution can change what the commit says. Claude is sent the commit's message too, and asked whether its
+  resolution changes what the message says; if it does, its answer ends with the message as it should now read
+  (a ```` ```commit-message ```` block), and the card says `Claude says the commit's message no longer holds`.
+  `m` on the card opens the message to write — Claude's version, else the commit's own; `:w` stages the files and
+  goes on with it (the commit keeps its author and date), `:q` leaves it as it was and puts the card back. A
+  resolved commit that went on with its old message is named on the bring card at the end (`Kept its message
+  through a resolved conflict: «Add login» — read it before bringing`)
 
 While it's under way the session's tab, the status line's chip and its row in the list say `rebasing 2/5`, and
 `:session-end` and `:restart` wait for it (they say why). `:session-bring` on a session whose rebase stopped
@@ -1869,6 +1886,14 @@ puts its card up again — `y` goes on, `X` aborts. Its card put away (`n`), a r
 stopped with nothing asked of its Claude (one taken up after a restart) — stays in the inbox (`space I`, the
 status line's `▲ waiting`) until it goes on or is aborted, waited since it began to wait (for one taken up, since
 git stopped, as git's files say). `enter` there, or one `C-q`, brings its card back with the keys.
+
+A session's checkout gets copies of the main checkout's git-ignored `CLAUDE.md`, `CLAUDE.local.md` and
+`AGENTS.md` when it's made, and keeps each as copied in its own git folder. When its claude starts and after
+its rebase, they're compared: a copy the session hasn't changed takes the main checkout's (said, and Claude is
+told with the next message — claude reads them as it starts, so from its next start); one changed on both sides
+is a card — `y` takes the main checkout's changes where they don't touch the session's own (those stay, the
+card says how many), `v` shows them, `n` keeps it; either way only later changes are asked. A buffer of it
+with unsaved changes is left alone. `.claude/settings*.json` aren't followed: they're trusted on their own card.
 
 A session with no commits of its own, behind its base (it was made, nothing was committed, and the base moved
 on), has nothing to bring. `:session-bring` then offers to move it up to its base's tip instead: the card says

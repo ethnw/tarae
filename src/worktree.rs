@@ -315,14 +315,14 @@ pub struct Making {
 /// The instruction files a session's checkout gets from this one when git doesn't carry them (#17: CLAUDE.md
 /// is ignored here, and a session's Claude started without the project's rules) — `.claude/settings*.json`
 /// too, never the rest of `.claude/`.
-const INSTRUCTIONS: [&str; 3] = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
+pub(crate) const INSTRUCTIONS: [&str; 3] = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"];
 
 /// An instruction file bigger than this isn't one — not copied.
 const INSTRUCTIONS_MAX: u64 = 1 << 20;
 
 /// The instruction files in `top` that git doesn't track (ignored or untracked), small and plain files —
 /// relative paths, in `INSTRUCTIONS`' order, then `.claude/`'s settings by name. On a worker.
-fn instructions(top: &Path) -> Vec<String> {
+pub(crate) fn instructions(top: &Path) -> Vec<String> {
     let mut settings: Vec<String> = std::fs::read_dir(top.join(".claude"))
         .into_iter()
         .flatten()
@@ -616,6 +616,8 @@ fn make(m: &Making) -> Result<(PathBuf, Vec<String>), String> {
     let path = m.path.to_str().ok_or("a checkout path that isn't UTF-8")?;
     git_no_hooks(&m.top, &["worktree", "add", "-q", "-b", &m.branch, path, &m.base_sha])?;
     let failed = copy_instructions(&m.top, &m.path, &m.copies);
+    // (the copies as made: what tells the session's own changes from the main checkout's later — #27)
+    crate::instructions::keep_bases(&m.top, &m.path, &m.copies);
     Ok((std::fs::canonicalize(&m.path).unwrap_or_else(|_| m.path.clone()), failed))
 }
 
@@ -762,7 +764,7 @@ fn changed_row(row: &str) -> String {
 
 /// The repository's main checkout (`git worktree list`'s first, with a `.git` folder of its own) — None: a
 /// bare repository's, or `root` itself.
-fn main_checkout(common: &Path, root: &Path) -> Option<PathBuf> {
+pub(crate) fn main_checkout(common: &Path, root: &Path) -> Option<PathBuf> {
     let first = checkouts(common).into_iter().next()?;
     (first != root && first.join(".git").is_dir()).then_some(first)
 }
@@ -3837,7 +3839,8 @@ mod tests {
         assert!(
             q.ends_with(
                 " feat a). The review shows it against that commit — not staged yet: y stages it and goes \
-                 on.\n\nX aborts the rebase: feat goes back as it was."
+                 on.\n\nm writes the commit's message first — :w there goes on with it.\n\nX aborts the rebase: \
+                 feat goes back as it was."
             ),
             "{q}"
         );
@@ -3860,8 +3863,30 @@ mod tests {
         assert!(says(&ed, "end feat: feat is rebasing 1/2"), "{}", said(&ed));
         let restart = crate::restart::start(&mut ed, false).unwrap_err();
         assert_eq!(restart, "can't restart: feat is rebasing 1/2 — :rebase-continue or :rebase-abort first");
+        // frictions29 #25: `m` writes the commit's message first — its own, Claude proposed none; `:q` leaves
+        // it as it was and the card is back
+        assert_eq!(card_in_sight(&mut ed), ['y', 'm', 'X', 'n']);
+        feed(&mut ed, "m");
+        settle_until(&mut ed, |ed| ed.in_rebase_message() || says(ed, "the commit's message:"));
+        assert!(
+            ed.doc().text.to_string().starts_with("feat a\n\n──────── tarae: this line"),
+            "{}",
+            ed.doc().text
+        );
+        assert!(card(&ed, "feat: conflicts resolved").is_none(), "out of the way while it's written");
+        feed(&mut ed, ":q<ret>");
+        assert!(!ed.in_rebase_message());
+        assert!(says(&ed, "the commit's message stays as it was"), "{}", said(&ed));
+        // Closed another way (`:bc!`): the same — the card back, nothing left pointing at the buffer
+        assert_eq!(card_in_sight(&mut ed), ['y', 'm', 'X', 'n']);
+        feed(&mut ed, "m");
+        settle_until(&mut ed, |ed| ed.in_rebase_message() || says(ed, "the commit's message:"));
+        feed(&mut ed, ":bc!<ret>");
+        assert!(says(&ed, "the commit's message was closed"), "{}", said(&ed));
+        assert!(ed.session.rebase.as_ref().is_some_and(|r| r.messages.editing.is_none()));
+        assert!(card(&ed, "feat: conflicts resolved").is_some(), "the card is back");
         // y: staged, and on to the end
-        assert_eq!(card_in_sight(&mut ed), ['y', 'X', 'n']);
+        assert_eq!(card_in_sight(&mut ed), ['y', 'm', 'X', 'n']);
         let a = ed
             .docs
             .iter()
@@ -3880,6 +3905,167 @@ mod tests {
         assert_eq!(git_in(&wt, &["log", "-1", "--format=%s", "HEAD~1"]), "feat a", "its message kept");
         assert!(ed.session.rebase.is_none() && ed.session.code_review.is_none());
         assert!(card(&ed, "feat: conflicts resolved").is_none());
+        // (#25: kept through a resolution — named before it's brought)
+        let q = &card(&ed, "Rebased feat onto main").unwrap().question;
+        assert!(q.ends_with("Kept its message through a resolved conflict: «feat a» — read it before bringing (the git tab's log)."), "{q}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #25: the ask carries the replayed commit's message and asks whether the resolution changes
+    /// what it says; Claude's answer proposes another in a ```` ```commit-message ```` block — the card says so,
+    /// `m` opens that version, and `:wq` goes on with it: the commit has the new message and keeps its author
+    /// date; the bring card names no kept message.
+    #[test]
+    fn a_resolution_that_changes_what_the_commit_says_gets_its_message_written() {
+        let (repo, dir) = place("rebase-message");
+        let (log, answer) = (dir.join("claude.log"), dir.join("answer.txt"));
+        std::fs::write(&answer, "one\nmain\nfeat\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let text = json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {
+            "type": "text_delta",
+            "text": "Resolved. It no longer holds:\n\n```commit-message\nfeat a, beside main\n\nKeeps the line from main.\n#25 asked for it.\n```\n"}}});
+        claude_does(&mut ed, &log, &format!("cp '{}' a.txt; printf '%s\\n' '{text}';", answer.display()));
+        let (wt, _) = moved_apart(&mut ed, &repo, false);
+        let date = git_in(&wt, &["log", "-1", "--format=%ad %an", "HEAD~1"]);
+        rebase_asked(&mut ed);
+        settle_until(&mut ed, |ed| {
+            card(ed, "feat: conflicts resolved").is_some() || says(ed, "rebase feat:")
+        });
+        let heard = std::fs::read_to_string(&log).unwrap();
+        for part in
+            ["<message>\\nfeat a\\n</message>", "whether your resolution changes", "```commit-message block"]
+        {
+            assert!(heard.contains(part), "{part:?} in {heard}");
+        }
+        let q = &card(&ed, "feat: conflicts resolved").unwrap().question;
+        assert!(q.contains("Claude says the commit's message no longer holds — m shows its version"), "{q}");
+        feed(&mut ed, "m");
+        settle_until(&mut ed, |ed| ed.in_rebase_message() || says(ed, "the commit's message:"));
+        let shown = ed.doc().text.to_string();
+        assert!(
+            shown.starts_with(
+                "feat a, beside main\n\nKeeps the line from main.\n#25 asked for it.\n\n──────── tarae: this line \
+                 and what's below it are left out ────────\nClaude's version"
+            ),
+            "{shown}"
+        );
+        // (written in: a line of your own)
+        feed(&mut ed, "ggOFixed.<esc>");
+        feed(&mut ed, ":wq<ret>");
+        settle_until(&mut ed, |ed| card(ed, "Rebased feat onto main").is_some() || says(ed, "rebase feat:"));
+        assert_eq!(
+            git_in(&wt, &["log", "-1", "--format=%B", "HEAD~1"]),
+            // (its own `#` line kept — tarae's lines cut, not git's comment lines)
+            "Fixed.\nfeat a, beside main\n\nKeeps the line from main.\n#25 asked for it.",
+            "{}",
+            said(&ed)
+        );
+        assert_eq!(
+            git_in(&wt, &["log", "-1", "--format=%ad %an", "HEAD~1"]),
+            date,
+            "its author and date kept"
+        );
+        assert_eq!(git_in(&wt, &["show", "HEAD~1:a.txt"]), "one\nmain\nfeat");
+        let q = &card(&ed, "Rebased feat onto main").unwrap().question;
+        assert!(!q.contains("Kept its message"), "{q}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #27: a session's git-ignored instruction files follow the main checkout's — a copy untouched
+    /// since it was made takes the main checkout's (said, and told to Claude); one changed on both sides is a
+    /// card whose `y` takes the main checkout's changes beside the session's own; one changed only here stays.
+    #[test]
+    fn a_sessions_instruction_files_follow_the_main_checkouts() {
+        let (repo, dir) = place("instructions");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\nAGENTS.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\n").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "a1\na2\na3\na4\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\n", "copied");
+        // Untouched here, changed there: taken, said, told — as the session's claude starts (a new conversation)
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\n").unwrap();
+        crate::chat::reset(&mut ed);
+        if let Some(c) = ed.session.chat.as_mut() {
+            c.focused = false;
+        }
+        settle_until(&mut ed, |ed| says(ed, "updated from the main checkout") || says(ed, "not updated"));
+        assert!(says(&ed, "CLAUDE.md updated from the main checkout"), "{}", said(&ed));
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\n");
+        assert!(ed.session.checkpoints.tell.iter().any(|t| t.contains("CLAUDE.md were updated here")));
+        // Changed only here: the session's own, left
+        std::fs::write(wt.join("CLAUDE.md"), "rule one\nrule two\nmine\n").unwrap();
+        // Changed on both sides: the card — `y` takes the main checkout's beside the session's own
+        std::fs::write(wt.join("AGENTS.md"), "a1\na2\na3\na4\nmine\n").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "a0\na1\na2\na3\na4\n").unwrap();
+        crate::instructions::follow(&mut ed);
+        let title = "AGENTS.md: the main checkout's changed";
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        let q = card(&ed, title).unwrap().question.clone();
+        assert!(q.contains("None of them touch this session's own changes."), "{q}");
+        assert!(ed.offers.iter().all(|o| !o.title.starts_with("CLAUDE.md")), "the session's own isn't asked");
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| says(ed, "takes the main checkout's changes") || says(ed, "AGENTS.md:"));
+        assert_eq!(read(&wt.join("AGENTS.md")), "a0\na1\na2\na3\na4\nmine\n", "{}", said(&ed));
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\nmine\n");
+        // Asked once: looked at again, nothing found
+        let found = crate::instructions::look(&wt, &repo, &[]);
+        assert!(found.updated.is_empty() && found.both.is_empty() && found.failed.is_empty(), "{found:?}");
+        // Unsaved in a buffer: left alone — not looked at, and `y` on its card refuses (the looks asked since
+        // the chat started settled first: one at a time, a look asked meanwhile runs after)
+        settle_until(&mut ed, |ed| !ed.session.instructions.under_way());
+        let agents = wt.join("AGENTS.md");
+        ed.open(&agents).unwrap();
+        feed(&mut ed, "ggiX<esc>");
+        assert!(ed.doc().is_modified());
+        std::fs::write(repo.join("AGENTS.md"), "a0\na1\na2\na3\na4\na5\n").unwrap();
+        let found = crate::instructions::look(&wt, &repo, std::slice::from_ref(&agents));
+        assert!(found.both.is_empty() && found.updated.is_empty(), "{found:?}");
+        let both = crate::instructions::look(&wt, &repo, &[]).both.into_iter().find(|b| b.rel == "AGENTS.md");
+        crate::instructions::answer(&mut ed, both.expect("asked once saved"), true);
+        assert!(says(&ed, "AGENTS.md has unsaved changes"), "{}", said(&ed));
+        assert_eq!(read(&agents), "a0\na1\na2\na3\na4\nmine\n", "not written over");
+        // Copied before bases were kept (no base): asked once — `n` keeps it, not asked again; `y` takes the
+        // main checkout's whole (the session's own lines go, as the card says)
+        let git_dir = PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).trim());
+        let base = git_dir.join("tarae-instructions/CLAUDE.md");
+        let title = "CLAUDE.md: the main checkout's changed";
+        std::fs::remove_file(&base).unwrap();
+        crate::instructions::follow(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        assert!(
+            ed.offers.iter().all(|o| !o.title.starts_with("AGENTS.md")),
+            "its unsaved buffer isn't asked"
+        );
+        let q = card(&ed, title).unwrap().question.clone();
+        assert!(q.contains("whose change it is can't be told"), "{q}");
+        ed.offer_dismiss();
+        settle_until(&mut ed, |ed| says(ed, "CLAUDE.md kept as it is") || says(ed, "CLAUDE.md:"));
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\nmine\n", "{}", said(&ed));
+        let found = crate::instructions::look(&wt, &repo, std::slice::from_ref(&agents));
+        assert!(found.both.is_empty(), "not asked again: {found:?}");
+        std::fs::remove_file(&base).unwrap();
+        crate::instructions::follow(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| {
+            says(ed, "CLAUDE.md takes the main checkout's") || says(ed, "CLAUDE.md: ")
+        });
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\n", "{}", said(&ed));
+        // A link where the session's CLAUDE.md was (Claude can write the checkout): never read through, never
+        // written over — not looked at (a stand-in "secret" in the test's own folder)
+        let secret = dir.join("stand-in-secret.txt");
+        std::fs::write(&secret, "rule one\nrule two\nnot for the checkout\n").unwrap();
+        std::fs::remove_file(wt.join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink(&secret, wt.join("CLAUDE.md")).unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\nrule three\n").unwrap();
+        let found = crate::instructions::look(&wt, &repo, std::slice::from_ref(&agents));
+        assert!(found.both.is_empty() && found.updated.is_empty() && found.failed.is_empty(), "{found:?}");
+        assert!(std::fs::symlink_metadata(wt.join("CLAUDE.md")).unwrap().file_type().is_symlink(), "left");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3910,7 +4096,7 @@ mod tests {
         assert!(!says(&ed, "bring feat:"), "{}", said(&ed));
         let q = card(&ed, "feat: conflicts resolved").expect("its card, here").question.clone();
         assert!(q.contains("not staged yet: y stages it and goes on"), "{q}");
-        assert_eq!(card_in_sight(&mut ed), ['y', 'X', 'n']);
+        assert_eq!(card_in_sight(&mut ed), ['y', 'm', 'X', 'n']);
         feed(&mut ed, "n");
         // Typed here: feat's rebase goes on, the front staying where it is
         feed(&mut ed, ":rebase-continue<ret>");

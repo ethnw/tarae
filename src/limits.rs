@@ -121,6 +121,8 @@ pub struct Limits {
     /// `get_usage`'s last answer, and when.
     pub answer: Option<(u64, Answer)>,
     pub plan: Option<String>,
+    /// The login the last account said was (`usage::Account.login`) — these are its limits.
+    pub login: Option<u64>,
     /// When tarae last asked `get_usage`.
     pub asked_ms: Option<u64>,
     /// The chat claude (its process's generation) asked `get_usage` and not answered yet.
@@ -137,6 +139,11 @@ pub struct Limits {
 impl Limits {
     pub fn new() -> Limits {
         Limits { ask: !cfg!(test), ..Limits::default() }
+    }
+
+    /// Another login: what was known is the other account's — unknown until a claude on this one says it.
+    pub fn forget(&mut self) {
+        *self = Limits { ask: self.ask, login: self.login, ..Limits::default() };
     }
 
     /// A line's readings: each window's latest wins. One that doesn't say the status keeps the one said for the

@@ -248,6 +248,8 @@ pub struct Stop {
     pub onto: Option<String>,
     /// When git stopped there (its step file's time) — what waits since then, across a restart.
     pub since: Option<std::time::SystemTime>,
+    /// The replayed commit's whole message (frictions29 #25: what a resolution may make wrong).
+    pub message: Option<String>,
 }
 
 impl Stop {
@@ -280,6 +282,55 @@ pub struct Rebase {
     pub stashed: Vec<String>,
     /// When its stop was resolved (`Stage::Resolved`) — from then it waits on you (`waits_on_you`).
     pub resolved_at: Option<std::time::Instant>,
+    /// What becomes of the replayed commits' messages (frictions29 #25).
+    pub messages: Messages,
+}
+
+/// The messages of the commits a rebase replays, where a resolution may have made them wrong (frictions29 #25:
+/// a resolution flipped what a commit did, and its message went on saying the opposite).
+#[derive(Clone, Debug, Default)]
+pub struct Messages {
+    /// The stop's message as Claude's answer says it should now read (a ```` ```commit-message ```` block) —
+    /// it said the message no longer holds.
+    pub proposed: Option<String>,
+    /// The stop's message being written (`m` on the card): its buffer and file.
+    pub editing: Option<(crate::document::DocId, PathBuf)>,
+    /// Its file once saved: what the rebase goes on with (`rebase_continue`).
+    pub written: Option<PathBuf>,
+    /// The commits whose conflict was resolved and whose message went on as it was, by subject — the bring
+    /// card names them.
+    pub kept: Vec<String>,
+}
+
+/// The fenced block Claude's answer proposes the stop's message in.
+const MESSAGE_FENCE: &str = "```commit-message";
+
+/// The message an answer proposes (`MESSAGE_FENCE`'s block, the last one) — None: it said the message holds.
+pub fn proposed_message(answer: &str) -> Option<String> {
+    let (_, after) = answer.rsplit_once(MESSAGE_FENCE)?;
+    let body = after.strip_prefix('\n').unwrap_or(after);
+    let (text, _) = body.split_once("```")?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The file the stop's message is written in (`m`), in the checkout's git folder: git's own editor hook takes
+/// it from there as the rebase goes on (`rebase_continue`).
+const MESSAGE_FILE: &str = "TARAE_REBASE_MSG";
+
+/// The line in the message file after which what's said is left out — tarae's own cut, not git's comment lines:
+/// a message's own `#` lines (a heading, `#123`) stay, and `core.commentChar` doesn't matter (the review of
+/// frictions31: git's strip dropped them, or kept `#` help under another comment character).
+const MESSAGE_CUT: &str = "──────── tarae: this line and what's below it are left out ────────";
+
+/// The message as written in `text`: what comes before the last `MESSAGE_CUT` line, its trailing blank lines off.
+pub fn message_written(text: &str) -> String {
+    let kept = match text.rfind(&format!("\n{MESSAGE_CUT}")) {
+        Some(i) => &text[..i],
+        None if text.starts_with(MESSAGE_CUT) => "",
+        None => text,
+    };
+    format!("{}\n", kept.trim_end())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,6 +440,10 @@ pub fn under_way(root: &Path) -> Option<Stop> {
         head: read("head-name").map(|h| h.trim_start_matches("refs/heads/").to_string()),
         onto: read("onto").map(|o| o.chars().take(7).collect()),
         since,
+        message: git(root, &["log", "-1", "--format=%B", "REBASE_HEAD"], None)
+            .ok()
+            .map(|m| m.trim_end().to_string())
+            .filter(|m| !m.is_empty()),
     })
 }
 
@@ -460,10 +515,24 @@ fn ask(root: &Path, branch: &str, base: &str, stop: &Stop) -> Ask {
         stop.at(),
         stop.files.join(", "),
     );
+    // (frictions29 #25: the commit keeps its message through the resolution unless someone asks whether it
+    // still holds — a proposal lands in the card's `m`)
+    let question = match &stop.message {
+        Some(_) => format!(
+            "{question} Then say whether your resolution changes what that commit's message (in <message>) \
+             says. If it does, end your answer with the whole message as it should now read, in a \
+             {MESSAGE_FENCE} block; if it still holds, say so and add no block."
+        ),
+        None => question,
+    };
     let short = stop.commit.as_ref().map_or("", |c| c.1.as_str());
+    let message = match &stop.message {
+        Some(m) => format!("<message>\n{m}\n</message>\n"),
+        None => String::new(),
+    };
     let about = format!(
-        "<rebase branch=\"{branch}\" onto=\"{base}\" commit=\"{short}\">\n<conflicted>\n{}\n</conflicted>\n\
-         <theirs note=\"what the commit being replayed changed in them\">\n{}</theirs>\n\
+        "<rebase branch=\"{branch}\" onto=\"{base}\" commit=\"{short}\">\n{message}<conflicted>\n{}\n\
+         </conflicted>\n<theirs note=\"what the commit being replayed changed in them\">\n{}</theirs>\n\
          <ours note=\"what {base}, and the commits replayed before this one, changed in them since that \
          commit's parent\">\n{}</ours>\n</rebase>",
         stop.files.join("\n"),
@@ -595,6 +664,9 @@ pub fn turn_over(ed: &mut Editor) {
     if r.stage != Stage::Stopped || !r.asked {
         return;
     }
+    // (what its answer says of the commit's message: a version of it when it no longer holds)
+    let answer = ed.session.chat.as_ref().map(|c| c.last_answer()).unwrap_or_default();
+    r.messages.proposed = proposed_message(&answer);
     let conflicted = r.stop.files.clone();
     let files = ed.rebase_texts(&conflicted);
     let root = ed.session.root.clone();
@@ -778,6 +850,7 @@ impl Editor {
             also: Vec::new(),
             stashed,
             resolved_at: None,
+            messages: Default::default(),
         });
         let base = crate::packs::sh_quote(&m.base);
         let branch = m.branch.clone();
@@ -843,6 +916,7 @@ impl Editor {
                     (r.stage, r.step, r.asked) = (Stage::Stopped, stop.step, false);
                     r.stop = *stop;
                     r.also.clear();
+                    (r.messages.proposed, r.messages.editing, r.messages.written) = (None, None, None);
                 }
                 match ask {
                     Some(a) => self.rebase_ask(a),
@@ -852,7 +926,8 @@ impl Editor {
                 }
             }
             Ended::Done { ahead, tip, back } => {
-                let stashed = self.session.rebase.take().map(|r| r.stashed).unwrap_or_default();
+                let (stashed, kept) =
+                    self.session.rebase.take().map(|r| (r.stashed, r.messages.kept)).unwrap_or_default();
                 self.rebase_cards_gone();
                 // (stashed for it: put back by git — or, not cleanly, kept in git's stash, which it said)
                 let lost: Vec<String> = stashed.iter().filter(|f| !back.contains(f)).cloned().collect();
@@ -872,13 +947,26 @@ impl Editor {
                     true => self.set_success(said),
                     false => self.set_warning(said),
                 }
+                // (its instruction files: the main checkout's changes since its copy — #27)
+                crate::instructions::follow(self);
                 // (a session's: bring it now? The checkout tarae started in has no base to go into)
                 if self.session.id != 0 {
                     let (root, quick, sid) =
                         (self.session.root.clone(), self.preflight_quick(), self.session.id);
-                    let card =
+                    let mut card =
                         Moved { root: root.clone(), name, branch, base: base.clone(), moved: 0, ahead }
                             .bring_card(quick, true);
+                    // (frictions29 #25: a resolution may have made a message wrong — named before it's brought)
+                    if !kept.is_empty() {
+                        let quoted: Vec<String> = kept.iter().map(|s| format!("«{s}»")).collect();
+                        card.question.push_str(&format!(
+                            "\n\nKept {} through a resolved conflict: {} — read {} before bringing (the git \
+                             tab's log).",
+                            if kept.len() == 1 { "its message" } else { "their messages" },
+                            quoted.join(", "),
+                            if kept.len() == 1 { "it" } else { "them" },
+                        ));
+                    }
                     crate::codereview::push_bring_card(self, sid, card, root, base);
                 }
             }
@@ -1028,16 +1116,30 @@ impl Editor {
                 ),
             ),
         };
-        let q = format!("{first}\n\nX aborts the rebase: {branch} goes back as it was.");
+        // (frictions29 #25: resolved, the commit's message may no longer hold — `m` writes it first)
+        let message = r.stage == Stage::Resolved && stop.message.is_some();
+        let said = match (message, r.messages.proposed.is_some()) {
+            (false, _) => String::new(),
+            (true, true) => {
+                "Claude says the commit's message no longer holds — m shows its version; :w there \
+                             goes on with it.\n\n"
+                    .to_string()
+            }
+            (true, false) => {
+                "m writes the commit's message first — :w there goes on with it.\n\n".to_string()
+            }
+        };
+        let q = format!("{first}\n\n{said}X aborts the rebase: {branch} goes back as it was.");
+        let x = q.lines().count() - 1;
         let root = self.session.root.clone();
         Offer::new(
             title,
             &q,
             "Going on with the rebase…",
             "Couldn't go on with the rebase".into(),
-            What::RebaseResolved { root },
+            What::RebaseResolved { root, message },
         )
-        .warning(2..3)
+        .warning(x..x + 1)
     }
 
     /// Session `id`'s rebase met where it's in the way (`:session-bring`, #175): its card up in front — `y`
@@ -1054,7 +1156,7 @@ impl Editor {
         });
         let (root, o) = card?;
         // (one card for it: one left from before goes)
-        let mine = |o: &Offer| matches!(&o.what, What::RebaseResolved { root: r } if *r == root);
+        let mine = |o: &Offer| matches!(&o.what, What::RebaseResolved { root: r, .. } if *r == root);
         self.offers.retain(|o| !mine(o));
         for l in std::iter::once(&mut self.session).chain(&mut self.sessions) {
             l.parked.retain(|o| !mine(o));
@@ -1157,6 +1259,117 @@ impl Editor {
         done
     }
 
+    /// `m` on the resolved card, a session's rebase (wherever it is): the replayed commit's message — as
+    /// Claude proposes it, else as it is — written to a file in its git folder (a worker) and opened to write.
+    /// `:w` goes on with it (`rebase_saved`), `:q` puts the card back (`rebase_message_left`).
+    pub fn rebase_message(&mut self, root: &Path) {
+        let Some(id) = self.session_at(root) else { return };
+        self.with_session(id, |ed| {
+            let Some(r) = ed.session.rebase.as_ref().filter(|r| r.stage == Stage::Resolved) else { return };
+            let (proposed, own) = (r.messages.proposed.clone(), r.stop.message.clone().unwrap_or_default());
+            let at = r.stop.at();
+            let root = ed.session.root.clone();
+            let said = "writing the commit's message…";
+            let work = move || -> Result<PathBuf, String> {
+                let dir = git_dir(&root).ok_or("no git folder")?;
+                let file = dir.join(MESSAGE_FILE);
+                let whose = match proposed.is_some() {
+                    true => "Claude's version of the message",
+                    false => "the message as it is",
+                };
+                let text = format!(
+                    "{}\n\n{MESSAGE_CUT}\n{whose} — for {at}, after its conflicts were resolved.\n:w stages the files \
+                     and goes on with this message · :q leaves it as it was\n",
+                    proposed.unwrap_or(own)
+                );
+                std::fs::write(&file, text).map_err(|e| e.to_string())?;
+                Ok(file)
+            };
+            ed.step(ed.events.jobs(), "rebase-message", said, work, move |ed, file| {
+                let file = match file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        ed.set_error(format!("the commit's message: {e}"));
+                        return ed.rebase_resolved_card();
+                    }
+                };
+                if ed.session.rebase.as_ref().is_none_or(|r| r.stage != Stage::Resolved) {
+                    return;
+                }
+                if let Err(e) = ed.open(&file) {
+                    ed.set_error(format!("{e:#}"));
+                    return ed.rebase_resolved_card();
+                }
+                let doc = ed.doc_mut();
+                doc.throwaway = true;
+                doc.set_selection(crate::selection::Selection::point(0));
+                let doc = doc.id;
+                if let Some(r) = ed.session.rebase.as_mut() {
+                    r.messages.editing = Some((doc, file));
+                }
+                ed.set_status(":w goes on with this message · :q leaves it as it was");
+            });
+        });
+    }
+
+    /// Whether the buffer in front is a rebase's commit message being written (`m`).
+    pub fn in_rebase_message(&self) -> bool {
+        let id = self.doc().id;
+        self.session.rebase.as_ref().is_some_and(|r| r.messages.editing.as_ref().is_some_and(|e| e.0 == id))
+    }
+
+    /// `:q` in the message being written: it closes, the message stays as it was, and the card is back.
+    pub fn rebase_message_left(&mut self) -> Result<(), String> {
+        if let Some(r) = self.session.rebase.as_mut() {
+            r.messages.editing = None;
+        }
+        self.close_current(true).map_err(|e| format!("{e:#}"))?;
+        self.set_status("the commit's message stays as it was — the rebase's card is back");
+        // (one card for it: put up again meanwhile by a bring, it isn't doubled)
+        let id = self.session.id;
+        self.rebase_offer(id)
+    }
+
+    /// Document `gone` closed (`close_doc`): a rebase's message being written in it, in any session, is left as it
+    /// was — said, and the resolved card back (the review of frictions31: closed by `:bd` or a session's end, the
+    /// card `m` took away never came back).
+    pub(crate) fn rebase_message_closed(&mut self, gone: crate::document::DocId) {
+        let writing = |l: &crate::session::Session| {
+            l.rebase.as_ref().and_then(|r| r.messages.editing.as_ref()).is_some_and(|e| e.0 == gone)
+        };
+        let ids: Vec<_> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| writing(l))
+            .map(|l| l.id)
+            .collect();
+        for id in ids {
+            self.with_session(id, |ed| {
+                if let Some(r) = ed.session.rebase.as_mut() {
+                    r.messages.editing = None;
+                }
+                ed.set_status(
+                    "the commit's message was closed — it stays as it was; the rebase's card is back",
+                );
+                let id = ed.session.id;
+                if let Err(e) = ed.rebase_offer(id) {
+                    ed.set_warning(e);
+                }
+            });
+        }
+    }
+
+    /// A buffer was saved: the rebase's message being written goes on with it — its buffer closes, the files
+    /// are staged and the rebase continues with that message.
+    pub fn rebase_saved(&mut self, id: crate::document::DocId) {
+        let Some(r) = self.session.rebase.as_mut() else { return };
+        let Some((_, file)) = r.messages.editing.take_if(|e| e.0 == id) else { return };
+        r.messages.written = Some(file);
+        self.close_doc(id);
+        if let Err(e) = self.rebase_continue() {
+            self.set_error(e);
+        }
+    }
+
     /// The resolved card's, a session's rebase (wherever it is): `y` continue · `X` abort.
     pub fn rebase_answer(&mut self, root: &Path, go_on: bool) {
         let Some(id) = self.session_at(root) else { return };
@@ -1173,6 +1386,8 @@ impl Editor {
     /// again). Anything else changed in the checkout isn't staged unseen: named, and the next
     /// `:rebase-continue` stages it (#129: left unstaged, git refused to go on). A rebase tarae didn't start
     /// is taken up first.
+    /// The replayed commit goes on with the message written with `m` (`Messages.written`), else as it is — a
+    /// resolved stop's then named on the bring card (`Messages.kept`).
     pub fn rebase_continue(&mut self) -> Result<(), String> {
         let name = self.session.label().to_string();
         let Some(r) = self.session.rebase.as_ref() else {
@@ -1186,8 +1401,16 @@ impl Editor {
         files.extend(r.also.iter().cloned());
         let texts = self.rebase_texts(&r.stop.files);
         let root = self.session.root.clone();
+        let written = r.messages.written.clone();
         self.events.jobs().spawn(move || {
             let left = marked(&root, texts);
+            // (the message written with `m`, tarae's lines cut off, beside it — what git's editor hook copies in)
+            let message: Option<Result<PathBuf, String>> = written.map(|f| {
+                let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+                let out = f.with_extension("out");
+                std::fs::write(&out, message_written(&text)).map_err(|e| e.to_string())?;
+                Ok(out)
+            });
             let unseen: Vec<String> = unstaged(&root).into_iter().filter(|f| !files.contains(f)).collect();
             move |ed: &mut Editor| {
                 let Some(r) = ed.session.rebase.as_mut().filter(|r| r.stopped()) else { return };
@@ -1207,16 +1430,42 @@ impl Editor {
                     r.also.extend(unseen);
                     return ed.set_warning(msg);
                 }
+                // (a resolved stop's commit going on with its message as it was: named on the bring card)
+                r.messages.written = None;
+                let message = match message {
+                    Some(Err(e)) => return ed.set_error(format!("the commit's message: {e} — not going on")),
+                    Some(Ok(f)) => Some(f),
+                    None => None,
+                };
+                if message.is_none()
+                    && r.stage == Stage::Resolved
+                    && let Some((_, _, subject)) = &r.stop.commit
+                {
+                    r.messages.kept.push(subject.clone());
+                }
+                r.messages.editing = None;
                 ed.rebase_review_gone();
                 ed.rebase_cards_gone();
                 let quoted: Vec<String> = files.iter().map(|f| crate::packs::sh_quote(f)).collect();
+                // (the replayed commit's message: written with `m`, put in place by git's own editor hook — so the
+                // commit keeps its author and date — else kept as it was, no editor)
+                let editor = message.map(|f| {
+                    crate::packs::sh_quote(&format!("cp {}", crate::packs::sh_quote(&f.to_string_lossy())))
+                });
                 let cmd = move |git: &str| {
                     let add = match quoted.is_empty() {
                         true => String::new(),
                         false => format!("{git} add -A -- {} && ", quoted.join(" ")),
                     };
-                    // (no editor for the replayed commit's message: it's kept as it was)
-                    format!("{add}GIT_EDITOR=true {git} rebase --continue")
+                    match &editor {
+                        // (`whitespace`: git keeps the message's own `#` lines — tarae cut its own already)
+                        Some(e) => {
+                            format!(
+                                "{add}GIT_EDITOR={e} {git} -c commit.cleanup=whitespace rebase --continue"
+                            )
+                        }
+                        None => format!("{add}GIT_EDITOR=true {git} rebase --continue"),
+                    }
                 };
                 let said: Unstarted = Box::new(|ed, e| ed.set_error(format!("rebase: {e}")));
                 ed.rebase_git("rebase --continue", cmd, false, said);
@@ -1282,6 +1531,7 @@ impl Editor {
             // (one tarae didn't start: whether git stashed for it is git's to say at its end)
             stashed: Vec::new(),
             resolved_at: None,
+            messages: Default::default(),
         });
     }
 
@@ -1300,7 +1550,7 @@ impl Editor {
     /// The resolved card of the front session's rebase goes (answered by hand).
     fn rebase_cards_gone(&mut self) {
         let root = self.session.root.clone();
-        let mine = |o: &Offer| matches!(&o.what, What::RebaseResolved { root: r } if *r == root);
+        let mine = |o: &Offer| matches!(&o.what, What::RebaseResolved { root: r, .. } if *r == root);
         self.offers.retain(|o| !mine(o));
         self.session.parked.retain(|o| !mine(o));
     }
@@ -1376,14 +1626,52 @@ pub(crate) fn ask_for_test(ed: &mut Editor, question: &str) {
         also: Vec::new(),
         stashed: Vec::new(),
         resolved_at: None,
+        messages: Default::default(),
     });
     let a = Ask { question: question.into(), about: "<conflicts/>".into(), chip: "rebase".into() };
     ed.rebase_ask(a);
 }
 
+/// The front session's rebase stopped at a conflict its Claude resolved, the replayed commit's message
+/// `message` (and Claude's version of it, `proposed`) — for the simulation of what `m` does (`sim/rebasemsg.rs`).
+#[cfg(test)]
+pub(crate) fn resolved_for_test(ed: &mut Editor, message: &str, proposed: Option<&str>) {
+    let stop = Stop {
+        step: Some((1, 2)),
+        files: vec!["a.txt".into()],
+        commit: Some(("0".repeat(40), "0000000".into(), message.lines().next().unwrap_or_default().into())),
+        message: Some(message.into()),
+        ..Stop::default()
+    };
+    ed.session.rebase = Some(Rebase {
+        branch: "dev".into(),
+        base: "main".into(),
+        stage: Stage::Resolved,
+        step: stop.step,
+        stop,
+        asked: true,
+        waiting: None,
+        also: Vec::new(),
+        stashed: Vec::new(),
+        resolved_at: Some(std::time::Instant::now()),
+        messages: Messages { proposed: proposed.map(String::from), ..Messages::default() },
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of frictions31: the message written with `m` loses only tarae's own lines — a `#` heading or `#123`
+    /// of the message's own stays, whatever git's comment character (`commit.cleanup=whitespace` on the run).
+    #[test]
+    fn the_message_written_keeps_its_own_hash_lines() {
+        let text = format!(
+            "Fix the gate\n\n# Why\n#123 asked for it\n; kept too\n\n{MESSAGE_CUT}\nhelp\n:w goes on\n"
+        );
+        assert_eq!(message_written(&text), "Fix the gate\n\n# Why\n#123 asked for it\n; kept too\n");
+        assert_eq!(message_written("No cut line\n\n"), "No cut line\n");
+    }
 
     #[test]
     fn a_stop_says_where_it_is() {
@@ -1407,6 +1695,7 @@ mod tests {
             also: Vec::new(),
             stashed: Vec::new(),
             resolved_at: None,
+            messages: Default::default(),
         };
         assert_eq!(r.said(), "rebasing 2/5");
         assert_eq!(r.why("feat"), "feat is rebasing 2/5 — :rebase-continue or :rebase-abort first");
@@ -1440,6 +1729,7 @@ mod tests {
             also: Vec::new(),
             stashed: Vec::new(),
             resolved_at: None,
+            messages: Default::default(),
         };
         ed.with_session(a, |ed| ed.session.rebase = Some(running("main")));
         let label = |ed: &mut Editor, id| {

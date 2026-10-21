@@ -211,6 +211,7 @@ commands! {
         review_start => "Review the changes",
         review_branch => "Review against a branch…",
         review_viewed => "Mark this file viewed",
+        review_unviewed => "Unmark this file viewed",
         review_send => "Send the review to Claude",
         review_claude => "A second Claude reviews",
         review_board => "A board of Claudes reviews",
@@ -1985,7 +1986,11 @@ fn review_branch(cx: &mut Context) {
 }
 
 fn review_viewed(cx: &mut Context) {
-    crate::codereview::toggle_viewed(cx.editor);
+    crate::codereview::mark_viewed(cx.editor);
+}
+
+fn review_unviewed(cx: &mut Context) {
+    crate::codereview::unmark_viewed(cx.editor);
 }
 
 fn review_send(cx: &mut Context) {

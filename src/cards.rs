@@ -1200,7 +1200,7 @@ mod tests {
             "{l}"
         );
         let root = std::env::temp_dir().join(format!("tarae-cards-no-session-{}", std::process::id()));
-        let id = up(&mut ed, What::RebaseResolved { root });
+        let id = up(&mut ed, What::RebaseResolved { root, message: false });
         ed.offer_abort();
         assert!(ed.offers.is_empty());
         let l = at(id).expect("its line");

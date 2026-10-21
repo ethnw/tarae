@@ -1340,6 +1340,8 @@ impl Editor {
                 ed.set_warning("the buffer of Claude's edit under review was closed — Claude was told");
             });
         }
+        // A rebase's commit message being written (`m`), closed some way but `:w`/`:q`: its card back
+        self.rebase_message_closed(gone);
     }
 
     // ── Splits ────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@
 //!   usual review.
 //! - `space v c`: the reviewer — a second Claude, never the chat's conversation — reads the changes and pins
 //!   its findings (`reviewer.rs`); they wait with the drafts until `space v s` takes them to the author.
-//! - `space v m` marks a file viewed (a click on its `◦` in the rail too); the mark stays — past the review,
+//! - `space v m` marks a file viewed (a click on its `◦` in the rail too), `space v M` unmarks; the mark stays — past the review,
 //!   reopened — while the file's diff is what it was, and a change takes it back; `space v q` ends the
 //!   review (asked first while files are left not viewed) and puts the index back as the diff base.
 
@@ -331,7 +331,12 @@ impl CodeReview {
                 for v in out.values_mut() {
                     *v = Some(0);
                 }
-                for l in d.text.lines() {
+                // (as `str::lines` counts, as the review's worker did — `count_asked`: not the empty line ropey
+                // has after a last newline; frictions29 #28: a viewed file's blank line counted once more open
+                // than closed, so it read as viewed only while open, and `]u` stopped on it)
+                let n = d.text.len_lines();
+                let n = n - usize::from(d.text.line(n - 1).len_chars() == 0);
+                for l in d.text.lines().take(n) {
                     let l = l.to_string();
                     if let Some(Some(n)) = out.get_mut(crate::risk::line_text(&l)) {
                         *n += 1;
@@ -1659,10 +1664,12 @@ fn viewed_said(ed: &mut Editor, i: usize) {
     let done = r.files.iter().filter(|f| r.viewed(ed, f)).count();
     let n = r.files.len();
     let rel = f.rel.clone();
-    let said = format!("{rel} {} — {done} of {n} viewed", if marked { "viewed" } else { "not viewed" });
-    match r.current(ed) == Some(i) {
-        true => ed.note(said),
-        false => ed.set_status(said),
+    // (an unmark is said wherever it is — frictions29 #28: `space v m` on a file it took for not viewed took
+    // marks off in silence; a mark the rail's `●` shows)
+    match (marked, r.current(ed) == Some(i)) {
+        (false, _) => ed.set_status(format!("unviewed {rel} — {done} of {n} viewed")),
+        (true, true) => ed.note(format!("{rel} viewed — {done} of {n} viewed")),
+        (true, false) => ed.set_status(format!("{rel} viewed — {done} of {n} viewed")),
     }
 }
 
@@ -3913,8 +3920,20 @@ pub fn step_unviewed(ed: &mut Editor, forward: bool) {
         return ed.set_status("this is the one file not viewed");
     }
     let rel = r.files[j].rel.clone();
+    // (round the end: said — the walk went back past where it started)
+    let round = at.is_some_and(|a| {
+        let p = order.iter().position(|&k| k == j).unwrap_or(a);
+        if forward { p < a } else { p > a }
+    });
     show(ed, j, false);
-    ed.note(format!("{rel} — {} not viewed", crate::nav::count(left, "file")));
+    let left = crate::nav::count(left, "file");
+    match round {
+        true => {
+            let past = if forward { "last" } else { "first" };
+            ed.set_status(format!("round past the {past} file to {rel} — {left} not viewed"))
+        }
+        false => ed.note(format!("{rel} — {left} not viewed")),
+    }
 }
 
 /// The first file not viewed after (before) the rail's row `at` in `order`, round the end — `at` itself last.
@@ -3937,16 +3956,55 @@ fn unviewed_from(
         .find(|&i| !r.viewed(ed, &r.files[i]))
 }
 
-/// `space v m`: marks the current file viewed (again: unmarks).
-pub fn toggle_viewed(ed: &mut Editor) {
+/// The review's file in hand (a binary one the rail just opened counts — the one in the code had its mark taken
+/// back) — None: said why.
+fn file_in_hand(ed: &mut Editor) -> Option<usize> {
     let Some(r) = ed.session.code_review.as_ref() else {
-        return ed.set_status("no review here — space v v starts one");
+        ed.set_status("no review here — space v v starts one");
+        return None;
     };
-    // (the file in hand: a binary one the rail just opened counts — the one in the code had its mark taken back)
-    let Some(i) = r.in_hand(ed) else {
-        return ed.set_status("this file isn't one of the review's");
-    };
+    let i = r.in_hand(ed);
+    if i.is_none() {
+        ed.set_status("this file isn't one of the review's");
+    }
+    i
+}
+
+/// `space v m`: marks the file in hand viewed — one viewed already is said, not unmarked (frictions29 #28, the
+/// user's decision 2026-10-19: a second `m` took marks off in silence); `space v M` unmarks.
+pub fn mark_viewed(ed: &mut Editor) {
+    let Some(i) = file_in_hand(ed) else { return };
+    let r = ed.session.code_review.as_ref().expect("in hand");
+    if r.viewed(ed, &r.files[i]) {
+        let rel = r.files[i].rel.clone();
+        return ed.set_status(format!("{rel} already viewed — space v M unmarks"));
+    }
     toggle_viewed_at(ed, i);
+}
+
+/// `space v M`: the file in hand's viewed mark taken off — a stale one too (changed since); none: said.
+pub fn unmark_viewed(ed: &mut Editor) {
+    let Some(i) = file_in_hand(ed) else { return };
+    let r = ed.session.code_review.as_ref().expect("in hand");
+    let f = &r.files[i];
+    if !ed.session.viewed.contains_key(&f.path) && !r.pending.contains(&f.path) {
+        let rel = f.rel.clone();
+        return ed.set_status(format!("{rel} isn't marked viewed — space v m marks it"));
+    }
+    unmark(ed, i);
+    viewed_said(ed, i);
+}
+
+/// File `i`'s mark taken off (and one waiting for its base).
+fn unmark(ed: &mut Editor, i: usize) {
+    let Some(path) = ed.session.code_review.as_ref().and_then(|r| r.files.get(i)).map(|f| f.path.clone())
+    else {
+        return;
+    };
+    ed.session.viewed.remove(&path);
+    if let Some(r) = ed.session.code_review.as_mut() {
+        r.pending.retain(|p| *p != path);
+    }
 }
 
 /// File `i` marked viewed (again: unmarked) — the rail's `m` on its row, whatever the code shows: a binary
@@ -3955,11 +4013,7 @@ fn toggle_viewed_at(ed: &mut Editor, i: usize) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
     let Some(f) = r.files.get(i) else { return };
     if r.viewed(ed, f) {
-        let path = f.path.clone();
-        ed.session.viewed.remove(&path);
-        if let Some(r) = ed.session.code_review.as_mut() {
-            r.pending.retain(|p| *p != path);
-        }
+        unmark(ed, i);
     } else {
         // (opened some other way: its base comes first, the mark with it)
         if doc_of(ed, f).is_none_or(|d| d.review_base.is_none()) && !f.binary {
@@ -4839,6 +4893,65 @@ mod tests {
         feed(&mut ed, "]u");
         assert_eq!(rel(&ed), "a.txt");
         assert!(ed.toasts.iter().any(|t| t.text == "all 4 files viewed"), "said");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// frictions29 #28: a viewed file with a blank line among its changes, its buffer closed, read as not
+    /// viewed in a review opened again (its blank lines counted once more while open: ropey's empty last
+    /// line) — `]u` stopped on it and `space v m` there took its mark off in silence. Now it stays viewed
+    /// closed, `]u` passes it, says when it goes round the end, and an unmark is said.
+    #[test]
+    fn bracket_u_passes_a_viewed_file_not_open_and_an_unmark_is_said() {
+        let base = text_of(30, |i| format!("para {i}"));
+        let now = text_of(30, |i| match i {
+            3 => "changed 3".into(),
+            25 => "".into(),
+            _ => format!("para {i}"),
+        });
+        let files =
+            [("a.txt", "a\n", "a2\n"), ("b.md", base.as_str(), now.as_str()), ("c.txt", "c\n", "c2\n")];
+        let (mut ed, dir) = reviewing("unviewed-closed", &files);
+        let rel = |ed: &Editor| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.in_hand(ed).map(|i| r.files[i].rel.clone()).unwrap_or_default()
+        };
+        let open = |ed: &mut Editor, at: &str| {
+            settle_until(ed, |ed| landed(ed) && ed.doc().path.as_ref().is_some_and(|p| p.ends_with(at)));
+        };
+        show(&mut ed, 1, false);
+        open(&mut ed, "b.md");
+        feed(&mut ed, "<space>vm");
+        assert!(viewed_now(&ed, "b.md"));
+        // (closed, the review opened again: its counts are the worker's)
+        show(&mut ed, 0, false);
+        open(&mut ed, "a.txt");
+        closed(&mut ed, &dir, "b.md");
+        close(&mut ed);
+        start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, landed);
+        assert!(viewed_now(&ed, "b.md"), "viewed, not open");
+        assert_eq!(rel(&ed), "a.txt");
+        feed(&mut ed, "]u");
+        open(&mut ed, "c.txt");
+        assert_eq!(rel(&ed), "c.txt", "past the viewed one");
+        // Round the end: said
+        feed(&mut ed, "]u");
+        open(&mut ed, "a.txt");
+        assert_eq!(rel(&ed), "a.txt");
+        let said = |ed: &Editor, s: &str| ed.toasts.iter().any(|t| t.text == s);
+        assert!(said(&ed, "round past the last file to a.txt — 2 files not viewed"), "{:?}", ed.toasts);
+        // A mark is the rail's to show; `space v m` again marks nothing off (the user's decision): said
+        feed(&mut ed, "<space>vm");
+        assert!(viewed_now(&ed, "a.txt"));
+        feed(&mut ed, "<space>vm");
+        assert!(viewed_now(&ed, "a.txt"), "still viewed");
+        assert!(said(&ed, "a.txt already viewed — space v M unmarks"), "{:?}", ed.toasts);
+        // `space v M` unmarks, said; again, nothing to unmark
+        feed(&mut ed, "<space>vM");
+        assert!(!viewed_now(&ed, "a.txt"));
+        assert!(said(&ed, "unviewed a.txt — 1 of 3 viewed"), "{:?}", ed.toasts);
+        feed(&mut ed, "<space>vM");
+        assert!(said(&ed, "a.txt isn't marked viewed — space v m marks it"), "{:?}", ed.toasts);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5886,9 +5999,9 @@ mod tests {
         feed(&mut ed, "<space>vm");
         assert_eq!(viewed(&ed), [true, true], "logo.png marked, a.rs's mark kept");
         assert!(ed.toasts.iter().any(|t| t.text.starts_with("logo.png viewed")), "said which, in sight");
-        // Moving on in the code: a.rs is the file in hand again
+        // Moving on in the code: a.rs is the file in hand again (`space v M` takes its mark off)
         show(&mut ed, 0, false);
-        feed(&mut ed, "<space>vm");
+        feed(&mut ed, "<space>vM");
         assert_eq!(viewed(&ed), [false, true]);
         std::fs::remove_dir_all(&dir).ok();
     }

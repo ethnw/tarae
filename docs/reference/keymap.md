@@ -335,6 +335,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space v h` | `review_hunk_seen` | Looked at this risky change |
 | `space v H` | `review_file_seen` | Looked at all drawn in file |
 | `space v m` | `review_viewed` | Mark this file viewed |
+| `space v M` | `review_unviewed` | Unmark this file viewed |
 | `space v q` | `review_close` | End the review |
 | `space v r` | `review_verdict` | The reviewer's verdict |
 | `space v s` | `review_send` | Send the review to Claude |
@@ -495,6 +496,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:claude-settings` |  | Look again at what this project's Claude settings run in the chat, and trust them or not |
 | `:git-trust` |  | Look again at what this repository's own git settings run, and trust them or not |
 | `:claude-update` |  | Look for a newer claude and install it (claude update, as you) |
+| `:claude-restart` |  | Start every chat's claude again, on the login it finds now |
 | `:granted` | `:sandbox-allowed` | What you've let through — take one back |
 | `:sandbox-disallow` |  | Take back what Claude may do without asking |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |

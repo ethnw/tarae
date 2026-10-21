@@ -75,6 +75,7 @@ mod hosts;
 mod inbox;
 mod indent;
 mod install;
+mod instructions;
 mod java;
 mod jumplist;
 mod keepwarm;

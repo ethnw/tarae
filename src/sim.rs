@@ -28,6 +28,8 @@ mod applies;
 mod board;
 mod brings;
 mod hosts;
+mod instructions;
+mod rebasemsg;
 mod reviews;
 mod sessions;
 mod watchers;

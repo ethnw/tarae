@@ -757,6 +757,14 @@ impl Chat {
         self.state != State::Idle
     }
 
+    /// The last turn's answer: its words since the last message sent, joined.
+    pub fn last_answer(&self) -> String {
+        let from = self.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
+        let words: Vec<&str> =
+            self.msgs[from..].iter().filter(|m| m.role == Role::Assistant).map(|m| m.text.as_str()).collect();
+        words.join("\n\n")
+    }
+
     /// Following while Claude works: the thought card beside the code carries its words, so the panel
     /// is minimized to a floating card (back in full with the answer, or on `space l`).
     pub fn compact(&self) -> bool {
@@ -1222,6 +1230,38 @@ pub(crate) fn settings_restart(ed: &mut Editor, why: &str, stop: bool) {
     }
 }
 
+/// `:claude-restart` — every session's chat claude started again on its conversation (`--resume`): an idle one
+/// now, a busy one once its turn ends (`settings_restart`'s way) — so a new login reaches every chat without
+/// `:restart`, which ends the terminal and what runs there too (frictions29 #7).
+pub fn restart_all(ed: &mut Editor) {
+    let running: Vec<crate::event::SessionId> = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .filter(|l| l.chat.as_ref().is_some_and(|c| c.proc.is_some()))
+        .map(|l| l.id)
+        .collect();
+    if running.is_empty() {
+        return ed.set_status("no chat's claude is running — each starts on the current login");
+    }
+    let mut busy = 0;
+    for &id in &running {
+        ed.with_session(id, |ed| {
+            busy += usize::from(ed.session.chat.as_ref().is_some_and(Chat::busy));
+            settings_restart(ed, "started again on its conversation (:claude-restart)", false);
+        });
+    }
+    // (the idle ones started again now, the busy ones only at their turn's end — counted apart)
+    let idle = running.len() - busy;
+    let once = |b: usize| if b == 1 { "once its turn ends" } else { "once their turns end" };
+    ed.set_status(match (idle, busy) {
+        (n, 0) => format!("{} started again on the current login", crate::nav::count(n, "chat")),
+        (0, 1) => format!("1 chat starts again on the current login {}", once(1)),
+        (0, b) => format!("{b} chats start again on the current login {}", once(b)),
+        (n, b) => {
+            format!("{} started again on the current login · {b} {}", crate::nav::count(n, "chat"), once(b))
+        }
+    });
+}
+
 /// Its claude started again as things hold now (the key card's `y` — `envkey.rs`), said in the chat — the
 /// conversation resumed when there is one — and `message`, the one that failed, sent again (its row goes: it's
 /// sent anew, before a message queued since).
@@ -1324,6 +1364,8 @@ fn ensure_proc(ed: &mut Editor) {
     // A fresh process has seen no file yet — and said no credential yet: the last one's may not be its
     c.sent.clear();
     (ed.session.usage.key_source, ed.session.usage.plan_event) = (None, false);
+    // (nor its account: on a key or a cloud provider it says none, and the last one's would stand — #3)
+    ed.session.usage.account = None;
     // (unique across chats too: a closed chat's process ending after a new chat's started isn't the new one's)
     static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     c.generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1340,6 +1382,8 @@ fn ensure_proc(ed: &mut Editor) {
     }
     // Where the plan's limits stand, unless a claude said it lately (`limits.rs`)
     crate::limits::ask_chat(ed);
+    // (a session's instruction files: the main checkout's changes since its copy — #27)
+    crate::instructions::follow(ed);
 }
 
 /// `on_event` for other modules' tests: an event of chat process `generation`'s stream, as `llm::pump` sends it.
@@ -1443,7 +1487,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 keep(ed);
             }
         }
-        StreamEv::Initialized { models, key_source } => {
+        StreamEv::Initialized { models, key_source, account } => {
             c.models = models;
             // Not the credential its billing gives, as it starts: it stops — said
             if let Some(said) = wrong(c, key_source.as_deref()) {
@@ -1454,6 +1498,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             // (the credential it runs on, as it starts — the first turn's `init` says it again)
             if key_source.is_some() {
                 ed.session.usage.key_source = key_source;
+            }
+            // (which account: its organization and plan — #3)
+            if let Some(a) = account {
+                crate::usage::account_seen(ed, a);
             }
         }
         // What it costs (`usage.rs`) — a request going out changes nothing on screen yet
@@ -1482,7 +1530,14 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 .filter(|r| r.status == Some(crate::limits::Status::Rejected))
                 .map(|r| (r.window.clone(), r.resets_at_ms))
                 .collect();
-            crate::limits::seen(ed, report);
+            // (a claude still on another login than the last one seen says that account's limits, not these —
+            // #3: they'd fill the new login's again; its own refusal below is still its chat's)
+            let other_login =
+                matches!((&ed.session.usage.account, ed.limits.login), (Some(a), Some(l)) if a.login != l);
+            match other_login {
+                true => log.line("limits", "info", "a reading from a claude on another login — not kept"),
+                false => crate::limits::seen(ed, report),
+            }
             for (window, resets_at_ms) in refused {
                 ed.limit_hit(&window, resets_at_ms);
             }

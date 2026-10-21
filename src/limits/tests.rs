@@ -534,6 +534,172 @@ fn near_the_limit_the_reset_outlasts_the_turns_cost() {
     assert!(far.contains("weekly 30 %") && far.contains("≈$0.018") && !far.contains("resets"), "{far:?}");
 }
 
+/// A fake claude whose answer to `initialize` says it runs on the plan, on `email`'s login in `org` — and whose
+/// turn says its account's weekly window is at 50 % (a `rate_limit_event`), then ends a moment later.
+fn on_login(ed: &mut Editor, email: &str, org: &str) {
+    let initialized = json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": "tarae-init", "response": {"models": [], "account": {"email": email, "organization": org,
+        "subscriptionType": "max", "tokenSource": "claude.ai", "apiKeySource": "none"}}}});
+    let event = json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed",
+        "resetsAt": 4_071_000_000u64, "rateLimitType": "seven_day", "utilization": 0.5}});
+    let result = json!({"type": "result", "result": "ok"});
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec![
+        "-c".into(),
+        format!(
+            "while read -r line; do case \"$line\" in *tarae-init*) printf '%s\\n' '{initialized}';; \
+             '{{\"message\"'*) printf '%s\\n' '{event}'; sleep 0.3; printf '%s\\n' '{result}';; esac; done"
+        ),
+    ];
+}
+
+/// frictions29 #3 + #7: which account a chat runs on — its organization and plan in `:usage`, `tarae state` and
+/// (the plan) on the chat's last row, never the email; a claude on another login makes the limits unknown and is
+/// said on the chat still on the old one; `:claude-restart` starts every chat's claude again on its
+/// conversation.
+#[test]
+fn a_chat_says_its_account_and_another_login_is_said_and_restarted_into() {
+    let scratch = crate::scratch::Scratch::new("limits-login");
+    let mut ed = Editor::new(crate::config::Config::default());
+    on_login(&mut ed, "first@example.test", "Acme");
+    crate::chat::open(&mut ed);
+    until(&mut ed, "its account", |ed| ed.session.usage.account.is_some());
+    let a = ed.session.usage.account.clone().unwrap();
+    assert_eq!((a.organization.as_deref(), a.plan.as_deref()), (Some("Acme"), Some("max")));
+    // Said: the organization and the plan — the email nowhere
+    let far = iso_ms("2099-01-06T01:00:00Z").unwrap();
+    let weekly = Reading {
+        window: WEEKLY.into(),
+        percent: Some(93),
+        resets_at_ms: Some(far),
+        status: None,
+        seen_at_ms: crate::usage::now_ms(),
+        from: Source::Event,
+    };
+    ed.limits.seen(Report { readings: vec![weekly], ..Report::default() });
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, 200, 40).unwrap();
+    let mut vt = vt100::Parser::new(40, 200, 0);
+    vt.process(&bytes);
+    let shown = vt.screen().contents();
+    assert!(shown.contains("max · weekly 93 %"), "{shown}");
+    let now = crate::usage::now_ms();
+    let r = crate::usage::report("s", &ed.session.usage, &ed.limits, &[], now);
+    assert!(r.contains("Account: Acme · plan max."), "{r}");
+    let state = ed.ui_state().json();
+    assert_eq!(state["sessions"][0]["account"], json!({"organization": "Acme", "plan": "max"}));
+    for said in [shown, r, state.to_string(), ed.ui_state_claude().json().to_string(), format!("{a:?}")] {
+        assert!(!said.contains("first@"), "the email: {said}");
+    }
+    // Another session's claude on another login: the limits unknown, said on the chat still on the first
+    let first = ed.session.id;
+    let other = ed.session_open(scratch.path()).unwrap();
+    ed.session_switch(other);
+    on_login(&mut ed, "second@example.test", "Acme");
+    crate::chat::open(&mut ed);
+    until(&mut ed, "the other's account", |ed| ed.session.usage.account.is_some());
+    assert!(ed.limits.get(WEEKLY, crate::usage::now_ms()).is_none(), "the other account's limits");
+    ed.session_switch(first);
+    let note = "another Claude login since this claude started — :claude-restart moves every chat to it";
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(
+        c.msgs.iter().any(|m| m.text == note),
+        "{:?}",
+        c.msgs.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+    let r = crate::usage::report("s", &ed.session.usage, &ed.limits, &[], now);
+    assert!(r.contains("Another login since this claude started"), "{r}");
+    // The new login's reading (93 %): its own chat's row shows it, the one still on the old login doesn't
+    let rows = |ed: &mut Editor| -> String {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 200, 40).unwrap();
+        let mut vt = vt100::Parser::new(40, 200, 0);
+        vt.process(&bytes);
+        vt.screen().contents()
+    };
+    let weekly = Reading {
+        window: WEEKLY.into(),
+        percent: Some(93),
+        resets_at_ms: Some(far),
+        status: None,
+        seen_at_ms: crate::usage::now_ms(),
+        from: Source::Event,
+    };
+    ed.limits.seen(Report { readings: vec![weekly], ..Report::default() });
+    assert!(!rows(&mut ed).contains("weekly"), "the old login's row: {}", rows(&mut ed));
+    ed.session_switch(other);
+    assert!(rows(&mut ed).contains("max · weekly 93 %"), "{}", rows(&mut ed));
+    ed.session_switch(first);
+    // A turn of the chat still on the old login: its claude's reading (50 %) is that account's — not kept
+    let generation = ed.session.chat.as_ref().unwrap().generation();
+    assert!(crate::chat::submit(&mut ed, "hello", None, None));
+    // `:claude-restart` meanwhile: the idle one (the other) started again at once, this busy one at its turn's
+    // end — counted apart (typed in the code, not the chat's input)
+    ed.session.chat.as_mut().unwrap().focused = false;
+    for c in ":claude-restart".chars() {
+        ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(c)));
+    }
+    ed.handle_key(crate::key::Key::plain(crate::key::Code::Enter));
+    let status = "1 chat started again on the current login · 1 once its turn ends";
+    assert!(ed.messages.iter().any(|m| m.2 == status), "{:?}", ed.messages);
+    assert_eq!(ed.session.chat.as_ref().unwrap().generation(), generation, "not before its turn ends");
+    until(&mut ed, "a new claude after its turn", |ed| {
+        ed.session.chat.as_ref().is_some_and(|c| c.generation() != generation)
+    });
+    let kept = ed.limits.get(WEEKLY, crate::usage::now_ms()).and_then(|r| r.percent);
+    assert_eq!(kept, Some(93), "the old login's 50 % isn't the new account's");
+    until(&mut ed, "its account again", |ed| {
+        ed.session.usage.account.as_ref().is_some_and(|b| b.login != a.login)
+    });
+}
+
+/// Review of frictions31: `:claude-restart` with no chat running says so; with only a busy one, that it starts
+/// again once its turn ends (in words that agree) — and it does, not before.
+#[test]
+fn claude_restart_says_what_it_did_with_none_and_with_a_busy_one() {
+    let mut ed = Editor::new(crate::config::Config::default());
+    crate::chat::restart_all(&mut ed);
+    assert!(
+        ed.messages.iter().any(|m| m.2 == "no chat's claude is running — each starts on the current login")
+    );
+    on_login(&mut ed, "first@example.test", "Acme");
+    crate::chat::open(&mut ed);
+    until(&mut ed, "its account", |ed| ed.session.usage.account.is_some());
+    let generation = ed.session.chat.as_ref().unwrap().generation();
+    assert!(crate::chat::submit(&mut ed, "hello", None, None));
+    crate::chat::restart_all(&mut ed);
+    let said = "1 chat starts again on the current login once its turn ends";
+    assert!(ed.messages.iter().any(|m| m.2 == said), "{:?}", ed.messages);
+    assert_eq!(ed.session.chat.as_ref().unwrap().generation(), generation, "not before its turn ends");
+    until(&mut ed, "a new claude", |ed| {
+        ed.session.chat.as_ref().is_some_and(|c| c.generation() != generation)
+    });
+}
+
+/// Review of frictions31: a claude started again on an API key says no account (no email, no organization) —
+/// the last one's organization and plan don't stand in `:usage`, the state or the row.
+#[test]
+fn a_claude_started_on_a_key_keeps_no_account_of_before() {
+    let mut ed = Editor::new(crate::config::Config::default());
+    on_login(&mut ed, "first@example.test", "Acme");
+    crate::chat::open(&mut ed);
+    until(&mut ed, "its account", |ed| ed.session.usage.account.is_some());
+    let initialized = json!({"type": "control_response", "response": {"subtype": "success",
+        "request_id": "tarae-init", "response": {"models": [], "account": {"apiKeySource": "apiKeyHelper"}}}});
+    ed.config.llm.args = vec![
+        "-c".into(),
+        format!(
+            "while read -r line; do case \"$line\" in *tarae-init*) printf '%s\\n' '{initialized}';; esac; done"
+        ),
+    ];
+    crate::chat::reset(&mut ed);
+    until(&mut ed, "its credential", |ed| ed.session.usage.key_source.as_deref() == Some("apiKeyHelper"));
+    assert_eq!(ed.session.usage.account, None);
+    let r = crate::usage::report("s", &ed.session.usage, &ed.limits, &[], crate::usage::now_ms());
+    assert!(!r.contains("Account:"), "{r}");
+    assert_eq!(ed.ui_state().json()["sessions"][0]["account"], Value::Null);
+}
+
 /// `tarae state` says the account's `limits` (whole percents, unix ms) and each session's `key_source_seen`;
 /// `:usage` says the windows, the credential, and — on a key — that Console is where billing is authoritative.
 #[test]

@@ -209,8 +209,12 @@ pub enum What {
     /// brings it once that passes, `n` not now.
     Rebased(Box<crate::rebase::Moved>),
     /// A rebase stopped at a conflict its Claude resolved (`rebase.rs`): `y` stages the files and goes on,
+    /// `m` writes the replayed commit's message first (`message`: resolved, its message known — frictions29 #25),
     /// `X` aborts the rebase, `n` leaves it stopped.
-    RebaseResolved { root: PathBuf },
+    RebaseResolved { root: PathBuf, message: bool },
+    /// An instruction file changed in a session and in the main checkout since its copy (`instructions.rs`,
+    /// frictions29 #27): `y` takes the main checkout's changes, `v` shows them, `n` keeps the session's.
+    Instructions(Box<crate::instructions::Both>),
     /// A session with nothing to bring, behind its base (`rebase.rs`, #186): `y` moves it up to its base's tip
     /// (a fast-forward in its checkout), `n` leaves it.
     UpTo(Box<crate::rebase::Moved>),
@@ -295,6 +299,7 @@ pub const KINDS: &[&str] = &[
     "rebase-held",
     "rebased",
     "rebase-resolved",
+    "instructions",
     "up-to",
     "hooks",
     "restart",
@@ -350,7 +355,9 @@ impl What {
             | What::Recover(_)
             | What::Restart(_)
             | What::RestartSame { .. }
-            | What::RestartCancel { .. } => ByItself,
+            | What::RestartCancel { .. }
+            // (looked at again as the session's claude starts)
+            | What::Instructions(_) => ByItself,
             What::ForcePush(_)
             | What::Hooks(_)
             | What::Grant { .. }
@@ -700,6 +707,11 @@ impl Offer {
         matches!(self.what, What::RebaseResolved { .. })
     }
 
+    /// Whether `m` answers it: a resolved rebase's card whose commit's message is known (frictions29 #25).
+    pub fn messages(&self) -> bool {
+        matches!(self.what, What::RebaseResolved { message: true, .. })
+    }
+
     /// The held rebase it asks about, if it's that card (`s` stashes, `g` shows the changes).
     pub fn held(&self) -> Option<&crate::rebase::Held> {
         match &self.what {
@@ -1023,7 +1035,13 @@ impl Offer {
                 vec![('y', "Bring"), ('p', p), ('n', "Not now")]
             }
             // (abort throws the resolution away: a capital, as removing does)
+            W::RebaseResolved { message: true, .. } => {
+                vec![('y', "Continue"), ('m', "Message"), ('X', "Abort"), ('n', "Not now")]
+            }
             W::RebaseResolved { .. } => vec![('y', "Continue"), ('X', "Abort"), ('n', "Not now")],
+            W::Instructions(_) => {
+                vec![('y', "Take the main checkout's"), ('v', "See them"), ('n', "Keep this one")]
+            }
             W::UpTo(_) => vec![('y', "Move it up"), ('n', "Leave it")],
             W::Hooks(a) if a.runnable() => {
                 vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
@@ -1117,6 +1135,7 @@ impl Offer {
             W::RebaseHeld(_) => "rebase-held",
             W::Rebased(_) => "rebased",
             W::RebaseResolved { .. } => "rebase-resolved",
+            W::Instructions(_) => "instructions",
             W::UpTo(_) => "up-to",
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
@@ -1379,6 +1398,7 @@ impl crate::editor::Editor {
                 self.offer_view()
             }
             Code::Char('v') if o.host_details().is_some() => self.offer_view(),
+            Code::Char('v') if matches!(o.what, What::Instructions(_)) => self.offer_view(),
             Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
@@ -1390,6 +1410,7 @@ impl crate::editor::Editor {
             Code::Char('A') if o.keeps() => self.offer_always(),
             Code::Char('D') if o.both() => self.offer_remove(true),
             Code::Char('p') if o.preflights() => self.offer_preflight_first(),
+            Code::Char('m') if o.messages() => self.offer_message(),
             Code::Char(c @ ('s' | 'g')) if (c == 's' && o.stashes()) || (c == 'g' && o.held().is_some()) => {
                 self.offer_held(c)
             }
@@ -1549,6 +1570,10 @@ impl crate::editor::Editor {
             }
             What::ChangeSet { whose, .. } => crate::refactor::accept_all(self, id, whose),
             What::Commit(c) => crate::committool::answer(self, id, *c, true),
+            What::Instructions(b) => {
+                self.offer_finished(id, Ok(()));
+                crate::instructions::answer(self, *b, true);
+            }
             What::ReviewEnd { session, started } => {
                 self.offer_finished(id, Ok(()));
                 crate::codereview::close_answered(self, session, started);
@@ -1560,7 +1585,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 self.rebase_bring(*m);
             }
-            What::RebaseResolved { root } => {
+            What::RebaseResolved { root, .. } => {
                 self.offer_finished(id, Ok(()));
                 self.rebase_answer(&root, true);
             }
@@ -1720,9 +1745,21 @@ impl crate::editor::Editor {
         }
         let o = self.offers.remove(0);
         self.offer_answered(&o, 'X');
-        if let What::RebaseResolved { root } = o.what {
+        if let What::RebaseResolved { root, .. } = o.what {
             self.rebase_answer(&root, false);
         }
+    }
+
+    /// `m` on a resolved rebase's card: the replayed commit's message in a buffer to write (`rebase_message`) —
+    /// the card goes meanwhile, and comes back if the buffer is left with `:q`.
+    pub fn offer_message(&mut self) {
+        let Some(What::RebaseResolved { root, message: true }) = self.offers.first().map(|o| o.what.clone())
+        else {
+            return;
+        };
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, 'm');
+        self.rebase_message(&root);
     }
 
     /// `D` on a session's end card: its checkout and its branch go · `R` (`both` false, work in no commit
@@ -1924,6 +1961,10 @@ impl crate::editor::Editor {
         }
         if let Some(What::Commit(c)) = self.offers.first().map(|o| &o.what) {
             let more = crate::committool::view_text(&c.ask);
+            return self.offer_view_with(more);
+        }
+        if let Some(What::Instructions(b)) = self.offers.first().map(|o| &o.what) {
+            let more = b.view_text();
             return self.offer_view_with(more);
         }
         match self.offers.first().and_then(Offer::change_set) {
@@ -2141,6 +2182,7 @@ impl crate::editor::Editor {
             }
             What::ChangeSet { whose, .. } => crate::refactor::decline_all(self, whose),
             What::Commit(c) => crate::committool::answer(self, o.id, *c, false),
+            What::Instructions(b) => crate::instructions::answer(self, *b, false),
             What::ReviewEnd { .. } => self.set_status("still reviewing — space v m marks a file viewed"),
             What::Rebase(m) => {
                 self.set_status(format!("Not rebased — {} as it is, nothing brought", m.branch))

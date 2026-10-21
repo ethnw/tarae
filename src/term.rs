@@ -10862,9 +10862,12 @@ fn usage_spans(
     let conv = u.conv.as_ref();
     let turn = conv.and_then(|c| u.turns.iter().rev().find(|t| t.conversation == c.id));
     let reported = conv.is_some_and(|c| c.last.is_some()) || turn.is_some();
+    // (another login's since this claude started: the limits known are the other account's — #3)
+    let other_login = matches!((&u.account, limits.login), (Some(a), Some(l)) if a.login != l);
     let weekly = crate::limits::on_plan(u.key_source.as_deref(), u.plan_event)
         .then(|| limits.get(crate::limits::WEEKLY, now_ms))
-        .flatten();
+        .flatten()
+        .filter(|_| !other_login);
     let api = billing == crate::billing::Billing::Api;
     if !reported && weekly.is_none() && !api {
         return None;
@@ -10921,10 +10924,15 @@ fn usage_spans(
     let limit = |long: bool| -> Vec<Span> {
         let Some(r) = weekly else { return Vec::new() };
         let shown = if crate::limits::pressing(r) { warn } else { dim };
-        let mut v = vec![
+        // (the plan it's on, long — `max · weekly 93 %`; never the account's email: #3)
+        let mut v = match u.account.as_ref().and_then(|a| a.plan.as_ref()).filter(|_| long) {
+            Some(p) => vec![sp(p.clone(), dim), sp(" · ".into(), faint)],
+            None => Vec::new(),
+        };
+        v.extend([
             sp(format!("{} ", crate::limits::label(&r.window)), faint),
             sp(crate::limits::used(r), shown),
-        ];
+        ]);
         if let Some(at) = r.resets_at_ms.filter(|_| long) {
             v.extend([sp(" · resets ".into(), faint), sp(crate::limits::resets(at), dim)]);
         }

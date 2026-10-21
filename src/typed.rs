@@ -79,6 +79,9 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "wq" | "x" | "write-quit" if editor.in_commit_message() => write(editor, rest, false),
+        // A rebase's commit message (`m` on its card): `:q` leaves it as it was, `:wq` goes on with it
+        "q" | "quit" | "q!" | "quit!" if editor.in_rebase_message() => editor.rebase_message_left(),
+        "wq" | "x" | "write-quit" if editor.in_rebase_message() => write(editor, rest, false),
         // With several panes :q closes only the current pane (as in Helix), :qa closes all
         "q" | "quit" if editor.close_view() => Ok(()),
         "q" | "quit" | "qa" | "quit-all" => quit(editor, false),
@@ -242,6 +245,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "claude-settings" => editor.claude_settings_ask(),
         "git-trust" => editor.git_trust_ask(),
         "claude-update" => crate::claudeupdate::update(editor),
+        "claude-restart" => {
+            crate::chat::restart_all(editor);
+            Ok(())
+        }
         "granted" | "sandbox-allowed" => {
             editor.granted();
             Ok(())
@@ -607,6 +614,7 @@ fn saved(editor: &mut Editor, id: crate::document::DocId) {
     editor.lsp_did_save(id);
     editor.undo_persist(id);
     editor.git_saved(id);
+    editor.rebase_saved(id);
     editor.plugin_event(crate::plugin::PluginEvent::Saved, id);
 }
 

@@ -348,6 +348,7 @@ impl Editor {
         }
         for &id in &saved {
             self.git_saved(id);
+            self.rebase_saved(id);
         }
         if !failed.is_empty() {
             self.set_error(format!("not saved — {}", failed.join("; ")));
