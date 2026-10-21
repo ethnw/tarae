@@ -314,6 +314,12 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
   `refused`, `waits` and a session's answer line (V 10); the usage asked where the stream's rate-limit event carries
   no percent; the reviewer's delta round measured (no saving, left as it was); the outside run card for
   `userns-run.sh` designed only.
+  The load-flake hunt (2026-10-21, `29c39437`, friction 80): seven tests that fell only while three sessions built —
+  five fixed at their cause, two of them real bugs (a disk-watch round an earlier reload overtook was dropped by a
+  git action's batch; the first snapshot's index copy lost the checkout's mtime on Linux, so git trusted a
+  same-second change), two the tests' own (a shared log file written in parts; a pty pair's node still open); the
+  e2e SIGKILL instrumented to name its sender, not found; two never fell in 50–60 runs. Left open (friction 90): a
+  plain write read half-done needs a settle wait in the watch; the VM degraded mid-loop.
   frictions29's item 12, the web tool: not built — measured
   first; if needed, tarae's `read` takes an https URL (GET, text, `select`), not a new tool; Claude Code's
   WebSearch stays held back.
