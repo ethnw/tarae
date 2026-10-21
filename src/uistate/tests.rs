@@ -77,6 +77,15 @@ fn weighty_card(ed: &mut Editor) {
     ));
 }
 
+/// The project's Claude settings card, up beside the chat it doesn't hold (claude runs held back meanwhile) —
+/// about no settings read here, so its answers find nothing to answer.
+fn settings_card(ed: &mut Editor) {
+    let q = "Claude started with these held back — y gives them to it, the conversation going on.\n\n  \
+             .claude/settings.json: apiKeyHelper = printf stand-in";
+    let what = What::ClaudeSettings { hash: [7; 32] };
+    ed.push_offer(Offer::new(crate::claudetrust::TITLE.into(), q, "", String::new(), what));
+}
+
 /// The front card in sight long enough for its answers to count.
 fn settle(ed: &mut Editor) {
     if let Some(o) = ed.offers.first() {
@@ -188,6 +197,21 @@ const SCENES: &[Scene] = &[
     ("a card given the keys over the chat", |ed| {
         chat(ed, "hello");
         light_card(ed);
+        feed(ed, &["<C-q>"]);
+    }),
+    // (sandbox UX piece A: the settings card comes up after the chat opened, its input empty — the chat keeps
+    // the keys, a weighty card's or not; `C-q` gives them to it)
+    ("the chat, empty, the Claude settings card beside it", |ed| {
+        chat(ed, "");
+        settings_card(ed);
+        frame(ed);
+        settle(ed);
+    }),
+    ("the Claude settings card given the keys from the chat (C-q)", |ed| {
+        chat(ed, "");
+        settings_card(ed);
+        frame(ed);
+        settle(ed);
         feed(ed, &["<C-q>"]);
     }),
     // (a held card's `h` went to what it waits on: its letters are the code's, `C-q` answers it)
@@ -671,6 +695,29 @@ fn keys_out_of_a_chat_filling_a_narrow_screen_go_to_code_in_sight() {
     feed(&mut ed, &[" ", "l"]);
     narrow(&mut ed);
     assert_eq!((ed.keys_to().region, ed.screen.chat_w), (Region::Chat, 60));
+}
+
+/// The Claude settings card is weighty, but it doesn't take the keys from the chat's empty input as others do:
+/// claude runs held back beside it, and what's typed is a message. Each keeps its own — `C-q` gives the card
+/// them, Esc gives them back, unanswered.
+#[test]
+fn the_claude_settings_card_and_the_chat_input_each_keep_their_keys() {
+    let mut ed = editor();
+    chat(&mut ed, "");
+    settings_card(&mut ed);
+    frame(&mut ed);
+    settle(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::Chat);
+    feed(&mut ed, &["n"]);
+    assert_eq!(ed.session.chat.as_ref().unwrap().input, "n", "typed, not an answer");
+    assert_eq!(ed.offers.len(), 1, "the card still up");
+    feed(&mut ed, &["<C-q>"]);
+    frame(&mut ed);
+    assert!(matches!(ed.keys_to().region, Region::Card(_)), "{:?}", ed.keys_to().region);
+    feed(&mut ed, &["<esc>"]);
+    frame(&mut ed);
+    assert_eq!(ed.keys_to().region, Region::Chat, "given back");
+    assert_eq!(ed.offers.len(), 1, "unanswered");
 }
 
 /// Right after a card is answered — one that took the keys from the chat (Claude asking mid-turn, its input

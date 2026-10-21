@@ -56,8 +56,12 @@
 //! `.claude/settings.local.json` is yours when git says it's untracked and ignored (`config::personal`, as for
 //! `.tarae.local.toml`): not asked about then, and part of `Baseline`.
 //!
+//! The chat doesn't wait for the card (sandbox UX piece A): while it's up, claude runs held back — exactly as `n`
+//! leaves it — and a message typed meanwhile goes to it. `y` gives claude the files at its next start: at once
+//! between turns, else once its turn is over, the conversation resumed (`chat::settings_restart`).
+//!
 //! While the chat is open a watch reads both files again when they change: a change that needs the card or other
-//! overrides stops its claude until then.
+//! overrides restarts its claude at once with what holds now — held back while the card asks again.
 
 use std::path::{Path, PathBuf};
 
@@ -163,7 +167,7 @@ impl Seen {
     }
 }
 
-/// A chat's gate: claude starts once the project's settings are read and, if they need it, answered.
+/// A chat's gate: claude starts once the project's settings are read — held back while their card waits.
 pub struct Gate {
     pub seen: Option<Seen>,
     /// A read under way.
@@ -175,13 +179,16 @@ pub struct Gate {
     started: Option<(String, String)>,
     /// Ends the watch when the chat goes.
     watch: Option<crate::fswatch::Waker>,
+    /// Its claude starts again, the conversation resumed, once its turn is over — `y` mid-turn, or a change that
+    /// stopped it mid-turn (then its exit ends the turn) — `chat::settings_restart`.
+    pub(crate) again: bool,
 }
 
 impl Default for Gate {
     fn default() -> Gate {
         static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Gate { seen: None, reading: false, id, started: None, watch: None }
+        Gate { seen: None, reading: false, id, started: None, watch: None, again: false }
     }
 }
 
@@ -194,9 +201,9 @@ impl Drop for Gate {
 }
 
 impl Gate {
-    /// claude can't start yet: the settings are being read, or their card waits.
+    /// claude can't start yet: the settings are being read (milliseconds — a card waiting doesn't hold it).
     pub fn waiting(&self) -> bool {
-        self.reading || self.seen.as_ref().is_some_and(|s| s.state == State::Ask)
+        self.reading
     }
 }
 
@@ -432,8 +439,8 @@ pub fn overrides(seen: &Seen) -> (Map<String, Json>, Vec<&'static str>) {
 }
 
 /// The chat's `--settings` (`base`, the chat's own, with the overrides laid in) and `--setting-sources` (a
-/// source left out by the overrides, or for a file it can't read key by key) for what was seen. Not for a card
-/// still waiting.
+/// source left out by the overrides, or for a file it can't read key by key) for what was seen. A card still
+/// waiting holds back as `n` does (`overrides`: only trusted lets a key through).
 pub fn settings(base: &str, seen: &Seen) -> (String, String) {
     let mut json: Map<String, Json> = serde_json::from_str(base).unwrap_or_default();
     let (over, mut left_out) = overrides(seen);
@@ -462,7 +469,7 @@ pub fn settings(base: &str, seen: &Seen) -> (String, String) {
 }
 
 /// The chat's claude may start (`chat::ensure_proc`): its `--settings` and `--setting-sources` — None while
-/// the project's settings are read, or their card waits (it starts once answered).
+/// the project's settings are read (it starts once they are).
 pub fn ready(ed: &mut Editor, base: &str) -> Option<(String, String)> {
     if !ed.claude_settings_gate {
         return Some((base.into(), SOURCES.into()));
@@ -475,7 +482,9 @@ pub fn ready(ed: &mut Editor, base: &str) -> Option<(String, String)> {
             }
             return None;
         }
-        Some(s) if s.state == State::Ask => return None,
+        // The card still waiting: held back, as `n` holds it — F1's safe state (`docs/threat-model.md` §2): none
+        // of the repository's commands, environment, plugins, allow rules or folders reach claude before `y`, so
+        // it needn't wait for the answer. Only trusted lets them through (`overrides`)
         Some(s) => settings(base, s),
     };
     c.settings.started = Some(start.clone());
@@ -540,8 +549,9 @@ pub fn user_settings() -> Option<PathBuf> {
     }
 }
 
-/// The settings as just read (the first time, or after a change): the card when they need one; claude stopped
-/// when what it runs with no longer holds; started when nothing waits.
+/// The settings as just read (the first time, or after a change): the card when they need one; claude started —
+/// held back while it's up — or, running, started again at once when what it runs with no longer holds or the
+/// card asks again.
 fn seen_now(ed: &mut Editor, id: u64, seen: Seen) {
     let gate_on = ed.claude_settings_gate;
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.id == id) else { return };
@@ -552,29 +562,39 @@ fn seen_now(ed: &mut Editor, id: u64, seen: Seen) {
         return;
     }
     let ask = seen.state == State::Ask;
-    let now = (!ask).then(|| settings(crate::chat::CHAT_SETTINGS, &seen));
-    let stop = c.running() && (ask || now != c.settings.started);
+    let now = settings(crate::chat::CHAT_SETTINGS, &seen);
+    // (asked again: what the files say now is held back whatever claude ran with — a held name's value it reads
+    // live, a new one isn't named yet — so it starts again, never only on what's different)
+    let restart = c.running() && (ask || Some(&now) != c.settings.started.as_ref());
     c.settings.seen = Some(seen.clone());
-    if stop {
-        c.stop_for_settings(match ask {
-            true => "The project's Claude settings changed — claude stopped until you answer the card",
-            false => "The project's Claude settings changed — claude starts again with them as answered",
-        });
-    }
     if first && gate_on {
         watch(ed, id);
     }
     if ask {
         offer(ed, &seen);
-        if let Some(c) = ed.session.chat.as_mut() {
-            c.note(
-                "The project's Claude settings run commands as you — Claude starts once you answer the card",
-            );
-        }
     } else {
         // (this session's card only — up in front, or parked while it's behind)
         ed.drop_cards(|w| matches!(w, crate::offer::What::ClaudeSettings { .. }));
-        crate::chat::gate_opened(ed);
+    }
+    match (restart, ask) {
+        (true, true) => crate::chat::settings_restart(
+            ed,
+            "The project's Claude settings changed — Claude started again with them held back; the card asks",
+            true,
+        ),
+        (true, false) => crate::chat::settings_restart(
+            ed,
+            "The project's Claude settings changed — Claude started again with them as answered",
+            true,
+        ),
+        (false, ask) => {
+            if ask && let Some(c) = ed.session.chat.as_mut() {
+                c.note(
+                    "The project's Claude settings run commands as you — Claude started with them held back",
+                );
+            }
+            crate::chat::gate_opened(ed);
+        }
     }
 }
 
@@ -614,16 +634,16 @@ fn watch(ed: &mut Editor, id: u64) {
 
 // ── The card ────────────────────────────────────────────────────────────────
 
-/// The card's text, and the lines being decided: what's held, each on a line of its own, as written (an env
-/// value never — names only), then what's off already, then what `n` does.
+/// The card's text, and the lines being decided: where claude stands (held back unless trusted — it doesn't wait
+/// for the card), then what's held, each on a line of its own, as written (an env value never — names only).
+/// Short: it stands beside the work while claude runs; the rest is `v`'s (`detail`).
 pub fn question(seen: &Seen) -> (String, std::ops::Range<usize>) {
     let Some(scan) = &seen.scan else { return (String::new(), 0..0) };
-    let mut lines = vec![
-        "The project's Claude Code settings run commands as you or set Claude's environment — read in the chat \
-         with no trust dialog of Claude Code's:"
-            .to_string(),
-        String::new(),
-    ];
+    let first = match seen.state {
+        State::Trusted => "Claude has these — n holds them back, starting it again.",
+        _ => "Claude started with these held back — y gives them to it, the conversation going on.",
+    };
+    let mut lines = vec![first.to_string(), String::new()];
     let line = crate::trust::visible_line;
     for i in &scan.items {
         lines.push(match i.kind {
@@ -644,19 +664,30 @@ pub fn question(seen: &Seen) -> (String, std::ops::Range<usize>) {
         lines.push(format!("  {file}: {why} — never used"));
     }
     let decided = 2..lines.len();
-    if !scan.held.is_empty() {
-        let held: Vec<String> = scan.held.iter().map(|(f, k)| format!("{f} {k}")).collect();
+    (lines.join("\n"), decided)
+}
+
+/// What the card leaves to `v`, after its text: why it asks, what's off already, what holding back does.
+pub fn detail(seen: &Seen) -> String {
+    let mut lines = vec![
+        "The project's Claude Code settings run commands as you or set Claude's environment — read in the chat \
+         with no trust dialog of Claude Code's."
+            .to_string(),
+    ];
+    let held = seen.scan.iter().flat_map(|s| &s.held);
+    let held: Vec<String> = held.map(|(f, k)| format!("{f} {k}")).collect();
+    if !held.is_empty() {
         lines.push(String::new());
         lines.push(format!("Already off in tarae's chat: {}.", held.join(", ")));
     }
     lines.push(String::new());
     lines.push(
-        "Held back, Claude starts with these emptied — PATH, SHELL and the locale your own — the plugins off; the \
+        "Held back, Claude runs with these emptied — PATH, SHELL and the locale your own — the plugins off; the \
          rest of the files still apply. No value of yours goes on Claude's command line for a name they chose; a \
          file that sets a variable your own Claude settings set too isn't loaded at all, so yours applies."
             .to_string(),
     );
-    (lines.join("\n"), decided)
+    lines.join("\n")
 }
 
 fn offer(ed: &mut Editor, seen: &Seen) {
@@ -670,7 +701,8 @@ fn offer(ed: &mut Editor, seen: &Seen) {
 
 impl Editor {
     /// The answer on the card (`hash` = what it showed): kept, and the chat's claude starts as answered — or,
-    /// already running, stops when what it runs with no longer holds (trusted: from its next start).
+    /// already running with other settings, starts again on the same conversation: trusted, between turns (at
+    /// once, else at its turn's end); held back, at once.
     pub fn claude_settings_answer(&mut self, id: u64, hash: Digest, trusted: bool) {
         self.offer_finished(id, Ok(()));
         let Some(c) = self.session.chat.as_mut() else { return };
@@ -680,11 +712,17 @@ impl Editor {
         let now = settings(crate::chat::CHAT_SETTINGS, &seen);
         if c.running() && Some(&now) != c.settings.started.as_ref() {
             match trusted {
-                // (held back while it runs is more than asked — it gets them when it next starts)
-                true => {
-                    c.note("Trusted — Claude gets these settings when it next starts (:procs, r restarts it)")
-                }
-                false => c.stop_for_settings("Ignored — claude starts again with them held back"),
+                // (held back while it answers is more than asked — it gets them once its turn is over)
+                true => crate::chat::settings_restart(
+                    self,
+                    "Trusted — Claude starts again with these settings, the conversation going on",
+                    false,
+                ),
+                false => crate::chat::settings_restart(
+                    self,
+                    "Held back — Claude started again without them, the conversation going on",
+                    true,
+                ),
             }
         }
         if let Some(path) = self.trust_path.clone() {
@@ -705,6 +743,14 @@ impl Editor {
             false => self.set_status("Held back — :claude-settings to look again"),
         }
         crate::chat::gate_opened(self);
+    }
+
+    /// `v` on the card: its text and `detail` in its buffer — for what the card shows (`hash`), else (read again
+    /// since) its text alone.
+    pub fn claude_settings_view(&mut self, hash: Digest) {
+        let seen = self.session.chat.as_ref().and_then(|c| c.settings.seen.as_ref());
+        let more = seen.filter(|s| s.digest() == Some(hash)).map(detail).unwrap_or_default();
+        self.offer_view_with(more);
     }
 
     /// `:claude-settings` — the card again, for what the project's Claude settings held when last read.

@@ -639,10 +639,13 @@ Kept:
   `saver::tests::a_save_claude_caused_never_goes_through_a_link_swapped_in`
 - **Every command** Claude asks for goes through tarae's `run` — §1.
 - **A repository's Claude settings are held until you trust them**: helper commands, `env`, plugins, `allow` rules,
-  `additionalDirectories`. claude doesn't start until the card is answered; a change while it runs stops it.
-  test: `claudetrust::tests::the_chats_claude_starts_only_as_the_card_answers` ·
+  `additionalDirectories`. While the card waits claude runs with all of them held back, as `n` leaves it — the
+  chat doesn't wait for the answer; `y` starts it again with them. A change while it runs starts it again at once
+  held back (mid-turn too), the card up again.
+  test: `claudetrust::tests::a_chat_starts_held_back_while_its_card_waits` ·
+  `claudetrust::tests::a_change_mid_chat_restarts_it_held_back_at_once` ·
   `claudetrust::tests::what_a_repository_runs_is_held_and_hooks_only_shown` ·
-  `claudetrust::tests::settings_made_while_claude_runs_stop_it_and_ask` ·
+  `claudetrust::tests::settings_made_while_claude_runs_restart_it_held_back_and_ask` ·
   `claudetrust::tests::every_command_key_is_held_up_front_but_trusted_or_yours`
 - **Its environment**: API keys dropped unless you keep them; a parent Claude Code session's variables dropped.
   test: `llm::tests::what_the_process_itself_holds_never_reaches_claude` ·

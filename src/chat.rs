@@ -664,13 +664,6 @@ impl Chat {
         }
     }
 
-    /// Its claude stops because the project's settings it runs with no longer hold (`claudetrust.rs`) — said;
-    /// the next start reads them as answered.
-    pub(crate) fn stop_for_settings(&mut self, why: &str) {
-        self.kill();
-        self.note(why);
-    }
-
     /// The process of now — a later answer goes only to the one that asked.
     pub fn generation(&self) -> u64 {
         self.generation
@@ -1080,11 +1073,47 @@ pub fn reset(ed: &mut Editor) {
     ed.set_status(said);
 }
 
-/// The project's Claude settings are read and answered (`claudetrust.rs`): its claude starts, and a message
-/// that waited for it goes.
+/// The project's Claude settings are read (`claudetrust.rs`): its claude starts — held back while their card
+/// waits — and a message that waited for the read goes.
 pub(crate) fn gate_opened(ed: &mut Editor) {
     ensure_proc(ed);
     send_queued(ed);
+}
+
+/// The project's Claude settings as answered now need another claude than the one running (`claudetrust.rs`):
+/// said (`why`), and started again on the same conversation (`--resume`) — between turns at once. Mid-turn,
+/// `stop`: it runs with more than they allow now, so it's stopped at once and starts again as its exit ends the
+/// turn; else (`y`: it runs with less) it finishes the turn first. Either way `Gate.again` (`settings_again`).
+pub(crate) fn settings_restart(ed: &mut Editor, why: &str, stop: bool) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    if !c.busy() {
+        c.note(why);
+        c.settings.again = true;
+        settings_again(ed);
+        return;
+    }
+    c.settings.again = true;
+    match stop {
+        // (the process stays this chat's until its exit, so nothing starts another before the turn has ended)
+        true => {
+            c.note(why);
+            c.stop_process();
+        }
+        false => c.note(&format!("{why} — once this turn is over")),
+    }
+}
+
+/// The turn is over — its end, or the exit of a claude stopped mid-turn: the restart that waited for it
+/// (`Gate.again`), the conversation resumed. Whether one started.
+fn settings_again(ed: &mut Editor) -> bool {
+    let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.again) else { return false };
+    c.settings.again = false;
+    if let Some(id) = c.conversation.clone() {
+        c.resume = Some(id);
+    }
+    c.kill();
+    ensure_proc(ed);
+    true
 }
 
 fn ensure_proc(ed: &mut Editor) {
@@ -1665,6 +1694,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             if let Some(m) = money {
                 ed.money_out(m);
             }
+            // (the project's Claude settings trusted mid-turn: claude takes them now — `settings_restart`)
+            settings_again(ed);
             // (a billing that waited for the turn's end — the limit card's `y` mid-turn)
             crate::billing::turn_over(ed);
             // (the key can't pay: a message queued behind the refused turn would only be refused too — #211)
@@ -1725,7 +1756,10 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 } else {
                     format!("claude exited: {err}")
                 };
-                c.msgs.push(Msg::new(Role::Note, e, ""));
+                // (stopped for the project's settings: said already, and it starts again below)
+                if !c.settings.again {
+                    c.msgs.push(Msg::new(Role::Note, e, ""));
+                }
             }
             if let Some(hint) = &login_hint {
                 c.note(hint);
@@ -1740,6 +1774,11 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             crate::restart::turn_over(ed);
             // (a billing that waited for the turn's end — the turn ended here)
             crate::billing::turn_over(ed);
+            // (stopped mid-turn for the project's settings: started again as they hold now — a message typed
+            // meanwhile goes to it)
+            if settings_again(ed) {
+                send_queued(ed);
+            }
         }
     }
 }
@@ -1821,8 +1860,9 @@ pub fn send(ed: &mut Editor) {
     let Some(c) = &mut ed.session.chat else { return };
     let question = c.input.trim().to_string();
     // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
-    // one joins it. So it does while claude waits on the project's settings (`claudetrust.rs`) or its own
-    // profile (`confine_ready` — made on a worker): sent once it starts
+    // one joins it. So it does while the project's settings are read (`claudetrust.rs` — their card doesn't
+    // hold it: claude runs held back meanwhile) or its own profile is made (`confine_ready`, on a worker): sent
+    // once it starts
     if (c.busy() || c.settings.waiting() || c.confine.making) && !question.is_empty() {
         c.queued = Some(match c.queued.take() {
             Some(q) => format!("{q}\n\n{question}"),

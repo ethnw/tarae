@@ -227,15 +227,20 @@ if a settings file allows them. `llm.chat-settings = false` starts it clean.
 there Claude Code asks no trust question: a repository's `.claude/settings.json` would have its `env` block, its
 helper commands and the plugins it turns on used as they are. A repository you cloned could run a command as you
 each time the chat starts, bill someone's API key, or send your prompts to another host (`ANTHROPIC_BASE_URL`).
-So before the chat's claude starts, tarae reads `.claude/settings.json` and `.claude/settings.local.json` itself,
-and a card shows what in them would run or set Claude's environment:
+So before the chat's claude starts, tarae reads `.claude/settings.json` and `.claude/settings.local.json` itself
+(on a worker, milliseconds), and a card shows what in them would run or set Claude's environment:
 
 - the commands — `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`, `otelHeadersHelper` —
   as written;
 - each variable the `env` block sets, by name only (a value may be a token);
 - each plugin `enabledPlugins` turns on.
 
-`y` trusts them. `n` starts Claude with each of them held back in its `--settings`: the variables emptied —
+The chat doesn't wait for the card: Claude starts at once with all of them held back, exactly as `n` leaves it,
+and the card stays up beside the chat, its first line saying so; it lists what the settings do, and `v` shows what
+holding back does. What you type goes to Claude; the chat keeps the
+keys, and `C-q` gives them to the card. `y` trusts them: Claude starts again with the files as they are, the
+conversation going on (`--resume`) — at once between turns, else once its turn is over. `n` keeps Claude as it
+runs. Held back, Claude has each of them overridden in its `--settings`: the variables emptied —
 `PATH`, `SHELL`, `HOME`, `TMPDIR`, `USER`, `LANG`, `TERM` and `LC_*` back to your own (a project can't empty your
 `PATH`) — the helper commands emptied, the plugins off. No value of theirs goes on Claude's command line, and
 no value of yours for a name they chose: copying your value for any name a repository names would let it publish
@@ -243,18 +248,18 @@ a variable of yours (`DATABASE_URL`, `AWS_SESSION_TOKEN`) where your other progr
 own Claude settings set too isn't held back that way: the file that sets it isn't loaded at all, so yours
 applies (for the project's file, that's its CLAUDE.md too). A helper command you set too goes back to yours,
 unless it looks like a secret — then that file isn't loaded either. The rest of the files still apply. Hooks, a status line and a file
-suggestion command are off in the chat anyway: the card says so, and doesn't ask. Every helper command —
+suggestion command are off in the chat anyway: the card's `v` says so, and doesn't ask. Every helper command —
 `apiKeyHelper` and the others — is held up front, even one the files don't set yet, unless you set it yourself:
 Claude Code picks up an edited helper mid-conversation, so one a `git pull` adds can't run before tarae has
 looked. A new variable or plugin can't be named up front: one a pull adds may reach Claude for the moment
 before tarae sees the change and stops it. Project skills can't pre-approve tools in the chat: the chat has no
 `Skill` tool, and denies it besides. A command too long to show is never trusted, and a file tarae can't read key by key (not a JSON
-object, a key of another shape, over 1 MB) isn't loaded at all. What you type while the card waits is sent once
-Claude starts. Each answer is kept for that content, for the whole repository, beside the `.tarae.toml` answers;
+object, a key of another shape, over 1 MB) isn't loaded at all. Each answer is kept for that content, for the whole repository, beside the `.tarae.toml` answers;
 the same values don't ask again, other ones do. `.claude/settings.local.json` is yours, and isn't asked about,
 while git says it's untracked and ignored. If either file changes while the chat is open, tarae reads it again,
-and a change that needs your answer stops Claude until you give it (Claude Code itself would otherwise pick up an
-edited helper mid-conversation). `:claude-settings` shows the card again. The chat also only ever starts tarae's
+and a change that needs your answer starts Claude again at once with them held back — mid-turn too, the turn cut
+off — the conversation going on and the card up again (Claude Code itself would otherwise pick up an edited
+helper mid-conversation). `:claude-settings` shows the card again. The chat also only ever starts tarae's
 own MCP server (`--strict-mcp-config`), whatever `llm.args` says, so a project's `.mcp.json` servers don't
 connect.
 

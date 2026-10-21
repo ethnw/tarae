@@ -306,9 +306,11 @@ fn your_own_local_file_isnt_asked_about_and_answers_are_kept() {
 // ── The chat ────────────────────────────────────────────────────────────────
 
 /// A stand-in claude: writes its arguments, one a line, to `argv` and appends what it's sent to `stdin`, in the
-/// folder it's started in — its session's root, the test's temp folder — nothing else runs.
+/// folder it's started in — its session's root, the test's temp folder — nothing else runs. It never answers, so
+/// a message sent leaves its turn under way. (`exec`: one process, as claude is — a `cat` left behind by a killed
+/// `sh` would keep its output open, and its exit would never come.)
 fn stand_in(ed: &mut Editor) {
-    let script = "printf '%s\\n' \"$0\" \"$@\" > argv; cat >> stdin".to_string();
+    let script = "printf '%s\\n' \"$0\" \"$@\" > argv; exec cat >> stdin".to_string();
     ed.config.llm.command = "sh".into();
     ed.config.llm.args = vec!["-c".into(), script];
 }
@@ -358,16 +360,16 @@ fn a_change_answered_before_restarts_claude_without_a_card() {
     assert_eq!(settings["env"]["SECOND_ZQ7"], "", "{settings}");
     assert!(settings["env"].get("FIRST_ZQ7").is_none(), "{settings}");
     assert!(card(&ed).is_none(), "answered before: no card");
-    assert!(noted(&ed, "claude starts again with them as answered"), "{}", state(&ed));
+    assert!(noted(&ed, "Claude started again with them as answered"), "{}", state(&ed));
     drop(ed);
     std::fs::remove_dir_all(&root).ok();
 }
 
 /// The case the window is about: no `.claude/` when the chat opens (claude starts as always), then a pull makes
 /// `.claude/settings.json` while claude runs — the watch sees the new file (through its folder not there yet),
-/// claude stops, and the card asks.
+/// claude starts again held back, and the card asks.
 #[test]
-fn settings_made_while_claude_runs_stop_it_and_ask() {
+fn settings_made_while_claude_runs_restart_it_held_back_and_ask() {
     let root = temp("made-later");
     std::fs::remove_dir_all(root.join(".claude")).unwrap();
     let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
@@ -376,25 +378,74 @@ fn settings_made_while_claude_runs_stop_it_and_ask() {
     crate::chat::open(&mut ed);
     until(&mut ed, "the plain start", |ed| running(ed) && arg_after(&root, "--settings").is_some());
     assert!(card(&ed).is_none());
+    let first = pid(&ed);
     std::fs::create_dir_all(root.join(".claude")).unwrap();
-    std::fs::write(root.join(PROJECT), r#"{"apiKeyHelper": "printf theirs-zq7"}"#).unwrap();
-    until(&mut ed, "the card for the new file", |ed| card(ed).is_some() && !running(ed));
+    std::fs::write(root.join(PROJECT), r#"{"env": {"MADE_ZQ7": "1"}}"#).unwrap();
+    until(&mut ed, "the card for the new file, claude again", |ed| {
+        card(ed).is_some() && running(ed) && pid(ed) != first
+    });
+    until(&mut ed, "its arguments written", |_| {
+        arg_after(&root, "--settings").is_some_and(|s| s.contains("MADE_ZQ7"))
+    });
+    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
+    assert_eq!(settings["env"]["MADE_ZQ7"], "", "held back: {settings}");
     drop(ed);
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// `y` while claude runs held back: it isn't stopped (held back is more than it was asked for) — it gets the
-/// files when it next starts, and the chat says so.
+/// `y` with claude running held back and idle: it starts again at once with the files as they are, the
+/// conversation going on (`--resume`), said in the chat.
 #[test]
-fn trusting_while_claude_runs_applies_at_its_next_start() {
-    let (mut ed, root) = asked("trust-running", r#"{"env": {"THIRD_ZQ7": "1"}}"#, false);
-    ed.offer_dismiss();
-    until(&mut ed, "the held-back start", |_| arg_after(&root, "--settings").is_some());
+fn a_yes_restarts_claude_at_idle_with_resume() {
+    let (mut ed, root) = asked("yes-idle", r#"{"env": {"THIRD_ZQ7": "1"}}"#, false);
+    until(&mut ed, "the held-back start", |ed| running(ed) && arg_after(&root, "--settings").is_some());
     let first = pid(&ed);
-    crate::typed::execute(&mut ed, "claude-settings").unwrap();
+    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
+    assert_eq!(settings["env"]["THIRD_ZQ7"], "", "held back while the card waits: {settings}");
+    // (a conversation going, as claude's `init` names it)
+    ed.session.chat.as_mut().unwrap().conversation = Some("conv-zq7".into());
+    std::fs::remove_file(root.join("argv")).unwrap();
     ed.offer_accept();
-    assert!(running(&ed) && pid(&ed) == first, "the same claude, not stopped");
-    assert!(noted(&ed, "Claude gets these settings when it next starts"), "{}", state(&ed));
+    until(&mut ed, "the trusted start", |ed| running(ed) && pid(ed) != first);
+    until(&mut ed, "its arguments written", |_| arg_after(&root, "--settings").is_some());
+    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
+    assert!(settings.get("env").is_none(), "trusted: theirs applies — {settings}");
+    assert_eq!(arg_after(&root, "--resume").as_deref(), Some("conv-zq7"), "the same conversation");
+    assert!(noted(&ed, "Trusted — Claude starts again with these settings"), "{}", state(&ed));
+    assert!(card(&ed).is_none());
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Trusted and mid-turn, the files change: claude is stopped at once, not at the turn's end, and starts again
+/// held back on the same conversation, the card up again — its exit ending the turn unsaid (the chat said why).
+#[test]
+fn a_change_mid_chat_restarts_it_held_back_at_once() {
+    let (mut ed, root) = asked("change", r#"{"env": {"FOURTH_ZQ7": "1"}}"#, false);
+    until(&mut ed, "the held-back start", |ed| running(ed) && arg_after(&root, "--settings").is_some());
+    ed.session.chat.as_mut().unwrap().conversation = Some("conv-zq7".into());
+    let first = pid(&ed);
+    ed.offer_accept();
+    until(&mut ed, "the trusted start", |ed| running(ed) && pid(ed) != first);
+    let trusted = pid(&ed);
+    // A turn under way (the stand-in never answers)
+    ed.session.chat.as_mut().unwrap().input = "mid-turn from the test".into();
+    crate::chat::send(&mut ed);
+    until(&mut ed, "the message", |_| {
+        std::fs::read_to_string(root.join("stdin")).is_ok_and(|s| s.contains("mid-turn from the test"))
+    });
+    assert!(ed.session.chat.as_ref().unwrap().busy(), "{}", state(&ed));
+    std::fs::remove_file(root.join("argv")).unwrap();
+    std::fs::write(root.join(PROJECT), r#"{"env": {"FIFTH_ZQ7": "1"}}"#).unwrap();
+    until(&mut ed, "held back again, the card up", |ed| {
+        card(ed).is_some() && running(ed) && pid(ed) != trusted && arg_after(&root, "--settings").is_some()
+    });
+    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
+    assert_eq!(settings["env"]["FIFTH_ZQ7"], "", "held back: {settings}");
+    assert_eq!(arg_after(&root, "--resume").as_deref(), Some("conv-zq7"), "the same conversation");
+    assert!(!ed.session.chat.as_ref().unwrap().busy(), "the cut turn is over");
+    assert!(noted(&ed, "Claude started again with them held back"), "{}", state(&ed));
+    assert!(!noted(&ed, "claude exited"), "said once, as why: {}", state(&ed));
     drop(ed);
     std::fs::remove_dir_all(&root).ok();
 }
@@ -472,13 +523,12 @@ fn arg_after(root: &Path, flag: &str) -> Option<String> {
     it.next().map(String::from)
 }
 
-/// The whole path: the chat's claude doesn't start before the repository's settings are read and answered; a
-/// message typed meanwhile waits and goes once it starts; held back, it starts with them overridden (and no
-/// value of theirs on its command line) — and stays so when the watch reads the same files again before the
-/// answer is in the store (tests keep none: the answer in hand holds); a change of the file while it runs
-/// stops it until the card is answered again; trusted, it starts with the files as they are.
+/// The chat's claude doesn't start before the repository's settings are read, nor waits for their card: it starts
+/// held back as `n` leaves it — them overridden, no value of theirs on its command line — the card up beside the
+/// chat, which keeps the keys, its first line saying so; a message typed reaches claude before any answer. `n`
+/// keeps the same claude (it runs held back already), and `:claude-settings` puts the card up again.
 #[test]
-fn the_chats_claude_starts_only_as_the_card_answers() {
+fn a_chat_starts_held_back_while_its_card_waits() {
     let root = temp("chat");
     let settings_file = root.join(PROJECT);
     std::fs::write(
@@ -495,23 +545,25 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     stand_in(&mut ed);
     crate::chat::open(&mut ed);
     assert!(!running(&ed), "nothing starts before the settings are read");
-    until(&mut ed, "the card", |ed| card(ed).is_some());
-    assert!(!running(&ed) && !root.join("argv").exists(), "nor before they're answered");
+    until(&mut ed, "the card, and claude beside it", |ed| card(ed).is_some() && running(ed));
+    until(&mut ed, "its arguments written", |_| arg_after(&root, "--settings").is_some());
     let q = &ed.offers.iter().find(|o| o.title == TITLE).unwrap().question;
+    assert!(q.starts_with("Claude started with these held back"), "{q}");
     assert!(
         q.contains("apiKeyHelper = printf theirs-zq7-key") && q.contains("env ANTHROPIC_BASE_URL"),
         "{q}"
     );
     assert!(!q.contains("theirs-zq7.invalid"), "a variable's value isn't shown: {q}");
-    // Typed meanwhile: it waits, over the input
+    let c = ed.session.chat.as_ref().unwrap();
+    assert!(c.focused && !ed.card_has_keys(), "the chat keeps its keys beside the card");
+    // Typed before any answer: it goes to claude
     ed.session.chat.as_mut().unwrap().input = "hello from the test".into();
     crate::chat::send(&mut ed);
-    assert_eq!(ed.session.chat.as_ref().unwrap().queued.as_deref(), Some("hello from the test"));
-    // Held back: started with each key overridden by name — and the message goes
-    ed.offer_dismiss();
-    until(&mut ed, "the held-back start and the message", |_| {
+    until(&mut ed, "the message", |_| {
         std::fs::read_to_string(root.join("stdin")).is_ok_and(|s| s.contains("hello from the test"))
     });
+    assert!(card(&ed).is_some(), "still unanswered");
+    // Held back: started with each key overridden by name
     let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
     assert_eq!(settings["apiKeyHelper"], "");
     // (not on `RESTORED`: empty, whatever tarae's environment holds — the test gives one that has it)
@@ -524,21 +576,24 @@ fn the_chats_claude_starts_only_as_the_card_answers() {
     let argv = std::fs::read_to_string(root.join("argv")).unwrap();
     let theirs: Vec<&str> = argv.lines().filter(|l| l.contains("theirs-zq7")).collect();
     assert!(theirs.is_empty(), "names only, no value of theirs: {theirs:?}");
-    // The file changes while it runs: stopped, and the card asks about what it says now
-    let before = card(&ed);
-    std::fs::write(&settings_file, r#"{"apiKeyHelper": "printf another-stand-in"}"#).unwrap();
-    until(&mut ed, "the card again", |ed| card(ed).is_some_and(|h| Some(h) != before) && !running(ed));
-    // Trusted: started with the files as they are — nothing laid over them
-    std::fs::remove_file(root.join("argv")).unwrap();
-    ed.offer_accept();
-    until(&mut ed, "the trusted start", |ed| running(ed) && root.join("argv").exists());
-    until(&mut ed, "its arguments written", |_| arg_after(&root, "--settings").is_some());
-    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
-    assert!(settings.get("apiKeyHelper").is_none(), "trusted: theirs applies — {settings}");
-    // `:claude-settings`: the card again, to take it back
+    // `n`: held back already — the same claude goes on
+    let first = pid(&ed);
+    ed.offer_dismiss();
+    assert!(running(&ed) && pid(&ed) == first, "the same claude: {}", state(&ed));
+    // `:claude-settings`: the card again, to look again
     assert!(card(&ed).is_none());
     crate::typed::execute(&mut ed, "claude-settings").unwrap();
     assert!(card(&ed).is_some(), "the card again");
+    // Short beside the work: what holding back does is `v`'s, after the card's text
+    let q = ed.offers.iter().find(|o| o.title == TITLE).unwrap().question.clone();
+    assert!(!q.contains("Held back, Claude runs") && !q.contains("no trust dialog"), "{q}");
+    ed.offer_view();
+    let all = ed.doc().text.to_string();
+    assert!(all.contains(&q), "the card's text: {all}");
+    assert!(
+        all.contains("no trust dialog") && all.contains("Held back, Claude runs with these emptied"),
+        "{all}"
+    );
     drop(ed);
     std::fs::remove_dir_all(&root).ok();
 }

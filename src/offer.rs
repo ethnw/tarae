@@ -866,7 +866,7 @@ impl Offer {
             W::Run(_) => vec![('y', "Run"), ('n', "No")],
             W::ReviewAtEnd => vec![('y', "Turn on"), ('n', "No")],
             W::ProjectTrust { .. } => vec![('y', "Trust"), ('n', "Ignore")],
-            W::ClaudeSettings { .. } => vec![('y', "Trust"), ('n', "Hold back")],
+            W::ClaudeSettings { .. } => vec![('y', "Trust"), ('v', "Details"), ('n', "Hold back")],
             W::GitTrust(_) => vec![('y', "Let them run"), ('n', "Keep off")],
             W::NoSandbox { .. } => vec![('y', "Run"), ('a', "This chat"), ('n', "No")],
             W::ProtectedMade { .. } => {
@@ -1131,8 +1131,10 @@ impl crate::editor::Editor {
         }
         // A card that runs something (or shows Claude the screen), while the chat has the keys and nothing is
         // being typed there (Claude asking mid-turn): the chat gives them to the card — as a review takes them. Mid-message, the
-        // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no")
+        // card waits (cards don't take keys from the chat's input — a `n` typed there was a "no"). Not the
+        // project's Claude settings: Claude runs held back beside it, and what's typed next is for Claude
         if (o.weighty() || matches!(o.what, What::Screen { .. }))
+            && !matches!(o.what, What::ClaudeSettings { .. })
             && let Some(c) = self.session.chat.as_mut().filter(|c| c.focused && c.input.is_empty())
         {
             c.focused = false;
@@ -1228,7 +1230,7 @@ impl crate::editor::Editor {
             if !self.offer_seen_whole() {
                 match key.code {
                     Code::Char('v') => {
-                        self.offer_view_all();
+                        self.offer_view();
                         return true;
                     }
                     Code::Char(c) if o.weighty_answer(c) => {
@@ -1252,6 +1254,8 @@ impl crate::editor::Editor {
             Code::Char('r') if matches!(o.what, What::NotesStale { .. }) => crate::notes::stale_list(self),
             // (the card stays while it's read)
             Code::Char('v') if o.made() => crate::tools::made_view(self),
+            // (its detail, kept off the card — it stands beside the work while Claude runs held back)
+            Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. }) => self.offer_view(),
             Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
@@ -1762,11 +1766,14 @@ impl crate::editor::Editor {
         }
     }
 
-    /// `v` on the front card: a change set's every change, the names a protected-made card is about, else its
-    /// whole text.
+    /// `v` on the front card: a change set's every change, the names a protected-made card is about, the Claude
+    /// settings card's detail, else its whole text.
     pub fn offer_view(&mut self) {
         if self.offers.first().is_some_and(Offer::made) && self.offer_seen_whole() {
             return crate::tools::made_view(self);
+        }
+        if let Some(&What::ClaudeSettings { hash }) = self.offers.first().map(|o| &o.what) {
+            return self.claude_settings_view(hash);
         }
         match self.offers.first().and_then(Offer::change_set) {
             Some(generation) => crate::refactor::view_all(self, generation),
