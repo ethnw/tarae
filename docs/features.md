@@ -100,7 +100,7 @@ configs carry over as they are.
 
 ## Look and feel
 
-![tarae in meok (ink): Claude's change under review in the code, the chat docked on the right with two sessions' tabs, path bar, mode pill](screenshots/hero-meok.png)
+![tarae in meok (ink): Claude's change under review in the code, the chat docked on the right with two sessions' tabs, path bar, the mode's word](screenshots/hero-meok.png)
 
 - **Themes** — meok (ink) and hanji (paper), plus `meok-transparent` and `hanji-transparent`, which leave the
   background to the terminal so its color and blur show through. The default `theme = "default"` asks the terminal for

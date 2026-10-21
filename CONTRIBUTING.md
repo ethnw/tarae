@@ -422,6 +422,11 @@ with the side panel, a picker, a toast, the git tab, `:granted`, the chat mid-an
 review, a turn's review, a card — in both themes at 80 and 160 columns, into `target/scenes/` (`--out DIR`), each
 on a demo crate of its own with a stand-in claude: the same pictures before and after (`--list` names them).
 
+The pictures the docs show are retaken the same way: `cargo xtask scenes --docs [picture …]` takes each from the
+scene its row in [`xtask/src/scenes/docshots.rs`](xtask/src/scenes/docshots.rs) names, at its size and theme, into
+`target/docshots/`, and compares them with `docs/screenshots/`; `--docs --keep` copies the ones you've looked at
+over the committed ones. A new picture in the docs is a row there (a test checks every reference has one).
+
 The design language:
 
 - **One accent color** (`ui.accent`; if a theme lacks it, the primary cursor background is used)

@@ -67,7 +67,7 @@ pub fn run(args: &[String]) -> Result<()> {
         let state = given
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join(format!("tarae-shot-state-{}", std::process::id())));
-        let res = Setup::from_env().and_then(|setup| drive(&mut vt, &setup, keys, &state, cols, rows));
+        let res = Setup::from_env().and_then(|setup| drive(&mut vt, &setup, keys, &state, None, cols, rows));
         if given.is_none() {
             let _ = std::fs::remove_dir_all(&state);
         }
@@ -112,8 +112,25 @@ impl Setup {
 pub fn take(setup: &Setup, keys: &[String], size: (u16, u16), state: &Path, out: &Path) -> Result<()> {
     let (cols, rows) = size;
     let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
-    drive(&mut vt, setup, keys, state, cols, rows)?;
+    drive(&mut vt, setup, keys, state, None, cols, rows)?;
     picture(&vt, 1, out)
+}
+
+/// `take` for a picture the docs show (`scenes --docs`): at `scale`, and with tarae's data home (grammars, packs,
+/// sessions' checkouts) at `data` rather than yours — nothing downloaded on this machine shows in it.
+pub fn take_at(
+    setup: &Setup,
+    keys: &[String],
+    size: (u16, u16),
+    scale: usize,
+    state: &Path,
+    data: &Path,
+    out: &Path,
+) -> Result<()> {
+    let (cols, rows) = size;
+    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    drive(&mut vt, setup, keys, state, Some(data), cols, rows)?;
+    picture(&vt, scale, out)
 }
 
 /// The screen as a PNG at `out`.
@@ -252,7 +269,16 @@ fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
     if rc == -1 { Err(io::Error::last_os_error()) } else { Ok(rc) }
 }
 
-fn drive(vt: &mut Vt, setup: &Setup, keys: &[String], state: &Path, cols: u16, rows: u16) -> Result<()> {
+/// `data`: tarae's `XDG_DATA_HOME` (None: the shot's own environment's).
+fn drive(
+    vt: &mut Vt,
+    setup: &Setup,
+    keys: &[String],
+    state: &Path,
+    data: Option<&Path>,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
     if !setup.bin.is_file() {
         return Err(format!("{} not found", setup.bin.display()));
     }
@@ -268,6 +294,9 @@ fn drive(vt: &mut Vt, setup: &Setup, keys: &[String], state: &Path, cols: u16, r
         .stdin(stdio()?)
         .stdout(stdio()?)
         .stderr(stdio()?);
+    if let Some(data) = data {
+        cmd.env("XDG_DATA_HOME", data);
+    }
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(|| {
@@ -360,16 +389,22 @@ fn wait_key(key: &str) -> Option<(f64, &str)> {
 /// The `shot` profile's tarae, built now (`Cargo.toml`: release's behavior, built incrementally without
 /// LTO — seconds after an edit where `--release` takes over a minute).
 pub fn build_shot(root: &Path) -> Result<PathBuf> {
+    build(root, "shot", &[])
+}
+
+/// tarae in cargo `profile` with `features`, built if it needs to be: the binary.
+pub fn build(root: &Path, profile: &str, features: &[&str]) -> Result<PathBuf> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let st = Command::new(cargo)
-        .args(["build", "--quiet", "--profile", "shot", "--bin", "tarae"])
-        .current_dir(root)
-        .status()
-        .map_err(|e| format!("cargo: {e}"))?;
-    if !st.success() {
-        return Err("building the shot profile failed".into());
+    let mut cmd = Command::new(cargo);
+    cmd.args(["build", "--quiet", "--profile", profile, "--bin", "tarae"]);
+    if !features.is_empty() {
+        cmd.args(["--features", &features.join(",")]);
     }
-    Ok(root.join("target/shot/tarae"))
+    let st = cmd.current_dir(root).status().map_err(|e| format!("cargo: {e}"))?;
+    if !st.success() {
+        return Err(format!("building the {profile} profile failed"));
+    }
+    Ok(root.join("target").join(profile).join("tarae"))
 }
 
 /// tarae's environment in the shot: a color terminal, its own config and state. An inherited `NO_COLOR`

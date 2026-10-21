@@ -11,7 +11,8 @@
 //! - `shot out.png [keys …]` — the real screen as a PNG, for looking at a change before it's committed
 //!   (see [`shot`]); `shot --live out.png [--pid N]` — a running tarae's last frame as one.
 //! - `scenes [--out DIR] [scene …]` — tarae's main surfaces as shots, both themes at 80 and 160 columns, each on a
-//!   demo crate of its own with a stand-in claude (see [`scenes`]).
+//!   demo crate of its own with a stand-in claude (see [`scenes`]); `scenes --docs [picture …]` the pictures the
+//!   docs show, each from the scene its row names (`scenes/docshots.rs`).
 //! - `perf` (`cargo perf`) — the budgets and real-use scenarios in the `perf` profile, their numbers kept in
 //!   `target/perf/history.tsv` and compared with the last runs (see [`perf`]).
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see

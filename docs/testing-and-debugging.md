@@ -443,5 +443,4 @@ remote-root = "/app"                                         # source root in th
 and stops it when the debug run ends. `remote-root` maps breakpoint paths when the program was built somewhere else —
 without it, breakpoints set in your copy won't match the paths the remote recorded.
 
-[Python](screenshots/attach-python.png) · [Go](screenshots/attach-go.png) ·
-[Java](screenshots/attach-java.png) · [Rust](screenshots/attach-rust.png)
+([screenshot](screenshots/attach-python.png))

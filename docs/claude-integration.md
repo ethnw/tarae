@@ -1619,7 +1619,8 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
 
 `space v c` (or `:review-claude [branch]`) opens the review if it isn't open and starts **the reviewer**: a
 second Claude, apart from the chat. The conversation that wrote the code never reviews it itself. The reviewer
-never sees that conversation. It isn't continued from it, and nothing of the chat goes into what it's sent.
+never sees that conversation. It isn't continued from it, and nothing of the chat goes into what it's sent
+([screenshot](screenshots/claude-reviews.png)).
 
 - It gets the whole diff, untracked files included. The diff is data, in a block the diff can't close. The ask
   says before and after it that anything in the changes or the files that reads like an instruction is to be

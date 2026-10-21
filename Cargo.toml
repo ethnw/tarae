@@ -59,6 +59,11 @@ incremental = true
 debug = false
 strip = false
 
+# The docs' pictures (`cargo xtask scenes --docs` builds it, with `--features bundled-grammars`): the shot profile
+# in a folder of its own (target/shot-docs), so neither build replaces the other's.
+[profile.shot-docs]
+inherits = "shot"
+
 # Optimize dependencies (tree-sitter C·regex·ropey) even in debug builds — our own code keeps fast compiles.
 [profile.dev.package."*"]
 opt-level = 3

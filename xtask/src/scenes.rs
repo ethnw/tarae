@@ -21,6 +21,9 @@ use serde_json::{Value, json};
 use crate::shot::{self, Setup};
 use crate::{Result, root};
 
+// (`scenes --docs`: the docs' pictures, each from a scene here)
+mod docshots;
+
 const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [--transparent] [scene …] | scenes --list | scenes --compare A B";
 
 /// One surface: the stand-in claude's script, the files tarae opens, the keys sent (as `cargo xtask shot`
@@ -365,6 +368,51 @@ const SCENES: &[Scene] = &[
 /// `scenes --compare A B`: each shot in `A` against `B`'s of its name, pixel for pixel — `same`, or the box the
 /// differing pixels lie in, to look at there (a turn's time or a temp path moves from run to run).
 fn compare(a: &Path, b: &Path) -> Result<()> {
+    let mut names: Vec<String> = std::fs::read_dir(a)
+        .map_err(|e| format!("{}: {e}", a.display()))?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".png"))
+        .collect();
+    names.sort();
+    let (mut same, mut unreadable) = (0, 0);
+    for n in &names {
+        let c = compared(a, b, n);
+        same += usize::from(c == Compared::Same);
+        unreadable += usize::from(matches!(c, Compared::Unreadable(_)));
+        println!("{n}: {}", c.said());
+    }
+    println!("{same} of {} the same", names.len());
+    match unreadable {
+        0 => Ok(()),
+        n => Err(format!("{n} couldn't be read as pictures")),
+    }
+}
+
+/// How a shot compares with its twin of the same name.
+#[derive(Debug, PartialEq)]
+enum Compared {
+    Same,
+    /// What differs: the box the differing pixels lie in, or the two sizes.
+    Differs(String),
+    /// No twin.
+    New,
+    /// One of the two couldn't be read as a PNG: which, and why.
+    Unreadable(String),
+}
+
+impl Compared {
+    fn said(&self) -> String {
+        match self {
+            Compared::Same => "same".into(),
+            Compared::Differs(how) => format!("differs {how}"),
+            Compared::New => "new — none to compare it with".into(),
+            Compared::Unreadable(why) => format!("can't be compared: {why}"),
+        }
+    }
+}
+
+/// Shot `n` in `a` against its twin in `b`, pixel for pixel.
+fn compared(a: &Path, b: &Path, n: &str) -> Compared {
     let read = |p: &Path| -> Result<(u32, u32, Vec<u8>)> {
         let file = std::fs::File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
         let mut r = png::Decoder::new(io::BufReader::new(file))
@@ -375,39 +423,31 @@ fn compare(a: &Path, b: &Path) -> Result<()> {
         buf.truncate(info.buffer_size());
         Ok((info.width, info.height, buf))
     };
-    let mut names: Vec<String> = std::fs::read_dir(a)
-        .map_err(|e| format!("{}: {e}", a.display()))?
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter(|n| n.ends_with(".png"))
-        .collect();
-    names.sort();
-    let mut differ = 0;
-    for n in &names {
-        let (x, y) = (read(&a.join(n))?, read(&b.join(n))?);
-        if (x.0, x.1) != (y.0, y.1) {
-            differ += 1;
-            println!("{n}: {}×{} against {}×{}", x.0, x.1, y.0, y.1);
-            continue;
-        }
-        let (w, px) = (x.0 as usize, x.2.len() / (x.0 * x.1) as usize);
-        let mut boxed: Option<(usize, usize, usize, usize)> = None;
-        for (i, (p, q)) in x.2.chunks(px).zip(y.2.chunks(px)).enumerate() {
-            if p != q {
-                let (cx, cy) = (i % w, i / w);
-                let (x0, y0, x1, y1) = boxed.unwrap_or((cx, cy, cx, cy));
-                boxed = Some((x0.min(cx), y0.min(cy), x1.max(cx), y1.max(cy)));
-            }
-        }
-        match boxed {
-            None => println!("{n}: same"),
-            Some((x0, y0, x1, y1)) => {
-                differ += 1;
-                println!("{n}: differs in x {x0}..={x1}, y {y0}..={y1} (of {}×{})", x.0, x.1);
-            }
+    if !b.join(n).exists() {
+        return Compared::New;
+    }
+    let (x, y) = match (read(&a.join(n)), read(&b.join(n))) {
+        (Ok(x), Ok(y)) => (x, y),
+        (Err(e), _) | (_, Err(e)) => return Compared::Unreadable(e),
+    };
+    if (x.0, x.1) != (y.0, y.1) {
+        return Compared::Differs(format!("in size: {}×{} against {}×{}", x.0, x.1, y.0, y.1));
+    }
+    let (w, px) = (x.0 as usize, x.2.len() / (x.0 * x.1).max(1) as usize);
+    let mut boxed: Option<(usize, usize, usize, usize)> = None;
+    for (i, (p, q)) in x.2.chunks(px.max(1)).zip(y.2.chunks(px.max(1))).enumerate() {
+        if p != q {
+            let (cx, cy) = (i % w, i / w);
+            let (x0, y0, x1, y1) = boxed.unwrap_or((cx, cy, cx, cy));
+            boxed = Some((x0.min(cx), y0.min(cy), x1.max(cx), y1.max(cy)));
         }
     }
-    println!("{} of {} the same", names.len() - differ, names.len());
-    Ok(())
+    match boxed {
+        None => Compared::Same,
+        Some((x0, y0, x1, y1)) => {
+            Compared::Differs(format!("in x {x0}..={x1}, y {y0}..={y1} (of {}×{})", x.0, x.1))
+        }
+    }
 }
 
 const SIZES: [(u16, u16); 2] = [(80, 24), (160, 45)];
@@ -427,6 +467,9 @@ pub fn run(args: &[String]) -> Result<()> {
     if args.first().is_some_and(|a| a == "--compare") {
         let [_, a, b] = args else { return Err(USAGE.into()) };
         return compare(Path::new(a), Path::new(b));
+    }
+    if args.first().is_some_and(|a| a == "--docs") {
+        return docshots::run(&args[1..]);
     }
     let (mut out, mut names) = (root().join("target/scenes"), Vec::new());
     let mut sizes = SIZES.to_vec();
