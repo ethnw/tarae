@@ -365,7 +365,7 @@ let it send keys too, in a way that can't land somewhere it didn't mean:
 The person at the keyboard already has the same guards: a card ignores keys typed as it appears, `y` counts only
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
 [design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Phase 1 is done
-(2026-10-19, `aebf0bfd`: the protocol and its guards — [design/ui-state.md](design/ui-state.md#shuttle-keys)):
+(2026-10-19, `aebf0bfd`: the protocol and its guards — [design/ui-state.md](design/ui-state.md#shuttle-keys--phase-1-built-2026-10-19-shuttlers)):
 `tarae keys` types over the UI socket, each step's `expect` checked in the job that hands its keys on; the grant
 card is for the connecting process alone (`--for <pid>` widens it, said); a shuttle answers light cards and a
 weighty card's `n`/`v` only, nothing that widens trust. Before it, watchers hear what a batch that drew nothing
@@ -393,9 +393,8 @@ main that has what it waits for, and the user says go:
   catch up, the wheel into it; `[keys.terminal]` replaced `editor.terminal-escape`. P2 done (2026-10-21, `8e17fc36`): quoting —
   `enter` on a view's selection, `space >` (`:quote`) on the code's, a chip over the input; `<quoted>` with its own
   closing id, the source said, cut past 16 KB and said, the terminal's token-like lines out; `C-s` follows
-  `llm.screen-terminal`. P3 next, before panes (decided 2026-10-21): the run panels' view mode — `RunView` in place of
-  `Bottom`, `[view.run]`, quoting from them — only; its hops (`C-w h/j/k/l`, `t` into a view mode, the cursor kept per
-  surface) go into panes, whose navigation they are. P4 after panes.
+  `llm.screen-terminal`. P3 (the run panels' view mode — `RunView` in place of `Bottom`, `[view.run]`, quoting from them) comes
+  inside the panes order below, after its P2a; its hops are panes' navigation; P4, the mouse, after panes' P2b.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
   `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the
@@ -403,9 +402,15 @@ main that has what it waits for, and the user says go:
   and as Helix's (`C-w h/j/k/l`); sizes by key and by drag. Inside zellij its `Alt` keys are zellij's, so a twin is
   settled in the plan. After view mode and the measurement (both touch the terminal panel). It brings tarae's own terminal engine (a workspace
   crate, in place of `vt100`, measured against a baseline taken first) and a terminal that understands the shell
-  while the shell stays yours. Order: several terminals → the engine → reflow → the shell understood → focus as
-  one value → surfaces as leaves → panes of their own → `tarae` verbs → output for Claude → another session
-  beside → the floating terminal → shells across `:restart`. After its own terminal engine, then images at full
+  while the shell stays yours. Order (the user, 2026-10-21, after using the publish
+  branch at work — a view mode's search reached the editor's, selecting felt loose: the base before the terminal
+  line): focus as one value, with one search scope and one selection per pane → view P3 → surfaces as leaves →
+  panes of their own → several terminals → the engine → reflow → the shell understood → `tarae` verbs → output for
+  Claude → another session beside → the floating terminal → shells across `:restart`. P2a done (2026-10-21, `e002ceb1`): focus as one value —
+  `Session.at` names where the keys are, the six flags gone; each pane its own search and selection (a view mode's
+  `/` never reaches the code's register — the user's friction 84, replayed as a test); `C-w h/j/k/l` from every
+  surface, said where nothing is that way; the `C-w`-inside-a-terminal decision in the plan's §2.6 for P2b. Next:
+  view P3, then P2b. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
   elsewhere (user, 2026-10-20).
 - **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`): a session's Claude starts
@@ -568,9 +573,12 @@ git tab, search, a short Kubernetes one.
   stamped with the key that decided it (`▐y▌ accepted` in the edit review, `m`/`u` on a turn's files, `:granted`'s
   answers by their key). P6 done (2026-10-20, `b135cf3b`): a turn's stops as knots — `●` the stop in hand, `◦`
   the rest, `▲` a change with its stamp — in the chat's rows and the follow card; no thread line (tried in the
-  margin, it read as a border or a quote bar; the user chose the knots alone). P7, live edits, stays after the
-  measurement, with `editor.motion` folded in. P8, 코드멍's reveal, is dropped — an invented delay,
-  and a key eaten to end it.
+  margin, it read as a border or a quote bar; the user chose the knots alone). P7 done (2026-10-21, `4d39285a`): live edits — what
+  Claude writes into a file is drawn there as it's written (`input_json_delta` read as it streams, the place found
+  on a worker, provisional rows on the proposed wash, the head of the line in progress wet; nothing applied, no key
+  taken; the review opens on the same rows), `editor.motion` full · calm · none with macOS's Reduce Motion read once
+  at start; a stream batch with live rows in a big file 0.3 ms, a native Write over 5,000 lines 1.4 ms (was 8).
+  P8, 코드멍's reveal, is dropped — an invented delay, and a key eaten to end it.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
   and `--keep` copies only what you've seen. Rows with no scene yet are named apart; a `@?` wait that timed out
