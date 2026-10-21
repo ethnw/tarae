@@ -5,13 +5,13 @@
   </picture>
 </p>
 
-<p align="center">
+<h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/seal-meok.svg">
-    <img src="docs/brand/seal-hanji.svg" width="64" alt="tarae's seal: a skein's thread unwinding into a cursor">
+    <img src="docs/brand/seal-hanji.svg" width="60" alt="tarae's seal: a skein's thread unwinding into a cursor">
   </picture>
-</p>
-<h1 align="center">tarae</h1>
+  <br>tarae
+</h1>
 
 <p align="center">
   <b>A terminal editor with Claude inside.</b><br>
@@ -63,5 +63,8 @@ macOS or Linux (WSL on Windows), with rustup and a C compiler. Claude features n
 Contributions need a signed [CLA](CONTRIBUTING.md#license-and-the-cla).
 
 <p align="center">
-  <img src="docs/brand/mascot.svg" width="120" alt="tarae's mascot in ink on hanji: a ball of thread with a small face, its loose red end a cursor">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/mascot-meok.svg">
+    <img src="docs/brand/mascot-hanji.svg" width="120" alt="tarae's mascot: a ball of thread painted in ink, a brush slung across its back, its pink hand holding it; the brush's tip has just drawn the cursor">
+  </picture>
 </p>
