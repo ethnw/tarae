@@ -213,6 +213,7 @@ commands! {
         review_viewed => "Mark this file viewed",
         review_send => "Send the review to Claude",
         review_claude => "A second Claude reviews",
+        review_board => "A board of Claudes reviews",
         review_verdict => "The reviewer's verdict",
         review_hunk_seen => "Looked at this risky change",
         review_file_seen => "Looked at all drawn in file",
@@ -2283,6 +2284,10 @@ fn effort_picker(cx: &mut Context) {
 
 fn review_claude(cx: &mut Context) {
     crate::codereview::ask_claude(cx.editor, None);
+}
+
+fn review_board(cx: &mut Context) {
+    crate::codereview::ask_board(cx.editor, None);
 }
 
 fn review_verdict(cx: &mut Context) {

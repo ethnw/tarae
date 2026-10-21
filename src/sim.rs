@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::editor::Editor;
 use crate::event::Event;
 
+mod board;
 mod sessions;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

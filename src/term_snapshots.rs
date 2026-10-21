@@ -1411,7 +1411,7 @@ fn snapshot_review_notes_by_their_author() {
     let has = |t: &str| rows.iter().any(|r| r.contains(t));
     assert!(has("¶ reviewer · not sent yet") && has("¶ author"), "the card: {rows:#?}");
     assert!(has("¶ reviewer · This value") && has("¶ draft · Name"), "the line ends: {rows:#?}");
-    assert!(has("¶1 r1"), "the rail: yours and the reviewer's: {rows:#?}");
+    assert!(has("¶1 ¶1"), "the rail: yours and the reviewer's, each in its colour: {rows:#?}");
     s.check("review_notes_by_author");
 }
 

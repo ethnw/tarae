@@ -1767,7 +1767,13 @@ impl Editor {
                 add(c.pid(), Kind::Chat, "claude", "the chat".into(), session);
             }
             if let Some(r) = &l.reviewer {
-                add(r.pid(), Kind::Reviewer, "claude", format!("the reviewer · {}", r.label), session);
+                for (i, m) in r.members.iter().enumerate().filter(|(_, m)| m.pid().is_some()) {
+                    let what = match r.board.is_some() {
+                        true => format!("the board · {} · {}", r.member_name(i), r.label),
+                        false => format!("the reviewer · {}", r.label),
+                    };
+                    add(m.pid(), Kind::Reviewer, "claude", what, session);
+                }
             }
         }
         // (a watch held elsewhere — its run gone, not yet started, or never to: still tarae's, still known)

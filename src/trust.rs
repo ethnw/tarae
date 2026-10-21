@@ -58,10 +58,11 @@ pub const RISKY: [&str; 23] = [
 
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
 /// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
-/// with (`llm.edit-tools`), whether what you use is counted (`features.count`) and whether your cards are kept
-/// (`llm.card-record`) and whether pings spend your usage to keep a conversation warm (`llm.keep-warm*`) — a
-/// project never does.
-pub const YOURS_ONLY: [&str; 9] = [
+/// with (`llm.edit-tools`), whether what you use is counted (`features.count`), whether your cards are kept
+/// (`llm.card-record`), whether pings spend your usage to keep a conversation warm (`llm.keep-warm*`), what the
+/// board's Claudes are asked (`review.angles`) and how many of them run on your credential and memory
+/// (`review.skeptics-max`, `review.board-at-once`) — a project never does.
+pub const YOURS_ONLY: [&str; 12] = [
     "llm.card-record",
     "llm.keep-warm",
     "llm.keep-warm-min-tokens",
@@ -71,6 +72,11 @@ pub const YOURS_ONLY: [&str; 9] = [
     "llm.reviewer-billing",
     "llm.edit-tools",
     "features.count",
+    // (what the board's Claudes are asked: a project's angle could talk its own reviewer into anything)
+    "review.angles",
+    // (how many of them: each is billed on your reviewer credential, ~200 MB while it reads)
+    "review.skeptics-max",
+    "review.board-at-once",
 ];
 
 pub fn yours_only(setting: &str) -> bool {

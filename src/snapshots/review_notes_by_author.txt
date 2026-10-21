@@ -6,7 +6,7 @@
 03   0 of 1 viewed · 1 unviewed ▌ 10 let line_2 = 2;                                                              ▐
 04                              ▌  9 let line_3 = 3;                                                              ▐
 05     src/                     ▌  8 let line_4 = 4;                                                              ▐
-06 ▎ │ ◦ demo.rs    • +30 ¶1 r1 ▌  7 let line_5 = 5;                                                              ▐
+06 ▎ │ ◦ demo.rs    • +30 ¶1 ¶1 ▌  7 let line_5 = 5;                                                              ▐
 07                              ▌  6▎let added_1 = 1;                                                             ▐
 08                              ▌  5▎let added_2 = 2;                                                             ▐
 09                              ▌  4▎let added_3 = 3;                                                             ▐

@@ -256,7 +256,8 @@ fn report(from: &str, text: &str) -> String {
         out += &format!(" ({broken} line{} not an entry, skipped)", if broken == 1 { "" } else { "s" });
     }
     out += ".\n";
-    let turns: Vec<Turn> = all.iter().map(Turn::of).collect();
+    // (a board's end, `board::WHOLE`: no turn of its own — its members' turns are their own entries)
+    let turns: Vec<Turn> = all.iter().filter(|e| e["what"] != "board-whole").map(Turn::of).collect();
 
     // By kind
     out += "\n## By kind\n\nThe cost's split is estimated at Opus 5.5's list prices (5-minute cache writes); $ is \
@@ -402,9 +403,10 @@ mod tests {
             line.split('|').skip(2).take(2).map(|c| c.trim().to_string()).collect()
         };
         has(
-            "From calls.jsonl: 7 entries, 2026-10-17 10:00:00 – 2026-10-17 11:10:00 (1 line not an entry, skipped).",
+            "From calls.jsonl: 8 entries, 2026-10-17 10:00:00 – 2026-10-17 11:10:00 (1 line not an entry, skipped).",
         );
         assert_eq!(row("change"), ["1", "3 · 3"]);
+        // (a board's end isn't a turn: no row of its own, none counted as a question)
         assert_eq!(row("question"), ["2", "5 · 5"]);
         assert_eq!(row("refactor"), ["1", "2 · 2"]);
         assert_eq!(row("compaction (/compact)"), ["1", "0 · 0"]);

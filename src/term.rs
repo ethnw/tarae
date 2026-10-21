@@ -4100,9 +4100,15 @@ fn draw_text(
                 let reviewer = n.thread.first().is_some_and(|e| e.by == crate::notes::By::Reviewer);
                 // (on the stale card up: `stale ·` — cardburden 6)
                 let stale = crate::notes::stale_shown(editor).contains(&n.id);
+                // (the board's: the angle that found it, `+1` for each other one)
+                let by = match n.board.as_ref().map(|m| &m.angles[..]) {
+                    Some([first]) => format!("{first} · "),
+                    Some([first, more @ ..]) => format!("{first} +{} · ", more.len()),
+                    _ => "reviewer · ".to_string(),
+                };
                 let draft = match (stale, reviewer, n.thread.iter().any(|e| e.draft)) {
                     (true, ..) => "stale · ",
-                    (false, true, _) => "reviewer · ",
+                    (false, true, _) => by.as_str(),
                     (false, false, true) => "draft · ",
                     (false, false, false) => "",
                 };
@@ -9349,6 +9355,12 @@ enum Tone {
     Key,
 }
 
+/// The board's rows on a rail `w` cells wide, as text (tests).
+#[cfg(test)]
+pub(crate) fn rail_board_text(editor: &Editor, rv: &crate::reviewer::Reviewer, w: usize) -> Vec<String> {
+    rail_board(editor, rv, w).into_iter().map(|r| r.into_iter().map(|p| p.1).collect()).collect()
+}
+
 /// How long the reviewer has read, as the rail says it: `7s`, `1m 20s` — whole seconds, a frame each
 /// (`Editor::tick_wanted`).
 fn reading_for(d: std::time::Duration) -> String {
@@ -9376,12 +9388,37 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
             n => vec![(Tone::High, format!("▲ {n} high to look at"))],
         });
     }
-    let Some(rv) = editor.session.reviewer.as_ref().filter(|rv| rv.of == r.started) else { return rows };
+    let this = editor.session.reviewer.as_ref().filter(|rv| rv.of == r.started);
+    // High-risk changes no board has read: where it pays, the key for it
+    if any_high && !this.is_some_and(crate::reviewer::Reviewer::board_read) {
+        let key = "space v C";
+        let said = ["  a board reads the ▲", "  a board"].into_iter().find(|s| key.width() + s.width() <= w);
+        rows.push(vec![(Tone::Key, key.to_string()), (Tone::Faint, said.unwrap_or_default().to_string())]);
+    }
+    let Some(rv) = this else { return rows };
+    if rv.board.is_some() {
+        rows.extend(rail_board(editor, rv, w));
+        return rows;
+    }
     let mut row = vec![(Tone::Reviewer, "reviewer".to_string())];
+    let in_line = rv.reading().then(|| crate::reviewer::place_in_line(editor, &editor.session)).flatten();
     match &rv.state {
-        State::Reading => {
+        // (its one member not started yet: the line is full, or memory is critical)
+        State::Waiting | State::Reading if in_line.is_some() => {
+            let n = crate::queued::ordinal(in_line.unwrap_or(1));
+            let full = format!("  waits · {n} in line");
+            if "reviewer".width() + full.width() <= w {
+                row.push((Tone::Faint, full));
+            } else {
+                // (its place on the row under, as its time goes there while it reads)
+                row.push((Tone::Faint, "  waits".into()));
+                rows.push(row);
+                row = vec![(Tone::Faint, format!("{n} in line"))];
+            }
+        }
+        State::Waiting | State::Reading => {
             row.push((Tone::Accent, "  reading…".into()));
-            let mut how = reading_for(rv.started.elapsed());
+            let mut how = reading_for(crate::clock::since(rv.started));
             if rv.reads > 0 {
                 how += &format!(" · {}", crate::nav::count(rv.reads, "read"));
             }
@@ -9412,6 +9449,198 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
     if let Some(first) = rv.verdict.lines().map(str::trim).find(|l| !l.is_empty()) {
         rows.push(vec![(Tone::Dim, format!("“{first}”"))]);
     }
+    rows
+}
+
+/// The board's rows on the rail (`board.rs`): while it reads, its head (how long, what it cost so far — or
+/// its place in line), a row per angle (waiting, reading and its reads, what it found, stopped) and the
+/// skeptics' (after the angles, then how many judged and what came of it); the angles fold into one row on a
+/// rail too narrow for them. Done: one row — confirmed (▲ on high-risk changes), refuted, unchecked.
+fn rail_board(editor: &Editor, rv: &crate::reviewer::Reviewer, w: usize) -> Vec<Vec<(Tone, String)>> {
+    use crate::reviewer::{Role, State};
+    let Some(b) = rv.board.as_deref() else { return Vec::new() };
+    let mut rows = Vec::new();
+    // (a part goes on its row only whole, and only while the row has room for it — else its shorter word)
+    let fits = |row: &[(Tone, String)], text: &str| {
+        row.iter().map(|p| p.1.width()).sum::<usize>() + text.width() <= w
+    };
+    let pick = |row: &[(Tone, String)], words: &[&str]| {
+        let first = words.iter().find(|s| fits(row, s));
+        first.or(words.last()).map_or_else(String::new, |s| s.to_string())
+    };
+    let mut head = vec![(Tone::Reviewer, "board".to_string())];
+    if rv.reading() {
+        match crate::reviewer::place_in_line(editor, &editor.session) {
+            Some(n) => {
+                let n = crate::queued::ordinal(n);
+                let full = format!("  waits · {n} in line");
+                if fits(&head, &full) {
+                    head.push((Tone::Faint, full));
+                } else {
+                    // (its place on the row under, never cut)
+                    head.push((Tone::Faint, "  waits".into()));
+                    rows.push(std::mem::replace(&mut head, vec![(Tone::Faint, format!("{n} in line"))]));
+                }
+            }
+            None => {
+                head.push((Tone::Accent, "  reading…".into()));
+                // (the time first, the cost after it — shorter, then gone, where the rail is narrow)
+                let time = format!(" {}", reading_for(crate::clock::since(rv.started)));
+                if fits(&head, &time) {
+                    head.push((Tone::Faint, time));
+                    if let Some(c) = rv.cost {
+                        let said = [format!(" · ${c:.2} so far"), format!(" · ${c:.2}")];
+                        if let Some(s) = said.into_iter().find(|s| fits(&head, s)) {
+                            head.push((Tone::Faint, s));
+                        }
+                    }
+                }
+            }
+        }
+        rows.push(head);
+        let skeptics = "skeptics";
+        let nw = b.angles.iter().map(|a| a.name.width()).chain([skeptics.width()]).max().unwrap_or(0);
+        let angles: Vec<(usize, &crate::reviewer::Member)> =
+            rv.members.iter().enumerate().filter(|(_, m)| matches!(m.role, Role::Angle(_))).collect();
+        let found = |m: &crate::reviewer::Member| match m.role {
+            Role::Angle(a) => b.claims_of(a).0,
+            _ => 0,
+        };
+        let folded = 2 + nw + 2 + "◦ waiting".width() > w;
+        if !folded {
+            for (i, m) in &angles {
+                let mut row = vec![(Tone::Dim, format!("  {}", pad_right(&rv.member_name(*i), nw)))];
+                match &m.state {
+                    State::Waiting => row.push((Tone::Faint, "  ◦ waiting".into())),
+                    State::Reading => {
+                        // (its reads where they fit after `reading…`, else in its place: `3 reads…`)
+                        let reads = crate::nav::count(m.reads, "read");
+                        if m.reads == 0 || fits(&row, &format!("  reading… {reads}")) {
+                            row.push((Tone::Accent, "  reading…".into()));
+                            if m.reads > 0 {
+                                row.push((Tone::Faint, format!(" {reads}")));
+                            }
+                        } else {
+                            row.push((Tone::Accent, format!("  {reads}…")));
+                        }
+                    }
+                    State::Done => row.push(match found(m) {
+                        0 => (Tone::Faint, pick(&row, &["  nothing found", "  none"])),
+                        k => (Tone::Dim, format!("  {k} found")),
+                    }),
+                    State::Failed(_) => row.push((Tone::Warn, "  stopped".into())),
+                    State::Stopped => row.push((Tone::Dim, pick(&row, &["  stopped by you", "  stopped"]))),
+                }
+                rows.push(row);
+            }
+        } else {
+            // (too narrow for a row each: each angle's state in a mark — ◦ waiting, • reading, what it found,
+            // × stopped — on the fewest rows, then with the longest names: names cut, then a row more, never a mark)
+            let marked: Vec<(String, String)> = angles
+                .iter()
+                .map(|(i, m)| {
+                    let mark = match &m.state {
+                        State::Waiting => "◦".to_string(),
+                        State::Reading => "•".to_string(),
+                        State::Done => found(m).to_string(),
+                        State::Failed(_) | State::Stopped => "×".to_string(),
+                    };
+                    (rv.member_name(*i), mark)
+                })
+                .collect();
+            let lay = |k: usize| {
+                let mut lines: Vec<String> = Vec::new();
+                for p in marked.iter().map(|(name, mark)| format!("{} {mark}", fit_ellipsis(name, k))) {
+                    match lines.last_mut() {
+                        Some(l) if l.width() + " · ".width() + p.width() <= w => *l += &format!(" · {p}"),
+                        _ => lines.push(format!("  {p}")),
+                    }
+                }
+                lines
+            };
+            // (rows that all fit first, then the fewest — a long name cut rather than its mark; a name cut keeps
+            // a character: a wide one is two cells, then the `…`)
+            let over = |l: &Vec<String>| (l.iter().any(|r| r.width() > w), l.len());
+            let lines = (3..=nw.max(3)).rev().map(lay).min_by_key(over).unwrap_or_default();
+            rows.extend(lines.into_iter().map(|l| vec![(Tone::Dim, fit_ellipsis(&l, w))]));
+        }
+        let (n, over) = rv.tally_of(true);
+        let angles_over = angles.iter().all(|(_, m)| m.over());
+        // (folded, no column to line up with: no padding to take the room its count needs)
+        let pad = if folded { skeptics.width() } else { nw };
+        let mut row = vec![(Tone::Dim, format!("  {}", pad_right(skeptics, pad)))];
+        match (angles_over, n) {
+            (false, _) => {
+                row.push((Tone::Faint, pick(&row, &["  after the angles", "  after them", "  next"])))
+            }
+            (true, 0) => row.push((Tone::Faint, pick(&row, &["  nothing to check", "  none"]))),
+            (true, n) => {
+                let said = [format!("  {over} of {n}"), format!("  {over}/{n}")];
+                row.push((Tone::Accent, pick(&row, &[&said[0], &said[1]])));
+                let (c, r) = (
+                    b.count(Some(crate::board::Verdict::Confirmed)),
+                    b.count(Some(crate::board::Verdict::Refuted)),
+                );
+                for part in [format!(" · {c} confirmed"), format!(" · {r} refuted")] {
+                    if fits(&row, &part) {
+                        row.push((Tone::Faint, part));
+                    }
+                }
+            }
+        }
+        rows.push(row);
+        return rows;
+    }
+    match &rv.state {
+        State::Failed(_) => head.push((Tone::Warn, "  stopped".into())),
+        State::Stopped => head.push((Tone::Dim, "  stopped by you".into())),
+        _ => {}
+    }
+    let marks: Vec<&crate::notes::Mark> = crate::reviewer::findings_in(&editor.session)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|n| n.board.as_ref())
+        .collect();
+    let of = |v: crate::board::Verdict| marks.iter().filter(|m| m.verdict == v).count();
+    let (confirmed, unchecked) = (of(crate::board::Verdict::Confirmed), of(crate::board::Verdict::Unchecked));
+    let refuted = b.count(Some(crate::board::Verdict::Refuted));
+    let t = crate::reviewer::review_tally(editor).unwrap_or_default();
+    let mut parts = vec![match confirmed {
+        0 => (Tone::Dim, "  no confirmed findings".to_string()),
+        k => (Tone::Dim, format!("  {k} confirmed")),
+    }];
+    if t.high > 0 {
+        parts.push((Tone::High, format!(" ▲{}", t.high)));
+    }
+    if refuted > 0 {
+        parts.push((Tone::Faint, format!(" · {refuted} refuted")));
+    }
+    if unchecked > 0 {
+        parts.push((Tone::Warn, format!(" · {unchecked} unchecked")));
+    }
+    // (done short of an angle: its kind of fault unread)
+    let short = rv.angles_short();
+    if rv.state == State::Done && !short.is_empty() {
+        parts.push((Tone::Warn, format!(" · {} stopped", short.join(", "))));
+    }
+    if t.answered > 0 {
+        parts.push((Tone::Faint, format!(" · {} answered", t.answered)));
+    }
+    // (what doesn't fit beside the head goes on the row under it, indented)
+    let mut row = head;
+    for (tone, text) in parts {
+        if !fits(&row, &text) {
+            rows.push(std::mem::take(&mut row));
+            row.push((Tone::Faint, String::new()));
+        }
+        // (a row of its own begins with the part, not with the `·` that joined it to the one before)
+        let text = match row.len() == 1 && row[0].1.is_empty() {
+            true => format!("  {}", text.trim_start().trim_start_matches("· ")),
+            false => text,
+        };
+        row.push((tone, text));
+    }
+    rows.push(row);
     rows
 }
 
@@ -9534,7 +9763,8 @@ fn draw_review_rail(
             tail.push(sp(format!(" ¶{k}"), Style { fg: ui.accent.fg, ..bg }));
         }
         if found > 0 {
-            tail.push(sp(format!(" r{found}"), Style { fg: reviewer_fg, ..bg }));
+            // (the reviewer's are its notes too: the `¶` its code lines and its card show, in its colour)
+            tail.push(sp(format!(" ¶{found}"), Style { fg: reviewer_fg, ..bg }));
         }
         // (the stale card up: its drafts here — all of them `stale`, else how many — cardburden 6)
         if let Some(said) = rail_stale(editor, f, k + found) {
@@ -9740,8 +9970,9 @@ fn session_tabs(
             end = put(&mut spans, m.text, m.style);
         }
         // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195)
-        if l.reviewing() {
-            end = put(&mut spans, " ¶ reviewing".into(), reviewer);
+        if let Some(said) = crate::reviewer::session_said(editor, l) {
+            let said = if said == "reviewing" { " ¶ reviewing" } else { " ¶ waits" };
+            end = put(&mut spans, said.into(), reviewer);
         }
         if let Some(r) = rebasing(l) {
             end = put(&mut spans, r.text, r.style);
@@ -11259,6 +11490,11 @@ fn pad_left(s: &str, width: usize) -> String {
     format!("{}{s}", " ".repeat(width.saturating_sub(s.width())))
 }
 
+/// `s` filled out to `width` cells on its right — a column of names (display width, as `pad_left`).
+fn pad_right(s: &str, width: usize) -> String {
+    format!("{s}{}", " ".repeat(width.saturating_sub(s.width())))
+}
+
 /// Keeps the end (file name) of a path that doesn't fit: `…/editor/mod.rs`. No room at all: nothing (a
 /// lone `…` would still take a cell).
 fn fit_left(s: &str, width: usize) -> String {
@@ -11939,7 +12175,18 @@ fn note_lines(
                 By::You => vec![sp("› ", dim), sp(By::You.label(), Style { bold: true, ..dim })],
                 By::Reviewer => {
                     let st = reviewer_style(editor, ui);
-                    let mut v = vec![sp("¶ ", st), sp(By::Reviewer.label(), Style { bold: true, ..st })];
+                    // (the board's: the angles that found it and what its skeptic made of it)
+                    let mark = n.board.as_ref().filter(|_| i == 0);
+                    let who = mark.map_or_else(|| By::Reviewer.label().to_string(), |m| m.angles.join(" · "));
+                    let mut v = vec![sp("¶ ", st), sp(&who, Style { bold: true, ..st })];
+                    match mark.map(|m| m.verdict) {
+                        Some(crate::board::Verdict::Unchecked) => {
+                            let warn = editor.theme.try_get("warning").and_then(|s| s.fg).or(ui.accent.fg);
+                            v.push(sp(" · unchecked", Style { fg: warn, ..Style::default() }));
+                        }
+                        Some(v2) => v.push(sp(&format!(" · {}", v2.word()), dim)),
+                        None => {}
+                    }
                     if e.draft {
                         v.push(sp(" · not sent yet", faint));
                     }
@@ -11955,6 +12202,14 @@ fn note_lines(
                 let mut spans = vec![sp("  ", Style::default())];
                 spans.extend(message_spans(l, Style::default(), lang.as_deref(), editor));
                 Line::Text { spans, indent: 2 }
+            });
+        }
+        // (its skeptic's trace — or why no one checked it — under it, faint, wrapped hanging)
+        if let Some(m) = n.board.as_ref().filter(|m| i == 0 && e.by == By::Reviewer && !m.trace.is_empty()) {
+            let who = if m.verdict == crate::board::Verdict::Confirmed { "skeptic — " } else { "" };
+            out.push(Line::Text {
+                spans: vec![sp("  ", Style::default()), sp(who, dim), sp(&m.trace, faint)],
+                indent: 6,
             });
         }
     }

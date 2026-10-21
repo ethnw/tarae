@@ -72,7 +72,7 @@ impl World {
 
 /// The scenario's own git (the world's changes, not tarae's): the user's global and system settings left out —
 /// two runs of a seed see the same git, wherever they run — and no hook, the repository's or anyone's.
-fn git(dir: &Path, args: &[&str]) {
+pub(super) fn git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .args(["-c", "core.hooksPath=/dev/null", "-C"])
         .arg(dir)

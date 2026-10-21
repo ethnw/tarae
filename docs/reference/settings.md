@@ -109,6 +109,10 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 |---|---|---|---|
 | `review.risky` | list of strings | `[]` | Code review: files whose every change is high-risk — looked at by you (space v h) before the review ends or the session is brought. A name matches anywhere, in any case, one * per part ("sandbox*"); a path from the project root (".github/"). The language packs' patterns (unsafe, spawning…) and the protected names count too. Read from the checkout tarae started in |
 | `review.quiet` | list of strings | `[]` | Code review: files that are tests, docs or snapshots — their changes graded quiet (never over a high-risk one). Names and paths as review.risky |
+| `review.screen` | list of strings | `[]` | Code review: the files that draw the screen — a change in one brings the board's design angle (space v C). Names and paths as review.risky |
+| `review.angles` | list of tables | correctness, security, tests, design | The board's angles (space v C): [[review.angles]] tables of name, ask, when (always, behaviour, high, screen), paths, languages, findings-max — replacing the built-in correctness, security, tests, design. Only your own config sets it |
+| `review.board-at-once` | integer 1–8 | `3` | The board's Claudes reading at once, every session's together (one under memory pressure, none while it's critical). Only your own config sets it |
+| `review.skeptics-max` | integer 0–50 | `12` | The board's skeptics at most — the claims of groups past it go to you unchecked. Only your own config sets it |
 
 ## Tables you name yourself
 

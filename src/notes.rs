@@ -88,6 +88,34 @@ pub struct Note {
     /// Its lines' text as it was pinned — a SHA-256 of it (`lines_digest`): a draft whose lines changed since
     /// is offered to close at a turn's end (#197). None until known (a file not open: read on a worker).
     pub pinned: Option<[u8; 32]>,
+    /// A finding of the board's (`board.rs`): the angles that found it, what its skeptic made of it, its trace.
+    pub board: Option<Mark>,
+}
+
+/// What a finding of the board's carries beside its text: the angles that found it (the first pinned it),
+/// confirmed or unchecked, and the skeptic's trace (or why no one checked it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub angles: Vec<String>,
+    pub verdict: crate::board::Verdict,
+    pub trace: String,
+}
+
+impl Mark {
+    fn json(&self) -> Value {
+        json!({ "angles": self.angles, "verdict": self.verdict.word(), "trace": self.trace })
+    }
+
+    fn of(v: &Value) -> Option<Mark> {
+        let angles: Vec<String> =
+            v["angles"].as_array()?.iter().filter_map(|a| a.as_str().map(str::to_string)).collect();
+        let verdict = crate::board::Verdict::named(v["verdict"].as_str()?)?;
+        (!angles.is_empty()).then(|| Mark {
+            angles,
+            verdict,
+            trace: v["trace"].as_str().unwrap_or_default().into(),
+        })
+    }
 }
 
 /// Whether note `n` hasn't gone to Claude yet: it began as a draft (yours, or the reviewer's finding) that
@@ -158,6 +186,7 @@ pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str
         waiting: by == By::You,
         anchor: None,
         pinned: None,
+        board: None,
     });
     ed.session.notes.focus = Some(id);
     attach(ed);
@@ -282,7 +311,7 @@ pub fn to_json(notes: &Notes, docs: &[crate::document::Document]) -> Vec<Value> 
             let pinned = n.pinned.as_ref().map(hex);
             json!({
                 "path": n.path, "lines": [n.lines.start, n.lines.end], "anchor": anchor, "thread": thread,
-                "pinned": pinned,
+                "pinned": pinned, "board": n.board.as_ref().map(Mark::json),
             })
         })
         .collect()
@@ -346,6 +375,7 @@ fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved
             waiting: false,
             anchor: v["anchor"].as_str().map(str::to_string),
             pinned: v["pinned"].as_str().and_then(of_hex),
+            board: Mark::of(&v["board"]),
         });
     }
     attach_in(notes, docs);
@@ -420,6 +450,15 @@ const FINDING_MAX: usize = 1_000;
 /// inside `root` (the checkout it reviews), no `reply_to` (it sees no thread). It waits like your drafts —
 /// for `space v s` to take it to the author with them, or `:note-close` to drop it.
 pub fn finding(ed: &mut Editor, root: &Path, args: &Value) -> Result<(u64, String), String> {
+    let (path, lines, text) = finding_of(root, args)?;
+    let (shown, line) = (crate::chat::shown(root, &path), lines.start);
+    let id = pin_finding(ed, &path, lines, &text, None);
+    Ok((id, format!("finding #{id} pinned at {shown}:{}", line + 1)))
+}
+
+/// A finding's place and text as the reviewer's `note` gives them, checked — a file inside `root`, no
+/// `reply_to`, the text cut at `FINDING_MAX` — not pinned (the board's angles record it as a claim first).
+pub fn finding_of(root: &Path, args: &Value) -> Result<(PathBuf, Range<usize>, String), String> {
     if args.get("reply_to").is_some_and(|r| !r.is_null()) {
         return Err("the reviewer pins new findings only — reply_to isn't one of its arguments".into());
     }
@@ -431,12 +470,18 @@ pub fn finding(ed: &mut Editor, root: &Path, args: &Value) -> Result<(u64, Strin
     let (path, lines) = placed(root, args)?;
     let shown = crate::chat::shown(root, &path);
     crate::paths::existing_inside(root, &path, &shown, "the reviewer pins findings in the checkout only")?;
-    let line = lines.start;
-    let id = add(ed, &path, lines, By::Reviewer, &text);
+    Ok((path, lines, text))
+}
+
+/// A finding of the reviewer's pinned on `lines` of `path` (checked by `finding_of`), a draft — the board's
+/// with its `mark`.
+pub fn pin_finding(ed: &mut Editor, path: &Path, lines: Range<usize>, text: &str, mark: Option<Mark>) -> u64 {
+    let id = add(ed, path, lines, By::Reviewer, text);
     if let Some(n) = find_mut(ed, id) {
         n.thread[0].draft = true;
+        n.board = mark;
     }
-    Ok((id, format!("finding #{id} pinned at {shown}:{}", line + 1)))
+    id
 }
 
 /// The chat turn ended: notes still waiting stop waiting — a single one gets Claude's plain answer (it didn't

@@ -5,4 +5,5 @@
 {"v":1,"at":"2026-10-17 10:55:
 {"v":1,"at":"2026-10-17 10:58:00","what":"chat","model":"claude-opus-5-5","requests":0,"counts":{"input":0,"write":0,"read":0,"output":0},"cost":0.2,"ms":30000,"compacted":"manual","calls":{"calls":0,"context":0,"read_only_runs":0},"steps":[]}
 {"v":1,"at":"2026-10-17 11:00:00","what":"reviewer","model":"claude-opus-5-5","requests":null,"counts":{"input":10,"write":30000,"read":0,"output":2000},"cost":0.2,"ms":60000,"calls":null,"steps":[]}
+{"v":1,"at":"2026-10-17 11:05:00","what":"board-whole","board":"b1"}
 {"v":1,"at":"2026-10-17 11:10:00","what":"draft","model":"claude-opus-5-5","requests":null,"counts":{"input":20000,"write":0,"read":0,"output":200},"cost":0.09,"ms":8000,"calls":null,"steps":[]}

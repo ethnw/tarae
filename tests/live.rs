@@ -2323,6 +2323,69 @@ fn the_reviewer_reviews_the_changes_read_only() {
     eprintln!("the reviewer called: {called:?}");
 }
 
+/// `space v C`: one real board over a ~4k-token diff (`security` too: `src/` is high-risk here). Its members
+/// get the diff as a block of its own with a cache breakpoint after it, and list the same tools: each one's
+/// first request after the first angle's reads the diff from the prompt cache instead of writing it again.
+/// Prints every member's first request (cache written, read) from `tarae state` — the commit's numbers.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn a_board_reads_its_diff_from_the_cache() {
+    if !have("claude") || !have("git") {
+        return;
+    }
+    let sb = Sandbox::live("board-cache");
+    sb.write_config(&format!("{LIVE_CONFIG}lsp = false\n[review]\nrisky = [\"src/\"]\n"));
+    cargo_project(&sb);
+    sb.git(&["init", "-q", "-b", "main"]);
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-q", "-m", "base"]);
+    let mut table = String::from("//! Ranges' ends, clamped.\n\n");
+    for k in 0..120 {
+        table += &format!(
+            "/// Range {k}'s end past its start, clamped to `max`.\npub fn end_{k}(start: usize, len: usize, max: usize) \
+             -> usize {{\n    (start + len + {k}).min(max)\n}}\n\n"
+        );
+    }
+    table += "/// The middle of a range.\npub fn mid(a: usize, b: usize) -> usize {\n    (a + b) / 2\n}\n";
+    sb.write("src/table.rs", &table);
+    let lib = std::fs::read_to_string(sb.file("src/lib.rs")).unwrap();
+    sb.write("src/lib.rs", &format!("pub mod table;\n{lib}"));
+    let mut t = sb.spawn(&["src/lib.rs"]);
+    t.send(" vC");
+    let deadline = Instant::now() + Duration::from_secs(20 * 60);
+    let run = loop {
+        let st = t.state_json(0);
+        let run = st["sessions"][0]["reviewer_run"].clone();
+        if run["board"].is_object() && run["state"] != "reading" {
+            break run;
+        }
+        assert!(Instant::now() < deadline, "the board never ended: {run:#}\n{}", t.screen().rows.join("\n"));
+        std::thread::sleep(Duration::from_secs(2));
+    };
+    let b = &run["board"];
+    let n = |v: &serde_json::Value, k: &str| v[k].as_u64().unwrap_or(0);
+    let mut firsts: Vec<(String, serde_json::Value)> = Vec::new();
+    for a in b["angles"].as_array().unwrap() {
+        firsts.push((a["angle"].as_str().unwrap_or_default().to_string(), a["first"].clone()));
+    }
+    for (i, s) in b["skeptics"]["first"].as_array().into_iter().flatten().enumerate() {
+        firsts.push((format!("skeptic {}", i + 1), s.clone()));
+    }
+    eprintln!("board {}: cost {}", run["state"], b["cost"]);
+    eprintln!("{:<14} {:>8} {:>12} {:>11}", "member", "input", "cache write", "cache read");
+    for (name, f) in &firsts {
+        eprintln!("{name:<14} {:>8} {:>12} {:>11}", n(f, "input"), n(f, "write"), n(f, "read"));
+    }
+    assert_eq!(run["state"], "done", "{run:#}");
+    let (_, first) = &firsts[0];
+    for (name, f) in &firsts[1..] {
+        assert!(
+            n(f, "read") >= n(first, "read") + n(first, "write") / 2,
+            "{name} read the diff from the cache: {f} (the first angle's: {first})"
+        );
+    }
+}
+
 /// The git tab's `C`: Claude drafts the commit message from the staged diff, reviewed in the message buffer;
 /// `:w` commits it.
 #[test]

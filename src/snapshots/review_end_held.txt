@@ -5,24 +5,24 @@
 02   1 file  +1                 ▌  1 let line_1 = 1;
 03   0 of 1 viewed · 1 unviewed ▌  1 let line_2 = 2;
 04   ▲ 1 high to look at        ▌  2 let line_3 = 3;
-05                              ▌  3 let line_4 = 4;
-06     src/                     ▌  4 let line_5 = 5;
-07 ▎ │ ◦ demo.rs          ▲1 +1 ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
-08                              ▌
+05   space v C  a board         ▌  3 let line_4 = 4;
+06                              ▌  4 let line_5 = 5;
+07     src/                     ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
+08 ▎ │ ◦ demo.rs          ▲1 +1 ▌
 09                              ▌
-10                              ▌
-11                              ▌
-12                              ▌                ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-13                              ▌                 ▎ End tarae's review?
-14                              ▌                   tarae's review · uncommitted · 0 of 1 viewed
+10                              ▌                ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+11                              ▌                 ▎ End tarae's review?
+12                              ▌                   tarae's review · uncommitted · 0 of 1 viewed
+13                              ▌
+14                              ▌                   1 file not viewed
 15                              ▌
-16                              ▌                   1 file not viewed
+16                              ▌                     src/demo.rs
 17                              ▌
-18                              ▌                     src/demo.rs
-19                              ▌
-20                              ▌                   1 high-risk change not looked at — it ends once each has had
-21                              ▌                   a look (h goes to them, ]h the next, space v h on each):
-22                              ▌                     src/demo.rs:6
+18                              ▌                   1 high-risk change not looked at — it ends once each has had
+19                              ▌                   a look (h goes to them, ]h the next, space v h on each):
+20                              ▌                     src/demo.rs:6
+21                              ▌
+22                              ▌                   No board has read them: space v C has one read them first.
 23                              ▌
 24                              ▌                   Drafts stay. Opened again, its marks are kept: a file
 25   ]g hunk  ]F file           ▌                   changed since asks only for its lines since.
@@ -38,12 +38,12 @@
 04 ppppppppppppppppppppppppppppp
 05 ppppppppppppppppppppppppppppp
 06 ppppppppppppppppppppppppppppp
-07 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp     111111111111111111111111111111111111111111111111111111111111111111111111111111
-08 ppppppppppppppppppppppppppppp
+07 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111111111111111
+08 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp
 09 ppppppppppppppppppppppppppppp
 10 ppppppppppppppppppppppppppppp
-11 ppppppppppppppppppppppppppppp
-12 ppppppppppppppppppppppppppppp
+11 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+12 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 15 ppppppppppppppppppppppppppppp                 ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -67,24 +67,24 @@
 02   d dddd  gg                    A
 03   f ff f ffffff d d dddddddd    f
 04   e e eeee ee eeee ee           f
-05                                 f
-06     dddf                        f
-07 a f f ttttttt          ee gg    fg                                 e
-08
+05   DDDDD D D  f fffff            f
+06                                 f
+07     dddf                        fg                                 e
+08 a f f ttttttt          ee gg
 09
 10
-11
-12
-13                                                a BBB BBBBBBB BBBBBBB
-14                                                  ddddddd dddddd d ddddddddddd d d dd d dddddd
+11                                                a BBB BBBBBBB BBBBBBB
+12                                                  ddddddd dddddd d ddddddddddd d d dd d dddddd
+13
+14                                                  d dddd ddd dddddd
 15
-16                                                  d dddd ddd dddddd
+16                                                    ddddddddddd
 17
-18                                                    ddddddddddd
-19
-20                                                  w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www www
-21                                                  w wwww ww wwww ww wwwww ww www wwwww wwwww w w ww wwwwww
-22                                                    wwwwwwwwwwwww
+18                                                  w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www www
+19                                                  w wwww ww wwww ww wwwww ww www wwwww wwwww w w ww wwwwww
+20                                                    wwwwwwwwwwwww
+21
+22                                                  dd ddddd ddd dddd ddddd ddddd d d ddd ddd dddd dddd dddddd
 23
 24                                                  dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd
 25   DD ffff  DD ffff                               ddddddd ddddd dddd dddd ddd ddd ddddd dddddd

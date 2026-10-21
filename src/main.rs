@@ -10,6 +10,7 @@ mod basetree;
 mod beneath;
 mod billing;
 mod blocked;
+mod board;
 mod builds;
 mod calls;
 mod caps;

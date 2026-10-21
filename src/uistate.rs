@@ -21,7 +21,9 @@ use crate::sizes::Slot;
 /// 3: `sessions[].sandbox.tier` is `own`, `host` or `offline` (the tiers folded, 2026-10-17).
 /// 4: `sessions[].sandbox.network.way` is `proxy` or `no-socket` — `tproxy` went with the transparent proxy
 /// (2026-10-17).
-pub const V: u64 = 4;
+/// 5: a reviewer's and the review panel's `reviewer` `state` is `waiting` while its turn in the line comes —
+/// `reading` before.
+pub const V: u64 = 5;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -820,7 +822,7 @@ pub struct SessionState {
 /// what it found so far.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReviewerState {
-    /// `reading` · `done` · `stopped`.
+    /// `waiting` (its turn in the line: none of it reads yet) · `reading` · `done` · `stopped`.
     pub state: &'static str,
     /// How long it read — so far, while it reads.
     pub ms: u64,
@@ -842,6 +844,8 @@ pub struct ReviewerState {
     pub of: String,
     /// It ended while its session was behind, and that session hasn't been in front since (its inbox item).
     pub news: bool,
+    /// The board's members and claims (`reviewer::board_state`) — None: the one pass.
+    pub board: Option<Value>,
 }
 
 impl ReviewerState {
@@ -852,14 +856,15 @@ impl ReviewerState {
         let t = crate::reviewer::review_tally_in(ed, l).unwrap_or_default();
         let open = l.code_review.as_ref().is_some_and(|c| c.started == r.of);
         let (state, why) = match &r.state {
-            State::Reading => ("reading", None),
+            State::Waiting | State::Reading if crate::reviewer::waits(ed, l) => ("waiting", None),
+            State::Waiting | State::Reading => ("reading", None),
             State::Done => ("done", None),
             State::Failed(why) => ("stopped", Some(why.clone())),
             State::Stopped => ("stopped", None),
         };
         Some(ReviewerState {
             state,
-            ms: ms(r.took.unwrap_or_else(|| r.started.elapsed())),
+            ms: ms(r.took.unwrap_or_else(|| crate::clock::since(r.started))),
             reads: r.reads,
             findings: t.findings,
             answered: t.answered,
@@ -870,6 +875,7 @@ impl ReviewerState {
             by_you: r.state == State::Stopped,
             of: r.label.clone(),
             news: r.unseen,
+            board: crate::reviewer::board_state(ed, l),
         })
     }
 
@@ -878,7 +884,7 @@ impl ReviewerState {
             "state": self.state, "ms": self.ms, "reads": self.reads, "findings": self.findings,
             "answered": self.answered, "unsent": self.unsent, "high": self.high, "verdict": self.verdict,
             "why": self.why,
-            "by_you": self.by_you, "of": self.of, "news": self.news,
+            "by_you": self.by_you, "of": self.of, "news": self.news, "board": self.board,
         })
     }
 
@@ -886,6 +892,7 @@ impl ReviewerState {
     pub fn text(&self) -> String {
         let took = crate::term::duration(self.ms as f32 / 1000.0);
         let how = match (self.state, &self.why) {
+            ("waiting", _) => "waits its turn".to_string(),
             ("reading", _) => format!("reading {took}"),
             ("stopped", _) if self.by_you => format!("stopped by you after {took}"),
             ("stopped", Some(why)) => format!("stopped after {took}: {why}"),
@@ -905,8 +912,34 @@ impl ReviewerState {
             true => String::new(),
             false => format!(" — {}", self.verdict),
         };
+        // (the board's angles each with its state and claims, and its skeptics)
+        let board = self.board.as_ref().map_or_else(String::new, |b| {
+            let angles: Vec<String> = b["angles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| {
+                    let n = a["claims"].as_u64().unwrap_or(0);
+                    format!(
+                        "{} {} {n}",
+                        a["angle"].as_str().unwrap_or_default(),
+                        a["state"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            let s = &b["skeptics"];
+            format!(
+                " · board: {} · skeptics {}/{} · {} confirmed · {} refuted · {} unchecked",
+                angles.join(", "),
+                s["over"],
+                s["asked"],
+                b["confirmed"],
+                b["refuted"],
+                b["unchecked"]
+            )
+        });
         format!(
-            "{how} · {} · {}{high}{unsent}{answered}{verdict}",
+            "{how} · {} · {}{high}{unsent}{answered}{board}{verdict}",
             crate::nav::count(self.reads, "read"),
             crate::nav::count(self.findings, "finding")
         )
@@ -1138,7 +1171,7 @@ impl Editor {
             branch: l.branch.clone().or_else(|| l.git_branch.clone()),
             root: l.root.display().to_string(),
             doing: self.doing_said(l),
-            reviewer: l.reviewing().then_some("reviewing"),
+            reviewer: crate::reviewer::session_said(self, l),
             reviewer_run: ReviewerState::of(self, l),
             cards: if is_front { self.offers.len() + l.parked.len() } else { l.parked.len() },
             rebasing: l.rebase.as_ref().map(|r| r.said()),

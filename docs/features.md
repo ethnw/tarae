@@ -386,7 +386,8 @@ your `PATH`.
   `target/sb`) moved to the main checkout's `target/sb/sessions/<name>/` when it ends
 - **Review like a pull request** — Claude's edits hunk by hunk, or all at the turn's end
   ([review at the end](claude-integration.md#review-at-the-end)); any change reviewed over the real buffers, and a
-  second Claude reviewing as notes on the lines, `space v c` ([code review](claude-integration.md#code-review))
+  second Claude reviewing as notes on the lines, `space v c`, or a board of them, one per angle with a skeptic
+  checking each finding, `space v C` ([code review](claude-integration.md#code-review))
 - **Claude's commands in a sandbox** — Seatbelt on macOS; Landlock, seccomp and a session's own namespaces on
   Linux; the network only through tarae's proxy, a card for anything past it
   ([the sandbox](claude-integration.md#the-sandbox), [threat model](threat-model.md))

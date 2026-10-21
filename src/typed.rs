@@ -361,6 +361,11 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             crate::codereview::ask_claude(editor, branch);
             Ok(())
         }
+        "review-board" => {
+            let branch = rest.split_whitespace().next().map(str::to_string);
+            crate::codereview::ask_board(editor, branch);
+            Ok(())
+        }
         "review-send" => {
             crate::codereview::send(editor);
             Ok(())

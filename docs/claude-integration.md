@@ -1560,7 +1560,8 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   viewed and goes on to the next, Esc back to the code. A click on a file opens it, a click on its `◦` marks it
   viewed too (a second click leaves it marked), and a click on `↑ N more` / `↓ N more` or the wheel scrolls the list
 - `space n` on a line writes a **draft** comment (the same key as everywhere else; during a review it drafts instead of
-  sending). Drafts show as `¶ draft · …` and in the rail, and `]n` walks them
+  sending). Drafts show as `¶ draft · …` and in the rail (a file's row ends with how many: `¶2` yours, in the
+  accent, `¶1` the reviewer's, in its colour), and `]n` walks them
 - `space v s` sends every draft to Claude in one message, each with its lines as a diff. Claude answers every comment
   on its note and makes the changes, which come to you as the usual [edit review](#edits)
 - `space v m` marks a file viewed, again unmarks it. The mark is kept line by line: ended and opened again, the
@@ -1605,10 +1606,16 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   in place, and its `y` waits until the new list has been in sight. While it's up each says `stale ·` at its
   line end and on its card, and the review rail's file row says `stale` (all its drafts) or `1 stale`.
 - The rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1 answered`) and the
-  first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`.
+  first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`. While
+  it waits its turn (see the board's **Running**) it says its place: `reviewer  waits · 2nd in line` (the
+  place on the row under where the rail is narrow). `tarae state`, Claude's `ui` and the bring card say it
+  waits too, and its time runs from its start, not from its wait.
   `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
 - While it reads, its session says so wherever a working chat would, beside what the chat does: its tab
   (`main ● ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
+  While it waits its turn they say that instead (`¶ waits`, `¶ waits to review`, `"waits to review"`). It
+  waits only while the line holds it — one ahead of it, or no room to read; the moment before its next member
+  starts (a board's skeptics after its angles) it reads on.
   How its last run went stays in `tarae state` after it ends, the review open or not: `reviewer_run` (reading,
   done or stopped, how long, its reads, findings, those answered, those not sent yet and those on a high-risk
   change, and its verdict's first line). The author's Claude sees the counts only, told that a finding
@@ -1618,6 +1625,85 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   closed) and an item in the inbox (`space I`, `C-q`). It's news, not a question, so `▲ waiting` doesn't count it. The item says how many findings and that `space v r` reads them, or why it stopped. When you come to
   the session, the toast says it again, and the item and the `•` go.
 - What it costs is the session's, said as the reviewer's in `:usage`.
+
+### A board of Claudes reviews your changes
+
+`space v C` (or `:review-board [branch]`) has **the board** read the changes instead of the one reviewer: one
+Claude per **angle**, each reading the same diff for its own kind of fault, then one **skeptic** per group of
+their findings, told to refute them. Only what a skeptic could trace is pinned as confirmed. It takes longer
+and costs more than `space v c`: use it where a miss costs most. A review with high-risk changes no board has
+read points at it, on the rail (`space v C  a board reads the ▲`) and on the card that ends the review —
+also after a board one of whose angles failed or was stopped before it read to its end: each angle reads for its
+own kind of fault.
+
+- **The angles.** These are built in, and each runs only when the changes call for it:
+  - **correctness**: always.
+  - **tests**: when anything isn't quiet.
+  - **security**: when there's a high-risk change.
+  - **design**: when a file the project names in `review.screen` changed. This repository names `term.rs`,
+    `chrome.rs`, the themes and the rest of what draws the screen.
+- **Your own angles.** `review.angles` replaces the built-in ones with your own `[[review.angles]]` tables:
+  `name`, `ask`, `when` (`always`, `behaviour`, `high`, `screen`), `paths`, `languages`, `findings-max`. Only
+  your own config sets it, because a project's angle could talk its own reviewer into anything.
+- **Each angle is a process of its own**, kept apart as the reviewer is: no settings, read-only tools, never
+  the author's conversation. Every member is first sent the same diff, as a block of its own marked for the
+  prompt cache (its own ask in the block after it), and every member lists the same tools, so the members
+  after the first read the diff from the cache. The others start once the first one's first request is
+  answered. On a ~4k-token diff, the members after the first wrote 0.7–1.1k tokens each to the cache
+  instead of ~10k (a skeptic, 15.7k). The cache lives an hour, laid into the `--settings` object `llm.args`
+  gives; one given as a file is refused (`space v C` says so and no board starts), never dropped.
+- **Same as.** A skeptic's `same_as` names a claim of its group it confirmed already. One still open is
+  refused (it's told to judge that one first), and so is one it refuted: a note is always a confirmed
+  claim's, with its trace. A group's notes are pinned when its skeptic ends, whatever the others are still
+  judging.
+- **Claims.** An angle's notes aren't pinned yet: they're claims, at most `findings-max` (5) checked per angle.
+  Claims on one file within two lines of each other go to one skeptic. A skeptic gets them as data in a block
+  of their own, reads the code, and answers each with `judge`:
+  - confirmed, with its trace (the steps as `file:line`);
+  - refuted, with why;
+  - or the same failure as another claim.
+  A claim it never answered is refuted by default.
+- **What you get.** Each confirmed finding is a note marked with the angles that found it. Two angles' claims
+  that the skeptic called the same failure are one note naming both. The card head reads
+  `¶ correctness · security · confirmed · not sent yet`, with the skeptic's trace under it. `space v s` sends
+  the trace along. Refuted claims aren't notes: `space v r`'s report lists them, each with why.
+- **Unchecked findings.** These are pinned marked `unchecked` (never dropped, never confirmed):
+  - claims past an angle's `findings-max` — five more at most; past those an angle's claims aren't kept, never
+    pinned, and `space v r`'s report counts them under the angle;
+  - claims past `review.skeptics-max` skeptics a board (12), which is also said;
+  - claims whose skeptic stopped;
+  - claims not yet judged when you stop the board.
+
+  `space v s` sends why one is unchecked as tarae's words (`tarae:`), never as a skeptic's trace.
+- **Running.** At most `review.board-at-once` (3) of the board's Claudes read at once, every session's
+  together. Under memory pressure it's one at a time; while the pressure is critical, none (looked at again
+  every 5 s). The one pass waits in the same line, and a session that ends gives its place to the next. A board that waits says its place (`board  waits · 2nd in line`, the place on the row under where the
+  rail is narrow).
+  - On the rail: the time and what it cost so far (`board  reading… 1m 20s · $0.08 so far`, the cost said
+    shorter, then left out, before the time), one row per angle (`◦ waiting`, `reading… 41 reads` — on a
+    narrow rail `41 reads…` —, `2 found`), then the skeptics (`after the angles`, then
+    `2 of 4 · 1 confirmed · 1 refuted`). Too narrow for a row each, the angles share rows of marks
+    (`correctness 2 · security • · tests ◦`: found, reading, waiting, `×` stopped): as few rows as can hold
+    them, their names cut as little as those rows allow. A mark is never cut. When it ends, one row: `board  3 confirmed ▲2 · 2 refuted · 1 unchecked`.
+    Done short of an angle that failed or that you stopped, the row and the end toast (a warning) name it
+    (`· security stopped`). It's done all the same while it found something; with every angle failed and
+    nothing found, it stopped.
+  - `tarae state` has the same under `reviewer_run.board`: each angle's state, time, reads, claims, what came
+    of them, cost and tokens, and its first request's (`first`: what it wrote to the prompt cache and read
+    from it) — the skeptics' too.
+  - `:procs` lists each of its claudes (`the board · security · uncommitted`). `s` there stops one: an
+    angle's claims so far still go to the skeptics, and a skeptic's claims go to you unchecked.
+  - `:reviewer-stop` stops the whole board.
+  - Closing the review (or another taking its place) ends its members still waiting their turn: never
+    started, nothing paid. Those reading go on. A skeptic their claims bring in later never starts either, so
+    those claims come to you unchecked.
+- **Cost.**
+  - Before it starts: the median of the last five boards that ended whole (every member read to its end —
+    not one stopped, failed or ended with its session), from the call-order record
+    (`≈ API $1.80 (the last 5 boards)`), or `cost not known yet` for the first one.
+  - After: the total, in the end toast and the report.
+  - Each process is a turn of its own in `:usage` (`board:security`, `board:skeptic`), paid as the reviewer
+    is (`llm.reviewer-billing`).
 
 ### Risk grades
 
@@ -1726,6 +1812,7 @@ of repeating itself, and the log says where.
 | `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |
 | `space v s` / `:review-send` | Send the drafts to Claude |
 | `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes: findings on the lines, a verdict |
+| `space v C` / `:review-board` | The board: a Claude per angle, then a skeptic per group of their findings — only what it traced is confirmed |
 | `space v r` / `:review-verdict` | The reviewer's report: its verdict and findings |
 | `space v h` / `:review-hunk-seen` | The high-risk changes here (or under the selection): looked at, then on to the next — none here: to the next |
 | `space v H` / `:review-file-seen` | Every high-risk change of the file whose lines were all on screen since they last changed: looked at |

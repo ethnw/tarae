@@ -224,7 +224,12 @@ impl Editor {
                     .collect(),
                 reviewer: self.session.reviewer.as_ref().filter(|v| v.of == r.started).map(|v| {
                     let state = match v.state {
-                        crate::reviewer::State::Reading => "reading",
+                        crate::reviewer::State::Waiting | crate::reviewer::State::Reading
+                            if crate::reviewer::waits(self, &self.session) =>
+                        {
+                            "waiting"
+                        }
+                        crate::reviewer::State::Waiting | crate::reviewer::State::Reading => "reading",
                         crate::reviewer::State::Done => "done",
                         crate::reviewer::State::Failed(_) | crate::reviewer::State::Stopped => "stopped",
                     };

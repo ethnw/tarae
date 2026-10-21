@@ -22,6 +22,8 @@ pub enum Kind {
     /// `"registries"`, `"*"` (`"any"`), or a list of host rules (`github.com`, `*.crates.io`, `host:8443` —
     /// `egress::Pattern`).
     Hosts,
+    /// The board's angles: a list of tables (`[[review.angles]]` — `board::angles_of`).
+    Angles,
 }
 
 impl Kind {
@@ -43,6 +45,9 @@ impl Kind {
                     return Err(format!("\"{s}\": {why}"));
                 }
             }
+        }
+        if let Kind::Angles = self {
+            return crate::board::angles_of(v).map(|_| ());
         }
         let ok = match (self, v) {
             (Kind::Hosts, Value::String(s)) => ["registries", "*", "any"].contains(&s.as_str()),
@@ -72,6 +77,7 @@ impl Kind {
                 "\"registries\" | \"*\" | list of hosts (\"github.com\", \"*.crates.io\", \"host:8443\")"
                     .into()
             }
+            Kind::Angles => "list of tables { name, ask, when, paths, languages, findings-max }".into(),
         }
     }
 }
@@ -685,6 +691,37 @@ pub static SETTINGS: &[Setting] = &[
                 v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
         },
     },
+    Setting {
+        path: "review.screen",
+        kind: Kind::StrList,
+        doc: "Code review: the files that draw the screen — a change in one brings the board's design angle (space v C). Names and paths as review.risky",
+        get: |c| Value::Array(c.review_screen.iter().map(|a| Value::from(a.as_str())).collect()),
+        set: |c, v| {
+            c.review_screen =
+                v.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
+        },
+    },
+    Setting {
+        path: "review.angles",
+        kind: Kind::Angles,
+        doc: "The board's angles (space v C): [[review.angles]] tables of name, ask, when (always, behaviour, high, screen), paths, languages, findings-max — replacing the built-in correctness, security, tests, design. Only your own config sets it",
+        get: |c| crate::board::angles_value(c.review_angles.as_deref().unwrap_or(&crate::board::built_in())),
+        set: |c, v| c.review_angles = crate::board::angles_of(v).ok(),
+    },
+    Setting {
+        path: "review.board-at-once",
+        kind: Kind::Int { min: 1, max: 8 },
+        doc: "The board's Claudes reading at once, every session's together (one under memory pressure, none while it's critical). Only your own config sets it",
+        get: |c| Value::Integer(c.review_board_at_once as i64),
+        set: |c, v| c.review_board_at_once = n(v),
+    },
+    Setting {
+        path: "review.skeptics-max",
+        kind: Kind::Int { min: 0, max: 50 },
+        doc: "The board's skeptics at most — the claims of groups past it go to you unchecked. Only your own config sets it",
+        get: |c| Value::Integer(c.review_skeptics_max as i64),
+        set: |c, v| c.review_skeptics_max = n(v),
+    },
 ];
 
 /// Settings that had another name: (old path, new path). A config file's old name still applies, and a
@@ -889,8 +926,13 @@ mod tests {
                 Kind::StrList => "list of strings".into(),
                 Kind::Ports { max } => format!("list of ports (at most {max})"),
                 Kind::Hosts => md_code("\"registries\"") + " · " + &md_code("\"*\"") + " or a list of hosts",
+                Kind::Angles => "list of tables".into(),
             };
-            let default = md_code(&(s.get)(&real).to_string());
+            let default = match s.kind {
+                // (the built-in angles' asks are paragraphs: named here, whole in `:config-show`)
+                Kind::Angles => "correctness, security, tests, design".to_string(),
+                _ => md_code(&(s.get)(&real).to_string()),
+            };
             out.push_str(&format!("| {} | {kind} | {default} | {} |\n", md_code(s.path), md_cell(s.doc)));
         }
         out.push_str(

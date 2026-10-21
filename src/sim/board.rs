@@ -1,0 +1,292 @@
+//! The board (`space v C`) and the one reviewer, simulated (detsim P1): a review of one change, its reviewer
+//! asked at random for a board or the one pass as the keys ask (`codereview::ask_board`/`ask_claude`: the review
+//! opened first, refused while one reads), its members stand-ins (`Editor.reviewer_stand_in`: no process —
+//! a process's reader threads aren't the simulation's; what a member says is the scenario's step) — an angle's
+//! claim, a skeptic's verdict, a member's end or failure — among the line's jobs and timers: the memory read
+//! before each start, the retry while it's critical, the other angles' stagger, the skeptics the angles' end
+//! brings in; `:reviewer-stop`, the review closed, a spell of memory pressure, time passing, a frame drawn. After every
+//! step: no more members read than may at once, none started past what the memory allowed, a later angle only
+//! after the stagger or the first one's end, a reviewer over has
+//! none waiting or reading, and every claim pinned stands (confirmed or unchecked), one failure one note — a skeptic judging any claim
+//! of its group, at times as the same failure as another.
+
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use super::sessions::git;
+use super::{Choices, Sim};
+use crate::board::Verdict;
+use crate::editor::Editor;
+use crate::llm::StreamEv;
+use crate::reviewer::{Role, State};
+
+/// The seeds every `cargo test` runs, each twice — the first of `TARAE_SIM_SEEDS=60` to catch each break of
+/// `target/sb/reviewpanel-r8-seeds.sh` (2026-10-18, macOS, ~1 s a run): 0 a refuted claim pinned and no
+/// stagger, 8 the line ignoring the memory, 10 a stop that leaves members waiting, 34 a same failure pinned
+/// apart (its skeptic's `same_as` landing on a claim it confirmed).
+const SEEDS: &[u64] = &[0, 8, 10, 34];
+
+/// The scenario's own steps a run (the jobs' and results' come between them).
+const INPUTS: usize = 40;
+
+/// A run's real time at most.
+const LIMIT: Duration = Duration::from_secs(60);
+
+/// The board's members reading at once at most (`review.board-at-once`): fewer than its angles, so the line
+/// holds some.
+const AT_ONCE: usize = 2;
+
+/// The other angles' wait for the first one's prompt, as shipped (`reviewer::STAGGER` is none in tests).
+const STAGGER: Duration = Duration::from_secs(3);
+
+/// The memory as the line reads it (`Editor.reviewer_room` is a plain function): under pressure until a time
+/// on the simulated clock — a spell, never for good: while it's critical the line retries for as long, and a
+/// run must go quiet after its last input.
+static PRESSURE: Mutex<Option<(crate::share::Pressure, Instant)>> = Mutex::new(None);
+
+fn room() -> crate::share::Room {
+    let now = crate::clock::now();
+    let spell = *PRESSURE.lock().unwrap_or_else(|e| e.into_inner());
+    let pressure = spell.filter(|s| now < s.1).map_or(crate::share::Pressure::Normal, |s| s.0);
+    crate::share::Room { pressure, headroom: None }
+}
+
+#[test]
+fn the_board_and_its_line() {
+    super::seeds("the_board_and_its_line", SEEDS, run);
+}
+
+/// One run of the scenario; its trace.
+fn run(choices: Choices) -> Vec<String> {
+    let dir = crate::scratch::Scratch::new("sim-board");
+    let repo = dir.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+        &["config", "commit.gpgsign", "false"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "base"],
+    ] {
+        git(&repo, args);
+    }
+    std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    *PRESSURE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let mut sim = Sim::new("the_board_and_its_line", choices, LIMIT);
+    let mut ed = Editor::new(crate::config::Config::default());
+    (ed.session.root, ed.session.name) = (repo.clone(), "proj".into());
+    (ed.reviewer_stand_in, ed.reviewer_room) = (true, room);
+    ed.config.review_board_at_once = AT_ONCE;
+    // (as shipped, not the tests' none: the other angles wait for the first one's prompt — a timer stepped)
+    ed.reviewer_stagger = STAGGER;
+    let (shown, started) = (dir.display().to_string(), std::cell::RefCell::new(BTreeSet::new()));
+    let check = |ed: &Editor| held(ed, &mut started.borrow_mut());
+    sim.walk(&mut ed, INPUTS, input, check, |ed| print(ed, &shown));
+    let trace = sim.trace().to_vec();
+    drop(sim);
+    drop(ed);
+    trace
+}
+
+/// One of the scenario's steps, said.
+fn input(sim: &mut Sim, ed: &mut Editor) -> String {
+    let n = sim.steps;
+    let c = &mut sim.choices;
+    // (by arm: a board 1, the one pass 1, a member says something 12, one ends 6, one fails 1, a stop 1, the
+    // review closed 1, the memory 1, time passing 2, a frame 1 — members speak most, so claims reach skeptics;
+    // with none reading, a second passes instead: the stagger and the line move on)
+    let none = |sim: &mut Sim| {
+        sim.wait(Duration::from_secs(1));
+        "(none reads) 1000 ms pass".to_string()
+    };
+    match c.weighted(&[1, 1, 12, 6, 1, 1, 1, 1, 2, 1]) {
+        // (as the keys do: the review opened first if it isn't, refused while its reviewer reads)
+        0 => {
+            crate::codereview::ask_board(ed, None);
+            "space v C".into()
+        }
+        1 => {
+            crate::codereview::ask_claude(ed, None);
+            "space v c".into()
+        }
+        2 => {
+            let Some((i, generation, role)) = reading(ed, c) else { return none(sim) };
+            let id = format!("r{n}");
+            let (tool, args) = match role {
+                // (any claim of its group, at times the same failure as another — refused unless that one was
+                // confirmed first, as `judge` says)
+                Role::Skeptic(g) => {
+                    let b = ed.session.reviewer.as_ref().and_then(|r| r.board.as_deref());
+                    let group = b.and_then(|b| b.groups.get(g)).cloned().unwrap_or_default();
+                    let k = group.len().max(1);
+                    let claim = 1 + c.below(k);
+                    let verdict = *c.pick(&["confirmed", "confirmed", "refuted"]);
+                    let mut args = json!({"claim": claim, "verdict": verdict, "trace": "a.txt:2 reads it"});
+                    // (the same failure as one it confirmed already, mostly — at times any claim, refused then)
+                    let confirmed: Vec<usize> = (0..group.len())
+                        .filter(|&n| {
+                            b.is_some_and(|b| b.claims[group[n]].verdict == Some(Verdict::Confirmed))
+                        })
+                        .collect();
+                    match c.below(4) {
+                        0 | 1 if !confirmed.is_empty() => args["same_as"] = json!(1 + *c.pick(&confirmed)),
+                        2 if k > 1 => args["same_as"] = json!(1 + c.below(k)),
+                        _ => {}
+                    }
+                    ("judge", args)
+                }
+                _ => {
+                    let line = 1 + c.below(3) as u64;
+                    ("note", json!({"path": "a.txt", "line": line, "text": format!("Line {line} is wrong")}))
+                }
+            };
+            let message = json!({"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                "params": {"name": tool, "arguments": args}});
+            let request = json!({"subtype": "mcp_message", "server_name": "tarae", "message": message});
+            crate::reviewer::on_event(ed, generation, StreamEv::Control { request_id: id, request });
+            format!("{} {tool}s", member(ed, i))
+        }
+        k @ (3 | 4) => {
+            let Some((i, generation, _)) = reading(ed, c) else { return none(sim) };
+            let who = member(ed, i);
+            let end = if k == 3 { Ok("Done.".to_string()) } else { Err("claude: it ended".to_string()) };
+            crate::reviewer::on_event(ed, generation, StreamEv::Done(end));
+            format!("{who} {}", if k == 3 { "ends" } else { "fails" })
+        }
+        5 => {
+            crate::reviewer::stop(ed);
+            ":reviewer-stop".into()
+        }
+        6 => {
+            crate::codereview::close(ed);
+            "space v q".into()
+        }
+        7 => {
+            use crate::share::Pressure;
+            let (p, word) = *c.pick(&[(Pressure::Warn, "warn"), (Pressure::Critical, "critical")]);
+            // (a test's retry comes each 30 ms, four steps: a spell past ~10 s outlasts the quiet a run must reach)
+            let secs = *c.pick(&[1, 2, 5]);
+            let until = crate::clock::now() + Duration::from_secs(secs);
+            *PRESSURE.lock().unwrap_or_else(|e| e.into_inner()) = Some((p, until));
+            format!("memory {word} for {secs} s")
+        }
+        8 => {
+            let ms = *c.pick(&[100, 1000, 3000, 31000]);
+            sim.wait(Duration::from_millis(ms));
+            format!("{ms} ms pass")
+        }
+        9 => {
+            crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
+            "a frame".into()
+        }
+        _ => unreachable!("one arm a weight"),
+    }
+}
+
+/// A member reading, picked: its index, its events' generation, its role.
+fn reading(ed: &Editor, c: &mut Choices) -> Option<(usize, u64, Role)> {
+    let r = ed.session.reviewer.as_ref()?;
+    let at: Vec<usize> = (0..r.members.len()).filter(|&i| r.members[i].state == State::Reading).collect();
+    let i = *c.pick(at.as_slice().get(..).filter(|a| !a.is_empty())?);
+    Some((i, r.members[i].generation, r.members[i].role))
+}
+
+fn member(ed: &Editor, i: usize) -> String {
+    ed.session.reviewer.as_ref().map_or_else(String::new, |r| r.member_name(i))
+}
+
+/// What holds after every step: no more members read than may at once — and a member that started in it
+/// started within what the memory allowed, as the line last read it (`started`: the generations seen reading
+/// so far; warn: one at a time, critical: none); a reviewer over has none waiting or reading; every claim
+/// pinned stands.
+fn held(ed: &Editor, started: &mut BTreeSet<u64>) -> Result<(), String> {
+    use crate::share::Pressure;
+    let Some(r) = ed.session.reviewer.as_ref() else { return Ok(()) };
+    let reading = r.members.iter().filter(|m| m.state == State::Reading).count();
+    if reading > AT_ONCE {
+        return Err(format!("{reading} members read at once, past {AT_ONCE}"));
+    }
+    let new: Vec<u64> = r
+        .members
+        .iter()
+        .filter(|m| m.state == State::Reading && !started.contains(&m.generation))
+        .map(|m| m.generation)
+        .collect();
+    let allowed = match ed.reviewer_pressure {
+        Pressure::Critical => 0,
+        Pressure::Warn => 1,
+        Pressure::Normal | Pressure::Unknown => AT_ONCE,
+    };
+    if !new.is_empty() && reading > allowed {
+        return Err(format!(
+            "a member started with {reading} reading, the memory {:?}",
+            ed.reviewer_pressure
+        ));
+    }
+    started.extend(new);
+    // (a board's later angle starts once the first one's prompt is in the cache: the stagger gone by since the
+    // first started, or the first over — a stand-in's first request is never answered)
+    let first = r.members.first().filter(|m| m.role == Role::Angle(0));
+    let first_end = first.and_then(|f| f.started.zip(f.took)).map(|(s, t)| s + t);
+    for m in r.members.iter().filter(|m| matches!(m.role, Role::Angle(a) if a > 0)) {
+        let (Some(s), Some(f)) = (m.started, first.and_then(|f| f.started)) else { continue };
+        if s < f + STAGGER && first_end.is_none_or(|e| e > s) {
+            return Err(format!(
+                "an angle started {} ms after the first, its prompt not cached",
+                (s - f).as_millis()
+            ));
+        }
+    }
+    if !r.reading()
+        && let Some(m) = r.members.iter().find(|m| !m.over())
+    {
+        return Err(format!("the reviewer is {:?}, a member still {:?}", r.state, m.state));
+    }
+    let pinned = r.board.as_deref().map_or(&[][..], |b| &b.claims[..]).iter().filter(|c| c.note.is_some());
+    if let Some(c) =
+        pinned.clone().find(|c| !matches!(c.verdict, Some(Verdict::Confirmed | Verdict::Unchecked)))
+    {
+        return Err(format!("a claim pinned {:?}: {}", c.verdict, c.text));
+    }
+    // (a claim its skeptic called the same failure as another is that one's note, never one of its own: every
+    // note the board pinned is a claim's, and a claim's is the one it folds into)
+    if let Some(b) = r.board.as_deref() {
+        let notes: BTreeSet<u64> = b.claims.iter().filter_map(|c| c.note).collect();
+        if let Some(id) = r.findings.iter().find(|id| !notes.contains(id)) {
+            return Err(format!("note#{id} pinned for no claim — a same failure pinned apart"));
+        }
+        let apart = |i: usize| b.claims[b.root(i)].note.is_some_and(|n| b.claims[i].note != Some(n));
+        if let Some(i) = (0..b.claims.len()).find(|&i| b.claims[i].note.is_some() && apart(i)) {
+            return Err(format!("claim {i} pinned apart from the one it's the same failure as"));
+        }
+    }
+    Ok(())
+}
+
+/// What a trace line ends with: the reviewer's state, each member's, the claims, the last thing said.
+fn print(ed: &Editor, dir: &str) -> String {
+    let last = ed.messages.last().map(|m| m.2.replace(dir, "<dir>")).unwrap_or_default();
+    let Some(r) = ed.session.reviewer.as_ref() else { return format!("no reviewer · said {last:?}") };
+    let word = |s: &State| match s {
+        State::Waiting => "waits".to_string(),
+        State::Reading => "reads".to_string(),
+        State::Done => "done".to_string(),
+        State::Failed(why) => format!("failed ({why})"),
+        State::Stopped => "stopped".to_string(),
+    };
+    let members: Vec<String> =
+        (0..r.members.len()).map(|i| format!("{} {}", r.member_name(i), word(&r.members[i].state))).collect();
+    let claims = r.board.as_deref().map_or(0, |b| b.claims.len());
+    format!(
+        "{} {} [{}] · {claims} claims · {} findings · said {last:?}",
+        if r.board.is_some() { "board" } else { "reviewer" },
+        word(&r.state),
+        members.join(", "),
+        r.findings.len()
+    )
+}

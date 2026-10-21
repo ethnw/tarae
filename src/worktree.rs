@@ -1090,9 +1090,10 @@ pub struct Shown {
 
 impl Shown {
     /// `reviewer` for session `l`.
-    pub fn reviewer_of(l: &crate::session::Session) -> String {
+    pub fn reviewer_of(ed: &crate::editor::Editor, l: &crate::session::Session) -> String {
         use crate::reviewer::State;
         match l.reviewer.as_ref() {
+            Some(r) if r.reading() && crate::reviewer::waits(ed, l) => "¶ waits to review".into(),
             Some(r) if r.reading() => "¶ reviewing".into(),
             Some(r) if r.unseen && r.state == State::Done => "¶ reviewer done".into(),
             Some(r) if r.unseen => "¶ reviewer stopped".into(),
@@ -1746,6 +1747,8 @@ impl Editor {
             self.docs.iter().filter(|d| gone.contains(&d.id)).flat_map(|d| d.lsp.clients()).collect();
         let root = session.root.clone();
         drop(session);
+        // (its reviewer's members are over with it: their places in the line go to those waiting)
+        crate::reviewer::pump(self);
         for d in gone {
             self.close_doc(d);
         }
@@ -1882,7 +1885,7 @@ impl Editor {
                 rebasing: l.rebase.as_ref().map(crate::rebase::Rebase::said),
                 reloaded: l.reloaded,
                 compacted: l.compacted.unseen,
-                reviewer: Shown::reviewer_of(l),
+                reviewer: Shown::reviewer_of(self, l),
                 claude: Shown::claude_of(
                     &l.usage,
                     &crate::keepwarm::said(l, &self.config.llm, &self.limits, now_ms),

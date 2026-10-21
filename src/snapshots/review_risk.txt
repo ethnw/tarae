@@ -5,12 +5,12 @@
 02   1 file  +30                ▌  3 let line_1 = 1;                                                              ▐
 03   0 of 1 viewed · 1 unviewed ▌  2 let line_2 = 2;                                                              ▐
 04   ▲ 2 high to look at        ▌  1 let line_3 = 3;                                                              ▐
-05   reviewer  1 finding ▲1     ▌  4 let line_4 = 4;                                                              ▐
-06   “One risk: the unsafe cal… ▌  1 let line_5 = 5;                                                              ▐
-07                              ▌  2▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▐
-08     src/                     ▌  3▎let added_2 = 2;                                                             ▐
-09 ▎ │ ◦ demo.rs         ▲2 +30 ▌  4▎let added_3 = 3;                                                             ▐
-10                              ▌  5▎let added_4 = 4;                                                             ▐
+05   space v C  a board         ▌  4 let line_4 = 4;                                                              ▐
+06   reviewer  1 finding ▲1     ▌  1 let line_5 = 5;                                                              ▐
+07   “One risk: the unsafe cal… ▌  2▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▐
+08                              ▌  3▎let added_2 = 2;                                                             ▐
+09     src/                     ▌  4▎let added_3 = 3;                                                             ▐
+10 ▎ │ ◦ demo.rs         ▲2 +30 ▌  5▎let added_4 = 4;                                                             ▐
 11                              ▌  6▎let added_5 = 5;                                                             ▐
 12                              ▌  7▎let added_6 = 6;                                                             ▐
 13                              ▌  8▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comme… ▐
@@ -40,8 +40,8 @@
 06 ppppppppppppppppppppppppppppp
 07 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 08 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
-09 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp     11111111111111111111111111111111111111111111111111111111111111111111111111111
-10 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+09 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
+10 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 11 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 12 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
 13 ppppppppppppppppppppppppppppp     11111111111111111111111111111111111111111111111111111111111111111111111111111
@@ -67,12 +67,12 @@
 02   d dddd  ggg                   f                                                                              f
 03   f ff f ffffff d d dddddddd    f                                                                              f
 04   e e eeee ee eeee ee           f                                                                              f
-05   BBBBBBBB  d ddddddd ee        A                                                                              g
-06   dddd ddddd ddd dddddd dddd    f                                                                              g
-07                                 fg                   e                                                         g
-08     dddf                        fg                                                                             g
-09 a f f ttttttt         ee ggg    fg                                                                             g
-10                                 fg                                                                             g
+05   DDDDD D D  f fffff            A                                                                              g
+06   BBBBBBBB  d ddddddd ee        f                                                                              g
+07   dddd ddddd ddd dddddd dddd    fg                   e                                                         g
+08                                 fg                                                                             g
+09     dddf                        fg                                                                             g
+10 a f f ttttttt         ee ggg    fg                                                                             g
 11                                 fg                                                                             g
 12                                 fg                                                                             g
 13                                 fg                                                                             g

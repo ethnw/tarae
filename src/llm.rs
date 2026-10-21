@@ -664,6 +664,11 @@ pub fn login_hint(ed: &mut Editor, error: &str) -> Option<String> {
 
 /// One user message line (stream-json input).
 pub fn user_message(content: &str) -> String {
+    user_content(serde_json::json!(content))
+}
+
+/// One user message line whose content is a string or a list of content blocks.
+pub fn user_content(content: serde_json::Value) -> String {
     serde_json::json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
 }
 

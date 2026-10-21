@@ -11,6 +11,11 @@ risky = [
   ".tarae.toml",
 ]
 quiet = ["src/snapshots/", "docs/"]
+# What draws the screen: a change there brings the board's design angle (space v C)
+screen = [
+  "src/term.rs", "src/chrome.rs", "src/screen.rs", "src/codeview.rs", "src/markdown.rs", "src/diagram.rs",
+  "src/themes/",
+]
 
 # A session's plans, measurements and commit drafts (target/sb/, git-ignored) go to the main checkout's
 # target/sb/sessions/<name>/ when it ends — git worktree remove deletes ignored files too

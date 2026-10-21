@@ -57,8 +57,10 @@ pub struct Session {
     pub review: Option<crate::llm::Review>,
     /// The code review in progress (`codereview.rs`).
     pub code_review: Option<crate::codereview::CodeReview>,
-    /// The review being opened is for the reviewer (`space v c`) — asked once it's open.
+    /// The review being opened is for the reviewer (`space v c`) — asked once it's open; for the board
+    /// (`space v C`) when `review_board` too.
     pub review_ask: bool,
+    pub review_board: bool,
     /// The review being opened is for the high-risk changes a bring's card names (its `h`, #196): those not
     /// looked at, and the card's id — it opens on the first (`codereview::held_go`).
     pub review_high: Option<(u64, Vec<crate::codereview::Held>)>,
@@ -288,6 +290,7 @@ impl Session {
             review: None,
             code_review: None,
             review_ask: false,
+            review_board: false,
             review_high: None,
             held_view: None,
             reviewer: None,

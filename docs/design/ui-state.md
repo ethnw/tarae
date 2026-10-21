@@ -136,11 +136,11 @@ side git · 4 rows · in hand git:src/term.rs
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
-  `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads (`reviewer.rs`,
-  #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver
+  `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads, `"waits to review"`
+  while it waits its turn in the line (`reviewer.rs`, #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver
   waiting for `doing: idle` waits for the chat's turn, not a review), and `reviewer_run`, how its reviewer's
   last run went, from its start until the next one, whether or not its review is open:
-  - `state`: `reading` · `done` · `stopped`; `ms`: how long it read (so far, while it reads); `reads`.
+  - `state`: `waiting` (its turn in the line, none of it reading yet) · `reading` · `done` · `stopped`; `ms`: how long it read (so far, while it reads); `reads`.
   - `findings`: those still pinned; `answered`: those you or the author answered; `unsent`: those not sent to
     the author yet (`space v s`).
   - `high`: those on a high-risk change, `null` when its review isn't the one open.

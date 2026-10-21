@@ -133,7 +133,7 @@ impl Counts {
         Some(self.read? as f64 / all as f64)
     }
 
-    fn json(&self) -> Value {
+    pub fn json(&self) -> Value {
         json!({ "input": self.input, "write": self.write, "read": self.read, "output": self.output })
     }
 
@@ -929,8 +929,10 @@ pub fn report(
             let models: Vec<String> =
                 t.model.split(", ").filter(|m| !m.is_empty()).map(model_short).collect();
             let mut model = if models.is_empty() { "not reported".to_string() } else { models.join(", ") };
-            // (a one-turn process's: `space i`'s, a commit draft's, the reviewer's — `reviewer.rs`)
-            if matches!(t.conversation.as_str(), "ask" | "draft" | "reviewer" | "keep-warm") {
+            // (a one-turn process's: `space i`'s, a commit draft's, the reviewer's, a board's — `reviewer.rs` —, a
+            // keep-warm ping's)
+            let c = t.conversation.as_str();
+            if matches!(c, "ask" | "draft" | "reviewer" | "keep-warm") || c.starts_with("board:") {
                 model = format!("{} · {model}", t.conversation);
             }
             // (a `/compact` turn's 0 tokens and its summary's cost, said for what they are)

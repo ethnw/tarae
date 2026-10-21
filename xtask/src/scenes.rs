@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use crate::shot::{self, Setup};
 use crate::{Result, root};
 
-const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [scene …] | scenes --list | scenes --compare A B";
+const USAGE: &str = "usage: cargo xtask scenes [--out DIR] [--size COLSxROWS] [scene …] | scenes --list | scenes --compare A B";
 
 /// One surface: the stand-in claude's script, the files tarae opens, the keys sent (as `cargo xtask shot`
 /// takes them: `@1` waits a second, `@?text` until `text` is on screen, `@20?text` at most 20 s).
@@ -183,6 +183,23 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "run the tests", "\r", "@?Its reason", "@1"],
     },
+    // (the board under way: an angle done, two reading, one waiting its turn — then, done, a confirmed finding's
+    // card: the angles that found it, its skeptic's trace)
+    Scene { name: "board", claude: "boardmid", files: MAIN, keys: &["@1", " ", "v", "C", "@?2 found", "@1"] },
+    // (the same on a narrow screen, the rail given the keys: the four angles folded into rows of marks —
+    // `--size 74x30` is where it folds)
+    Scene {
+        name: "boardnarrow",
+        claude: "boardmid",
+        files: MAIN,
+        keys: &["@1", " ", "v", "C", "@?the board reads", "@3", " ", "e", "@?skeptics", "@1"],
+    },
+    Scene {
+        name: "boardnote",
+        claude: "boarddone",
+        files: MAIN,
+        keys: &["@1", " ", "v", "C", "@30?the board is done", "@2"],
+    },
 ];
 
 /// `scenes --compare A B`: each shot in `A` against `B`'s of its name, pixel for pixel — `same`, or the box the
@@ -252,6 +269,7 @@ pub fn run(args: &[String]) -> Result<()> {
         return compare(Path::new(a), Path::new(b));
     }
     let (mut out, mut names) = (root().join("target/scenes"), Vec::new());
+    let mut sizes = SIZES.to_vec();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -260,6 +278,12 @@ pub fn run(args: &[String]) -> Result<()> {
                 return Ok(());
             }
             "--out" => out = PathBuf::from(it.next().ok_or(USAGE)?),
+            // (one size instead of the two: a width where something folds)
+            "--size" => {
+                let s = it.next().ok_or(USAGE)?;
+                let (c, r) = s.split_once('x').ok_or(USAGE)?;
+                sizes = vec![(c.parse().map_err(|_| USAGE)?, r.parse().map_err(|_| USAGE)?)];
+            }
             n if !n.starts_with('-') => names.push(n.to_string()),
             _ => return Err(USAGE.into()),
         }
@@ -271,7 +295,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut failed = Vec::new();
     for scene in scenes {
         for bg in BACKGROUNDS {
-            for size in SIZES {
+            for &size in &sizes {
                 let file = out.join(format!("{}-{bg}-{}.png", scene.name, size.0));
                 if let Err(e) = one(scene, bg, size, &bin, &me, &file) {
                     eprintln!("{}: {e}", file.display());
@@ -318,11 +342,17 @@ fn one(scene: &Scene, bg: &'static str, size: (u16, u16), bin: &Path, me: &Path,
     shot::take(&setup, &keys, size, &dir.0.join("state"), out)
 }
 
-/// The shot's config: language servers off, this xtask as claude running `script`.
+/// The shot's config: language servers off, this xtask as claude running `script` — and for the board's
+/// scripts, the review settings that bring their angles (`knot.rs` high-risk, `thread.rs` the screen's).
 fn config_toml(me: &Path, script: &str) -> String {
     let quoted = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let review = match script {
+        "boardmid" => "\n[review]\nrisky = [\"knot.rs\"]\nscreen = [\"thread.rs\"]\nboard-at-once = 2\n",
+        "boarddone" => "\n[review]\nrisky = [\"knot.rs\"]\n",
+        _ => "",
+    };
     format!(
-        "[editor]\nlsp = false\n\n[llm]\ncommand = {}\nargs = [\"scenes\", \"--claude\", {}]\n",
+        "[editor]\nlsp = false\n\n[llm]\ncommand = {}\nargs = [\"scenes\", \"--claude\", {}]\n{review}",
         quoted(&me.to_string_lossy()),
         quoted(script)
     )
@@ -449,7 +479,8 @@ fn demo_crate(dir: &Path) -> Result<()> {
 /// reads and edits (its calls wait for tarae's answers); `mid` stops in the middle of its code block and waits
 /// for tarae to go; `midlist` stops in a list after a quote, on a line in Japanese; `ask` answers `space i` and
 /// stops mid-line; `card` asks to run outside the sandbox; `warm` answers on a big conversation's 1h cache, and
-/// `warmfork` as a ping's fork of it; `idle` never answers.
+/// `warmfork` as a ping's fork of it; `boardmid` / `boarddone` are a board's members (each by what its message
+/// asks — `board`); `idle` never answers.
 fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Duration) -> io::Result<()> {
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
@@ -474,6 +505,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "card" => turn.ask_outside()?,
             "warm" => turn.warm(false)?,
             "warmfork" => turn.warm(true)?,
+            "boardmid" => turn.board(&line, false)?,
+            "boarddone" => turn.board(&line, true)?,
             _ => {}
         }
     }
@@ -604,6 +637,74 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
             json!({"type": "result", "result": "ok", "session_id": id, "total_cost_usd": cost, "usage": usage,
             "modelUsage": model}),
         )
+    }
+
+    /// Waits for tarae to go — a member still reading when the shot is taken.
+    fn reads_on(&mut self) -> io::Result<()> {
+        self.lines.by_ref().try_for_each(|l| l.map(drop))
+    }
+
+    /// A board's member, by what its message (`msg`) asks: an angle notes its claims on the demo's changes
+    /// (`done`: every angle ends; else security reads on, three reads made, and the others after correctness
+    /// read on too); a skeptic confirms `knot.rs`'s claims (the second the same failure) and, on `thread.rs`,
+    /// refutes the first and confirms the second.
+    fn board(&mut self, msg: &str, done: bool) -> io::Result<()> {
+        let note = |path: &str, line: u64, text: &str| json!({"path": path, "line": line, "text": text});
+        if msg.contains("(angle: correctness)") {
+            self.call(
+                1,
+                "note",
+                note("src/knot.rs", 1, "`untie` does nothing: a caller that unties a knot keeps it."),
+            )?;
+            let doc =
+                "The doc says the knot goes at the strand's end, but `at` is a gap: the length grows by it.";
+            self.call(2, "note", note("src/thread.rs", 13, doc))?;
+            return self
+                .line(json!({"type": "result", "result": "Two findings: untie, and the doc of tie."}));
+        }
+        if msg.contains("(angle: security)") {
+            if !done {
+                for (n, f) in ["src/knot.rs", "src/main.rs", "src/thread.rs"].iter().enumerate() {
+                    let read = json!({"type": "tool_use", "id": format!("r{n}"), "name": "Read", "input": {"file_path": f}});
+                    self.line(
+                        json!({"type": "assistant", "message": {"id": format!("m{n}"), "content": [read]}}),
+                    )?;
+                }
+                return self.reads_on();
+            }
+            let text = "`untie` is public and empty: any caller believes the knot is gone, and nothing says it isn't.";
+            self.call(1, "note", note("src/knot.rs", 1, text))?;
+            return self.line(json!({"type": "result", "result": "One finding."}));
+        }
+        if msg.contains("(angle: tests)") && done {
+            self.call(
+                1,
+                "note",
+                note("src/thread.rs", 14, "No test ties a knot: nothing holds the doc's claim."),
+            )?;
+            return self.line(json!({"type": "result", "result": "One finding."}));
+        }
+        // (a skeptic's claims come after the diff every member is sent: its group is read from there)
+        if let Some((_, claims)) = msg.split_once("(role: skeptic)") {
+            let judge = |claim: u64, verdict: &str, trace: &str| json!({"claim": claim, "verdict": verdict, "trace": trace});
+            if claims.contains("knot.rs") {
+                let trace = "knot.rs:1 — untie's body is empty; nothing in main.rs or thread.rs takes a knot out, so a call leaves it";
+                self.call(1, "judge", judge(1, "confirmed", trace))?;
+                let same =
+                    json!({"claim": 2, "verdict": "confirmed", "trace": "the same empty body", "same_as": 1});
+                self.call(2, "judge", same)?;
+            } else {
+                let held = "thread.rs:15 — push puts the knot last: the doc holds";
+                self.call(1, "judge", judge(1, "refuted", held))?;
+                self.call(
+                    2,
+                    "judge",
+                    judge(2, "confirmed", "thread.rs:14 — no #[test] in the crate calls tie"),
+                )?;
+            }
+            return self.line(json!({"type": "result", "result": "Judged."}));
+        }
+        self.reads_on()
     }
 
     fn ask_outside(&mut self) -> io::Result<()> {

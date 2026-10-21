@@ -590,6 +590,11 @@ fn pruned(mut v: Value) -> Value {
 /// The record's file for the month `at` falls in, local time: `2026-10.jsonl`.
 pub fn month_file(at: SystemTime) -> String {
     let (y, m, _) = crate::log::day(at);
+    month_name(y, m)
+}
+
+/// The record's file for month `m` of year `y`.
+pub fn month_name(y: i32, m: i32) -> String {
     format!("{y:04}-{m:02}.jsonl")
 }
 

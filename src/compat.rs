@@ -1076,6 +1076,16 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn with_root: calls_dir",
         "stays off: no call-order record written — a turn's tool names, never read by a run",
     ),
+    (
+        "src/editor.rs",
+        "in fn with_root: reviewer_room",
+        "stays normal: the board's reviewers read memory pressure only to wait their turn — no run waits on it",
+    ),
+    (
+        "src/editor.rs",
+        "in fn with_root: reviewer_stand_in",
+        "stays off: only a simulation's reviewer starts no process (`sim/board.rs`) — no run is a reviewer's",
+    ),
     ("src/editor.rs", "in fn with_root: caps_home", HOOK),
     ("src/editor.rs", "in fn with_root: chats_dir", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: claude_env", CLAUDES),

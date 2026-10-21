@@ -680,6 +680,19 @@ pub struct Editor {
     pub cards_dir: Option<PathBuf>,
     /// The call-order record's folder (`calls.rs`, `$state/calls`) — None in tests: nothing written.
     pub calls_dir: Option<PathBuf>,
+    /// The reviewers' line (`reviewer::pump`): its memory read under way · its retry pending while memory is
+    /// critical · how memory is read (`share::room`; in tests normal, unless a test says).
+    pub reviewer_pumping: bool,
+    pub reviewer_retry: bool,
+    /// How long a board's other angles wait for its first one's prompt to be cached (`reviewer::STAGGER`).
+    pub reviewer_stagger: std::time::Duration,
+    pub reviewer_room: crate::share::ReadRoom,
+    /// The memory as the line last read it — what `reviewer::place_in_line` counts the room by between reads.
+    pub reviewer_pressure: crate::share::Pressure,
+    /// Tests: a reviewer's members start no process — a simulation's stand-ins, their events the scenario's
+    /// (`sim/board.rs`: a process's reader threads aren't the simulation's).
+    #[cfg(test)]
+    pub reviewer_stand_in: bool,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
@@ -911,6 +924,17 @@ impl Editor {
             } else {
                 crate::config::state_dir().map(|d| d.join(crate::calls::DIR))
             },
+            reviewer_pumping: false,
+            reviewer_retry: false,
+            reviewer_stagger: crate::reviewer::STAGGER,
+            reviewer_room: if cfg!(test) {
+                || crate::share::Room { pressure: crate::share::Pressure::Normal, headroom: None }
+            } else {
+                crate::share::room
+            },
+            reviewer_pressure: crate::share::Pressure::Unknown,
+            #[cfg(test)]
+            reviewer_stand_in: false,
             features: crate::features::Counts::new(if cfg!(test) {
                 None
             } else {
@@ -2425,15 +2449,18 @@ impl Editor {
         } else {
             self.toast_wake()
         };
-        // The reviewer reading, its time on the review rail drawn last frame: a frame as each second turns
+        // The reviewer reading, its time on the review rail drawn last frame: a frame as each second turns (none
+        // while it waits in the line: no time runs)
         let reviewer = self
             .session
             .reviewer
             .as_ref()
-            .filter(|rv| rv.reading() && self.screen.rail_w > 0)
+            .filter(|rv| {
+                rv.reading() && !crate::reviewer::waits(self, &self.session) && self.screen.rail_w > 0
+            })
             .filter(|rv| self.session.code_review.as_ref().is_some_and(|r| r.started == rv.of))
             .map(|rv| {
-                let into = rv.started.elapsed().subsec_nanos();
+                let into = crate::clock::since(rv.started).subsec_nanos();
                 std::time::Duration::from_nanos(1_000_000_000 - u64::from(into))
                     + std::time::Duration::from_millis(2)
             })
