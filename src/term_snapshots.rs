@@ -3631,12 +3631,13 @@ fn a_base_parse_landing_after_the_trees_went_is_let_go() {
     s.until("the parse again", |ed| ed.doc().base_syntax.is_some());
 }
 
-/// A pane without the keys paints its primary cursor as it paints the others (it painted none).
+/// A pane without the keys paints no cursor — one cursor on screen, where the keys go (the user, 2026-10-20; it
+/// painted its primary as the others before): only the focused pane's.
 #[test]
-fn a_pane_without_the_keys_shows_its_primary_cursor() {
+fn a_pane_without_the_keys_paints_no_cursor() {
     let (s, bgs) = split_on_two_files("");
     let cursor = vt_color(s.ed.theme.get("ui.cursor").bg).unwrap();
-    assert_eq!((bgs[0].1, bgs[1].1 == cursor), (cursor, false), "the cursor on `a`: {bgs:?}");
+    assert!(bgs.iter().all(|b| b.1 != cursor), "no cursor in the pane without the keys: {bgs:?}");
 }
 
 /// Scrolled sideways: a folded block is flowed to the width — it stays folded (unshifted), `j` steps over it.
@@ -5711,6 +5712,7 @@ fn the_panels_follow_one_set_of_rules() {
     assert_eq!(keys(&mut s), (vec![false, true, false, false], "● normal".into()), "the code");
     s.keys(" l");
     assert_eq!(keys(&mut s), (vec![false, false, true, false], "● chat".into()), "the chat");
+    // (an empty conversation: nothing to view — `esc` is the code's)
     s.keys("<esc><C-w>e");
     assert_eq!(keys(&mut s), (vec![true, false, false, false], "● files".into()), "the side panel");
     s.keys("<esc><C-w>j");
@@ -5901,6 +5903,7 @@ fn the_chat_input_says_where_the_keys_are() {
     let (border, lit, caret, input) = look(&mut s);
     assert!(lit && !border.contains("draft"), "with the keys: {border}");
     assert_eq!(caret.map(|c| c.0 as usize), Some(input), "the caret in it");
+    // (an empty conversation: nothing to view — `esc` is the code's)
     s.keys("<esc>");
     let (border, lit, caret, input) = look(&mut s);
     assert!(!lit && border.trim_end().ends_with("draft ──"), "without them: {border}");

@@ -370,7 +370,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // Reading an answer moved the editor to what the chat now shows (its links are only known once drawn)
     let mut frame = Vec::with_capacity(1 << 16);
     render_frame(editor, &mut frame, w, h)?;
-    if crate::follow::reading(editor) {
+    // (the chat's view mode asked for before its rows were laid out: made from these, drawn with it)
+    if crate::follow::reading(editor) | crate::view::wanted(editor) {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
@@ -427,6 +428,9 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         panes: Vec::new(),
         pane_docs: Vec::new(),
         chat_x: (lay.chat_w > 0).then_some(lay.edit_w),
+        chat_laid: Default::default(),
+        chat_view: Default::default(),
+        cursors: Default::default(),
         picker_list: editor.picker.as_ref().map(|p| {
             let b = PickerBox::new(&lay, p);
             (b.list_y(), b.list_rows)
@@ -3102,7 +3106,7 @@ fn draw(
     }
     let chat_cursor = match &editor.session.chat {
         Some(c) if lay.chat_w > 0 => {
-            let _fade = Fade::unless(keys == Keys::Chat, ui);
+            let _fade = Fade::unless(keys.chat(), ui);
             draw_chat(c, editor, ui, lay, out)?
         }
         _ => None,
@@ -3155,7 +3159,11 @@ fn draw(
     if let Some(card) = offer {
         card.draw(editor, ui, out)?;
     }
-    if !editor.pending.is_empty() && editor.picker.is_none() {
+    // (a view mode's own sequence under way — `g`, `z`, `m` on the conversation — lists its keys too)
+    let viewing = crate::view::has_keys(editor).and(editor.session.view.as_ref());
+    if (!editor.pending.is_empty() || viewing.is_some_and(|v| !v.pending().is_empty()))
+        && editor.picker.is_none()
+    {
         draw_which_key(editor, ui, lay, out)?;
     }
     let picker_cursor = match &editor.picker {
@@ -3177,7 +3185,6 @@ fn draw(
         Some(p) => Some(draw_prompt(editor, p, editor.cmdline_completion().as_ref(), ui, lay, out)?),
         None => None,
     };
-    let prompt_cursor = prompt_cursor.or(picker_cursor).or(chat_cursor).or(terminal_cursor);
     // Pointing: a label on every element with an id, over everything
     if let Some(p) = &editor.pointing {
         draw_point_labels(p, ui, out)?;
@@ -3187,16 +3194,21 @@ fn draw(
     // (seated as the frame is read for the terminal — `Screen::present`)
     *editor.screen.edges.borrow_mut() = std::mem::take(&mut *ui.edges.borrow_mut());
 
-    let (pos, shape) = match prompt_cursor {
-        // A shell's cursor is a block
-        Some(p) if Some(p) == terminal_cursor => (Some(p), CursorShape::Block),
-        Some(p) => (Some(p), CursorShape::Bar),
+    // One cursor on screen, where the keys go (`Editor::cursor_in`) — a view mode's is painted on its rows
+    use crate::chrome::CursorIn;
+    let (pos, shape) = match editor.cursor_in() {
         // (the code's cursor under a card floating over it is hidden with the code it's on — frictions 57: the
         // follow card in replay showed it inside its title)
-        None => (
+        Some(CursorIn::Code) => (
             text_cursor.filter(|&c| !under_a_card(c, &[note_rect, follow_rect, offer_rect, ask_rect])),
             cursor_shape(editor),
         ),
+        Some(CursorIn::Input) => (chat_cursor, CursorShape::Bar),
+        // (a shell's cursor is a block)
+        Some(CursorIn::Program) => (terminal_cursor, CursorShape::Block),
+        Some(CursorIn::Prompt) => (prompt_cursor, CursorShape::Bar),
+        Some(CursorIn::Picker) => (picker_cursor, CursorShape::Bar),
+        Some(CursorIn::View) | None => (None, CursorShape::Bar),
     };
     // (a list whose letters are keys has nothing to type into: no cursor, there or under it — nor labels up)
     let pos = pos.filter(|_| editor.prompt.is_some() || !editor.picker.as_ref().is_some_and(|p| p.keys));
@@ -3923,7 +3935,8 @@ fn draw_text(
             }
             let span = c.pos..c.pos + c.len.max(1);
             let k = cursors.partition_point(|&p| p < span.start);
-            let hit = cursors.get(k).filter(|&&p| p < span.end).map(|_| k);
+            // (a cursor only where the keys are — `Shows.cursors`)
+            let hit = cursors.get(k).filter(|&&p| p < span.end && shows.cursors).map(|_| k);
             let k = ranges.partition_point(|r| r.to() <= c.pos);
             let selected = ranges.get(k).filter(|r| r.from() <= c.pos).map(|_| k);
             // Underline diagnostic ranges (the most severe)
@@ -3943,9 +3956,16 @@ fn draw_text(
             if let Some(i) = selected {
                 st = st.patch(if i == primary_idx { ui.selection_primary } else { ui.selection });
             }
+            let drawn_at = || editor.screen.cursors.borrow_mut().push((lay.x0 + lay.gutter + x, y as usize));
             match hit {
-                Some(i) if i == primary_idx && shows.primary => st = st.patch(ui.cursor_primary),
-                Some(i) if i != primary_idx || !shows.focused => st = st.patch(ui.cursor),
+                Some(i) if i == primary_idx && shows.primary => {
+                    st = st.patch(ui.cursor_primary);
+                    drawn_at();
+                }
+                Some(i) if i != primary_idx || !shows.focused => {
+                    st = st.patch(ui.cursor);
+                    drawn_at();
+                }
                 _ => {}
             }
             let eol = g == "\n" || g == "\r\n";
@@ -6385,6 +6405,12 @@ fn draw_statusline(
         Mode::Insert => "INSERT",
         Mode::Select => "SELECT",
     });
+    // (a view mode's own `v`: said after its surface)
+    let view = crate::view::chat_view_of(editor).filter(|_| matches!(keys, Keys::View(_)));
+    let mode = match view.map(|v| v.mode()) {
+        Some(Mode::Select) => format!("{mode} · SELECT"),
+        _ => mode.to_string(),
+    };
     let mut left = Vec::new();
     // `● normal`: a dot in the mode's colour (the accent, or the mode's own with `color-modes`), the word in ink
     // bold — a mark, not a block of colour (geultarae decision 1); its word where a prompt's `:` stands over it
@@ -6405,6 +6431,19 @@ fn draw_statusline(
             style: Style { fg: ui.linenr.fg, ..ui.status },
             keep: 240,
         });
+    }
+    // A view mode's way back to typing and out — each key as bound; the first to fold when narrow
+    if let Keys::View(s) = keys {
+        let bound = |name: &str, like: &str| crate::view::bound(editor, s, name, like);
+        let pairs = [(bound("view_input", "i"), "type"), (bound("view_leave", "esc"), "code")];
+        for (k, what) in pairs.iter().filter_map(|(k, d)| Some((k.as_ref()?, *d))) {
+            left.push(Seg { text: format!("  {k}"), style: Style { bold: true, ..dim }, keep: VIEW_HINTS });
+            left.push(Seg {
+                text: format!(" {what}"),
+                style: Style { fg: ui.linenr.fg, ..ui.status },
+                keep: VIEW_HINTS,
+            });
+        }
     }
     // A program typing into tarae (`shuttle.rs`): faint, its name, `paused` once your key paused it; a click ends
     // it (`:shuttle-end`). Its step in the accent a moment after each (`y → card#12`) goes last on the left, below
@@ -6583,10 +6622,12 @@ fn draw_statusline(
         left.push(Seg { text: format!("   {}", fit_ellipsis(step, 32)), style: accent, keep: SHUTTLE_LIT });
     }
 
-    let sel = doc.selection();
-    let pos = cursor_idx(editor.mode, sel.primary(), &doc.text);
-    let line = mv::line_of(&doc.text, pos);
-    let col = doc.text.byte_slice(mv::line_start(&doc.text, line)..pos).len_chars() + 1; // char col for users
+    // (in a view mode, where its cursor is on its document — the row and column, the selections)
+    let (at_doc, at_mode) = view.map_or((doc, editor.mode), |v| (v.doc(), v.mode()));
+    let sel = at_doc.selection();
+    let pos = cursor_idx(at_mode, sel.primary(), &at_doc.text);
+    let line = mv::line_of(&at_doc.text, pos);
+    let col = at_doc.text.byte_slice(mv::line_start(&at_doc.text, line)..pos).len_chars() + 1; // char col for users
     let gap = |keep| Seg { text: "   ".into(), style: ui.status, keep };
     let mut right = Vec::new();
     // `C-w z`: one thing fills the screen — how to get the rest back
@@ -6823,6 +6864,10 @@ const INBOX: u8 = 245;
 /// The status line's `◦ shuttle claude-code` (`shuttle.rs`): a program typing into tarae is said while anything
 /// but the mode, the position, the inbox and a list's keys is — it outlasts the session chip.
 const SHUTTLE: u8 = 238;
+
+/// The status line's view-mode hints (`i type  esc code`): the first to fold when narrow — below the branch and
+/// the hunks; the mode word (`● view · chat`) and a shuttle's name never (quote-plan §6).
+const VIEW_HINTS: u8 = 70;
 
 /// …and its step lit a moment after each: as long-lived on the line, apart from the chip (not its click).
 const SHUTTLE_LIT: u8 = 237;
@@ -8250,7 +8295,13 @@ fn which_key_columns(
 const WHICH_KEY_CUT_MIN: usize = 6;
 
 fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
-    let entries = editor.keymaps.children(editor.mode, &editor.pending);
+    let view = crate::view::has_keys(editor)
+        .zip(editor.session.view.as_ref())
+        .filter(|(_, v)| editor.pending.is_empty() && !v.pending().is_empty());
+    let (entries, keys) = match view {
+        Some((s, v)) => (editor.keymaps.view_children(s, v.mode(), v.pending()), v.pending()),
+        None => (editor.keymaps.children(editor.mode, &editor.pending), editor.pending.as_slice()),
+    };
     if entries.is_empty() {
         return Ok(());
     }
@@ -8258,7 +8309,7 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     let pad = card_padding(ui, card);
     let key_style = Style { fg: ui.accent.fg, bold: true, ..card };
     let dim = Style { fg: ui.virt.fg, ..card };
-    let pending: Vec<String> = editor.pending.iter().map(|k| k.to_string()).collect();
+    let pending: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
     // The group's name (`space g` → git); the first key's otherwise
     let title = match crate::keymap::group_name(&pending.join(" ")) {
         Some(name) => name.to_lowercase(),
@@ -10031,7 +10082,7 @@ fn draw_review_rail(
 ///                                     2.1s
 ///   ──────────────────────────── draft ──    ← the input's border
 ///   › input…
-///   enter send  esc editor  C-r apply
+///   enter send  esc view  C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
 /// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
@@ -10429,11 +10480,10 @@ fn draw_chat(
         lines
     };
     // The conversation as pieces: each message's kept rows, and the frame's own between and after them
-    enum Piece {
-        Kept(std::sync::Arc<[ChatRow]>),
-        Own(ChatRow),
-    }
-    let mut pieces: Vec<Piece> = Vec::new();
+    // (`view::Laid` — what its view mode is made of; a row of air shared)
+    let blank: std::sync::Arc<[ChatRow]> = std::sync::Arc::from(vec![ChatRow::default()]);
+    let own = |row: ChatRow| -> std::sync::Arc<[ChatRow]> { std::sync::Arc::from(vec![row]) };
+    let mut pieces: crate::view::Laid = Vec::new();
     let mut total = 0;
     for (i, m) in c.msgs.iter().enumerate() {
         // (air before a question, and before a run of tool rows — where it is, not what it is)
@@ -10443,7 +10493,7 @@ fn draw_chat(
             _ => false,
         };
         if air {
-            pieces.push(Piece::Own(ChatRow::default()));
+            pieces.push((None, blank.clone()));
             total += 1;
         }
         let key = LaidKey { version: m.version(), len: m.text.len(), width: w, look, state: state(i, m) };
@@ -10462,7 +10512,7 @@ fn draw_chat(
             rows
         });
         total += rows.len();
-        pieces.push(Piece::Kept(rows));
+        pieces.push((Some(i), rows));
         // (the live command or tests waiting on what isn't their own — another cargo's lock — said under it, not
         // left looking stuck: #10, `waits.rs`; or printing nothing for minutes — #157. The clock's: never kept)
         let Some(look) = m.look.as_ref().filter(|_| m.role == Role::Tool && exploring && i + 1 == n) else {
@@ -10505,7 +10555,7 @@ fn draw_chat(
                 row.push(sp("  ".into(), faint));
                 row.extend(hint);
             }
-            pieces.push(Piece::Own(plain(row)));
+            pieces.push((None, own(plain(row))));
             total += 1;
             // (the run it waits behind, a stopped turn's: what, how long, the key that stops it — the name cut,
             // the time and the key whole)
@@ -10517,7 +10567,7 @@ fn draw_chat(
                 let mut row = vec![sp(format!("  {}", fit_ellipsis(&label, room)), dim), sp(ran, faint)];
                 row.push(sp("  ".into(), faint));
                 row.extend(hint);
-                pieces.push(Piece::Own(plain(row)));
+                pieces.push((None, own(plain(row))));
                 total += 1;
             }
         }
@@ -10580,18 +10630,25 @@ fn draw_chat(
         lines = std::iter::repeat_n(Vec::new(), pad).chain(intro).collect();
     }
     total += lines.len();
-    pieces.extend(lines.into_iter().map(|l| Piece::Own(plain(l))));
-    let max_scroll = total.saturating_sub(area);
-    let scroll = c.scroll.min(max_scroll);
-    let (from, to) = (total.saturating_sub(area + scroll), total - scroll);
+    pieces.extend(lines.into_iter().map(|l| (None, own(plain(l)))));
+    // In its view mode the chat holds still: the rows it was made of, from the document's top — else the
+    // newest, `scroll` up from the bottom
+    let view = crate::view::chat_view_of(editor);
+    let (from, to, drawn) = match view {
+        Some(v) => {
+            let total = v.rows();
+            let from = v.doc().top.min(total.saturating_sub(1));
+            (from, (from + area).min(total), &v.laid)
+        }
+        None => {
+            let scroll = c.scroll.min(total.saturating_sub(area));
+            (total.saturating_sub(area + scroll), total - scroll, &pieces)
+        }
+    };
     // (only the rows on screen are looked at again — the rest stays where it's kept)
     let mut shown: Vec<&ChatRow> = Vec::with_capacity(to - from);
     let mut at = 0;
-    for p in &pieces {
-        let rows: &[ChatRow] = match p {
-            Piece::Kept(rows) => rows,
-            Piece::Own(row) => std::slice::from_ref(row),
-        };
+    for (_, rows) in drawn {
         let (a, b) = (from.max(at), to.min(at + rows.len()));
         if a < b {
             shown.extend(&rows[a - at..b - at]);
@@ -10611,6 +10668,19 @@ fn draw_chat(
     chat_row_start(out, x0, y, edge(y), card)?;
     apply(out, if c.focused { strong } else { dim })?;
     queue!(out, Print("claude"))?;
+    // Its view mode: `● view` — held still; once something came after what it holds, said (`G` catches up)
+    let came = view.is_some_and(|v| v.came(crate::view::seen(c)));
+    let (held, after) = match view {
+        None => ("", ""),
+        Some(_) if came && w >= 44 => (" ● view", " · new text after"),
+        Some(_) if came => (" ● view", " · new"),
+        Some(_) => (" ● view", ""),
+    };
+    apply(out, accent)?;
+    queue!(out, Print(held))?;
+    apply(out, dim)?;
+    queue!(out, Print(after))?;
+    let view_w = held.width() + after.width();
     // Follow badge: accent while following, faint once the user took over
     // (paused lasts until the next question — only worth saying while Claude works)
     let paused = c.follow.paused && c.busy();
@@ -10624,7 +10694,7 @@ fn draw_chat(
     // Review at the end: Claude's edits go in unasked — said while it's on. Room for it before the model's
     // name (which gives way); shorter when the time of a turn in flight needs the room
     let busy_w = if c.busy() { 4 + " thinking 00.0s".len() + 1 } else { 0 };
-    let room = w.saturating_sub(6 + badge.width() + busy_w);
+    let room = w.saturating_sub(6 + view_w + badge.width() + busy_w);
     let at_end = match c.edits.at_end.is_some() {
         false => "",
         true if room >= 16 => " › review at end",
@@ -10658,14 +10728,14 @@ fn draw_chat(
         _ => " › 99+ granted".into(),
     };
     if !granted.is_empty() {
-        let x = text_x + 6 + badge.width() + at_end.width();
+        let x = text_x + 6 + view_w + badge.width() + at_end.width();
         let spot = (y, x + 1, x + granted.width(), crate::session::Spot::Granted);
         editor.screen.session_spots.borrow_mut().push(spot);
         apply(out, faint)?;
         queue!(out, Print(&granted), Spaces(GRANTED_W - granted.width()))?;
     }
     let chip_w = if granted.is_empty() { 0 } else { GRANTED_W };
-    let title_w = 6 + badge.width() + at_end.width() + bare.width() + chip_w;
+    let title_w = 6 + view_w + badge.width() + at_end.width() + bare.width() + chip_w;
     // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
     let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
@@ -10736,6 +10806,29 @@ fn draw_chat(
         chat_row_end(out, card, lay.chat_w, w)?;
         y += 1;
     }
+    // (what this frame laid out, and where its rows are: the view mode is made of them, the wheel finds its row)
+    *editor.screen.chat_laid.borrow_mut() = pieces.clone();
+    editor.screen.chat_view.set(Some((y, w, area, from)));
+    // (its view mode's selections and cursors, painted over the rows they're on — its cursors only while it has
+    // the keys: a card given them, a picker over it, its selections alone)
+    let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
+    let painted = |line: usize, spans: &[Span], y: usize| -> Option<Vec<Span>> {
+        let v = view?;
+        // (where its cursors land on screen: recorded, as the code's are)
+        if view_cursor {
+            let d = v.doc();
+            let ls = mv::line_start(&d.text, line.min(mv::last_line(&d.text)));
+            for r in d.selection().ranges().iter().map(|r| r.cursor(&d.text)) {
+                if mv::line_of(&d.text, r) == line {
+                    let col = d.text.byte_slice(ls..r).to_string().width();
+                    if col < w {
+                        editor.screen.cursors.borrow_mut().push((text_x + col, y));
+                    }
+                }
+            }
+        }
+        view_paint(v, line, spans, ui, view_cursor)
+    };
     for i in 0..area {
         chat_row_start(out, x0, y, edge(y), card)?;
         if let Some((a, b)) = shown.get(i).and_then(|r| r.ran) {
@@ -10748,7 +10841,10 @@ fn draw_chat(
                     if let Some(call) = &r.call {
                         chat_calls.push((y, call.clone()));
                     }
-                    chat_spans(out, &r.spans, card, w)?
+                    match painted(from + i, &r.spans, y) {
+                        Some(p) => chat_spans(out, &p, card, w)?,
+                        None => chat_spans(out, &r.spans, card, w)?,
+                    }
                 }
                 // `path:line` and an element's id in an answer: underlined, clickable
                 None => {
@@ -10758,10 +10854,17 @@ fn draw_chat(
                     }
                     let mut spots = editor.screen.chat_ids.borrow_mut();
                     spots.extend(ids.into_iter().map(|(a, b, id)| (y, text_x + a, text_x + b, id)));
-                    chat_spans(out, &l, card, w)?
+                    match painted(from + i, &l, y) {
+                        Some(p) => chat_spans(out, &p, card, w)?,
+                        None => chat_spans(out, &l, card, w)?,
+                    }
                 }
             },
-            None => 0,
+            // (a cursor past the last row: an empty conversation's)
+            None => match painted(from + i, &[], y) {
+                Some(p) => chat_spans(out, &p, card, w)?,
+                None => 0,
+            },
         };
         chat_row_end(out, card, lay.chat_w, used)?;
         y += 1;
@@ -10844,7 +10947,9 @@ fn draw_chat(
     }
     // The input's border: the accent while it has the keys; without them, what's typed in it is a draft —
     // said at the border's end, so a message half-written isn't lost from sight
-    let border = if c.focused { accent } else { Style { fg: ui.window, ..card } };
+    // (in its view mode the input keeps what's typed, faint, its cursor hidden — `i` comes back to it)
+    let typing = c.focused && view.is_none();
+    let border = if typing { accent } else { Style { fg: ui.window, ..card } };
     let draft = !c.focused && !c.input.trim().is_empty() && w >= used + 12;
     let line = w - used - if draft { " draft ──".width() } else { 0 };
     apply(out, border)?;
@@ -10861,7 +10966,7 @@ fn draw_chat(
     for (i, r) in input_rows.iter().skip(first_input).take(input_h).enumerate() {
         chat_row_start(out, x0, y, edge(y), card)?;
         let prompt = if i == 0 { "› " } else { "  " };
-        apply(out, if c.focused { Style { bold: true, ..accent } } else { faint })?;
+        apply(out, if typing { Style { bold: true, ..accent } } else { faint })?;
         queue!(out, Print(prompt))?;
         let used = if c.input.is_empty() {
             apply(out, faint)?;
@@ -10869,7 +10974,7 @@ fn draw_chat(
             queue!(out, Print(&p))?;
             p.width()
         } else {
-            apply(out, card)?;
+            apply(out, if view.is_some() { faint } else { card })?;
             queue!(out, Print(r))?;
             r.width()
         };
@@ -10880,7 +10985,25 @@ fn draw_chat(
     chat_row_start(out, x0, y, edge(y), card)?;
     let key = Style { bold: true, ..dim };
     let mut hints: Vec<(&str, &str)> = Vec::new();
-    if !c.focused {
+    // (each key as bound — a remap moves the hint)
+    let bound = |name: &str, like: &str| crate::view::bound(editor, crate::view::Surface::Chat, name, like);
+    let viewing = [
+        (bound("view_input", "i"), "type"),
+        (bound("view_copy", "y"), "copy"),
+        (bound("search", "/"), "search"),
+        (bound("view_latest", "G"), "latest"),
+        (bound("view_leave", "esc"), "code"),
+    ];
+    let to_view = editor.keymaps.chat.keys_for("chat_view").into_iter().next();
+    // (nothing to read yet: `esc` goes to the code, as it says)
+    let esc = match &to_view {
+        Some(k) if !c.msgs.is_empty() => (k.as_str(), "view"),
+        // (`esc code` where the surface stays, `esc close` where it goes — the user, 2026-10-20)
+        _ => ("esc", "code"),
+    };
+    if view.is_some() {
+        hints.extend(viewing.iter().filter_map(|(k, d)| Some((k.as_deref()?, *d))));
+    } else if !c.focused {
         hints.push(("space l", "focus"));
         hints.push(("space L", "close"));
     } else if c.busy() {
@@ -10895,7 +11018,7 @@ fn draw_chat(
             hints.push(("↑", "edit queued"));
         }
         hints.push(("C-c", "stop"));
-        hints.push(("esc", "editor"));
+        hints.push(esc);
         hints.push(("C-f", if c.follow.active() { "unfollow" } else { "follow" }));
     } else {
         let code = c.last_code().is_some();
@@ -10910,7 +11033,7 @@ fn draw_chat(
         } else if c.screen.is_some() && c.input.is_empty() {
             hints.push(("backspace", "no screen"));
         }
-        hints.push(("esc", "editor"));
+        hints.push(esc);
         if crate::checkpoint::can_undo(editor) {
             hints.push(("C-z", "undo turn"));
         }
@@ -10958,7 +11081,7 @@ fn draw_chat(
         chat_row_end(out, card, lay.chat_w, 0)?;
         y += 1;
     }
-    Ok(c.focused.then(|| {
+    Ok(typing.then(|| {
         let r = cur_row.saturating_sub(first_input).min(input_h - 1);
         ((x0 + 3 + 2 + cur_col) as u16, (input_top + r) as u16)
     }))
@@ -11185,6 +11308,73 @@ fn chat_markdown(
 
 /// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
 /// leaves alone. Text wraps at `measure` (≤ `w`), code rows take `w`.
+/// A row of a view's document (`view.rs`) with its selections and cursors painted over its spans: a selection's
+/// background over the spans' own colours, a cursor in the code's style (the primary's apart, as the code's).
+/// What's on the line's end — a cursor on the line break, a selection over it — is the cell after its text.
+/// None: nothing of the view's on this line. `cursor`: its cursors drawn — it has the keys (`Editor::cursor_in`).
+fn view_paint(
+    v: &crate::view::View,
+    line: usize,
+    spans: &[crate::markdown::Span],
+    ui: &Ui,
+    cursor: bool,
+) -> Option<Vec<crate::markdown::Span>> {
+    use crate::markdown::Span;
+    let d = v.doc();
+    let text = &d.text;
+    if line > mv::last_line(text) {
+        return None;
+    }
+    let (ls, le) = (mv::line_start(text, line), mv::line_end(text, line));
+    let sel = d.selection();
+    let primary = sel.primary_index();
+    // (byte ranges of the line, each with what it patches — selections first, the cursors over them)
+    let mut marks: Vec<(usize, usize, Style)> = Vec::new();
+    let mut cursors: Vec<(usize, usize, Style)> = Vec::new();
+    for (i, r) in sel.ranges().iter().enumerate() {
+        let first = i == primary;
+        let bg = if first { ui.selection_primary.bg } else { ui.selection.bg };
+        let wash = Style { bg, ..Style::default() };
+        let (a, b) = (r.from().max(ls), r.to().min(le + 1));
+        if a < b {
+            marks.push((a - ls, b - ls, wash));
+        }
+        let c = r.cursor(text);
+        if cursor && (ls..=le).contains(&c) {
+            let end = crate::graphemes::next_boundary(text, c).min(le).max(c + 1);
+            cursors.push((c - ls, end - ls, if first { ui.cursor_primary } else { ui.cursor }));
+        }
+    }
+    if marks.is_empty() && cursors.is_empty() {
+        return None;
+    }
+    marks.extend(cursors);
+    let style_at = |at: usize, base: Style| {
+        marks.iter().filter(|m| (m.0..m.1).contains(&at)).fold(base, |s, m| s.patch(m.2))
+    };
+    let mut out: Vec<Span> = Vec::new();
+    let mut at = 0;
+    let push = |text: &str, style: Style, out: &mut Vec<Span>| match out.last_mut() {
+        Some(last) if last.style == style => last.text.push_str(text),
+        _ => out.push(Span { text: text.to_string(), style }),
+    };
+    for s in spans {
+        for g in unicode_segmentation::UnicodeSegmentation::graphemes(s.text.as_str(), true) {
+            push(g, style_at(at, s.style), &mut out);
+            at += g.len();
+        }
+    }
+    // (the line break's cell: after the row's text when nothing is drawn there — the row's own trailing
+    // blanks, a code well's padding, were painted above)
+    if at == le - ls {
+        let cell = style_at(at, Style::default());
+        if cell != Style::default() {
+            out.push(Span { text: " ".into(), style: cell });
+        }
+    }
+    Some(out)
+}
+
 fn chat_markdown_drawn(
     lines: &[crate::markdown::Line],
     (w, measure): (usize, usize),
@@ -15046,6 +15236,158 @@ mod tests {
 
     /// A conversation 200 messages long (50 turns: a question, a tool row, an answer with code, its time) and
     /// an answer being written: what one streamed delta costs the frame.
+    /// A view's selection and cursor painted over a chat row's spans (`view_paint`): the selection's ground over
+    /// the spans' own colours, the cursor in the code's style on the line break's cell after the text; a row the
+    /// view has nothing on comes back as it was.
+    #[test]
+    fn a_views_selection_is_painted_over_a_rows_spans() {
+        use crate::markdown::Span;
+        let ed = crate::view::tests::viewing("<esc>x");
+        let ui = Ui::new(&ed);
+        let v = crate::view::chat_view_of(&ed).unwrap();
+        let d = v.doc();
+        let line = mv::line_of(&d.text, d.selection().primary().from());
+        let red = Style { fg: Some(crossterm::style::Color::Red), ..Style::default() };
+        let spans = vec![
+            Span { text: "The latest".into(), style: red },
+            Span { text: " answer starts here.".into(), style: Style::default() },
+        ];
+        let p = view_paint(v, line, &spans, &ui, true).expect("the selected row is painted");
+        let text: String = p.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "The latest answer starts here. ", "the text, and the line break's cell");
+        assert!(
+            p.iter().all(|s| s.style.bg.is_some() && s.style.bg == p[0].style.bg || s.text == " "),
+            "{p:?}"
+        );
+        assert_eq!(p[0].style.fg, Some(crossterm::style::Color::Red), "the span's own colour kept");
+        assert_eq!(p[0].style.bg, ui.selection_primary.bg);
+        assert_eq!(
+            p.last().unwrap().style,
+            Style::default()
+                .patch(Style { bg: ui.selection_primary.bg, ..Style::default() })
+                .patch(ui.cursor_primary),
+            "the cursor on the line break"
+        );
+        assert!(view_paint(v, line + 1, &spans, &ui, true).is_none(), "nothing on the next row");
+        // (without the keys: the selection's ground, no cursor)
+        let p = view_paint(v, line, &spans, &ui, false).unwrap();
+        assert!(p.iter().all(|s| s.style.bg == ui.selection_primary.bg), "{p:?}");
+        assert_eq!(p.iter().map(|s| s.text.as_str()).collect::<String>(), "The latest answer starts here. ");
+    }
+
+    /// The cells a frame shows a cursor in: painted in a cursor's style (the code's block, a view's —
+    /// `Screen.cursors`), and the terminal's own cursor where it's shown — each cell once.
+    fn cursors_on_frame(ed: &mut Editor) -> Vec<(u16, u16)> {
+        let (w, h) = (140, 34);
+        let mut bytes = Vec::new();
+        // (the whole frame, not what changed since the last)
+        ed.last_frame = None;
+        render(ed, &mut bytes, w, h).unwrap();
+        let mut p = vt100::Parser::new(h, w, 0);
+        p.process(&bytes);
+        let s = p.screen();
+        // (the cells painted as cursors, as the drawers recorded them — colours may not reach the bytes:
+        // `NO_COLOR`)
+        let mut at: std::collections::BTreeSet<(u16, u16)> =
+            ed.screen.cursors.borrow().iter().map(|&(x, y)| (x as u16, y as u16)).collect();
+        if !s.hide_cursor() {
+            let (r, c) = s.cursor_position();
+            at.insert((c, r));
+        }
+        at.into_iter().collect()
+    }
+
+    /// One cursor on screen, where the keys go (the user, 2026-10-20 — `Editor::cursor_in`): the code's with the
+    /// keys in it (normal, insert), the chat input's caret, its view mode's cursor, a prompt's or a picker's caret
+    /// (a view's `/` too), the terminal's — each alone on the frame, in its own place; the code's cursor line
+    /// stays washed while the keys are elsewhere. Both themes.
+    #[test]
+    fn one_cursor_on_screen_where_the_keys_go() {
+        use crate::chat::{Msg, Role};
+        let pty = !crate::sandbox::no_pty_here("term::tests::one_cursor_on_screen_where_the_keys_go");
+        for theme in ["meok", "hanji"] {
+            let editor = || {
+                let mut ed = Editor::new(Config::default());
+                ed.theme = crate::theme::load(theme).unwrap();
+                ed.docs[0].text = ropey::Rope::from_str("fn main() {\n    let code = 1;\n}\n");
+                ed.config.llm.command = "sh".into();
+                ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+                let mut c = crate::chat::Chat::new();
+                c.msgs.push(Msg::new(Role::User, "why does it fail?", ""));
+                c.msgs.push(Msg::new(Role::Assistant, "Because the answer says so.", ""));
+                c.input = "a draft".into();
+                c.cursor = c.input.len();
+                // (up beside the code, the keys in the code)
+                c.focused = false;
+                ed.session.chat = Some(c);
+                ed
+            };
+            let keys = |ed: &mut Editor, keys: &[&str]| {
+                for k in keys {
+                    ed.handle_key(k.parse().unwrap());
+                    ed.focus_sync();
+                    let mut sink = Vec::new();
+                    render(ed, &mut sink, 140, 34).unwrap();
+                }
+            };
+            let chat_x = |ed: &Editor| ed.screen.chat_x.unwrap() as u16;
+            type Place = fn(&Editor, (u16, u16)) -> bool;
+            let in_code: Place = |ed, (x, _)| x < ed.screen.chat_x.unwrap() as u16;
+            let in_chat: Place = |ed, (x, _)| x >= ed.screen.chat_x.unwrap() as u16;
+            let at_bottom: Place = |_, (_, y)| y >= 30;
+            let scenes: Vec<(&str, Vec<&str>, Place)> = vec![
+                ("the code", vec![], in_code),
+                ("the code in insert mode", vec!["i"], in_code),
+                ("the chat's input", vec!["space", "l"], in_chat),
+                ("the chat's view mode", vec!["space", "l", "esc"], in_chat),
+                ("the view's search prompt", vec!["space", "l", "esc", "/"], at_bottom),
+                ("the command line", vec![":"], at_bottom),
+                ("back to the code", vec!["space", "l", "esc", "esc"], in_code),
+            ];
+            for (name, ks, place) in scenes {
+                let mut ed = editor();
+                keys(&mut ed, &ks);
+                let at = cursors_on_frame(&mut ed);
+                assert_eq!(at.len(), 1, "{theme}, {name}: one cursor, not {at:?}");
+                assert!(
+                    place(&ed, at[0]),
+                    "{theme}, {name}: where the keys are, not {:?} (chat from {})",
+                    at[0],
+                    chat_x(&ed)
+                );
+            }
+            // A picker over the code: its query's caret alone
+            let mut ed = editor();
+            keys(&mut ed, &["space", "b"]);
+            assert!(ed.picker.is_some());
+            assert_eq!(cursors_on_frame(&mut ed).len(), 1, "{theme}, a picker");
+            // The terminal's program: its own cursor alone
+            if pty {
+                let mut ed = editor();
+                ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
+                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while ed.session.terminal.is_none() && std::time::Instant::now() < end {
+                    if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                        ed.handle_event(ev);
+                    }
+                }
+                keys(&mut ed, &[]);
+                assert_eq!(
+                    ed.cursor_in(),
+                    Some(crate::chrome::CursorIn::Program),
+                    "{theme}: the program has the keys"
+                );
+                let at = cursors_on_frame(&mut ed);
+                let rows = ed.screen.terminal_rows.unwrap();
+                assert_eq!(at.len(), 1, "{theme}, the terminal: {at:?}");
+                assert!(
+                    (rows.0..=rows.1).contains(&(at[0].1 as usize)),
+                    "{theme}: in the terminal {at:?} {rows:?}"
+                );
+            }
+        }
+    }
+
     fn long_chat(msgs: usize) -> Editor {
         use crate::chat::{Look, Msg, Role};
         let mut ed = Editor::new(Config::default());

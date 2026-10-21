@@ -347,7 +347,34 @@ each one while the chat keeps the keys.
 | `C-l` | New conversation |
 | `C-p` | Continue an earlier conversation |
 | `C-t` | Choose the model (`:effort` — how hard it thinks) |
-| `esc` | Back to the editor |
+| `esc` | The conversation's view mode ([below](#reading-the-conversation-view-mode)); `esc` again, back to the code. An empty conversation has nothing to read: `esc` goes straight to the code |
+
+### Reading the conversation: view mode
+
+`esc` from the input puts a cursor on the conversation — `space >` does from anywhere (the chat opened or
+brought back if it isn't up), and so does the wheel over it: the status line says `● view · chat`, the chat's
+title `● view`, and what you'd typed stays in the input, faint. It's the code's normal mode on the chat's rows, a line
+per row as you see it: `j` `k` `w` `b` `e` `f` `x` `v` `mi` `%` `s` `/` `n` `*`, counts and the `z` views all
+work, and the selection and cursor are painted over the rows in the code's colours. Nothing edits there, and a key
+that would (`d`, `p`, the `space` menu, `:`) is said, not done.
+
+| Key | In view mode |
+|---|---|
+| `↑` `↓` | A line up or down, the cursor carried along at the edge |
+| `←` `→` | A page back (older) or on (newer) |
+| `y` | Copy what's selected, the rows as drawn — to the clipboard, and to `p` in the code |
+| `G` | The latest: the conversation caught up, the cursor on its last row (`5G`: row 5) |
+| `i` `a` `enter` | Back to the input, your text as it was |
+| `esc` `q` | A selection collapses first; with none, back to the code |
+
+It holds still while you read: Claude's answer streaming in doesn't move it, and the title says
+`● view · new text after` once something came — `G` catches up; leaving lets it go on, the rows you were
+reading still in sight and what came below them. Next time it opens where
+you left it in this conversation; the first time, on the last answer's first row. The wheel over the conversation
+opens it too, at the row under the pointer; rolled back down to the end with nothing selected, it closes and the
+keys go back where they were. The chat's chords (`C-s`, `C-o`, `C-y`, `C-l` …) work in it as in the input; `C-d`
+`C-u` `C-f` `C-b` page, as in the code. Your `[keys.normal]` reach it (kept to what reads), and `[keys.view]`,
+`[keys.view.chat]` and `[keys.chat]` remap it — the hints follow the keys you bound.
 
 ### Follow mode
 

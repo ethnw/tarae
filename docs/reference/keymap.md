@@ -258,6 +258,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 |---|---|---|
 | `space '` | `last_picker` | Reopen the last picker |
 | `space /` | `global_search` | Search in project |
+| `space >` | `chat_view` | View the chat |
 | `space ?` | `command_palette` | Find a command |
 | `space @` | `chat_point` | Point Claude at something |
 | `space a` | `code_action` | Code actions |
@@ -427,6 +428,32 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `right` | `move_char_right` | Move right |
 | `tab` | `insert_tab` | Insert tab char |
 | `up` | `move_visual_line_up` | Move up (visual line) |
+
+## View mode
+
+A cursor on what a surface shows — the chat's conversation (`esc` from its input). Normal mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the rest is said, not done. Its own keys go over them.
+
+### Its own keys (`[keys.view]`, `[keys.view.chat]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `a` | `view_input` | Back to typing |
+| `G` | `view_latest` | To the latest, caught up |
+| `i` | `view_input` | Back to typing |
+| `q` | `view_leave` | Leave view mode |
+| `y` | `view_copy` | Copy, to paste anywhere |
+| `down` | `scroll_down` | Scroll down a line |
+| `esc` | `view_leave` | Leave view mode |
+| `left` | `page_up` | Move page up |
+| `ret` | `view_input` | Back to typing |
+| `right` | `page_down` | Move page down |
+| `up` | `scroll_up` | Scroll up a line |
+
+### The chat's input (`[keys.chat]`)
+
+| Key | Command | Description |
+|---|---|---|
+| `esc` | `chat_view` | View the chat |
 
 ## Cards, reviews and panels
 

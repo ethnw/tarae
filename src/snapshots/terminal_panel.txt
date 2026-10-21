@@ -27,7 +27,7 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
 04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
@@ -75,5 +75,5 @@
 22
 23  a TTTTTTTT                                                                  dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

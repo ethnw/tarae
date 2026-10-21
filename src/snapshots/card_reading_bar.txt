@@ -1,4 +1,4 @@
-# card_reading_bar · 100x24 · theme meok · cursor 4:4
+# card_reading_bar · 100x24 · theme meok · cursor hidden
 ## text
 00  tarae  ›  card · Claude wants to run a script
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@
 01
 02
 03
-04     Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+04     ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 05
 06
 07
@@ -75,5 +75,5 @@
 22  a BBBBBB BBBBB BB BBB B BBBBBB   dd dd ddd ddd d ddd dddd dddd    A           A ddd ddd   A ddddd
 23  a TTTT                                                                             ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
+bg: c=ui.cursorline.primary  p=ui.popup
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

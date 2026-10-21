@@ -88,6 +88,43 @@ impl Node {
         keyed.into_iter().map(|(_, e)| e).collect()
     }
 
+    /// Only the bindings every command of which `keep` takes (view mode's: `view::COMMANDS`) — a submode kept
+    /// while something in it is.
+    fn filtered(&self, keep: &dyn Fn(&str) -> bool) -> Node {
+        let mut node = Node::default();
+        for (k, t) in &self.map {
+            match t {
+                KeyTrie::Node(n) => {
+                    let sub = n.filtered(keep);
+                    if !sub.map.is_empty() {
+                        node.map.insert(*k, KeyTrie::Node(sub));
+                    }
+                }
+                KeyTrie::Leaf(cmds) => {
+                    let all = cmds.iter().all(|c| matches!(c, MappableCommand::Static(s) if keep(s.name)));
+                    if all {
+                        node.map.insert(*k, t.clone());
+                    }
+                }
+            }
+        }
+        node
+    }
+
+    /// The keys bound to `name` here, shortest first (a hint names the key as bound — a remap moves it).
+    pub fn keys_for(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .map
+            .iter()
+            .filter(|(_, t)| {
+                matches!(t, KeyTrie::Leaf(c) if matches!(c.as_slice(), [MappableCommand::Static(s)] if s.name == name))
+            })
+            .map(|(k, _)| k.to_string())
+            .collect();
+        crate::sorting::by(&mut out, |a, b| (a.len(), a).cmp(&(b.len(), b)));
+        out
+    }
+
     pub fn search(&self, keys: &[Key]) -> Option<&KeyTrie> {
         let mut node = self;
         for (i, key) in keys.iter().enumerate() {
@@ -151,6 +188,15 @@ pub struct Keymaps {
     pub normal: Node,
     pub select: Node,
     pub insert: Node,
+    /// View mode's own rows (`[view]`), and each surface's on top of them (`[view.chat]`) — what the view
+    /// modes look keys up in is built from these and `normal`/`select` (`views`).
+    view: Node,
+    view_on: Vec<(&'static str, Node)>,
+    /// Per surface: normal mode kept to `view::COMMANDS`, then `[view]`, then the surface's — and the same
+    /// over `select` (view mode's `v`).
+    views: Vec<(&'static str, Node, Node)>,
+    /// The chat's input (`[chat]`): what its keys run before it types them — `esc` → its view mode.
+    pub chat: Node,
 }
 
 const DEFAULT_KEYS: &str = include_str!("default_keys.toml");
@@ -193,17 +239,100 @@ impl Keymaps {
         let normal = part("normal", warnings);
         let mut select = normal.clone();
         select.merge(part("select", warnings));
-        Self { normal, select, insert: part("insert", warnings) }
+        let (view, view_on) = Self::view_tables(table, path, warnings);
+        let mut km = Self {
+            normal,
+            select,
+            insert: part("insert", warnings),
+            view,
+            view_on,
+            views: Vec::new(),
+            chat: part("chat", warnings),
+        };
+        km.build_views();
+        km
     }
 
-    /// Merges the user's `[keys]` table. As in helix, `keys.normal` does not spill into select.
+    /// `[view]`'s rows, and its surfaces' tables (`[view.chat]`) apart — a surface's name isn't a key.
+    fn view_tables(
+        table: &toml::Table,
+        path: &str,
+        warnings: &mut Vec<String>,
+    ) -> (Node, Vec<(&'static str, Node)>) {
+        let Some(toml::Value::Table(t)) = table.get("view") else {
+            return (Node::default(), Vec::new());
+        };
+        let mut rows = t.clone();
+        let mut on = Vec::new();
+        for s in crate::view::SURFACES {
+            if let Some(toml::Value::Table(sub)) = rows.remove(s.name()) {
+                on.push((s.name(), Node::from_toml(&sub, &format!("{path}.view.{}", s.name()), warnings)));
+            }
+        }
+        (Node::from_toml(&rows, &format!("{path}.view"), warnings), on)
+    }
+
+    /// View mode's tables from `normal`/`select` and the view rows — again after the user's keys merge in.
+    fn build_views(&mut self) {
+        let keep = |name: &str| crate::view::COMMANDS.contains(&name);
+        self.views = crate::view::SURFACES
+            .iter()
+            .map(|s| {
+                let mut on = self.view.clone();
+                if let Some((_, n)) = self.view_on.iter().find(|(name, _)| *name == s.name()) {
+                    on.merge(n.clone());
+                }
+                // (the space menu is the editor's — in view mode its `space` is said, not a prefix)
+                let space = Key::plain(crate::key::Code::Char(' '));
+                let mut normal = self.normal.filtered(&keep);
+                normal.map.remove(&space);
+                normal.merge(on.clone());
+                let mut select = self.select.filtered(&keep);
+                select.map.remove(&space);
+                select.merge(on);
+                (s.name(), normal, select)
+            })
+            .collect();
+    }
+
+    /// Merges the user's `[keys]` table. As in helix, `keys.normal` does not spill into select. View mode is
+    /// normal mode on another document: `keys.normal` spills into it (kept to `view::COMMANDS`), `keys.view`
+    /// and `keys.view.<surface>` over it (decided 2026-10-20).
     pub fn merge_user(&mut self, keys: &toml::Table, warnings: &mut Vec<String>) {
-        for (mode, node) in
-            [("normal", &mut self.normal), ("select", &mut self.select), ("insert", &mut self.insert)]
-        {
+        for (mode, node) in [
+            ("normal", &mut self.normal),
+            ("select", &mut self.select),
+            ("insert", &mut self.insert),
+            ("chat", &mut self.chat),
+        ] {
             if let Some(toml::Value::Table(t)) = keys.get(mode) {
                 node.merge(Node::from_toml(t, &format!("keys.{mode}"), warnings));
             }
+        }
+        let (view, on) = Self::view_tables(keys, "keys", warnings);
+        self.view.merge(view);
+        for (name, node) in on {
+            match self.view_on.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, mine)) => mine.merge(node),
+                None => self.view_on.push((name, node)),
+            }
+        }
+        self.build_views();
+    }
+
+    /// A view mode's table: the surface's, in normal or select (`v`).
+    pub fn view(&self, surface: crate::view::Surface, mode: Mode) -> &Node {
+        let (_, normal, select) =
+            self.views.iter().find(|(n, ..)| *n == surface.name()).expect("every surface has its table");
+        if mode == Mode::Select { select } else { normal }
+    }
+
+    /// `lookup` in a view mode's table.
+    pub fn view_lookup(&self, surface: crate::view::Surface, mode: Mode, keys: &[Key]) -> Lookup<'_> {
+        match self.view(surface, mode).search(keys) {
+            Some(KeyTrie::Leaf(cmds)) => Lookup::Matched(cmds),
+            Some(KeyTrie::Node(_)) => Lookup::Pending,
+            None => Lookup::NotFound,
         }
     }
 
@@ -218,7 +347,21 @@ impl Keymaps {
     /// Keys that can be pressed next in a submode (`space`, `g` …) — for the which-key card.
     /// (key, description, is submode). Description = command doc (the line for `:cmd`), lowercase first.
     pub fn children(&self, mode: Mode, keys: &[Key]) -> Vec<(Key, String, bool)> {
-        let Some(KeyTrie::Node(node)) = self.root(mode).search(keys) else { return Vec::new() };
+        Self::children_of(self.root(mode), keys)
+    }
+
+    /// `children` in a view mode's table.
+    pub fn view_children(
+        &self,
+        surface: crate::view::Surface,
+        mode: Mode,
+        keys: &[Key],
+    ) -> Vec<(Key, String, bool)> {
+        Self::children_of(self.view(surface, mode), keys)
+    }
+
+    fn children_of(root: &Node, keys: &[Key]) -> Vec<(Key, String, bool)> {
+        let Some(KeyTrie::Node(node)) = root.search(keys) else { return Vec::new() };
         node.sorted()
             .into_iter()
             .map(|(k, t)| match t {
@@ -453,6 +596,19 @@ mod tests {
         }
 
         node_tables(&mut out, &km.insert, &mut Vec::new(), "## Insert mode");
+
+        out.push_str(
+            "\n## View mode\n\nA cursor on what a surface shows — the chat's conversation (`esc` from its input). Normal \
+             mode's moves, selections, search and counts work there (yours too: `[keys.normal]` spills in), the \
+             rest is said, not done. Its own keys go over them.\n",
+        );
+        node_tables(
+            &mut out,
+            &km.view,
+            &mut Vec::new(),
+            "### Its own keys (`[keys.view]`, `[keys.view.chat]`)",
+        );
+        node_tables(&mut out, &km.chat, &mut Vec::new(), "### The chat's input (`[keys.chat]`)");
 
         out.push_str(
             "\n## Cards, reviews and panels\n\nKeys of what's up on the screen — not rebindable, so not in \

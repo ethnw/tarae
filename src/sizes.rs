@@ -611,6 +611,7 @@ impl crate::editor::Editor {
     /// `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
         self.slot_sync();
+        crate::view::sync(self);
         if self.bottom_focus {
             let program = self.session.terminal.as_ref().is_some_and(|t| t.focus && t.visible);
             let other = self.session.chat.as_ref().is_some_and(|c| c.focused)

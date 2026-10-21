@@ -427,6 +427,7 @@ fn perf_e2e_busy_session_behind() {
     // right behind it, both came in one read, alt+`:`, the switch typed into the chat, a timeout —
     // :preflight 2026-10-04. A screen grep for the follow card's words passed too early once. Now: the Esc
     // handled and drawn — `after_input` — and the state saying the code has the keys)
+    t.esc_state("the chat's view mode", |s| s["keys"]["region"] == "view:chat");
     t.esc_state("the chat let go of the keys", |s| s["keys"]["region"] == "code");
     t.send(":session-switch 0\r");
     t.wait_for("the first session in front", |s| !s.contains("word word") && s.contains("fn f1("));

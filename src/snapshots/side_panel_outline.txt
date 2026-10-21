@@ -1,4 +1,4 @@
-# side_panel_outline · 112x24 · theme meok · cursor 2:36
+# side_panel_outline · 112x24 · theme meok · cursor hidden
 ## text
 00   files  outline  git          ▌ tarae  ›  src  ›  demo.rs
 01   ──────────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppppp
-02 ppppppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02 ppppppppppppppppppppppppppppppp     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp
 04 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
 05 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
@@ -75,5 +75,5 @@
 22   DDD ffff  D fffff
 23  a TTTTTTT                                                                               dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

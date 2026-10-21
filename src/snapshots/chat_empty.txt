@@ -28,12 +28,12 @@
 25
 26                                                                ────────────────────────────────────
 27                                                                › Ask about demo.rs…
-28                                                                enter send  esc editor  C-s screen
+28                                                                enter send  esc code  C-s screen
 29  ● chat                                                                      rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                              ppppppppppppppppppppppppppppppppppppppp
 01                                                              ppppppppppppppppppppppppppppppppppppppp
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
 03                                                              ppppppppppppppppppppppppppppppppppppppp
 04     11111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
 05     11111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppp
@@ -90,8 +90,8 @@
 25
 26                                                                aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 27                                                                A fff fffff ffffffff
-28                                                                DDDDD ffff  DDD ffffff  DDD ffffff
+28                                                                DDDDD ffff  DDD ffff  DDD ffffff
 29  a TTTT                                                                      dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

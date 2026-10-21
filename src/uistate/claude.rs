@@ -94,6 +94,8 @@ impl Editor {
         // (how long you spend on a change is yours: the review record's, never Claude's)
         for l in &mut s.sessions {
             l.review = None;
+            // (where you read in the conversation or the scrollback: yours — nothing unsent, quote-plan §6)
+            l.view = None;
         }
         s.cards.retain(|c| c.session == own);
         // (a toast that's news of another session — its turn ended, it waits: theirs, a count here)

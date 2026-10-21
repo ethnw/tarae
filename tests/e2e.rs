@@ -1294,7 +1294,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 7, "the schema's version (`uistate::V`)");
+    assert_eq!(s["v"], 8, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();
@@ -1542,8 +1542,9 @@ fn a_turns_usage_shows_under_the_chat_and_in_usage() {
     let u = &s["sessions"][0]["usage"];
     assert_eq!((u["ttl"].as_str(), u["context"]["tokens"].as_u64()), (Some("5m"), Some(24_006)), "{u}");
     assert_eq!(u["last_turn"]["cost"], 0.0412);
-    t.send("\x1b");
-    t.wait_state("the code has the keys", |s| s["keys"]["region"] == "code");
+    // (`esc` the chat's view mode — the conversation under a cursor — `esc` again the code)
+    t.esc_state("the chat's view mode", |s| s["keys"]["region"] == "view:chat");
+    t.esc_state("the code has the keys", |s| s["keys"]["region"] == "code");
     t.command("usage");
     // (the costs said once to be the API price — #161; today's total at the end, below the screen)
     t.wait_for("the usage view", |s| {

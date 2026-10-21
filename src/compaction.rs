@@ -435,7 +435,7 @@ mod tests {
                 vec![sleep(), result(None, 0.3)],
             ],
         );
-        feed(&mut ed, "<space>l<esc>");
+        feed(&mut ed, "<space>l<esc><esc>");
         ed.session.chat.as_mut().unwrap().follow.on = false;
         let said = |rows: &[String], w: &str| rows.iter().any(|r| r.contains(w));
         // Begun: said in the chat, title and body
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(told(&ed), [], "{:?}", ed.toasts);
         ed.session.chat.as_mut().unwrap().follow.on = false;
         // The code zoomed: said
-        feed(&mut ed, "<space>ltwo<ret><esc>");
+        feed(&mut ed, "<space>ltwo<ret><esc><esc>");
         rows(&mut ed, 160);
         feed(&mut ed, "<C-w>z");
         rows(&mut ed, 160);

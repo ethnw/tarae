@@ -82,6 +82,9 @@ pub struct Session {
     /// output is dropped).
     pub terminal: Option<crate::terminal::Terminal>,
     pub terminal_run: u64,
+    /// A surface's view mode (`view.rs`) — the chat's conversation held still under a cursor; ended when its
+    /// surface loses the keys or the session goes behind.
+    pub view: Option<crate::view::View>,
     /// A terminal is being started (on a worker) · what it printed and its exit code, if they came before
     /// it was in place.
     pub terminal_starting: bool,
@@ -308,6 +311,7 @@ impl Session {
             sidebar: None,
             side_last: crate::sidebar::Mode::Files,
             terminal: None,
+            view: None,
             terminal_run: 0,
             terminal_starting: false,
             terminal_early: Default::default(),
@@ -1175,6 +1179,8 @@ impl Editor {
         self.session.waiting_told = waits;
         // (the texts of its turns read back go again: their files have them — #218)
         crate::checkpoint::shed(&mut self.session);
+        // (a view mode ends as its session goes behind — kept for next time, its document freed)
+        crate::view::leave(self);
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         if waits {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));
@@ -2366,24 +2372,24 @@ mod tests {
         let (mut ed, front, _) = two_projects("front-ended");
         claude_ends(&mut ed, &[json!({"type": "result", "result": "done"})]);
         let said = |ed: &Editor| ed.toasts.iter().filter(|t| t.text.starts_with("Claude's turn")).count();
-        feed(&mut ed, "<space>l<esc>");
+        feed(&mut ed, "<space>l<esc><esc>");
         ed.session.chat.as_mut().unwrap().follow.on = false;
         // In sight
-        feed(&mut ed, "<space>lone<ret><esc>");
+        feed(&mut ed, "<space>lone<ret><esc><esc>");
         screen(&mut ed, 160, 30);
         assert!(ed.screen.chat_x.is_some());
         turn_ends(&mut ed, 0);
         assert_eq!(said(&ed), 0, "{:?}", ed.toasts);
         // Minimized by follow mode while Claude works: nothing
         ed.session.chat.as_mut().unwrap().follow.on = true;
-        feed(&mut ed, "<space>ltwo<ret><esc>");
+        feed(&mut ed, "<space>ltwo<ret><esc><esc>");
         screen(&mut ed, 160, 30);
         assert!(ed.screen.chat_x.is_none(), "minimized while it works");
         turn_ends(&mut ed, 0);
         assert_eq!(said(&ed), 0, "{:?}", ed.toasts);
         // The code zoomed: said
         ed.session.chat.as_mut().unwrap().follow.on = false;
-        feed(&mut ed, "<space>lthree<ret><esc>");
+        feed(&mut ed, "<space>lthree<ret><esc><esc>");
         screen(&mut ed, 160, 30);
         feed(&mut ed, "<C-w>z");
         screen(&mut ed, 160, 30);

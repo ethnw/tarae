@@ -186,6 +186,11 @@ commands! {
         llm_ask => "Ask Claude to edit selection",
         chat_open => "Chat with Claude",
         chat_point => "Point Claude at something",
+        chat_view => "View the chat",
+        view_leave => "Leave view mode",
+        view_input => "Back to typing",
+        view_latest => "To the latest, caught up",
+        view_copy => "Copy, to paste anywhere",
         command_palette => "Find a command",
         theme_picker => "Choose a theme (live preview)",
         symbol_picker => "Symbols in this file",
@@ -2330,6 +2335,33 @@ fn chat_close(cx: &mut Context) {
 /// `space @`: labels on the elements on screen — the one picked goes to the chat's next message.
 fn chat_point(cx: &mut Context) {
     crate::uistate::point::start(cx.editor);
+}
+
+// ── View mode (body in view.rs) ───────────────────────────────────────────────────────
+
+/// The chat's `esc`: from its input to its view mode.
+fn chat_view(cx: &mut Context) {
+    crate::view::chat_view(cx.editor);
+}
+fn view_leave(cx: &mut Context) {
+    crate::view::leave_key(cx.editor);
+}
+fn view_input(cx: &mut Context) {
+    crate::view::ask(cx.editor, crate::view::After::Input);
+}
+/// View mode's `y`: what's selected to the clipboard (to paste outside tarae) and to `"` (`p` in the code) at
+/// once — the copy toast says it, once.
+fn view_copy(cx: &mut Context) {
+    let texts = yanked_texts(cx);
+    cx.editor.write_register('"', texts.clone());
+    cx.editor.write_register('+', texts);
+}
+/// `G`: to the last line, the surface caught up first; with a count, to that line (`goto_line`).
+fn view_latest(cx: &mut Context) {
+    match cx.count {
+        Some(_) => goto_line(cx),
+        None => crate::view::ask(cx.editor, crate::view::After::Latest),
+    }
 }
 
 fn llm_ask(cx: &mut Context) {

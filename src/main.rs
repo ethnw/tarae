@@ -188,6 +188,7 @@ mod uisocket;
 mod uistate;
 mod undofile;
 mod usage;
+mod view;
 mod viewalign;
 mod virtualdoc;
 mod waits;

@@ -467,6 +467,12 @@ pub struct Chat {
     /// runs, then what wrote its latest answer (empty after `:model` until the next answer says).
     pub models: Vec<crate::llm::ModelInfo>,
     pub model: String,
+    /// Where its view mode was last left, in this conversation: a message and a row of it (`view.rs` lands
+    /// there next time).
+    pub view_at: Option<(usize, usize)>,
+    /// Its view mode was asked for before its rows were laid out (closed, minimized): made after the next frame
+    /// (`view::wanted`).
+    pub view_wanted: bool,
     /// Its tool calls this turn whose result hasn't come yet, in the order claude made them (#87: claude
     /// makes them one after another, so what comes after a run card waits on it unseen).
     pub calls: Vec<Called>,
@@ -786,6 +792,8 @@ impl Chat {
             queued: None,
             queued_n: 0,
             queued_last: String::new(),
+            view_at: None,
+            view_wanted: false,
             sends: Vec::new(),
             hosts_next: Vec::new(),
             screen: None,
@@ -1052,6 +1060,8 @@ fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
     if other {
         crate::hosts::chat_ended(ed);
     }
+    // (a view mode — `C-p` picks from it — was of the conversation left: it goes)
+    crate::view::forget(ed);
     let Some(c) = &mut ed.session.chat else { return };
     if other {
         c.conversation_left();
@@ -1066,6 +1076,7 @@ fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
     c.conversation = Some(saved.id.clone());
     c.resume = Some(saved.id.clone());
     c.scroll = 0;
+    c.view_at = None;
     c.follow.new_turn();
     // (its turns, cost so far and cache, as far as they were kept)
     match &saved.usage {
@@ -1256,6 +1267,8 @@ pub fn reset(ed: &mut Editor) {
     // (the hosts this conversation's `a` let through go with it — the proxy keeps them as the session's, right
     // while a session has one conversation at a time)
     crate::hosts::chat_ended(ed);
+    // (its view mode — `C-l` is one of its chords — was the conversation that goes: it goes with it)
+    crate::view::forget(ed);
     let Some(c) = &mut ed.session.chat else {
         open(ed);
         if let Some(c) = &mut ed.session.chat {
@@ -1278,6 +1291,7 @@ pub fn reset(ed: &mut Editor) {
     c.state = State::Idle;
     c.scroll = 0;
     c.follow.new_turn();
+    c.view_at = None;
     c.conversation = None;
     c.resume = None;
     c.switched = None;
@@ -2881,10 +2895,20 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if !ed.pending.is_empty() {
         return false;
     }
+    // (its view mode has the keys — what reaches here is the chat's chords, and `C-w`: the windows')
+    if crate::view::chat_view_of(ed).is_some() && !crate::view::chat_chord(ed, key) {
+        return false;
+    }
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.focused) else { return false };
     // An empty input: `C-w` is the windows' (sizes — `C-w >` widens the chat), nothing to delete
     if key.ctrl && key.code == Code::Char('w') && c.input.is_empty() {
         return false;
+    }
+    // The input's rows of the keymap (`[chat]` — `esc` to its view mode) before what it types
+    if let Some(crate::keymap::KeyTrie::Leaf(cmds)) = ed.keymaps.chat.search(&[key]) {
+        let cmds = cmds.clone();
+        ed.run(&cmds, None);
+        return true;
     }
     let ch = |c: &Chat| c.input[..c.cursor].chars().next_back().map_or(0, char::len_utf8);
     match (key.code, key.ctrl, key.alt) {

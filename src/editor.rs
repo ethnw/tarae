@@ -286,6 +286,13 @@ pub struct Screen {
     pub pane_docs: Vec<DocId>,
     /// Column where the chat pane starts.
     pub chat_x: Option<usize>,
+    /// The chat's rows as this frame laid them out (`view::Laid`) — its view mode is made of them — and where
+    /// its conversation was drawn: (first screen row, width, rows, the document line on its first row).
+    pub chat_laid: std::cell::RefCell<crate::view::Laid>,
+    /// The cells a cursor was painted in this frame (x, y) — the code's block and others, a view's: with the
+    /// terminal's own cursor, one place on screen (`Editor::cursor_in`; the test that counts them).
+    pub cursors: std::cell::RefCell<Vec<(usize, usize)>>,
+    pub chat_view: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// First row and row count of the picker list.
     pub picker_list: Option<(usize, usize)>,
     /// Grammar download offer buttons: (row, start col, end col, key to feed when clicked).
@@ -1707,6 +1714,12 @@ impl Editor {
 
     /// For the status line — pending count and keys.
     pub fn pending_display(&self) -> String {
+        // (a view mode's own, while it has the keys)
+        if let Some(v) =
+            crate::view::has_keys(self).and(self.session.view.as_ref()).filter(|_| self.pending.is_empty())
+        {
+            return v.pending_display();
+        }
         let mut s = self.count.map(|c| c.to_string()).unwrap_or_default();
         for k in &self.pending {
             s.push_str(&k.to_string());
@@ -2331,8 +2344,14 @@ impl Editor {
                         }
                     }
                 }
-                K::ScrollUp => c.scroll += 3,
-                K::ScrollDown => c.scroll = c.scroll.saturating_sub(3),
+                // The wheel over the conversation: its view mode at that point (tmux's copy mode by the wheel —
+                // §3.8), the cursor on the row under the pointer
+                K::ScrollUp | K::ScrollDown => {
+                    let line = s.chat_view.get().and_then(|(y0, _, rows, first)| {
+                        (y >= y0 && y < y0 + rows).then(|| first + (y - y0))
+                    });
+                    return crate::view::chat_wheel(self, line, m.kind == K::ScrollUp);
+                }
                 _ => {}
             }
             return;
@@ -3599,6 +3618,10 @@ impl Editor {
             self.picker_key(key);
             return;
         }
+        // A surface's view mode (the chat's conversation): its moves and selections on its document
+        if let Some(h) = crate::view::key(self, key) {
+            return took(h);
+        }
         if crate::chat::unfold_key(self, key) {
             return took(Handler::Unfold);
         }
@@ -4026,7 +4049,7 @@ impl Editor {
         p.cycle = Some((base, i));
     }
 
-    fn handle_prompt_key(&mut self, key: Key) {
+    pub(crate) fn handle_prompt_key(&mut self, key: Key) {
         let Some(prompt) = self.prompt.as_mut() else { return };
         match (key.code, key.ctrl || key.alt) {
             (Code::Esc, _) => self.cancel_prompt(),
@@ -5050,8 +5073,8 @@ mod tests {
         assert!(ed.session.review.as_ref().is_some_and(|r| r.ready));
         feed(&mut ed, "y");
         assert_eq!(text(&ed), "foo BAR");
-        // esc = back to the editor (pane stays), space L = close
-        feed(&mut ed, "<space>l<esc>");
+        // esc = its view mode, esc again = back to the code (pane stays), space L = close
+        feed(&mut ed, "<space>l<esc><esc>");
         assert!(ed.session.chat.as_ref().is_some_and(|c| !c.focused));
         feed(&mut ed, "<space>L");
         assert!(ed.session.chat.is_none());
@@ -5215,7 +5238,8 @@ mod tests {
         let footer = narrow.iter().find(|r| r.contains("● warm")).unwrap_or_else(|| panic!("{narrow:#?}"));
         assert!(footer.contains(&format!("● warm until {at}  ctx 4%  ≈$0.018")), "{footer:?}");
         assert!(!footer.contains("of 200k") && !footer.contains("turn "), "{footer:?}");
-        feed(&mut ed, "<esc>:usage<ret>");
+        // (from the chat's input: `esc` its view mode, `esc` the code)
+        feed(&mut ed, "<esc><esc>:usage<ret>");
         assert_eq!(ed.doc().title.as_deref(), Some("usage"));
         let text = ed.doc().text.to_string();
         for part in [
@@ -5351,7 +5375,7 @@ mod tests {
         assert_eq!(cursor_line(&ed), 4);
         assert!(!ed.docs.iter().any(|d| d.path.as_deref() == Some(util.as_path())), "the preview closed");
         assert!(ed.session.chat.as_ref().unwrap().focused, "the chat keeps the keys");
-        feed(&mut ed, "<esc><C-o>");
+        feed(&mut ed, "<esc><esc><C-o>");
         assert_eq!(ed.doc().path.as_deref(), Some(main.as_path()), "one jump back = before the turn");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -5547,7 +5571,7 @@ mod tests {
             ed.screen.thought_card.get().is_some()
         };
         assert!(card(&mut ed), "the stop's card stays");
-        feed(&mut ed, "<esc>gg");
+        feed(&mut ed, "<esc><esc>gg");
         assert!(!card(&mut ed), "gone once the cursor leaves");
         feed(&mut ed, "8G");
         assert!(card(&mut ed), "back at the stop");
@@ -6053,7 +6077,7 @@ mod tests {
         );
         assert!(sent.contains("\"request_id\":\"c7\"") && sent.contains("note #1 pinned at"), "{sent}");
         // Reply in place — the keys stay in the editor
-        feed(&mut ed, "<esc><space>nwhy?<ret>");
+        feed(&mut ed, "<esc><esc><space>nwhy?<ret>");
         assert!(ed.session.notes.list[0].waiting);
         assert!(!ed.session.chat.as_ref().unwrap().focused, "replying doesn't move the keys to the chat");
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
@@ -9328,7 +9352,7 @@ mod tests {
         // Replay: the newest stop in hand, then the one before
         let hand = |ed: &Editor| ed.session.chat.as_ref().unwrap().in_hand().map(str::to_string);
         assert_eq!(hand(&ed), None, "at rest, none");
-        feed(&mut ed, "<esc>[r");
+        feed(&mut ed, "<esc><esc>[r");
         assert_eq!(hand(&ed).as_deref(), Some("e2"));
         feed(&mut ed, "[r");
         assert_eq!(hand(&ed).as_deref(), Some("e1"));
@@ -9407,7 +9431,7 @@ mod tests {
         assert!(new.exists());
         // The user edits away from Claude's change
         ed.open(&lib).unwrap();
-        feed(&mut ed, "<esc>8GA!<esc>");
+        feed(&mut ed, "<esc><esc>8GA!<esc>");
         let lib_text = |ed: &Editor| {
             ed.docs.iter().find(|d| d.path.as_deref() == Some(lib.as_path())).unwrap().text.to_string()
         };
@@ -9743,7 +9767,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
-        feed(&mut ed, "<esc>:model haiku<ret>");
+        feed(&mut ed, "<esc><esc>:model haiku<ret>");
         assert_eq!(ed.config.llm.model.as_deref(), Some("haiku"));
         logged(r#""model":"haiku","subtype":"set_model""#);
         assert!(title(&mut ed).contains("Haiku 4.5"));
@@ -12560,7 +12584,8 @@ mod tests {
         feed(&mut ed, "<C-w>z");
         draw(&mut ed);
         assert_eq!((ed.screen.chat_w, ed.screen.bottom_h), (140, 0));
-        feed(&mut ed, "<esc>");
+        // (`esc` its view mode, still the chat's — `esc` again the code's)
+        feed(&mut ed, "<esc><esc>");
         draw(&mut ed);
         assert_eq!(shown(&ed), all);
         // The side panel

@@ -27,7 +27,9 @@ use crate::sizes::Slot;
 /// while its review isn't open; since added: `taken`, `files`, `changed_since`. A finding's `high` is a bool.
 /// 7: `sessions[].sandbox.attributes.owner_xattrs_flags` is two keys, `xattrs` (served where a run may write, D2 B)
 /// and `owner_flags`.
-pub const V: u64 = 7;
+/// 8: the front session's `view` (a surface's view mode — `view.rs`); `keys.region` `view:chat`, a handler
+/// `chat-view`.
+pub const V: u64 = 8;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -61,6 +63,8 @@ pub enum Region {
     Popup,
     /// Labels up for pointing at an element (`point.rs`): letters pick one, Esc stops.
     Point,
+    /// A surface's view mode (`view.rs`): Helix's moves and selections on what it shows.
+    View(crate::view::Surface),
 }
 
 impl Region {
@@ -81,6 +85,7 @@ impl Region {
             Region::NextCard => "next-card".into(),
             Region::Popup => "popup".into(),
             Region::Point => "point".into(),
+            Region::View(s) => format!("view:{}", s.name()),
         }
     }
 
@@ -104,6 +109,7 @@ impl Region {
             Region::NextCard => Handler::NextCard,
             Region::Popup => Handler::Popup,
             Region::Point => Handler::Point,
+            Region::View(_) => Handler::ChatView,
         }
     }
 }
@@ -142,6 +148,7 @@ pub enum Handler {
     Popup,
     EditReview,
     Picker,
+    ChatView,
     Unfold,
     Chat,
     Rail,
@@ -164,6 +171,7 @@ impl Handler {
             Handler::Popup => "popup",
             Handler::EditReview => "edit-review",
             Handler::Picker => "picker",
+            Handler::ChatView => "chat-view",
             Handler::Unfold => "chat-minimized",
             Handler::Chat => "chat",
             Handler::Rail => "review",
@@ -379,6 +387,24 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
+        // `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing under way
+        // `C-w` and the chat's chords go on (to `chat::key`'s, which takes only those then)
+        let viewing = crate::view::has_keys(self).filter(|_| !pending);
+        if let Some(s) = viewing {
+            let view = self.session.view.as_ref().expect("has_keys: a view");
+            if self.prompt.is_some() {
+                if view.prompt {
+                    v.push(layer(Region::Prompt, Filter::All));
+                }
+            } else if view.pending().is_empty() && !view.waits() {
+                v.push(layer(Region::View(s), Filter::Except(crate::view::passes(self))));
+                let chords = crate::view::passes(self).into_iter().filter(|k| k.code != Code::Char('w'));
+                let chords: Vec<Key> = chords.collect();
+                v.push(layer(Region::Chat, Filter::Only(chords)));
+            } else {
+                v.push(layer(Region::View(s), Filter::All));
+            }
+        }
         // `chat::unfold_key`: minimized, what would type brings it back — its own keys (and `C-w` from an
         // empty input) go on
         if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && c.compact() && !pending) {
@@ -402,7 +428,7 @@ impl Editor {
             v.push(layer(Region::Unfold, Filter::Except(passes)));
         }
         // `chat::key` — before the prompt: it doesn't ask whether one is open
-        if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && !pending) {
+        if let Some(c) = self.session.chat.as_ref().filter(|c| c.focused && !pending && viewing.is_none()) {
             v.push(match c.input.is_empty() {
                 true => layer(Region::Chat, Filter::Except(vec![ctrl('w'), Key { alt: true, ..ctrl('w') }])),
                 false => layer(Region::Chat, Filter::All),
@@ -532,15 +558,21 @@ impl Editor {
             Region::EditReview => vec!['y', 'n', 'a', 'q'],
             _ => Vec::new(),
         };
+        let view =
+            crate::view::has_keys(self).and(self.session.view.as_ref()).filter(|_| self.pending.is_empty());
         let mut pending: Vec<String> = self.count.iter().map(|n| n.to_string()).collect();
         pending.extend(self.pending.iter().map(Key::to_string));
+        // (a view mode's own count and keys, while it has them)
+        if let Some(v) = view {
+            pending = v.pending_keys();
+        }
         KeysTo {
             region,
             takes,
             answers,
             held,
             pending: pending.join(" "),
-            char_next: self.on_next_char.is_some(),
+            char_next: self.on_next_char.is_some() || view.is_some_and(|v| v.char_next()),
             drawn: self.drawn(region),
             under,
             to: self.element_id(region),
@@ -574,6 +606,7 @@ impl Editor {
             Region::NextCard => true,
             Region::Popup => s.popup.get().is_some(),
             Region::Point => self.pointing.is_some(),
+            Region::View(crate::view::Surface::Chat) => s.chat_view.get().is_some(),
         }
     }
 
@@ -587,7 +620,7 @@ impl Editor {
             Region::Slot(Slot::Terminal) | Region::Program => "terminal".into(),
             Region::Slot(s) => slot_name(s).into(),
             Region::Rail => "review".into(),
-            Region::Unfold => "chat".into(),
+            Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),
             other => other.name(),
         }
     }
@@ -864,6 +897,9 @@ pub struct SessionState {
     pub billing: &'static str,
     /// What its last sandboxed run's sandbox keeps apart and shares (`Session.sandbox`) — None: none yet.
     pub sandbox: Option<crate::sandbox::guarantees::Guarantees>,
+    /// A surface's view mode (`view::state`: its surface, the cursor's line of how many, selections, whether
+    /// something came since — shapes, never text) — the front session's only; Claude's level never.
+    pub view: Option<Value>,
 }
 
 /// A session's reviewer (`reviewer.rs`) as the state says it: its last run — reading, done or stopped — and
@@ -1241,6 +1277,7 @@ impl Editor {
             account: l.usage.account.as_ref().map(|a| (a.organization.clone(), a.plan.clone())),
             billing: l.billing.name(),
             sandbox: l.sandbox.clone(),
+            view: if is_front { crate::view::state(self) } else { None },
         };
         let mut sessions = vec![session(front, true)];
         sessions.extend(self.sessions.iter().map(|l| session(l, false)));
@@ -1443,6 +1480,9 @@ impl UiState {
                 if let Some(c) = &s.compacted {
                     v["compacted"] = c.json();
                 }
+                if let Some(view) = &s.view {
+                    v["view"] = view.clone();
+                }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);
                 }
@@ -1553,6 +1593,18 @@ impl UiState {
             }
             if let Some(c) = &s.compacted {
                 out.push(format!("compacted {}: {}", s.id, c.text()));
+            }
+            if let Some(v) = &s.view {
+                out.push(format!(
+                    "view {}: {} line {}/{} · {} selection{}{}",
+                    s.id,
+                    v["surface"].as_str().unwrap_or(""),
+                    v["line"],
+                    v["lines"],
+                    v["selections"],
+                    if v["selections"] == 1 { "" } else { "s" },
+                    if v["held"] == true { " · new text after" } else { "" },
+                ));
             }
             if let Some(r) = &s.reviewer_run {
                 out.push(format!("reviewer {}: {}", s.id, r.text()));

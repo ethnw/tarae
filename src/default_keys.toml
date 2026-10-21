@@ -254,6 +254,8 @@ l = "chat_open"
 L = "chat_close"
 # Point at something on screen (a card, a row, a run) — it goes with your next chat message (C-o in the chat)
 "@" = "chat_point"
+# The chat's conversation under a cursor: read, search, copy (esc from the chat's input too)
+">" = "chat_view"
 n = "note_here"
 N = "note_picker"
 u = "undo_turn"
@@ -350,6 +352,26 @@ b = "extend_prev_word_start"
 e = "extend_next_word_end"
 v = "normal_mode"
 esc = "normal_mode"
+
+# View mode — a cursor on what a surface shows (the chat's conversation): normal mode's moves, selections,
+# search and counts (kept to `view::COMMANDS`; your [keys.normal] spill in), these on top, then [view.<surface>]
+[view]
+up = "scroll_up"
+down = "scroll_down"
+left = "page_up"
+right = "page_down"
+G = "view_latest"
+y = "view_copy"
+ret = "view_input"
+i = "view_input"
+a = "view_input"
+esc = "view_leave"
+# (as tmux's copy mode and less: `q` out too)
+q = "view_leave"
+
+# The chat's input: what its keys run before they're typed
+[chat]
+esc = "chat_view"
 
 [insert]
 esc = "normal_mode"

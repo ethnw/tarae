@@ -383,7 +383,40 @@ const SCENES: &[Scene] = &[
         frame(ed);
         feed(ed, &["<C-o>"]);
     }),
+    ("the chat's view mode", chat_view),
+    ("the chat's view mode, a count under way", |ed| {
+        chat_view(ed);
+        feed(ed, &["3"]);
+    }),
+    ("the chat's view mode, a row selected", |ed| {
+        chat_view(ed);
+        feed(ed, &["x"]);
+    }),
+    ("the chat's view mode, a sequence under way", |ed| {
+        chat_view(ed);
+        feed(ed, &["g"]);
+    }),
+    ("the chat's view mode, its search prompt", |ed| {
+        chat_view(ed);
+        feed(ed, &["/"]);
+    }),
+    ("a card over the chat's view mode", |ed| {
+        chat_view(ed);
+        light_card(ed);
+    }),
 ];
+
+/// The chat's view mode (`esc` from its input, a draft in it) on a question and its answer.
+fn chat_view(ed: &mut Editor) {
+    use crate::chat::{Msg, Role};
+    chat(ed, "a draft");
+    let c = ed.session.chat.as_mut().unwrap();
+    c.msgs.push(Msg::new(Role::User, "a question", ""));
+    c.msgs.push(Msg::new(Role::Assistant, "An answer, in a few words.", ""));
+    frame(ed);
+    feed(ed, &["<esc>"]);
+    frame(ed);
+}
 
 /// Keys a driver sends: answers, commands, text, the prefixes, `C-q`, Esc. (No Enter: in the chat it would
 /// start a claude.)
@@ -654,6 +687,10 @@ fn no_key_is_refused_in_silence() {
     }
     let quiet = |k: &str, name: &str| match k {
         "<esc>" | "<C-w>" => true,
+        // (view mode's copy: said once the clipboard has it — its job's toast)
+        "y" => name.contains("view mode") && !name.contains("prompt"),
+        // (`x` again on the conversation's last row: no row below to take — `j` at a list's end)
+        "x" => name.contains("a row selected"),
         "j" | "<C-d>" => [
             "side panel",
             "rail",
@@ -665,6 +702,7 @@ fn no_key_is_refused_in_silence() {
             "hover",
             "command line",
             "review",
+            "view mode",
         ]
         .iter()
         .any(|p| name.contains(p)),
@@ -889,6 +927,7 @@ fn keys_out_of_a_chat_filling_a_narrow_screen_go_to_code_in_sight() {
     narrow(&mut ed);
     assert_eq!(ed.keys_to().region, Region::Chat);
     assert_eq!(ed.screen.chat_w, 60, "the chat fills the narrow screen while it has the keys");
+    // (an empty conversation: nothing to view — `esc` is the code's)
     feed(&mut ed, &["<esc>"]);
     narrow(&mut ed);
     let k = ed.keys_to();

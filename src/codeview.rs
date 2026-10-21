@@ -116,6 +116,9 @@ pub struct Shows {
     /// The primary cursor painted as a cell (focused, not INSERT, a block cursor); without the keys it's painted
     /// as the others are.
     pub primary: bool,
+    /// Its cursors are drawn at all: the code has the keys and this is its focused pane (`Editor::cursor_in` —
+    /// one cursor on screen); else its selections only, and the cursor line's wash.
+    pub cursors: bool,
     /// The search's hits — only on the document searched (`SearchHits` are its offsets).
     pub search: bool,
     /// The line on the cursor line's band: the cursor's (`editor.cursorline`, focused only), or a preview's item's.
@@ -480,6 +483,7 @@ impl Shows {
             changes: Changes::of(doc),
             numbers: config.line_number,
             primary: focused && not_insert && crate::term::cursor_shape(editor) == CursorShape::Block,
+            cursors: focused && editor.cursor_in() == Some(crate::chrome::CursorIn::Code),
             search: editor.search_hits.as_ref().is_some_and(|h| h.doc == doc.id),
             cursorline: (focused && config.cursorline).then(|| {
                 let primary = crate::term::cursor_idx(editor.mode, doc.selection().primary(), &doc.text);
@@ -507,6 +511,7 @@ impl Shows {
             changes: Changes::Edit,
             numbers: LineNumber::Absolute,
             primary: false,
+            cursors: false,
             search: false,
             cursorline: None,
             messages: config.inline_diagnostics,
@@ -533,6 +538,7 @@ impl Shows {
             changes: Changes::Index,
             numbers: LineNumber::Absolute,
             primary: false,
+            cursors: false,
             search: false,
             cursorline: item,
             messages: config.inline_diagnostics,

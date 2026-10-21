@@ -1,4 +1,4 @@
-# plugin_panel · 100x30 · theme meok · cursor 2:4
+# plugin_panel · 100x30 · theme meok · cursor hidden
 ## text
 00  tarae  ›  app.yaml
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
 04
 05
@@ -93,5 +93,5 @@
 28   dd dddd d dddddddd
 29  a TTTTT                                                                            ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

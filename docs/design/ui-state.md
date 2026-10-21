@@ -118,8 +118,9 @@ side git · 4 rows · in hand git:src/term.rs
 
 - **`keys`** — the field that would have stopped all four slips.
   - `to`: the element id that takes the next key.
-  - `region`: `code` · `prompt` · `picker` · `chat` · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` ·
-    `terminal-program` · `card`.
+  - `region`: `code` · `prompt` · `picker` · `chat` · `view:chat` (the chat's view mode — `view.rs`, its
+    handler `chat-view`, V 8) · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` · `terminal-program` ·
+    `card`. In a view mode `pending` and `char_next` are its own (its count, `g`, `f`).
   - `takes`:
     - `commands`: normal mode, panels.
     - `text`: letters become text — insert mode, the chat input, a prompt, a picker query.
@@ -136,6 +137,9 @@ side git · 4 rows · in hand git:src/term.rs
 
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
+- **`sessions[].view`** (V 8, the front session's only) — a surface's view mode: `surface` (`chat`), the cursor's
+  `line` of `lines`, `selections`, `selects` (wider than a character), `mode` (`normal` · `select`), `held`
+  (something came since it was made). Shapes, never text; Claude's level never has it.
 - **`sessions`** — id, name, branch, `doing` (`Doing`: `idle` · `working` · `waiting` · `done` ·
   `stuck {tool, secs}` — its chat's Claude), `reviewer: "reviewing"` while its reviewer reads, `"waits to review"`
   while it waits its turn in the line (`reviewer.rs`, #195; absent else — a field of its own, not a `doing`: the two work apart and often at once, and a driver

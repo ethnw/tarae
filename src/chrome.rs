@@ -117,6 +117,8 @@ pub enum Keys {
     Card,
     /// Labels up for pointing at an element: letters pick one (`uistate/point.rs`).
     Point,
+    /// A surface's view mode (`view.rs`).
+    View(crate::view::Surface),
 }
 
 impl Keys {
@@ -141,7 +143,13 @@ impl Keys {
             Keys::Slot(Slot::Plugin) => "PANEL",
             Keys::Card => "CARD",
             Keys::Point => "POINT",
+            Keys::View(crate::view::Surface::Chat) => "VIEW · CHAT",
         })
+    }
+
+    /// The chat's, as it's drawn: its input or its view mode has them.
+    pub fn chat(self) -> bool {
+        matches!(self, Keys::Chat | Keys::View(crate::view::Surface::Chat))
     }
 
     /// Whether the code panes are what has them (they're drawn at full strength).
@@ -160,7 +168,47 @@ impl Keys {
     }
 }
 
+/// Where the one cursor on screen is: where the keys go (user decision 2026-10-20 — as Vim and tmux keep one,
+/// and an editor without focus draws no caret). Everywhere else nothing of a cursor: the code keeps only its
+/// cursor-line wash, the input no caret; selections keep their colours (a selection isn't a cursor).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorIn {
+    /// The focused pane's (its primary block, its other cursors, the terminal's own cursor on it).
+    Code,
+    /// The chat's input caret.
+    Input,
+    /// A view mode's cursors (`view.rs`), painted on its rows.
+    View,
+    /// The terminal's program's cursor.
+    Program,
+    /// A prompt's caret (`:`, `/` — a view's search too).
+    Prompt,
+    /// A picker's query caret.
+    Picker,
+}
+
 impl Editor {
+    /// Where the cursor is drawn: `keys_to`'s region — a card's answers taken in normal mode aren't where the keys
+    /// are (what's under it is), a card given them (`C-q`) has none; panels, lists, an edit's review and labels have
+    /// none.
+    pub fn cursor_in(&self) -> Option<CursorIn> {
+        use crate::uistate::Region as R;
+        let k = self.keys_to();
+        let region = match k.region {
+            R::Card(_) if !k.held => k.under.unwrap_or(R::Code),
+            r => r,
+        };
+        Some(match region {
+            R::Code => CursorIn::Code,
+            R::Chat => CursorIn::Input,
+            R::View(_) => CursorIn::View,
+            R::Program => CursorIn::Program,
+            R::Prompt => CursorIn::Prompt,
+            R::Picker => CursorIn::Picker,
+            _ => return None,
+        })
+    }
+
     /// A key the panel with the keys has no use for: said, not swallowed in silence — the routing matrix
     /// found the side panel, the review's file list, `:procs`, the bottom slot and an edit's review taking
     /// any key and doing nothing (`uistate::tests::silent`). `out`: what to do instead.
@@ -187,6 +235,7 @@ impl Editor {
             R::Slot(s) => Keys::Slot(s),
             R::Program => Keys::Program,
             R::Point => Keys::Point,
+            R::View(s) => Keys::View(s),
             R::Code | R::Prompt | R::NextCard | R::Popup => Keys::Code,
         }
     }

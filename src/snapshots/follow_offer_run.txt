@@ -1,4 +1,4 @@
-# follow_offer_run · 100x30 · theme meok · cursor 2:4
+# follow_offer_run · 100x30 · theme meok · cursor hidden
 ## text
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03                                                              pppppppppppppppppppppppppppppppppppppp
 04     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
 05     111111111111111111111111111111111111111111111111111111111pppppppppppppppppppppppppppppppppppppp1
@@ -93,5 +93,5 @@
 28
 29  a TTTT                                                                      dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold
