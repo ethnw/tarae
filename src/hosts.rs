@@ -7,7 +7,7 @@
 //! and sessions.
 //!
 //! What lasts: `y` lives in the proxy for that run; `s` and `n` in the proxy for the session, `s` listed in
-//! `Session.hosts` (`:sandbox-allowed` takes it back); `A` in `$state/sandbox.json` (`allow::Allowed.hosts`),
+//! `Session.hosts` (`:granted` takes it back); `A` in `$state/sandbox.json` (`allow::Allowed.hosts`),
 //! which the next runs' rules carry (`tools::with_allowed`).
 //!
 //! 6e+ (`target/sb/step6eplus-design.md`): raw TCP to a host:port (`What::HostRaw`) and a name's SRV/TXT records
@@ -71,7 +71,7 @@ fn doing(kind: Kind, host: &str, port: u16) -> String {
     }
 }
 
-/// How `:sandbox-allowed` lists it and `:sandbox-disallow` takes it (`host a:443`, `raw a:22`, `lookup a`).
+/// How `:granted` lists it and `:sandbox-disallow` takes it (`host a:443`, `raw a:22`, `lookup a`).
 pub fn listed(kind: Kind, host: &str, port: u16) -> String {
     match kind {
         Kind::Host => format!("host {host}:{port}"),
@@ -277,7 +277,7 @@ fn keep(ed: &mut Editor, session: u64, run: u64, kind: Kind, host: &str, port: u
                 ed.session.hosts.push((kind, host.into(), port));
             }
             tell(ed, format!("The user let your commands {doing} — for this session."));
-            ed.set_success(format!("Commands may {doing} in this session — :sandbox-allowed lists it"));
+            ed.set_success(format!("Commands may {doing} in this session — :granted lists it"));
         }
         Scope::Project => {
             let kept = host.to_string();
@@ -286,7 +286,7 @@ fn keep(ed: &mut Editor, session: u64, run: u64, kind: Kind, host: &str, port: u
                 ed,
                 format!("The user let your commands {doing} — in this project, until they take it back."),
             );
-            ed.set_success(format!("Commands may {doing} in this project — :sandbox-allowed lists it"));
+            ed.set_success(format!("Commands may {doing} in this project — :granted lists it"));
         }
         Scope::Refused => {
             if ours {

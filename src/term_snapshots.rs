@@ -3736,6 +3736,7 @@ fn snapshot_sandbox_blocked() {
     s.keys("<ret>");
     s.check("sandbox_blocked_card");
     dump(&mut s, "sandbox_blocked_card");
+    s.frames_both("sandbox_blocked_card");
 }
 
 /// 9f: what was blocked, then the AppArmor profile's step — its row last, after running it outside; the header's
@@ -3784,6 +3785,70 @@ fn snapshot_sandbox_blocked_with_step() {
 /// A failed `npm test` of Claude's the sandbox blocked a write in npm's cache and a port in, as its panel has it
 /// (macOS: the fixed folder is in `/private/tmp` so the paths read the same every run).
 #[cfg(target_os = "macos")]
+/// cardauto 7: `:granted` — the defaults first, each saying why, then the answers under how long they last, newest
+/// first, with when — and the chat title's faint `› N granted` (`granted_chip`). Full, narrow, nothing past the
+/// defaults; both themes with `TARAE_FRAMES_DIR` (`frames_both`). The list is made from a `Caps` given here, not
+/// found (the toolchains found are this machine's); macOS only, as `snapshot_sandbox_blocked`: its places are in
+/// `/private/tmp` (none under home — `~` is this machine's), so they read the same every run.
+#[cfg(target_os = "macos")]
+#[test]
+fn snapshot_granted() {
+    use crate::allow::{Allowed, Grant};
+    use crate::caps::{Caps, Entry, Source, Why};
+    use crate::sandbox::proxy::Kind;
+    let at = |p: &str| PathBuf::from(format!("/private/tmp/tarae-shot-granted/{p}"));
+    let now = 1_792_000_000;
+    let answer = |a: &mut Allowed, g: Grant, ago: u64| {
+        a.add(&g);
+        a.granted.insert(g, now - ago);
+    };
+    let (mut kept, mut session, mut chat) = (Allowed::default(), Allowed::default(), Allowed::default());
+    answer(&mut kept, Grant::Write(at("npm-cache")), 3 * 86_400);
+    answer(&mut kept, Grant::Host("registry.npmjs.org".into(), 443), 5 * 3600);
+    answer(&mut session, Grant::Port(5432), 2 * 3600);
+    answer(&mut chat, Grant::Read(at("notes")), 12 * 60);
+    answer(&mut chat, Grant::Terminals, 20);
+    let hosts = vec![(Kind::Raw, "db.example.com".to_string(), 5432)];
+    let caps = |answers: [&Allowed; 3]| {
+        let mut c = Caps::granted(&at("tarae"), answers[0], answers[1], answers[2]);
+        let d = |what: PathBuf, why| Entry { what, source: Source::Default(why) };
+        c.read.extend([
+            d(at("tarae-review"), Why::OtherCheckout),
+            d("/private/tmp".into(), Why::Temp),
+            d(at("rustup/toolchains/1.99.0/lib/rustlib/src"), Why::Toolchain),
+            d(at("cargo/registry/src"), Why::Toolchain),
+        ]);
+        c.outside = true;
+        c
+    };
+    let scene = |w: u16, h: u16, answers: [&Allowed; 3], hosts: &[(Kind, String, u16)]| {
+        let mut s = Shot::new(w, h);
+        s.file("src/demo.rs", DEMO_RS);
+        let mut c = crate::chat::Chat::new();
+        c.focused = false;
+        s.ed.session.chat = Some(c);
+        s.ed.session.caps = Some((1, std::sync::Arc::new(caps(answers))));
+        s.ed.session.hosts = hosts.to_vec();
+        s
+    };
+    let full = [&kept, &session, &chat];
+    let mut s = scene(100, 30, full, &hosts);
+    s.check("granted_chip");
+    s.frames_both("granted_chip");
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, now), false);
+    s.check("granted_full");
+    s.frames_both("granted_full");
+    let mut s = scene(60, 24, full, &hosts);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, now), false);
+    s.check("granted_narrow");
+    s.frames_both("granted_narrow");
+    let none = Allowed::default();
+    let mut s = scene(100, 30, [&none; 3], &[]);
+    s.ed.granted_open(crate::granted::items(&caps([&none; 3]), [&none; 3], &[], now), false);
+    s.check("granted_empty");
+    s.frames_both("granted_empty");
+}
+
 fn blocked_npm_run(s: &mut Shot) {
     let cache = PathBuf::from("/private/tmp/tarae-shot-blocked/npm-cache");
     std::fs::create_dir_all(&cache).unwrap();

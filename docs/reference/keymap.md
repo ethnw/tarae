@@ -492,8 +492,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:claude-settings` |  | Look again at what this project's Claude settings run in the chat, and trust them or not |
 | `:claude-update` |  | Look for a newer claude and install it (claude update, as you) |
 | `:claude-login` |  | Log claude in for tarae (claude auth login, in the terminal) |
-| `:sandbox-allowed` |  | What Claude may do past the defaults — take one back |
-| `:sandbox-disallow` |  | Take back what :sandbox-allowed lists |
+| `:granted` | `:sandbox-allowed` | What Claude may do without asking — take one back |
+| `:sandbox-disallow` |  | Take back what :granted lists |
 | `:sandbox-blocked` |  | What the sandbox blocked in Claude's last run: open it |
 | `:sandbox-env` |  | Your environment's names Claude's commands get, and don't |
 | `:chat-screen` |  | Send the screen, as text, with your next chat message |

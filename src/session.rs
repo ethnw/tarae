@@ -197,7 +197,7 @@ pub struct Session {
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
     /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit) — over
-    /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:sandbox-allowed` lists and
+    /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:granted` lists and
     /// takes back; the proxy holds the answers itself (`hosts.rs`).
     pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
     /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
@@ -423,6 +423,8 @@ pub enum Spot {
     Session(SessionId),
     /// `+`: a new session.
     New,
+    /// The chat's `› N granted`: the list of what Claude may do without asking (`:granted`).
+    Granted,
     /// The dropdown's name, the status line's chip: the list (`space W`).
     List,
     /// The dropdown's `◂` · `▸`: the session before · after the one in front.
@@ -1031,6 +1033,7 @@ impl Editor {
                 self.session_switch(step(1));
             }
             Spot::Inbox => self.inbox_open(),
+            Spot::Granted => self.granted(),
         }
     }
 

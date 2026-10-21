@@ -591,6 +591,9 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
+    /// Kept answers taken back whose write to `allow_path` hasn't landed yet (as `:sandbox-disallow` takes them)
+    /// — a `Caps` made meanwhile leaves them out (`caps::Basis.taking`): the next run never has one.
+    pub allow_taking: Vec<String>,
     /// Where cargo's configs told about for their tokens are kept (`tokens::tell_cargo`) — None in tests.
     pub tokens_said: Option<std::path::PathBuf>,
     /// Those told about since tarae started (`~` paths).
@@ -835,6 +838,7 @@ impl Editor {
             project_trust: None,
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
+            allow_taking: Vec::new(),
             tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
@@ -2749,8 +2753,13 @@ impl Editor {
                 self.qlist_from_picker();
                 return;
             }
-            // The session list: its letters act on the row, a digit picks one (nothing is typed)
-            (Code::Char(c), false) if p.keys && !key.alt => return self.session_list_key(c),
+            // The session list, `:granted`: their letters act on the row, a digit picks one (nothing is typed)
+            (Code::Char(c), false) if p.keys && !key.alt => {
+                return match p.kind {
+                    crate::granted::KIND => self.granted_key(c),
+                    _ => self.session_list_key(c),
+                };
+            }
             (Code::Backspace, _) if p.keys => return,
             // Global search results: replace what's listed
             (Code::Char('r'), true) if p.grep.is_some() => return self.replace_ask(),
@@ -2872,7 +2881,8 @@ impl Editor {
                 self.replace_apply(&[n]);
                 Ok(())
             }
-            Action::Dir(_) | Action::Message => Ok(()), // folders open in the picker (picker_key)
+            // (folders open in the picker: picker_key; `:granted`'s rows act by their keys)
+            Action::Dir(_) | Action::Message | Action::Heading | Action::Granted(_) => Ok(()),
             Action::Plugin { token, id } => {
                 self.plugin_prompt_done(token, Some(id));
                 Ok(())
@@ -8438,7 +8448,7 @@ mod tests {
 
     /// Claude's Read, Grep and Glob (measured: allowed by name they read anywhere unasked — so they aren't):
     /// inside the project they're allowed at once; outside, a card says exactly what's read — `n` no, `a`
-    /// this chat (what it covers then goes unasked), `A` always (kept for the project, `:sandbox-allowed`
+    /// this chat (what it covers then goes unasked), `A` always (kept for the project, `:granted`
     /// lists it, `:sandbox-disallow` takes it back), and a place that's everything (`/`) only once. Nothing
     /// is read here: the fake claude only asks, and its paths are this test's own temp folder.
     #[test]

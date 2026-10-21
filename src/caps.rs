@@ -28,9 +28,23 @@ pub enum Why {
     Temp,
     /// The toolchains' sources, the crates cargo downloaded, the project's build folders outside it.
     Toolchain,
+    /// Outside home, where it's read by default (`Caps.outside`, D3) — never an entry of `read`: what
+    /// `Caps::default_for` says of a place there.
+    Outside,
 }
 
 impl Why {
+    /// As `:granted` and its toasts say it.
+    pub fn said(self) -> &'static str {
+        match self {
+            Why::Checkout => "this checkout",
+            Why::OtherCheckout => "another checkout",
+            Why::Temp => "the temp folders",
+            Why::Toolchain => "a toolchain's own",
+            Why::Outside => "outside home",
+        }
+    }
+
     // (tests' for now: `:granted` will say it — piece 7)
     #[cfg(test)]
     pub fn word(self) -> &'static str {
@@ -39,6 +53,7 @@ impl Why {
             Why::OtherCheckout => "other-checkout",
             Why::Temp => "temp",
             Why::Toolchain => "toolchain",
+            Why::Outside => "outside",
         }
     }
 }
@@ -198,6 +213,16 @@ impl Caps {
         self.keys.iter().any(|e| e.what == real)
     }
 
+    /// Why `real` is read by default, if it is: a default place holding it, else outside home where that's read
+    /// (but others' homes and volumes).
+    pub fn default_for(&self, real: &Path) -> Option<Why> {
+        let held = self.read.iter().find_map(|e| match e.source {
+            Source::Default(why) if real.starts_with(&e.what) => Some(why),
+            _ => None,
+        });
+        held.or_else(|| (self.outside && self.class(Some(real)) == Class::Elsewhere).then_some(Why::Outside))
+    }
+
     /// The places read by default for `why`.
     pub fn defaults(&self, why: Why) -> impl Iterator<Item = &Path> {
         self.read.iter().filter(move |e| e.source == Source::Default(why)).map(|e| e.what.as_path())
@@ -283,14 +308,47 @@ pub struct Basis {
     pub temp: bool,
     /// Outside home read by default (`Editor.read_outside`).
     pub outside: bool,
+    /// Kept answers taken back, their write not landed yet (`Editor.allow_taking`) — left out of what's read.
+    pub taking: Vec<String>,
 }
 
 impl Basis {
     /// The answers only — the kept ones read from the store, by the checkout's real path. A worker's.
     pub fn granted(&self) -> Caps {
-        let kept =
+        Caps::granted(&self.root, &self.kept(), &self.session, &self.chat)
+    }
+
+    /// The answers kept for the project, but those being taken back. A worker's: it reads the store.
+    pub fn kept(&self) -> Allowed {
+        let mut kept =
             crate::allow::Store::read(self.store.as_deref()).get(&crate::sandbox::profile_path(&self.root));
-        Caps::granted(&self.root, &kept, &self.session, &self.chat)
+        self.taking.iter().for_each(|w| kept.remove(w));
+        kept
+    }
+
+    /// The schema step (plan §2.2): what `caps` (made from this) keeps for the project that a default reads now
+    /// — an old answer the defaults caught up with — taken out of the store, each with why. A worker's: it
+    /// writes the store (only when there's one to take out).
+    pub fn drop_covered(&self, caps: &Caps) -> Vec<(PathBuf, Why)> {
+        let Some(path) = self.store.as_deref() else { return Vec::new() };
+        let covered: Vec<(PathBuf, Why)> = caps
+            .read
+            .iter()
+            .filter(|e| e.source == Source::Grant(Scope::Always))
+            .filter_map(|e| Some((e.what.clone(), caps.default_for(&e.what)?)))
+            .collect();
+        if covered.is_empty() {
+            return covered;
+        }
+        let gone: Vec<String> = covered.iter().map(|(p, _)| p.display().to_string()).collect();
+        let project = crate::sandbox::profile_path(&self.root);
+        match crate::allow::keep(path, &project, |a| gone.iter().for_each(|w| a.remove(w))) {
+            Ok(()) => covered,
+            Err(e) => {
+                crate::log::line("sandbox", "warning", &format!("couldn't drop what a default covers: {e}"));
+                Vec::new()
+            }
+        }
     }
 
     /// The whole value, for home and the variables as the process has them. A worker's: it reads the store and
@@ -325,6 +383,7 @@ impl crate::editor::Editor {
             chat: self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default(),
             temp: self.read_temp,
             outside: self.read_outside,
+            taking: self.allow_taking.clone(),
         }
     }
 
@@ -337,14 +396,27 @@ impl crate::editor::Editor {
     /// is then (in front or behind; gone: dropped), and only over an older one — two out of order keep the newer.
     pub fn caps_sync_of(&mut self, id: crate::event::SessionId) {
         let (store, temp, outside) = (self.allow_path.clone(), self.read_temp, self.read_outside);
+        let taking = self.allow_taking.clone();
         let Some(s) = self.session_by_id(id) else { return };
         s.caps_asked += 1;
         let generation = s.caps_asked;
         let chat = s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-        let basis = Basis { root: s.root.clone(), store, session: s.allowed.clone(), chat, temp, outside };
+        let (root, session) = (s.root.clone(), s.allowed.clone());
+        let basis = Basis { root, store, session, chat, temp, outside, taking };
         self.events.shared_jobs().spawn(move || {
             let caps = Arc::new(basis.build());
-            move |ed: &mut crate::editor::Editor| caps_landed(ed, id, generation, caps)
+            let dropped = basis.drop_covered(&caps);
+            move |ed: &mut crate::editor::Editor| {
+                caps_landed(ed, id, generation, caps);
+                if !dropped.is_empty() {
+                    let said: Vec<String> = dropped
+                        .iter()
+                        .map(|(p, why)| format!("{} ({})", crate::allow::tilde(p), why.said()))
+                        .collect();
+                    ed.set_status(format!("No longer kept — read by default now: {}", said.join(", ")));
+                    ed.unchanged = false;
+                }
+            }
         });
     }
 }
@@ -356,13 +428,14 @@ fn caps_landed(
     generation: u64,
     caps: Arc<Caps>,
 ) {
-    // (nothing on screen reads it yet: `:granted` will)
-    ed.unchanged = true;
+    // (on screen only as the chat's `› N granted`)
+    let shown = crate::granted::count(&ed.session);
     if let Some(s) = ed.session_by_id(id)
         && s.caps.as_ref().is_none_or(|(had, _)| *had < generation)
     {
         s.caps = Some((generation, caps));
     }
+    ed.unchanged = crate::granted::count(&ed.session) == shown;
 }
 
 impl crate::session::Session {

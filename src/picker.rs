@@ -55,6 +55,11 @@ pub enum Action {
     },
     /// A notification since tarae started (`:messages`) — nothing to do; the list is for reading.
     Message,
+    /// A plain list's group heading (`:granted`'s scopes) — drawn faint, never selected.
+    Heading,
+    /// A row of `:granted` (`granted.rs`): an answer `d` takes back (what `:sandbox-disallow` takes), or None —
+    /// a default, not one to take back. Enter does nothing: the list is for reading.
+    Granted(Option<String>),
     /// A local branch (`B` in the git tab): Enter switches to it, `C-r` renames, `C-x` deletes. `held` = where
     /// it's checked out when that's another worktree (as shown — switching there is refused).
     Branch {
@@ -314,6 +319,9 @@ pub struct Picker {
     /// Letters are the list's keys, not a query (the session list: `d` `b` `n`, a digit picks a row) — a
     /// short list nobody needs to filter.
     pub keys: bool,
+    /// Each row's hint keeps its room and a long label is cut in its middle (`:granted`: a place's start and end,
+    /// and where it comes from).
+    pub hints_first: bool,
     /// The buffer with unsaved changes `C-x` was pressed on once (the buffer list) — again closes it.
     pub closing: Option<crate::document::DocId>,
     /// What it is, as counted (`features::PICKERS`) — never its title, which may name a file.
@@ -370,6 +378,7 @@ impl Picker {
             make: None,
             made: None,
             keys: false,
+            hints_first: false,
             closing: None,
             kind: "test",
         };
@@ -567,7 +576,7 @@ impl Picker {
     fn pickable(&self, row: usize) -> bool {
         match &self.tree {
             Some(tm) => tm.rows.get(row).is_some_and(|r| r.item.is_some()),
-            None => row < self.len(),
+            None => row < self.len() && self.item_at(row).is_none_or(|i| i.action != Action::Heading),
         }
     }
 
@@ -604,6 +613,20 @@ impl Picker {
         match self.items.get(i) {
             Some(it) => Some(it),
             None => self.tree.as_ref()?.dirs.get(i - self.items.len()),
+        }
+    }
+
+    /// Row `row` selected, or the nearest that picks something — the list refilled under the row in hand, gone.
+    pub fn select_near(&mut self, row: usize) {
+        self.selected = row.min(self.len().saturating_sub(1));
+        self.settle(1);
+    }
+
+    /// The row in hand says `hint` now — a plain list's answer to a key on it (`:granted`'s default row).
+    pub fn set_current_hint(&mut self, hint: &str) {
+        let Some(&i) = self.matches.get(self.selected).filter(|_| self.tree.is_none()) else { return };
+        if let Some(it) = Arc::make_mut(&mut self.items).get_mut(i as usize) {
+            it.hint = hint.to_string();
         }
     }
 
@@ -843,7 +866,12 @@ impl Picker {
 
     /// (items matching, items) — a tree's folders and headings aren't counted.
     pub fn counts(&self) -> (usize, usize) {
-        (self.matches.len(), self.items.len())
+        // (a short list's headings: no query, so every one is matched too)
+        let h = match self.keys {
+            true => self.items.iter().filter(|i| i.action == Action::Heading).count(),
+            false => 0,
+        };
+        (self.matches.len().saturating_sub(h), self.items.len() - h)
     }
 
     /// Visible lines. Scrolls so the selection shows.
@@ -892,9 +920,9 @@ impl Picker {
                     marks: marks(&item.label, &mut self.matcher),
                     selected: row == selected,
                     hint: item.hint.clone(),
-                    hint_first: false,
+                    hint_first: self.hints_first && !item.hint.is_empty(),
                     glyph: item.glyph,
-                    tree: None,
+                    tree: (item.action == Action::Heading).then_some((0, Kind::Group)),
                     spots: Vec::new(),
                 })
                 .collect();
@@ -1036,7 +1064,9 @@ impl Action {
             | Action::Command(_)
             | Action::Typed(_)
             | Action::Grant(_)
-            | Action::Theme(_) => None,
+            | Action::Theme(_)
+            | Action::Heading
+            | Action::Granted(_) => None,
         }
     }
 }

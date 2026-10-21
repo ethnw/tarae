@@ -20,7 +20,7 @@
 17  15     let counts = word_counts(text);   npm was writing …/_cacache/index-v5 in it, in `npm
 18  16     println!("{} distinct words", c   test` — which runs again now with it open,
 19  17 }                                     whichever you choose. s lasts until this session
-20                                           ends, A until :sandbox-allowed takes it back.
+20                                           ends, A until :granted takes it back.
 21
 22                                           y Once   a This chat   s This session   A Always   n No
 23                                        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
@@ -82,7 +82,7 @@
 17  ff                                       ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd
 18  ff              ggg gggggggg gggggg      ddddd d ddddd dddd ddddd ddd dddd dd ddddd
 19  ff                                       ddddddddd ddd ddddddd d ddddd ddddd dddd ddddddd
-20                                           ddddd d ddddd dddddddddddddddd ddddd dd ddddd
+20                                           ddddd d ddddd dddddddd ddddd dd ddddd
 21
 22                                           A        A dddd dddd   A dddd ddddddd   A dddddd   A dd
 23

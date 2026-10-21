@@ -384,11 +384,9 @@ fn grant_offer(
     // (as far as it may be kept: a socket this conversation's at most, a key and Docker's socket this run's —
     // everything else stays in the sandbox)
     let lasts = match (&grant, crate::caps::Caps::storable(&grant)) {
-        (Grant::Host(..), _) => {
-            "This session lasts until you quit, always until :sandbox-allowed takes it back."
-        }
+        (Grant::Host(..), _) => "This session lasts until you quit, always until :granted takes it back.",
         (_, Scope::Always | Scope::Session) => {
-            "s lasts until this session ends, A until :sandbox-allowed takes it back."
+            "s lasts until this session ends, A until :granted takes it back."
         }
         (_, Scope::ThisChat) => {
             "Everything else stays in the sandbox; it's never kept past this conversation."

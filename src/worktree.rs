@@ -1791,7 +1791,7 @@ impl Editor {
 
     /// Every event: the list, while it's open, says what's so now (the row in hand stays).
     pub(crate) fn session_list_sync(&mut self) {
-        if !self.picker.as_ref().is_some_and(|p| p.keys) {
+        if !self.picker.as_ref().is_some_and(|p| p.kind == "sessions") {
             return;
         }
         let items = self.session_items();

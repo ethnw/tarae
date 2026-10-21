@@ -63,6 +63,7 @@ mod gitrepo;
 mod gittool;
 mod gittrust;
 mod grammar;
+mod granted;
 mod graphemes;
 mod grep;
 mod hooks;

@@ -168,7 +168,7 @@ impl Allowed {
         a
     }
 
-    /// Takes back a place, a port, a socket or the terminals (as `:sandbox-allowed` lists it).
+    /// Takes back a place, a port, a socket or the terminals (as `:granted` lists it).
     pub fn remove(&mut self, what: &str) {
         self.remove_only(what);
         let left = self.grants();
@@ -205,7 +205,7 @@ impl Allowed {
     }
 }
 
-/// How `:sandbox-allowed` lists `Grant::Terminals`, and `:sandbox-disallow` takes it back.
+/// How `:granted` lists `Grant::Terminals` for `:sandbox-disallow` to take it back.
 pub const TERMINALS_LISTED: &str = "terminals";
 
 /// `host:port` as a kept answer or `:sandbox-disallow` writes it: one name (as the proxy reads names) at its
@@ -427,10 +427,12 @@ impl Store {
     }
 }
 
+/// `keep`'s turn: one at a time (a test holds it to see what goes on before a write lands).
+pub(crate) static KEEP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Changes what `project` always allows (on a worker — read, change, write; one at a time).
 pub fn keep(path: &Path, project: &Path, change: impl FnOnce(&mut Allowed)) -> Result<(), String> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _held = KEEP.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = Store::read(Some(path));
     change(store.projects.entry(project.to_path_buf()).or_default());
     if let Some(dir) = path.parent() {
@@ -786,16 +788,28 @@ pub fn home() -> Option<PathBuf> {
 /// Keeps `change` for the project (the session's root, resolved on the worker as a run's policy resolves it —
 /// the real path the next runs read the kept answers by: `tools::guard_then_go`), on a worker (an error says so).
 pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
-    let Some(path) = ed.allow_path.clone() else { return };
+    keep_later_then(ed, change, |_| {});
+}
+
+/// `keep_later`, and `then` once it's written or failed — at once when nothing is kept (tests).
+fn keep_later_then(
+    ed: &mut crate::editor::Editor,
+    change: impl FnOnce(&mut Allowed) + Send + 'static,
+    then: impl FnOnce(&mut crate::editor::Editor) + Send + 'static,
+) {
+    let Some(path) = ed.allow_path.clone() else { return then(ed) };
     let project = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
         let r = keep(&path, &crate::sandbox::profile_path(&project), change);
-        move |ed: &mut crate::editor::Editor| match r {
-            Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
-            // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
-            Ok(_) => {
-                crate::reads::kept_keys_load(ed);
-                ed.caps_sync();
+        move |ed: &mut crate::editor::Editor| {
+            then(ed);
+            match r {
+                Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
+                // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
+                Ok(_) => {
+                    crate::reads::kept_keys_load(ed);
+                    ed.caps_sync();
+                }
             }
         }
     });
@@ -827,13 +841,10 @@ fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
 /// How long `scope` lasts, as Claude hears it and as the toast ends.
 fn lasting(scope: Scope) -> (&'static str, &'static str) {
     match scope {
-        Scope::Always => {
-            ("in this project, until they take it back", " in this project — :sandbox-allowed lists it")
+        Scope::Always => ("in this project, until they take it back", " in this project — :granted lists it"),
+        Scope::Session => {
+            ("in this session, until it ends or they take it back", " in this session — :granted lists it")
         }
-        Scope::Session => (
-            "in this session, until it ends or they take it back",
-            " in this session — :sandbox-allowed lists it",
-        ),
         Scope::ThisChat | Scope::Once => ("for the rest of this conversation", " in this conversation"),
     }
 }
@@ -888,66 +899,6 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
 }
 
 impl crate::editor::Editor {
-    /// `:sandbox-allowed` — what Claude may do past the defaults here, always (kept) and in this
-    /// conversation; Enter takes one back.
-    pub fn sandbox_allowed(&mut self) {
-        use crate::picker::{Action, FillError, Item};
-        let chat = self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
-        let session = self.session.allowed.clone();
-        let (path, project) = (self.allow_path.clone(), self.session.root.clone());
-        let session_hosts = self.session.hosts.clone();
-        let fill: crate::picker::Fill = Box::new(move || {
-            let kept = Store::read(path.as_deref()).get(&crate::sandbox::profile_path(&project));
-            let row = |label: String, hint: String| Item {
-                action: Action::Typed(format!("sandbox-disallow {label}")),
-                label,
-                hint,
-                glyph: Some(("◦", "ui.virtual")),
-            };
-            let mut items = Vec::new();
-            for (a, when) in [(&kept, "always"), (&session, "this session"), (&chat, "this chat")] {
-                let not_kept = |also: bool| when == "always" || !also;
-                for p in a.read.iter().filter(|p| not_kept(kept.read.contains(p))) {
-                    items.push(row(p.display().to_string(), format!("reads · {when}")));
-                }
-                for p in a.write.iter().filter(|p| not_kept(kept.write.contains(p))) {
-                    items.push(row(p.display().to_string(), format!("writes · {when}")));
-                }
-                for n in a.ports.iter().filter(|n| not_kept(kept.ports.contains(n))) {
-                    items.push(row(format!("port {n}"), format!("connects · {when}")));
-                }
-                for s in &a.sockets {
-                    items.push(row(format!("socket {}", s.display()), format!("connects · {when}")));
-                }
-                if a.terminals && not_kept(kept.terminals) {
-                    items.push(row(TERMINALS_LISTED.into(), format!("opens /dev/ttys* · {when}")));
-                }
-                for k in a.keys.iter().filter(|k| not_kept(kept.keys.contains(k))) {
-                    items.push(row(k.display().to_string(), format!("reads, named like a key · {when}")));
-                }
-            }
-            // (hosts: the project's, and this session's — not a conversation's; raw and lookups only the session's)
-            for (h, p) in &kept.hosts {
-                items.push(row(format!("host {h}:{p}"), "reaches · always".into()));
-            }
-            for (kind, h, p) in &session_hosts {
-                let verb = match kind {
-                    crate::sandbox::proxy::Kind::Host => "reaches",
-                    crate::sandbox::proxy::Kind::Raw => "raw TCP",
-                    crate::sandbox::proxy::Kind::Lookup => "looks up records",
-                };
-                items.push(row(crate::hosts::listed(*kind, h, *p), format!("{verb} · this session")));
-            }
-            match items.is_empty() {
-                true => Err(FillError::Nothing("nothing allowed past the defaults in this project".into())),
-                false => Ok(items),
-            }
-        });
-        let p = crate::picker::Picker::of("allowed", "allowed — enter takes it back", Vec::new(), false)
-            .without_preview();
-        self.open_picker(p, Some(fill));
-    }
-
     /// `:sandbox-disallow <path | port N | socket path | host name:port | raw name:port | lookup name>` — taken
     /// back (this conversation, this session and kept): Claude asks again before reading there, its commands can't
     /// write there or connect there, a host (raw TCP to it, its records) is asked again (its runs going on too — the
@@ -963,10 +914,23 @@ impl crate::editor::Editor {
         {
             return Err(
                 "usage: :sandbox-disallow <path | port N | socket path | terminals | host name:port | raw \
-                        name:port | lookup name> — as :sandbox-allowed lists it"
+                        name:port | lookup name> — as :granted lists it"
                     .into(),
             );
         }
+        // (what goes, as Claude was told it: every answer `what` names, whichever scope — the session's `Caps` has
+        // the kept ones too)
+        let gone: Vec<String> = self.session.caps().map_or_else(Vec::new, |c| {
+            let named = |g: &Grant| {
+                let mut one = Allowed::default();
+                one.add(g);
+                one.remove(&what);
+                one.is_empty()
+            };
+            let mut gone: Vec<String> = c.grants().iter().filter(|g| named(g)).map(Grant::shown).collect();
+            gone.dedup();
+            gone
+        });
         if let Some(c) = self.session.chat.as_mut() {
             c.allowed.remove(&what);
         }
@@ -975,14 +939,21 @@ impl crate::editor::Editor {
         if self.session.allowed != had {
             self.sessions_keep();
         }
-        self.caps_sync();
         if let Some((kind, h, p)) = host {
             self.session.hosts.retain(|(sk, sh, sp)| (*sk, sh, *sp) != (kind, &h, p));
             crate::hosts::taken(&self.session, kind, &h, p);
         }
-        let taken = what.clone();
-        keep_later(self, move |a| a.remove(&taken));
-        self.set_success(format!("Taken back: {what}"));
+        // (a run's `Caps` made before the write lands leaves it out too: `caps::Basis.taking`)
+        self.allow_taking.push(what.clone());
+        let (taken, landed) = (what.clone(), what.clone());
+        keep_later_then(self, move |a| a.remove(&taken), move |ed| ed.allow_taking.retain(|w| *w != landed));
+        self.caps_sync();
+        let said = if gone.is_empty() { what.clone() } else { gone.join("; ") };
+        self.session.checkpoints.tell.push(format!(
+            "The user took back what they had let you and your commands do: {said} — it's asked again from the \
+             next run and the next read on."
+        ));
+        self.set_success(format!("Taken back: {said}"));
         Ok(())
     }
 }

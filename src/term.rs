@@ -5078,6 +5078,7 @@ fn draw_list_row(
     let fold = match r.tree {
         // (a note: its place, in line with the names above)
         Some((_, Kind::Note)) => Some(" "),
+        Some((_, Kind::Group)) => None,
         Some((_, Kind::Dir { open: Some(true) })) => Some("−"),
         Some((_, Kind::Dir { open: Some(false) })) => Some("+"),
         Some(_) if r.glyph.is_none() => Some(" "),
@@ -5114,7 +5115,9 @@ fn draw_list_row(
     let fits = label_room.saturating_sub(used + usize::from(dir));
     let cut;
     let r = if r.label.width() > fits {
-        let named = matches!(r.tree, Some((_, Kind::File | Kind::Dir { .. })));
+        // (a plain row whose hint keeps its room: a place, its start and its end kept — `:granted`)
+        let named =
+            matches!(r.tree, Some((_, Kind::File | Kind::Dir { .. }))) || (r.hint_first && r.tree.is_none());
         let (label, marks) = if named {
             fit_middle(&r.label, &r.marks, fits)
         } else {
@@ -5132,6 +5135,10 @@ fn draw_list_row(
                 name.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
             let st = Style { bg: base.bg, ..st };
             used += print_matched(out, &r.label, &r.marks, st, matched, label_room.saturating_sub(used))?;
+        }
+        // A plain list's group heading (`:granted`'s scopes) faint — the rows under it are what's read
+        Some((_, Kind::Group)) => {
+            used += print_matched(out, &r.label, &[], faint, matched, label_room.saturating_sub(used))?;
         }
         // Folders dim with a faint `/`; a hit's line number faint
         Some((_, Kind::Dir { .. })) => {
@@ -5322,7 +5329,9 @@ fn draw_picker(
             | Action::Branch { .. }
             | Action::Session(_)
             | Action::Inbox(_)
-            | Action::Plugin { .. },
+            | Action::Plugin { .. }
+            | Action::Heading
+            | Action::Granted(_),
         )
         | None => String::new(),
     };
@@ -5385,7 +5394,11 @@ fn draw_picker(
             // Nothing is typed in a list whose letters are keys: no `›` — what a digit does, faint
             let n = p.items().len().min(9);
             let right = format!("{}  {count} ", p.title);
-            let say = if n > 1 { format!("1–{n} switch to that row") } else { String::new() };
+            let say = match p.kind {
+                crate::granted::KIND => crate::granted::SAID.to_string(),
+                _ if n > 1 => format!("1–{n} switch to that row"),
+                _ => String::new(),
+            };
             let say = fit_ellipsis(&say, (lw + 2).saturating_sub(3 + right.width() + 2));
             apply(out, faint)?;
             queue!(out, Print("   "), Print(&say))?;
@@ -9347,6 +9360,9 @@ fn session_tabs(
     (spans, spots)
 }
 
+/// The chat title's `› N granted`, as wide as its widest (` › 99+ granted`) whatever the count.
+pub(crate) const GRANTED_W: usize = 14;
+
 fn draw_chat(
     c: &crate::chat::Chat,
     editor: &Editor,
@@ -9708,7 +9724,24 @@ fn draw_chat(
         .map_or(accent, |fg| Style { fg: Some(fg), ..accent });
     apply(out, warn)?;
     queue!(out, Print(bare))?;
-    let title_w = 6 + badge.width() + at_end.width() + bare.width();
+    // What Claude may do without asking past the defaults (`:granted`), faint — as wide for 1 as for 99, so
+    // nothing after it moves when the count does; a click lists them
+    let room = room.saturating_sub(bare.width());
+    let granted = match crate::granted::count(&editor.session) {
+        _ if !bare.is_empty() || room < GRANTED_W => String::new(),
+        0 => String::new(),
+        n @ 1..=99 => format!(" › {n} granted"),
+        _ => " › 99+ granted".into(),
+    };
+    if !granted.is_empty() {
+        let x = text_x + 6 + badge.width() + at_end.width();
+        let spot = (y, x + 1, x + granted.width(), crate::session::Spot::Granted);
+        editor.screen.session_spots.borrow_mut().push(spot);
+        apply(out, faint)?;
+        queue!(out, Print(&granted), Spaces(GRANTED_W - granted.width()))?;
+    }
+    let chip_w = if granted.is_empty() { 0 } else { GRANTED_W };
+    let title_w = 6 + badge.width() + at_end.width() + bare.width() + chip_w;
     // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
     let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
@@ -11375,6 +11408,14 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             }
             Some(_) => hints(&[("enter", "make it and switch"), ("esc", "close")]),
             None => None,
+        }
+    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.kind == crate::granted::KIND) {
+        // (a default isn't one to take back: its row says so)
+        match p.current().map(|i| &i.action) {
+            Some(Action::Granted(Some(_))) => {
+                hints(&[("d", "take it back"), ("j k", "move"), ("esc", "close")])
+            }
+            _ => hints(&[("j k", "move"), ("esc", "close")]),
         }
     } else if let Some(p) = editor.picker.as_ref().filter(|p| p.keys) {
         // The sessions: the checkout tarae started in can't be ended or brought in

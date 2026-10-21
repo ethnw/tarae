@@ -30,6 +30,9 @@ pub enum Kind {
     /// A line of text under the row above (why it isn't fine), in its glyph's color, with no glyph — not
     /// made here either.
     Note,
+    /// A plain list's group heading (`picker::Action::Heading`), faint, where the rows' glyphs start — not
+    /// made here either.
+    Group,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

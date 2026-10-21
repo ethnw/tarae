@@ -748,8 +748,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   every host. One card per host, in the session of the run that asked — another session's keys never answer
   it — and it goes when its run ends. At most 8 hosts of a session wait on cards at once; a ninth is refused
   unasked, and the result says so. An answer after the 20 s counts from the tool's next try. "Always" is kept
-  in `sandbox.json`; `:sandbox-allowed` lists hosts (always, this session) and `:sandbox-disallow host
-  name:port` takes one back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
+  in `sandbox.json`; `:granted` lists hosts (always, this session) and `d` on one (or `:sandbox-disallow host
+  name:port`) takes it back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
   `space m s` as well. While the network is off, the list does nothing
 - **Raw connections and service records** (Linux, where tarae takes a session's connections). A command
   connecting to a host it looked up with something that isn't TLS or HTTP — ssh, a database client, Redis, a
@@ -761,8 +761,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   records show the DNS's operators nothing they don't see already, and every host they name is still asked about
   when connected to. Any other name gets a card, the lookup held meanwhile — answered within about 5 s, it gets the
   records; later, from its next try. Both cards answer `y`, `s` or `n` (no `A`: write the
-  entry in `llm.sandbox-hosts` instead), and `:sandbox-allowed` lists an `s` as `raw name:port` or `lookup name`,
-  taken back by `:sandbox-disallow` with the same words. A raw connection to an address no name was looked up for
+  entry in `llm.sandbox-hosts` instead), and `:granted` lists an `s` as raw TCP to `name:port` or looking up a
+  name's records, taken back by `d` there, or by `:sandbox-disallow raw name:port` / `lookup name`. A raw connection to an address no name was looked up for
   is refused
 - **Through your own proxy.** Where tarae itself goes out through a proxy — `HTTPS_PROXY`, `HTTP_PROXY` or
   `ALL_PROXY` in the environment you started it from, lowercase forms first, as curl reads them — tarae's proxy
@@ -861,8 +861,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   start a container that mounts any folder — as much as running outside the sandbox. And, last, running the command once outside the sandbox. A folder's or a port's card offers `y` once,
   `a` this conversation, `A` always in this project; whichever you pick, the command runs again now with it
   open. "Always" is kept in
-  your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:sandbox-allowed` lists it with what Claude may
-  read, Enter taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
+  your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), and `:granted` lists it with what Claude may
+  read, `d` taking one back. Some places are never offered, only set by hand in `llm.sandbox-write`: home and
   above it, folders that hold keys, folders on your `PATH`, shell, git and tarae settings, launch agents, the
   project's `.git`. Neither are the ports in the table above. Running it outside is a weighty card of its own,
   and only ever once. These runs are yours, not Claude's: Claude hears how one ended with your next message,
@@ -1252,7 +1252,14 @@ for. What's read goes to Claude.
 - `y` once · `a` this conversation · `A` always, in this project · `n` no
 - "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
   "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`, per project), not in the
-  project's files. `:sandbox-allowed` lists them, and Enter on one takes it back
+  project's files. `:granted` lists them, and `d` on one takes it back
+- `:granted` (or a click on the chat title's faint `› 3 granted`) is the whole list of what Claude may do
+  without asking. The defaults come first — this checkout, the repository's other checkouts, the temp folders,
+  the toolchains' own, outside home — each saying why. Then your answers, under how long they last (always ·
+  this session · this chat), newest first, each saying when you gave it. `d` takes an answer back from the next
+  run and the next read on, and Claude hears it with your next message; a default isn't an answer to take
+  back, and its row says so. A kept answer that a default now covers is dropped from `sandbox.json`, and a
+  toast names it
 - Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
   `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
 - Each answer on a card is one `card` line in tarae's log (`~/.local/state/tarae/tarae.log`): the session, why
