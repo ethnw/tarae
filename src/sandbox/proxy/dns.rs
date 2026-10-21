@@ -447,5 +447,10 @@ pub fn framed(msg: &[u8]) -> Vec<u8> {
     f
 }
 
+/// The properties the loops and the fuzz targets hold these readers to (`fuzz/parsers`: `--cfg fuzzing`).
+#[cfg(any(test, fuzzing))]
+#[path = "dns/check.rs"]
+pub(crate) mod check;
+
 #[cfg(test)]
 mod tests;

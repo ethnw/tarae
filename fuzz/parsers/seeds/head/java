@@ -1,0 +1,6 @@
+CONNECT example.invalid:443 HTTP/1.1
+User-Agent: Java/25.0.4.1
+Host: example.invalid
+Accept: */*
+Proxy-Connection: keep-alive
+

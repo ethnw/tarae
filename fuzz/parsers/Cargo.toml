@@ -1,0 +1,95 @@
+# cargo-fuzz targets for tarae's readers of what a sandboxed run sends (V2, README.md): the readers' modules
+# included from tarae's tree as they are, each target one call to the property its in-tree loop holds (`check`).
+# Outside tarae's workspace and the plugin fuzzer's (../Cargo.toml), own lockfile, on the nightly in
+# rust-toolchain.toml — nothing here touches tarae's build.
+[package]
+name = "tarae-fuzz-parsers"
+version = "0.0.0"
+license = "GPL-3.0-or-later"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+test = false
+doc = false
+
+[dependencies]
+libc = "0.2"
+libfuzzer-sys = "0.4"
+
+# `fuzzing`: what cargo-fuzz sets, and what builds the readers' `check` modules
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+# Line tables in a crash's stack
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "sockaddr"
+path = "fuzz_targets/sockaddr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "netlink"
+path = "fuzz_targets/netlink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "msghdr"
+path = "fuzz_targets/msghdr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "head"
+path = "fuzz_targets/head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "origin"
+path = "fuzz_targets/origin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sni"
+path = "fuzz_targets/sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "body"
+path = "fuzz_targets/body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_question"
+path = "fuzz_targets/dns_question.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_response"
+path = "fuzz_targets/dns_response.rs"
+test = false
+doc = false
+bench = false

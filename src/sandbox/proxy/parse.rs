@@ -788,5 +788,10 @@ impl Body {
     }
 }
 
+/// The properties the loops and the fuzz targets hold these parsers to (`fuzz/parsers`: `--cfg fuzzing`).
+#[cfg(any(test, fuzzing))]
+#[path = "parse/check.rs"]
+pub(crate) mod check;
+
 #[cfg(test)]
 pub(super) mod tests;

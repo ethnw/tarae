@@ -1,0 +1,85 @@
+# fuzz/parsers — coverage-guided fuzzing of what a sandboxed run sends
+
+libFuzzer targets (cargo-fuzz) for tarae's readers of bytes a run controls: the supervisor's `struct sockaddr`,
+netlink batches and `struct msghdr`, the egress proxy's request heads, ClientHellos and chunked bodies, the DNS
+questions it answers and the responses it reads (`target/sb/v2-fuzz-plan.md` §1, §3 "A + C").
+
+The readers' modules are included from tarae's tree as they are (`src/lib.rs`, `#[path]`), and each target is one
+call to the **property function** its in-tree loop calls too — the module's `check` (`wire/check.rs`,
+`proxy/parse/check.rs`, `proxy/dns/check.rs`), built for tests and under cargo-fuzz's `--cfg fuzzing`, never in
+tarae's own build. A broken property panics, which is a crash here and a failure there. The loops run in every
+`cargo test`; this crate is optional and nothing of tarae's reads it.
+
+It has its own workspace, lockfile and toolchain (`rust-toolchain.toml`: a dated nightly, which cargo-fuzz needs).
+tarae and the plugin fuzzer in `../` keep the pinned stable.
+
+| target | reader | property (`check::`) | input |
+|---|---|---|---|
+| `sockaddr` | `wire::parse` | `address`: read as the kernel reads it | the address's bytes |
+| `netlink` | `wire::netlink_reads` | `netlink`: taken ⇒ the kernel's model finds no change | a batch |
+| `msghdr` | `wire::read_msg` | `message`: the kernel's model's memory, errno, data, descriptors | a run's memory (below) |
+| `head` | `parse::head` | `head` | what a client sends the proxy |
+| `origin` | `parse::origin` | `origin` | a request to its server (port 80) |
+| `sni` | `parse::server_name` | `sni` | a tunnel's first bytes |
+| `body` | `parse::Body` (chunked) | `body` | first byte: bytes given at a time (1 + 2n), then the body |
+| `dns_question` | `dns::question` | `question` | a run's question |
+| `dns_response` | `dns::response` | `response` | a resolver's answer to `check::asked()` |
+
+`msghdr`'s input is a run's memory (`Fake::from_input`): a byte of flags (1: a datagram), where the header is
+(8 bytes), then pieces, each an address (8 bytes), a length (2 bytes) and its bytes. Numbers are little-endian.
+
+Not here: `linux.rs`'s audit reader (`audit_value` can't be included alone), the keeper's channel (Linux-only, it
+needs the tier and redirect types), and `said_in_output`/`said_in_result` (they need a `Policy`). Their loops
+are in-tree.
+
+## Running
+
+Once, with the network: the nightly in `rust-toolchain.toml`, cargo-fuzz, and a C++ compiler for libFuzzer.
+
+```sh
+rustup toolchain install nightly-2026-10-14 --profile minimal
+cargo install cargo-fuzz
+```
+
+The first build makes `Cargo.lock` (check it in). Run from the repository's root, with this folder named:
+
+```sh
+t=sni  # any target above; `cargo +nightly-2026-10-14 fuzz list --fuzz-dir fuzz/parsers` lists them
+mkdir -p fuzz/parsers/corpus/$t
+cargo +nightly-2026-10-14 fuzz run --fuzz-dir fuzz/parsers $t fuzz/parsers/corpus/$t fuzz/parsers/seeds/$t \
+  -- -max_total_time=600
+```
+
+The first folder is the corpus libFuzzer grows (git-ignored, kept between runs). The second holds the seeds,
+which are read and never written. Builds are optimized with debug assertions and overflow checks on, as in
+tarae's test profile, so an overflow the release build would wrap is a crash here too. `-max_len` matters
+for targets whose limits are past libFuzzer's default of 4096 bytes: `head`/`origin` 12288 (past `HEAD_MAX`),
+`sni` 40000 (past `HELLO_MAX` in records), `msghdr` 20000 (a full iovec array).
+
+`hour.sh` does all of it on Linux: it builds, then runs each target for an hour (`./hour.sh [seconds]`, `JOBS`
+at a time, one per core by default). It leaves `logs/<target>.log` and prints each target's crashes and last
+coverage line (`cov:`, `ft:`). The coverage line, compared over the hour, says whether a target plateaued.
+
+## A crash
+
+libFuzzer stops at the first one and leaves its input in `artifacts/<target>/crash-…` (also `oom-…`,
+`timeout-…`). To run it again and to minimize it:
+
+```sh
+cargo +nightly-2026-10-14 fuzz run  --fuzz-dir fuzz/parsers $t fuzz/parsers/artifacts/$t/crash-…
+cargo +nightly-2026-10-14 fuzz tmin --fuzz-dir fuzz/parsers $t fuzz/parsers/artifacts/$t/crash-…
+```
+
+The minimized input becomes a hex literal in a plain `#[test]` beside the reader, named for what it shows,
+and it's written up in the plan's report form (`v2-fuzz-plan.md` §4).
+
+## Seeds
+
+`seeds/<target>/` is small and checked in: the inputs the in-tree loops start from (captured client heads and
+ClientHellos, glibc's question, laid-out messages and batches). The loops' own builders write them:
+
+```sh
+cargo test writes_fuzz_seeds -- --ignored
+```
+
+Run that again when a builder changes.

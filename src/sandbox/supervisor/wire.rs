@@ -198,7 +198,7 @@ impl From<i32> for Unsent {
 
 impl Unsent {
     /// Tests: the errno the caller gets.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(super) fn errno(&self) -> i32 {
         match self {
             Unsent::Errno(e) => *e,
@@ -311,6 +311,11 @@ pub(super) fn mmsg_at(base: u64, i: u64) -> Option<u64> {
     let at = i.checked_mul(MMSGHDR as u64)?.checked_add(base)?;
     at.checked_add(MMSGHDR as u64).map(|_| at)
 }
+
+/// The properties the loops and the fuzz targets hold these readers to (`fuzz/parsers`: `--cfg fuzzing`).
+#[cfg(any(test, fuzzing))]
+#[path = "wire/check.rs"]
+pub(super) mod check;
 
 #[cfg(test)]
 #[path = "wire/tests.rs"]

@@ -320,6 +320,10 @@ process, or the disk.
   - When a decision changes, its tests change in the same commit.
 
   The second reviewer (`src/reviewer.rs`) asks what each new test explains.
+- **A reader of what a sandboxed run sends keeps its properties in one function** (its module's `check`, built
+  under `cfg(any(test, fuzzing))`): the in-tree loop calls it on seeded mutations in every `cargo test`, and the
+  cargo-fuzz target in [`fuzz/parsers`](fuzz/parsers) calls it on libFuzzer's inputs (a dated nightly, its own
+  workspace; its README says how to run it). A crash found there becomes a plain `#[test]` beside the reader.
 - **New behavior gets a key-sequence test.** In `editor.rs`, `run("text", "keys")` feeds keys to a fresh editor, and you
   assert on the text and selections:
 

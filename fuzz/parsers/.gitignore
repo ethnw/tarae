@@ -1,0 +1,6 @@
+# What a run makes: the build, the corpus it grows, the crashes it finds, its logs (the seeds are checked in)
+/target
+/corpus
+/artifacts
+/coverage
+/logs

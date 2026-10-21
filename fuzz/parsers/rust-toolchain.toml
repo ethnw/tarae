@@ -1,0 +1,6 @@
+# The nightly cargo-fuzz needs (its sanitizer and coverage flags are -Z), dated so a run can be repeated — for this
+# folder only: tarae and the plugin fuzzer keep the pinned stable (../../rust-toolchain.toml). Moving it is a change
+# of its own, with the targets run again.
+[toolchain]
+channel = "nightly-2026-10-14"
+profile = "minimal"

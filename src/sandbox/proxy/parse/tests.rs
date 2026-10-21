@@ -127,11 +127,8 @@ fn every_client_measured_is_read_as_it_was_sent() {
     }
 }
 
-/// Whatever a head holds, the parser answers a request, "more", or a refusal — never a panic, never a byte past
-/// `HEAD_MAX`: a request's head ends at its first blank line, its host is a name as `name` makes it (or an
-/// address), a plain request's head goes on with no `Proxy-*` header and `Connection: close`; "more" only while
-/// no blank line is in the first `HEAD_MAX` bytes. The captured heads mutated 200,000 times, some grown past
-/// `HEAD_MAX` (a long run inside a line puts the blank line beyond it).
+/// Whatever a head holds, the parser answers a request, "more", or a refusal as `check::head` has it. The captured
+/// heads mutated 200,000 times, some grown past `HEAD_MAX` (a long run inside a line puts the blank line beyond it).
 #[test]
 fn the_connect_parser_never_panics() {
     let heads = heads();
@@ -141,33 +138,10 @@ fn the_connect_parser_never_panics() {
         let mut b = heads[rng.below(heads.len())].to_vec();
         mutate(&mut rng, &mut b, HEAD_MAX);
         past += usize::from(b.len() > HEAD_MAX);
-        let blank = find(&b[..b.len().min(HEAD_MAX)], b"\r\n\r\n");
-        match head(&b) {
-            Ok(Some(h)) => {
-                requests += 1;
-                assert!(h.len <= HEAD_MAX && Some(h.len - 4) == blank, "ends at its first blank line");
-                let (Request::Connect { host, port } | Request::Plain { host, port, .. }) = &h.request;
-                assert!(*port > 0);
-                if let Host::Name(n) = host {
-                    assert_eq!(name(n).as_ref(), Ok(n), "a name as `name` makes it");
-                }
-                if let Request::Plain { head: on, .. } = &h.request {
-                    let low = on.to_ascii_lowercase();
-                    assert!(
-                        on.ends_with(b"\r\nConnection: close\r\n\r\n") && find(&low, b"\nproxy-").is_none()
-                    );
-                    // (the body's framing goes on as the client sent it, or the request isn't taken)
-                    let sent = b[..h.len].to_ascii_lowercase();
-                    for f in [&b"\ncontent-length:"[..], b"\ntransfer-encoding:"] {
-                        assert_eq!(find(&low, f).is_some(), find(&sent, f).is_some(), "its framing kept");
-                    }
-                }
-            }
-            Ok(None) => {
-                more += 1;
-                assert!(blank.is_none() && b.len() < HEAD_MAX, "more only while no blank line came");
-            }
-            Err(_) => refusals += 1,
+        match check::head(&b) {
+            "request" => requests += 1,
+            "more" => more += 1,
+            _ => refusals += 1,
         }
     }
     assert!(requests > 1000 && more > 1000 && refusals > 10_000, "{requests} / {more} / {refusals}");
@@ -256,9 +230,8 @@ fn what_cant_start_a_request_is_refused_at_once() {
     }
 }
 
-/// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal — never a panic: a
-/// request it answers ends at the first blank line of what was sent, its host a name as `name` makes it (or an
-/// address) at the port it connected to. The hand-made request mutated 100,000 times, some grown past `HEAD_MAX`.
+/// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal as `check::origin` has
+/// it. The hand-made request mutated 100,000 times, some grown past `HEAD_MAX`.
 #[test]
 fn the_origin_parser_never_panics() {
     let mut rng = Rng(0x6d6d_0d0d_5eed_0006);
@@ -266,19 +239,10 @@ fn the_origin_parser_never_panics() {
     for _ in 0..100_000 {
         let mut b = TO_ITS_SERVER.to_vec();
         mutate(&mut rng, &mut b, HEAD_MAX);
-        let blank = find(&b[..b.len().min(HEAD_MAX)], b"\r\n\r\n");
-        match origin(&b, 80) {
-            Ok(Some(h)) => {
-                requests += 1;
-                assert_eq!(Some(h.len - 4), blank, "ends at its first blank line as sent");
-                let Request::Plain { host, port, .. } = &h.request else { panic!("a CONNECT") };
-                assert_eq!(*port, 80);
-                if let Host::Name(n) = host {
-                    assert_eq!(name(n).as_ref(), Ok(n));
-                }
-            }
-            Ok(None) => assert!(blank.is_none() && b.len() < HEAD_MAX),
-            Err(_) => refusals += 1,
+        match check::origin(&b) {
+            "request" => requests += 1,
+            "more" => {}
+            _ => refusals += 1,
         }
     }
     assert!(requests > 1000 && refusals > 10_000, "{requests} / {refusals}");
@@ -326,28 +290,8 @@ fn padded(hs: &[u8], n: usize) -> Vec<u8> {
     out
 }
 
-/// What a tunnel's first bytes claim, read as the test reads them: the handshake's length and how many records
-/// it took to come whole — None where they don't hold one.
-fn claimed(b: &[u8]) -> Option<(usize, usize)> {
-    let (mut hs, mut at, mut records) = (Vec::new(), 0, 0);
-    loop {
-        if hs.len() >= 4 {
-            let n = usize::from(hs[1]) << 16 | usize::from(hs[2]) << 8 | usize::from(hs[3]);
-            if hs.len() >= 4 + n {
-                return Some((n, records));
-            }
-        }
-        let h = b.get(at..at + 5)?;
-        let len = usize::from(u16::from_be_bytes([h[3], h[4]]));
-        hs.extend_from_slice(b.get(at + 5..at + 5 + len)?);
-        at += 5 + len;
-        records += 1;
-    }
-}
-
-/// Whatever a tunnel's first bytes hold, the parser answers a name, "more", or a refusal — never a panic: a name
-/// it answers is a name as `name` makes it, never an address, and only from a ClientHello within `HELLO_MAX`
-/// that came in `RECORDS_MAX` records at most. The captured ClientHellos mutated 200,000 times, whole and split
+/// Whatever a tunnel's first bytes hold, the parser answers a name, "more", or a refusal as `check::sni` has it:
+/// a name only from a ClientHello within its limits. The captured ClientHellos mutated 200,000 times, whole and split
 /// into records, some padded (lengths fixed) up to twice `HELLO_MAX` in as many records as that takes and up
 /// to two more than `RECORDS_MAX`; and a real one gives the same name in any number of records up to
 /// `RECORDS_MAX`, past it a refusal.
@@ -379,16 +323,10 @@ fn the_sni_parser_never_panics() {
         if rng.below(2) == 0 {
             mutate(&mut rng, &mut b, HELLO_MAX);
         }
-        match server_name(&b) {
-            Ok(Some(n)) => {
-                names += 1;
-                assert_eq!(name(&n).as_ref(), Ok(&n));
-                assert!(n.parse::<IpAddr>().is_err(), "never an address: {n}");
-                let (len, records) = claimed(&b).expect("a name only from a whole ClientHello");
-                assert!(len <= HELLO_MAX && records <= RECORDS_MAX, "within its limits: {len} in {records}");
-            }
-            Ok(None) => more += 1,
-            Err(_) => refusals += 1,
+        match check::sni(&b) {
+            "name" => names += 1,
+            "more" => more += 1,
+            _ => refusals += 1,
         }
     }
     assert!(names > 1000 && more > 1000 && refusals > 10_000, "{names} / {more} / {refusals}");
@@ -595,49 +533,67 @@ fn a_body_ends_where_its_framing_says() {
     assert!(taken(Framing::Chunked, &long_trailers, 64).is_err(), "trailers past their limit");
 }
 
+/// A chunked body: up to three chunks of random sizes, some with an extension, its last chunk with a trailer or
+/// without.
+fn chunked(rng: &mut Rng) -> Vec<u8> {
+    let mut b = Vec::new();
+    for _ in 0..rng.below(4) {
+        let n = 1 + rng.below(300);
+        b.extend_from_slice(format!("{n:x}").as_bytes());
+        if rng.below(3) == 0 {
+            b.extend_from_slice(b";name=value");
+        }
+        b.extend_from_slice(b"\r\n");
+        b.extend((0..n).map(|_| rng.next() as u8));
+        b.extend_from_slice(b"\r\n");
+    }
+    b.extend_from_slice(if rng.below(2) == 0 { b"0\r\n\r\n" } else { b"0\r\nX-T: 1\r\n\r\n" });
+    b
+}
+
 /// Whatever a chunked body's bytes hold, its parser takes at most what it's given, never panics, and once done
-/// takes nothing more: real chunked bodies (random chunk sizes, extensions, trailers) mutated 100,000 times.
+/// takes nothing more (`check::body`): real chunked bodies mutated 100,000 times, given 1–512 bytes at a time.
 #[test]
 fn the_body_parser_never_panics() {
     let mut rng = Rng(0xb0d1_e5ee_d1ce_0005);
     let (mut done, mut errors) = (0, 0);
     for _ in 0..100_000 {
-        let mut b = Vec::new();
-        for _ in 0..rng.below(4) {
-            let n = 1 + rng.below(300);
-            b.extend_from_slice(format!("{n:x}").as_bytes());
-            if rng.below(3) == 0 {
-                b.extend_from_slice(b";name=value");
-            }
-            b.extend_from_slice(b"\r\n");
-            b.extend((0..n).map(|_| rng.next() as u8));
-            b.extend_from_slice(b"\r\n");
-        }
-        b.extend_from_slice(if rng.below(2) == 0 { b"0\r\n\r\n" } else { b"0\r\nX-T: 1\r\n\r\n" });
+        let mut b = chunked(&mut rng);
         mutate(&mut rng, &mut b, CHUNK_LINE_MAX);
-        let mut body = Body::new(Framing::Chunked);
-        let mut at = 0;
-        while at < b.len() {
-            let piece = &b[at..(at + 1 + rng.below(512)).min(b.len())];
-            match body.take(piece) {
-                Ok(k) => {
-                    assert!(k <= piece.len());
-                    if body.done() {
-                        assert_eq!(body.take(b"more"), Ok(0), "nothing more once done");
-                        done += 1;
-                        break;
-                    }
-                    assert_eq!(k, piece.len(), "short only once done");
-                    at += k;
-                }
-                Err(_) => {
-                    errors += 1;
-                    break;
-                }
-            }
+        match check::body(&b, || 1 + rng.below(512)) {
+            "done" => done += 1,
+            "refused" => errors += 1,
+            _ => {}
         }
     }
     assert!(done > 1000 && errors > 10_000, "{done} / {errors}");
+}
+
+/// The fuzz targets' seeds (`fuzz/parsers/seeds/`): `head` the captured heads, `origin` requests to their server,
+/// `sni` the captured ClientHellos whole and in three records, `body` chunked bodies (`check::body_input`'s first
+/// byte: 1, 3, 255, 511 bytes at a time).
+#[test]
+#[ignore = "writes fuzz/parsers/seeds: by hand"]
+fn writes_fuzz_seeds() {
+    use crate::mutate::fuzz_seeds;
+    let client = |k: usize| CAPTURED[k].0.replace([' ', ','], "-");
+    fuzz_seeds("head", heads().into_iter().enumerate().map(|(k, h)| (client(k), h.to_vec())));
+    let get = b"GET /a?b=1 HTTP/1.1\r\nHost: example.invalid:80\r\nAccept: */*\r\n\r\n";
+    fuzz_seeds("origin", [("curl-post".into(), TO_ITS_SERVER.to_vec()), ("get".into(), get.to_vec())]);
+    let tunnels: Vec<usize> =
+        (0..CAPTURED.len()).filter(|&k| CAPTURED[k].1.starts_with(b"CONNECT")).collect();
+    let hellos = hellos().into_iter().zip(&tunnels).flat_map(|(h, &k)| {
+        [(client(k), h.to_vec()), (format!("{}-3-records", client(k)), in_records(&handshake(h), 3))]
+    });
+    fuzz_seeds("sni", hellos);
+    let mut rng = Rng(0xb0d1_e5ee_d1ce_0006);
+    let bodies: Vec<(String, Vec<u8>)> = [0u8, 1, 127, 255]
+        .into_iter()
+        .enumerate()
+        .map(|(k, n)| (format!("chunked-{k}"), [&[n][..], &chunked(&mut rng)].concat()))
+        .collect();
+    assert!(bodies.iter().all(|(_, b)| check::body_input(b) == "done"), "each a whole body");
+    fuzz_seeds("body", bodies);
 }
 
 /// Each refusal is answered with its status (too long 431, a method 405, the rest 400) and said in words that

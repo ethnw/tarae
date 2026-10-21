@@ -121,6 +121,11 @@ toml = "1.1.6"
 [workspace]
 members = ["xtask", "netlink"]
 
+# `fuzzing`: what cargo-fuzz sets (`--cfg fuzzing`) when fuzz/parsers includes a reader's module — its properties
+# (`check`) are built for tests and for it, never in tarae's own build
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dev-dependencies]
 vt100 = "0.16.2"
 wat = "1"  # wasm runtime tests are written as text

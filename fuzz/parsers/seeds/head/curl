@@ -1,0 +1,6 @@
+CONNECT example.invalid:443 HTTP/1.1
+Host: example.invalid:443
+Proxy-Authorization: Basic cnVuOnRhcmFlLWZha2UtdG9rZW4tNQ==
+User-Agent: curl/8.7.1
+Proxy-Connection: Keep-Alive
+

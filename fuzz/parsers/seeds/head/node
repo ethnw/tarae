@@ -1,0 +1,6 @@
+CONNECT example.invalid:443 HTTP/1.1
+host: example.invalid
+connection: close
+proxy-authorization: Basic cnVuOnRhcmFlLWZha2UtdG9rZW4tNQ==
+proxy-connection: keep-alive
+

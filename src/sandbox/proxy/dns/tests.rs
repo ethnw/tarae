@@ -252,35 +252,31 @@ fn a_response_is_read_as_resolvers_write_it() {
 /// each read, or not taken — and what's read holds only records whole within the message.
 #[test]
 fn the_response_reader_never_panics() {
-    let q = query(0x1234, "_mongodb._tcp.cluster.test", TYPE_SRV).unwrap();
-    let target = [&[3][..], b"db1", &[0xc0, 26]].concat();
-    let srv = rr(&[0xc0, 12], TYPE_SRV, 60, &[&[0, 1, 0, 2, 0x69, 0x89][..], &target].concat());
-    let cname = rr(&[0xc0, 12], TYPE_CNAME, 100, &[&[5][..], b"alias", &[0xc0, 26]].concat());
-    let base = response_to(&q, NOERROR, false, &[cname, srv]);
+    let q = check::asked();
+    let base = srv_response(&q);
     let mut rng = Rng(0x5e5e_0d0d_1234_9876);
     let (mut read, mut not) = (0, 0);
     for _ in 0..100_000 {
         let mut b = base.clone();
         mutate(&mut rng, &mut b, 4096);
-        match response(&b, &q) {
-            Ok(Found::Records(r, _)) => {
-                read += 1;
-                assert!(r.len() <= RECORDS_MAX);
-                for x in r {
-                    assert!(x.data().is_some(), "{x:?} writes back");
-                }
-            }
-            Ok(_) => read += 1,
-            Err(()) => not += 1,
+        match check::response(&b, &q) {
+            "not taken" => not += 1,
+            _ => read += 1,
         }
     }
     assert!(read > 1000 && not > 1000, "{read} / {not}");
 }
 
+/// A response to `q`, the SRV question `check::asked`: a CNAME and an SRV record, their names compressed.
+fn srv_response(q: &[u8]) -> Vec<u8> {
+    let target = [&[3][..], b"db1", &[0xc0, 26]].concat();
+    let srv = rr(&[0xc0, 12], TYPE_SRV, 60, &[&[0, 1, 0, 2, 0x69, 0x89][..], &target].concat());
+    let cname = rr(&[0xc0, 12], TYPE_CNAME, 100, &[&[5][..], b"alias", &[0xc0, 26]].concat());
+    response_to(q, NOERROR, false, &[cname, srv])
+}
+
 /// The reader never panics: 100,000 mutations of the questions above (bits, lengths, labels, cuts, runs past
-/// `QUESTION_MAX` — `parse`'s loop) are each read as a question, or refused. A question read is whole: its name
-/// fits the wire (≤ 255) where it's a host name, and the answer written to it echoes it and reads back as one
-/// answer to one question.
+/// `QUESTION_MAX` — `parse`'s loop) are each read as a whole question, or refused (`check::question`).
 #[test]
 fn the_dns_reader_never_panics() {
     let mut rng = Rng(0x6d6d_0d0d_5eed_0e01);
@@ -288,18 +284,20 @@ fn the_dns_reader_never_panics() {
     for i in 0..100_000 {
         let mut b = if i % 2 == 0 { GLIBC_A } else { MIXED_A }.to_vec();
         mutate(&mut rng, &mut b, QUESTION_MAX);
-        match question(&b) {
-            Ok(q) => {
-                read += 1;
-                if let Ok(n) = parse::name(&q.name) {
-                    assert!(wire_name(&n).is_some(), "{n}");
-                }
-                let a = answer(&q, &Answer::Rcode(REFUSED), 300);
-                assert_eq!((&a[..2], &a[4..6]), (&b[..2], &[0, 1][..]));
-                assert_eq!(&a[12..12 + q.raw.len()], &q.raw[..]);
-            }
-            Err(_) => refused += 1,
+        match check::question(&b) {
+            "read" => read += 1,
+            _ => refused += 1,
         }
     }
     assert!(read > 1000 && refused > 10_000, "{read} / {refused}");
+}
+
+/// The fuzz targets' seeds (`fuzz/parsers/seeds/`): `dns_question` the stub's questions above, `dns_response` the
+/// SRV response the reader's loop mutates.
+#[test]
+#[ignore = "writes fuzz/parsers/seeds: by hand"]
+fn writes_fuzz_seeds() {
+    use crate::mutate::fuzz_seeds;
+    fuzz_seeds("dns_question", [("glibc-a".into(), GLIBC_A.to_vec()), ("mixed-a".into(), MIXED_A.to_vec())]);
+    fuzz_seeds("dns_response", [("srv".into(), srv_response(&check::asked()))]);
 }

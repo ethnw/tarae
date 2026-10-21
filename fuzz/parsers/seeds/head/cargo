@@ -1,0 +1,6 @@
+CONNECT index.crates.io:443 HTTP/1.1
+Host: index.crates.io:443
+Proxy-Authorization: Basic cnVuOnRhcmFlLWZha2UtdG9rZW4tNQ==
+User-Agent: cargo/1.99.0 (5f94df478 2026-08-27)
+Proxy-Connection: Keep-Alive
+

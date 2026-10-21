@@ -63,6 +63,18 @@ pub fn text(rng: &mut Rng, s: &mut String, words: &[&str]) {
     *s = c.into_iter().collect();
 }
 
+/// Writes `seeds` (name, bytes) as the fuzz target `target`'s: `fuzz/parsers/seeds/<target>/<name>`, over what's
+/// there by that name. For the ignored `writes_fuzz_seeds` tests, run by hand when a seed's builder changes
+/// (`cargo test writes_fuzz_seeds -- --ignored`) — tarae's tests never read `fuzz/`.
+pub fn fuzz_seeds(target: &str, seeds: impl IntoIterator<Item = (String, Vec<u8>)>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/parsers/seeds").join(target);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, bytes) in seeds {
+        assert!(!name.is_empty() && !name.contains(['/', '.']), "a seed's name: {name:?}");
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+}
+
 /// One to three of: a byte changed (to any, or a bit flipped), one of `words` put in, a cut, a byte put in.
 pub fn bytes(rng: &mut Rng, b: &mut Vec<u8>, words: &[&[u8]]) {
     for _ in 0..1 + rng.below(3) {

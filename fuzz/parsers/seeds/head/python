@@ -1,0 +1,4 @@
+CONNECT example.invalid:443 HTTP/1.1
+Proxy-Authorization: Basic cnVuOnRhcmFlLWZha2UtdG9rZW4tNQ==
+Host: example.invalid:443
+

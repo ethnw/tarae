@@ -1,0 +1,123 @@
+//! The properties the proxy's parsers keep, one function a parser — whatever the bytes, each holds or the function
+//! panics: the in-tree loops (`tests.rs`) call them on seeded mutations, the fuzz targets (`fuzz/parsers`, built with
+//! `--cfg fuzzing`) on libFuzzer's inputs. Each says what came of its input in a word.
+
+use super::*;
+
+/// Whatever a head holds, the parser answers a request, "more", or a refusal — never a panic, never a byte past
+/// `HEAD_MAX`: a request's head ends at its first blank line, its host is a name as `name` makes it (or an
+/// address), a plain request's head goes on with no `Proxy-*` header and `Connection: close`, its body's framing as
+/// the client sent it; "more" only while no blank line is in the first `HEAD_MAX` bytes.
+pub(crate) fn head(b: &[u8]) -> &'static str {
+    let blank = find(&b[..b.len().min(HEAD_MAX)], b"\r\n\r\n");
+    match super::head(b) {
+        Ok(Some(h)) => {
+            assert!(h.len <= HEAD_MAX && Some(h.len - 4) == blank, "ends at its first blank line");
+            let (Request::Connect { host, port } | Request::Plain { host, port, .. }) = &h.request;
+            assert!(*port > 0);
+            if let Host::Name(n) = host {
+                assert_eq!(name(n).as_ref(), Ok(n), "a name as `name` makes it");
+            }
+            if let Request::Plain { head: on, .. } = &h.request {
+                let low = on.to_ascii_lowercase();
+                assert!(on.ends_with(b"\r\nConnection: close\r\n\r\n") && find(&low, b"\nproxy-").is_none());
+                // (the body's framing goes on as the client sent it, or the request isn't taken)
+                let sent = b[..h.len].to_ascii_lowercase();
+                for f in [&b"\ncontent-length:"[..], b"\ntransfer-encoding:"] {
+                    assert_eq!(find(&low, f).is_some(), find(&sent, f).is_some(), "its framing kept");
+                }
+            }
+            "request"
+        }
+        Ok(None) => {
+            assert!(blank.is_none() && b.len() < HEAD_MAX, "more only while no blank line came");
+            "more"
+        }
+        Err(_) => "refused",
+    }
+}
+
+/// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal — never a panic: a
+/// request it answers ends at the first blank line of what was sent, its host a name as `name` makes it (or an
+/// address) at the port it connected to (80 here).
+pub(crate) fn origin(b: &[u8]) -> &'static str {
+    let blank = find(&b[..b.len().min(HEAD_MAX)], b"\r\n\r\n");
+    match super::origin(b, 80) {
+        Ok(Some(h)) => {
+            assert_eq!(Some(h.len - 4), blank, "ends at its first blank line as sent");
+            let Request::Plain { host, port, .. } = &h.request else { panic!("a CONNECT") };
+            assert_eq!(*port, 80);
+            if let Host::Name(n) = host {
+                assert_eq!(name(n).as_ref(), Ok(n));
+            }
+            "request"
+        }
+        Ok(None) => {
+            assert!(blank.is_none() && b.len() < HEAD_MAX);
+            "more"
+        }
+        Err(_) => "refused",
+    }
+}
+
+/// What a tunnel's first bytes claim, read apart from the parser: the handshake's length and how many records it
+/// took to come whole — None where they don't hold one.
+pub(crate) fn claimed(b: &[u8]) -> Option<(usize, usize)> {
+    let (mut hs, mut at, mut records) = (Vec::new(), 0, 0);
+    loop {
+        if hs.len() >= 4 {
+            let n = usize::from(hs[1]) << 16 | usize::from(hs[2]) << 8 | usize::from(hs[3]);
+            if hs.len() >= 4 + n {
+                return Some((n, records));
+            }
+        }
+        let h = b.get(at..at + 5)?;
+        let len = usize::from(u16::from_be_bytes([h[3], h[4]]));
+        hs.extend_from_slice(b.get(at + 5..at + 5 + len)?);
+        at += 5 + len;
+        records += 1;
+    }
+}
+
+/// Whatever a tunnel's first bytes hold, the parser answers a name, "more", or a refusal — never a panic: a name it
+/// answers is a name as `name` makes it, never an address, and only from a ClientHello within `HELLO_MAX` that came
+/// in `RECORDS_MAX` records at most (`claimed`).
+pub(crate) fn sni(b: &[u8]) -> &'static str {
+    match server_name(b) {
+        Ok(Some(n)) => {
+            assert_eq!(name(&n).as_ref(), Ok(&n));
+            assert!(n.parse::<IpAddr>().is_err(), "never an address: {n}");
+            let (len, records) = claimed(b).expect("a name only from a whole ClientHello");
+            assert!(len <= HELLO_MAX && records <= RECORDS_MAX, "within its limits: {len} in {records}");
+            "name"
+        }
+        Ok(None) => "more",
+        Err(_) => "refused",
+    }
+}
+
+/// Whatever a chunked body's bytes hold, given `size()` bytes at a time, its parser takes at most what it's given,
+/// all of it until it's done, never panics, and once done takes nothing more. Done, refused, or "more" (the bytes
+/// ran out first).
+pub(crate) fn body(b: &[u8], mut size: impl FnMut() -> usize) -> &'static str {
+    let mut body = Body::new(Framing::Chunked);
+    let mut at = 0;
+    while at < b.len() {
+        let piece = &b[at..(at + size().max(1)).min(b.len())];
+        let Ok(k) = body.take(piece) else { return "refused" };
+        assert!(k <= piece.len());
+        if body.done() {
+            assert_eq!(body.take(b"more"), Ok(0), "nothing more once done");
+            return "done";
+        }
+        assert_eq!(k, piece.len(), "short only once done");
+        at += k;
+    }
+    "more"
+}
+
+/// `body` on a fuzz input: its first byte how many bytes at a time (1 + twice it), the body after it.
+pub(crate) fn body_input(b: &[u8]) -> &'static str {
+    let Some((&n, rest)) = b.split_first() else { return "more" };
+    body(rest, || 1 + 2 * usize::from(n))
+}
