@@ -35,9 +35,10 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **Sessions** | Several branches of work at once, each in its own checkout with its own panes, chat, terminal, tests and tasks. A session is brought into its base by fast-forward, or by a rebase whose conflicts its own Claude resolves ([claude-integration.md](claude-integration.md#rebasing-a-session)) |
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, or a board of them — one per angle, then a skeptic per group of their claims, only what a skeptic traced pinned as confirmed (`space v C`) — and risk grades mark what a person must look at. Each review is recorded: how long a person spends on each change and what it ended as, never its code ([code review](claude-integration.md#code-review)) |
 | **Reviews in the background** | `space v c` (the reviewer) and `space v C` (the board) no longer take the session's screen: they read a snapshot of the changes through tarae's own `read` and `search` (no reading copy), findings land on the lines as they are now, and the status line says one is reading. Against Claude Code's tools: the same bugs found, −57 % tokens, −39 % $ (bgreview P1 + P2, `7f6b8834`, 2026-10-20) |
+| **Images in `read`** | tarae's `read` sends an image as a picture, decoded and scaled in-process by memory-safe code (the `image` crate, on Claude Code's Read ladder), so the chat runs with none of Claude Code's tools. PDFs later (readimg, `99eb6c2d`, 2026-10-20) |
 | **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0–P5 of the card model are built, and `:granted` lists what Claude may do without asking ([design/cards.md](design/cards.md)) |
 | **Sandbox, macOS** | Claude's commands run under a deny-default Seatbelt profile, as Anthropic's sandbox-runtime: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable — a file named like a key closed where a grant or a default opened outside the project too; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
-| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. A run changes no file's owner, extended attributes, ACLs or flags; a file's mode and times are still its own, said. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
+| **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. A run changes no file's owner or flags, nor a `security.` or `trusted.` attribute; its mode, times, extended attributes and ACLs are served where it may write (tiers own and host), and so is an owner call that changes nothing. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
 | **Queues** | A run waits its turn instead of being refused, and says what it waited for (phases 0, H and 1 of [design/async.md](design/async.md)) |
 | **UI state** | What's on screen as data: `tarae state`, a socket for outside programs, Claude's `ui` tool, ids that are links, pointing at things (phases 1–3 of [design/ui-state.md](design/ui-state.md)) |
@@ -154,7 +155,8 @@ The aim is to state what the sandbox guarantees and show that it holds.
    stopped that work twice); a run's own `setsockopt` is unchanged (its own rights).
 3. **A "must be refused" property suite** — done on both systems: nothing a run does changes the session's
    rules, and nothing is reached but through tarae's proxy and sockets. macOS (`df2f70e3`); Linux (`08ec1cb3`), rows
-   21–26 measured against an unsandboxed baseline. Left: running it on several kernels, on a schedule.
+   21–26 measured against an unsandboxed baseline. Since sandbox C (2026-10-20, `4b130f35`) it holds each user's
+   runs to their own table. Left: running it on several kernels, on a schedule.
 4. **Yama ptrace scope 2** — done (2026-10-18, D-h): Yama asks for `CAP_SYS_PTRACE` in a run's user namespace,
    which tarae owns in the session's, so tier own is served at scope 2 (the tier probe tries it on its keeper's
    run); without namespaces the session stays offline, said with the way out. No capability on tarae, no privileged
@@ -169,9 +171,13 @@ The aim is to state what the sandbox guarantees and show that it holds.
    changed on it, let only where the run may write (or on a descriptor it holds open for writing, or one that names
    no file); a path through `/proc`, a descriptor's name in `/dev` or a magic link refused and said, never emulated.
    A change of owner or group stays refused; an owner call that changes nothing (each id `-1` or the file's own:
-   `rsync -a`, `cp -a`) is let there as a mode is (sandbox C, 2026-10-19; `install -m`/`-g` still fails: coreutils
-   sets that mode as an ACL). Tier offline stays a full tier with mode and times open, said (user decision
-   2026-10-18). Left: nested user namespaces in tier own are a piece of their own.
+   `rsync -a`, `cp -a`) is let there as a mode is (sandbox C, 2026-10-20, `4b130f35`). Sandbox D2 B done
+   (2026-10-20, `43688c80`): extended attributes and ACLs are served as a mode is in tiers own and host, so
+   `install -m`, `cp --preserve=all` and `rsync -AX` work in the project; `security.` and `trusted.` are refused by
+   name, as root too. Tier offline stays a full tier with mode and times open, said (user decision 2026-10-18).
+   **Next, D2 A** (user decision 2026-10-20), built outside — it needs tier own: there, the key files in the key
+   places masked per command, by a fresh breadth-first walk each run capped at about 20,000 entries, the folders
+   it didn't walk named in the report. Left: nested user namespaces in tier own are a piece of their own.
 
 ### 3. Frictions, and lighter cards and reviews
 
@@ -184,7 +190,10 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
   (`c646ca83`, B5, B6, B9–B11). B12 done (2026-10-18, `c3e9a605`): pnpm's store on the project's filesystem, where
   pnpm keeps it when its home is on another, is found and told to a run, read and never written — passed over,
   said why, wherever another could change it or a run may write it; and a variable's name is no longer taken for a
-  token.
+  token. Sandbox D (2026-10-20, `c0155ea3`, `36ea9076`): tarae's own `cargo test --bin tarae` passes whole as
+  Claude's run — a run's pty cap counts the ptys it holds open at once (it makes 431), `stty` reads a pty's line
+  discipline, and on macOS a run's TMPDIR is short enough for its sockets (instances named `<pid>-<k>`, run tags
+  with the instance's start).
 - **The card model**: P3 done (cardauto pieces 1–4). P4 done: scopes (piece 6, `30a38311`: `s`, this session, on
   every card whose grant may outlive the conversation) and the grant list (piece 7, `951dcdb4`: `:granted`).
   Piece 5 is §9.3's.
@@ -270,7 +279,7 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
 - **Auto mode** is built only if the card record shows it's worth it: one to two weeks of `$state/cards` after P3
   runs in the user's tarae, each class's residual rate held against D1's bar (at least one card of a class per
   session-hour; then the 300-card safety bar). Likely not built.
-- **Frictions**: batches 24–34 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
+- **Frictions**: batches 24–35 done. Batch 29 (2026-10-18, `a61cca7d`): a file named like a key outside the
   project asks for itself — Claude's Read on the key's own card, tarae's own tools leave it out — and on macOS a
   run doesn't read one where a grant or a default opened (the shared temp folders too; its own `$TMPDIR` reads);
   `cargo xtask linux` proves the tree it mounts is this checkout, and a filter that matched no test fails. Left from
@@ -285,12 +294,15 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
   terminals' A (`5a68b5ca`): a sandboxed run's ptys come from tarae's broker, no card. Batch 32 (`bd5c6ab0`): a
   rebuilt program is never "script unchanged", a read's no holds for the turn, a search's card names its pattern,
   the board asks before it spends. Batch 33 (2026-10-19, `523fdef3`): a stop ends what left its run's group, the
-  bring queue, short e2e sockets. Batch 34 (2026-10-20, `target/sb/frictions34-plan.md`): where a filter holds a
+  bring queue, short e2e sockets. Batch 34 (2026-10-20, `e7911bdb`, `target/sb/frictions34-plan.md`): where a filter holds a
   run's output, the stuck card counts a new process at work in its tree as progress, and it says what the filter
   does to the output; a stopped rebase reaches a chat whose Claude hasn't started, or waits in the inbox; a failed
   preflight's bring card comes back naming the test and its panic, `v` its output; the edit tools' reviews are
   titled with what you asked (a rename's and a replace's keep their own); `:restart` keeps the symbols with
-  cargo's build-dir apart. frictions29's item 12, the web tool: not built — measured
+  cargo's build-dir apart. Batch 35 (2026-10-20, `5b7aa937`): the reviewer reads the project's rules, all of a big
+  change and the session's whole change; a card hides the cursor under it; a run busy at nothing it shows is said;
+  System V segments a run made are named with `ipcrm` to free them, never removed (a Mac's 32 can fill up).
+  frictions29's item 12, the web tool: not built — measured
   first; if needed, tarae's `read` takes an https URL (GET, text, `select`), not a new tool; Claude Code's
   WebSearch stays held back.
 
@@ -351,11 +363,7 @@ move over.
 **Then, before the remote split** — plans decided 2026-10-19, each built only once its checkout is rebased on a
 main that has what it waits for, and the user says go:
 
-- **Images in `read`** (readimg): tarae's `read` sends an image as a picture, decoded and scaled in-process by
-  memory-safe code (the `image` crate, as Claude Code's Read scales), so the chat runs with no tool of Claude
-  Code's (`--tools ""`; Edit and Write only with `llm.edit-tools` "both"/"native"). Built in its checkout
-  (2026-10-20), not in main yet.
-- **PDFs in `read`**, later (user, 2026-10-20): its own piece, starting from readimg's measurement (tests/live.rs
+- **PDFs in `read`**, later (user, 2026-10-20): its own piece after images (readimg, [done](#done)), starting from readimg's measurement (tests/live.rs
   `mcp_image_and_pdf_reach_the_model`: a PDF an MCP tool hands Claude Code never reaches the model — it's saved
   to a file, the model told its name), so pages go as pictures or text. Options to weigh then, measured: poppler
   in tarae's sandbox (deny-default, reads listed, nothing of home), or a pure-Rust renderer in-process.
@@ -366,10 +374,15 @@ main that has what it waits for, and the user says go:
   its rows as read-only text, Helix's keys, to read, search and copy. Then quoting (인용): select part of any of
   them and ask about it, a chip over the input like pointing's, sent with where it came from, cut to a limit and
   said so; `C-s` follows `llm.screen-terminal`. Phases: P1 view mode for the chat and the terminal, P2 quoting, P3
-  the run panels, P4 the mouse.
+  the run panels, P4 the mouse. Under way: P1a done (2026-10-20, `2696b066`), the chat's view mode — `esc` from its
+  input or `space >` from anywhere, `q`/`esc` leave, `y` copies; held still while Claude writes, `G` catches up; one
+  cursor on screen, where the keys go (`keys_to()`). P1b, the terminal, next.
 - **Panes** (the panes checkout's `target/sb/panes-plan.md`): splits as first-class, so tarae alone does what
   zellij does for you today — several terminals, any surface in a pane, a floating terminal, shells kept across
-  `:restart`. After view mode (both touch the terminal panel). It brings tarae's own terminal engine (a workspace
+  `:restart`. The user's direction (2026-10-20): every surface — the tree, the editor, the chat, the terminal, the
+  panels — a pane on one base; focus decides the one cursor; focus moves as zellij's (`Alt`+arrows, `Alt h/j/k/l`)
+  and as Helix's (`C-w h/j/k/l`); sizes by key and by drag. Inside zellij its `Alt` keys are zellij's, so a twin is
+  settled in the plan. After view mode and the measurement (both touch the terminal panel). It brings tarae's own terminal engine (a workspace
   crate, in place of `vt100`, measured against a baseline taken first) and a terminal that understands the shell
   while the shell stays yours. Order: several terminals → the engine → reflow → the shell understood → focus as
   one value → surfaces as leaves → panes of their own → `tarae` verbs → output for Claude → another session
@@ -436,7 +449,7 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 
 1. **The bar**: no test that fails only under load or only sometimes; every test green three runs in a row on
    macOS and on every supported kernel (§2's set); a set period of building tarae with tarae with no new serious
-   bug.
+   bug. flakyfix (2026-10-20, `5d14cf65`): ten tests that failed now and then, each fixed at its cause and pinned.
 2. **Bug hunting: deterministic simulation testing**, built in-house — no commercial service (user decision
    2026-10-18; the plan: `target/sb/detsim-plan.md`). AI made writing code easier, not checking that it works, and
    the bugs left are about *when*: a kill sent to a pid already reaped and someone else's (timing), two bring cards
@@ -497,9 +510,14 @@ git tab, search, a short Kubernetes one.
   - Several distributions, kernels and languages, and a large repository. Crash recovery, with no work lost.
   - A BPF measurement kit for development, outside the tarae binary. Its start is in [`trace/`](../trace)
     (`tarae-trace`, see [CONTRIBUTING](../CONTRIBUTING.md)).
-- **A first-use check.** which-key, the palette (`space ?`) and `:tutor` exist, and the start screen lists
-  `:tutor`. Go through them as a first-timer: do they cover sessions, review mode, cards, bringing a session in,
-  the git tab?
+- **One experience, all through tarae** — under way (the user's direction, 2026-10-20; CLAUDE.md's first UX
+  rule): the same act has the same key, the same words and the same look on every surface. The UX audit (the
+  `uxaudit` session's `target/sb/uxaudit-plan.md`) laid every surface side by side, held against Helix and zellij
+  first. Decided: `q` closes every list or output panel (the review rail's `q` ends the review), `esc code` where a
+  surface stays and `esc close` where it goes, line numbers absolute by default. Piece 1, those words and keys, is
+  built and in review; the next pieces in the plan's order: hints where none are, scrolling alike, the first hour
+  (the tutor, which-key and the palette as a first-timer meets them — what was the first-use check), Helix's
+  picker keys, keys inside zellij, a card never taking keys mid-typing, and the rest.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
 - **The run-flow panel**: one run's processes, writes, connections and refusals, from sources that need no
   privileges, on macOS too.
@@ -518,8 +536,10 @@ git tab, search, a short Kubernetes one.
   solid pill, the start screen a title page set in type with no seal, the edit review's head in ink, the chat's
   prose at a 72-cell measure, list cards their own height. P5 done (2026-10-19, `25a2c4c2`): what you decided is
   stamped with the key that decided it (`▐y▌ accepted` in the edit review, `m`/`u` on a turn's files, `:granted`'s
-  answers by their key). Next (user, 2026-10-20; its §5): P6, the turn as a thread, before view mode; P7, live
-  edits, after the measurement, with `editor.motion` folded in. P8, 코드멍's reveal, is dropped — an invented delay,
+  answers by their key). P6 done (2026-10-20, `b135cf3b`): a turn's stops as knots — `●` the stop in hand, `◦`
+  the rest, `▲` a change with its stamp — in the chat's rows and the follow card; no thread line (tried in the
+  margin, it read as a border or a quote bar; the user chose the knots alone). P7, live edits, stays after the
+  measurement, with `editor.motion` folded in. P8, 코드멍's reveal, is dropped — an invented delay,
   and a key eaten to end it.
 - **The docs' pictures from scenes** — phase 1 done (2026-10-19, `f3a08b30`): every picture the docs show is a row
   naming the scene that makes it; `cargo xtask scenes --docs` retakes them into `target/docshots/` and compares,
