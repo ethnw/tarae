@@ -1,24 +1,24 @@
 # sandbox_blocked_list · 100x30 · theme meok · cursor 2:5
 ## text
 00
-01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02    ›                                                                what the sandbox blocked  5/5
-03    ──────────────────────────────────────────────────────────────────────────────────────────────
-04     sandbox Seatbelt  loopback none of its ports open  network closed  shared POSIX shared memory
-05
-06   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5
-07     ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5
-08     ◦ allow port 5432 on this machine                                              npm connecting
-09     ◦ allow every port on this machine — the risky ones too                        npm connecting
-10     ▲ run it outside the sandbox, once                                                   npm test
-11
-12
-13
-14
-15
-16
-17
-18   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+01  ╭─ what the sandbox blocked ─────────────────────────────────────────────────────────────────────╮
+02  │ ›                                                                                          5/5 │
+03  │ ────────────────────────────────────────────────────────────────────────────────────────────── │
+04  │  sandbox Seatbelt  loopback none of its ports open  network closed  shared POSIX shared memory │
+05  │                                                                                                │
+06  │▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5 │
+07  │  ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5 │
+08  │  ◦ allow port 5432 on this machine                                              npm connecting │
+09  │  ◦ allow every port on this machine — the risky ones too                        npm connecting │
+10  │  ▲ run it outside the sandbox, once                                                   npm test │
+11  │                                                                                                │
+12  │                                                                                                │
+13  │                                                                                                │
+14  │                                                                                                │
+15  │                                                                                                │
+16  │                                                                                                │
+17  │                                                                                                │
+18  ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
 19
 20
 21
@@ -33,46 +33,15 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-03   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-04   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-05   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-06   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
-07   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-08   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-09   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-10   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-12   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18
-19
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00
-01
-02    A                                                                ffff fff fffffff fffffff  fff
-03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDDDDD ffffffff  DDDDDDDD ffff ff fff fffff ffff  DDDDDDD ffffff  DDDDDD fffff ffffff ffffff
+02
+03
+04
 05
-06   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd
-07     d                                                               ddddddddddddddddddddddddddddd
-08     d                                                                              ddd dddddddddd
-09     d                                                                              ddd dddddddddd
-10     w                                                                                    ddd dddd
+06   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+07
+08
+09
+10
 11
 12
 13
@@ -91,7 +60,38 @@
 26
 27
 28
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00
+01  ff TTTT TTT TTTTTTT TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+02  f A                                                                                          fff f
+03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff f
+04  f  BBBBBBB ffffffff  BBBBBBBB ffff ff fff fffff ffff  BBBBBBB ffffff  BBBBBB fffff ffffff ffffff f
+05  f                                                                                                f
+06  fa d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd f
+07  f  d                                                               ddddddddddddddddddddddddddddd f
+08  f  d                                                                              ddd dddddddddd f
+09  f  d                                                                              ddd dddddddddd f
+10  f  w                                                                                    ddd dddd f
+11  f                                                                                                f
+12  f                                                                                                f
+13  f                                                                                                f
+14  f                                                                                                f
+15  f                                                                                                f
+16  f                                                                                                f
+17  f                                                                                                f
+18  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
 29  a TTTTTT   DDDDD ffffff  DDDD ffffff  DDD fffff                             dddd   ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning
+bg: P=ui.menu.selected
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  B=bold

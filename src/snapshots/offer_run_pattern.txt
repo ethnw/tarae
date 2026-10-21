@@ -15,20 +15,20 @@
 12  11     counts
 13  12 }
 14  13
-15  14 fn main() {                        ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-16  15     let text = "the quick brown fox ▎ Claude wants to run
-17  16     let counts = word_counts(text);   cargo xtask shot /tmp/words.png ' l' '@?distinct words'
-18  17     println!("{} distinct words", c
-19  18 }                                     It runs cargo xtask — not a check, a read, or a command
-20                                           allowed in this chat.
-21
-22                                           a — this exact command again unasked, this chat
-23
-24                                           The sandbox is off (llm.sandbox) — it runs with all
-25                                           your permissions.
-26
-27                                           y Once   a This chat   n No
-28                                        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+15  14 fn main() {
+16  15     let text = "the quick brown fox jumps over the lazy dog";
+17  16     let counts = word_counts(text);
+18  17     println!("{} distinct words", co╭─ Claude wants to run ───────────────────────────────────╮
+19  18 }                                   │ cargo xtask shot /tmp/words.png ' l' '@?distinct words' │
+20                                         │                                                         │
+21                                         │ It runs cargo xtask — not a check, a read, or a command │
+22                                         │ allowed in this chat.                                   │
+23                                         │                                                         │
+24                                         │ a — this exact command again unasked, this chat         │
+25                                         │                                                         │
+26                                         │ The sandbox is off (llm.sandbox) — it runs with all     │
+27                                         │ your permissions.                                       │
+28                                         ╰─ y Once · a This chat · n No ───────────────────────────╯
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -47,18 +47,18 @@
 13
 14
 15
-16                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-23                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-24                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-25                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-26                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-27                                        pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
@@ -78,20 +78,20 @@
 13  ff
 14  ff
 15  ff
-16  ff                gggg ggggg ggggg ggg a BBBBBB BBBBB BB BBB
+16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 17  ff
-18  ff              ggg gggggggg gggggg
-19  ff                                       dd dddd ddddd ddddd d ddd d dddddd d ddddd dd d ddddddd
-20                                           ddddddd dd dddd ddddd
-21
-22                                           d d dddd ddddd ddddddd ddddd dddddddd dddd dddd
-23
-24                                           ddd ddddddd dd ddd ddddddddddddd d dd dddd dddd ddd
-25                                           dddd dddddddddddd
-26
-27                                           A        A dddd dddd   A dd
-28
+18  ff              ggg gggggggg gggggg    ff TTTTTT TTTTT TT TTT ffffffffffffffffffffffffffffffffffff
+19  ff                                     f                                                         f
+20                                         f                                                         f
+21                                         f dd dddd ddddd ddddd d ddd d dddddd d ddddd dd d ddddddd f
+22                                         f ddddddd dd dddd ddddd                                   f
+23                                         f                                                         f
+24                                         f d d dddd ddddd ddddddd ddddd dddddddd dddd dddd         f
+25                                         f                                                         f
+26                                         f ddd ddddddd dd ddd ddddddddddddd d dd dddd dddd ddd     f
+27                                         f dddd dddddddddddd                                       f
+28                                         ff A      f A dddd dddd f A dd ffffffffffffffffffffffffffff
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus  B=bold
+bg: c=ui.cursorline.primary  A=ui.cursor.primary
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

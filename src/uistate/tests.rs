@@ -1446,7 +1446,9 @@ fn the_frame_asked_is_the_one_drawn_after_the_keys() {
         "the frame as the terminal got it"
     );
     let text = crate::screen::text(bytes.as_bytes(), 120, 40).unwrap();
-    assert!(text.contains("two") && text.lines().any(|l| l.trim_start().starts_with(':')), "{text}");
+    // (the prompt's input inside its frame)
+    let input = |l: &str| l.trim_start_matches([' ', '│']).starts_with(':');
+    assert!(text.contains("two") && text.lines().any(input), "{text}");
 }
 
 // ── The socket ───────────────────────────────────────────────────────────

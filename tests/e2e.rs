@@ -652,9 +652,12 @@ fn which_key_and_command_palette_open_and_close() {
     // `space` alone: which-key card lists what follows, described in plain words
     t.send(" ");
     t.wait_text("Find a command");
-    // `?` opens the palette: input row `› …  commands  n/n`
+    // `?` opens the palette: its frame named `commands`, its input row `› …  n/n` under it
     t.send("?");
-    t.wait_for("the command palette", |s| s.rows.iter().any(|r| r.contains('›') && r.contains("commands")));
+    t.wait_for("the command palette", |s| {
+        let named = s.rows.iter().position(|r| r.contains("╭─ commands ─"));
+        named.is_some_and(|y| s.rows.get(y + 1).is_some_and(|r| r.contains('›')))
+    });
     t.send("save");
     t.wait_for("the query in the palette", |s| s.contains("› save"));
     let s = t.esc("the palette to close", |s| !s.contains("commands") && s.contains("palette test"));

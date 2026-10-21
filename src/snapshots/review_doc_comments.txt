@@ -1,79 +1,79 @@
 # review_doc_comments · 100x24 · theme meok · cursor 16:34
 ## text
-00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs  ›  ƒ main
-01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────
-02   1 file  +1                 ▌  1 ▎ Counts the words in text.
-03   0 of 1 viewed · 1 unviewed ▌    ▎
-04                              ▌    ▎ Splits on whitespace, so a  b is two words.
-05     src/                     ▌  4 pub fn count(text: &str) -> usize {
-06 ▎ │ ◦ demo.rs           • +1 ▌  5     text.split_whitespace().count()
-07                              ▌  6 }
-08                              ▌  7
-09                              ▌   −/// The longest word.
-10                              ▌  8▎/// The longest word, if there is one.
-11                              ▌  9▎/// Ties go to the first of them.
-12                              ▌ 10 pub fn longest(text: &str) -> Option<&str> {
-13                              ▌ 11     text.split_whitespace().max_by_key(|w| w.len())
-14                              ▌ 12 }
-15                              ▌ 13
-16                              ▌ 14 fn main() {
-17                              ▌ 15     let text = "to be or not to be";
-18   ]g hunk  ]F file           ▌ 16     println!("{} words, the longest {:?}", count(text),
-19   space e files  ]u unviewed ▌        longest(text));
-20   space n comment            ▌ 17 }
-21   space v m viewed           ▌
-22   space v q end              ▌
+00   review         uncommitted │ tarae  ›  src  ›  demo.rs  ›  ƒ main
+01   ────────────────────────── │ ────────────────────────────────────────────────────────────────────
+02   1 file  +1                 │  1 ▎ Counts the words in text.
+03   0 of 1 viewed · 1 unviewed │    ▎
+04                              │    ▎ Splits on whitespace, so a  b is two words.
+05     src/                     │  4 pub fn count(text: &str) -> usize {
+06 ▎ │ ◦ demo.rs           • +1 │  5     text.split_whitespace().count()
+07                              │  6 }
+08                              │  7
+09                              │   −/// The longest word.
+10                              │  8▎/// The longest word, if there is one.
+11                              │  9▎/// Ties go to the first of them.
+12                              │ 10 pub fn longest(text: &str) -> Option<&str> {
+13                              │ 11     text.split_whitespace().max_by_key(|w| w.len())
+14                              │ 12 }
+15                              │ 13
+16                              │ 14 fn main() {
+17                              │ 15     let text = "to be or not to be";
+18   ]g hunk  ]F file           │ 16     println!("{} words, the longest {:?}", count(text),
+19   space e files  ]u unviewed │        longest(text));
+20   space n comment            │ 17 }
+21   space v m viewed           │
+22   space v q end              │
 23  ● normal   +2  −1                                                          rust   utf-8 LF   14:1
 ## bg · surface per cell, blank = ui.background
-00 ppppppppppppppppppppppppppppp
-01 ppppppppppppppppppppppppppppp
-02 ppppppppppppppppppppppppppppp
-03 ppppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppppp
-05 ppppppppppppppppppppppppppppp
-06 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp
-07 ppppppppppppppppppppppppppppp
-08 ppppppppppppppppppppppppppppp
-09 ppppppppppppppppppppppppppppp 1111111111111111111111111111111111111111111111111111111111111111111111
-10 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222
-11 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222
-12 ppppppppppppppppppppppppppppp
-13 ppppppppppppppppppppppppppppp
-14 ppppppppppppppppppppppppppppp
-15 ppppppppppppppppppppppppppppp
-16 ppppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-17 ppppppppppppppppppppppppppppp
-18 ppppppppppppppppppppppppppppp
-19 ppppppppppppppppppppppppppppp
-20 ppppppppppppppppppppppppppppp
-21 ppppppppppppppppppppppppppppp
-22 ppppppppppppppppppppppppppppp
+00
+01
+02
+03
+04
+05
+06 PPPPPPPPPPPPPPPPPPPPPPPPPPPP
+07
+08
+09                               1111111111111111111111111111111111111111111111111111111111111111111111
+10                                   222222222222222222222222222222222222222222222222222222222222222222
+11                                   222222222222222222222222222222222222222222222222222222222222222222
+12
+13
+14
+15
+16                                   Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+17
+18
+19
+20
+21
+22
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT  f    dddd
-01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  gg                    f f
-03   f ff f ffffff d d dddddddd      f
-04                                   f           BBBBBBBBBB
-05     dddf                        f
-06 a f f ttttttt           w gg    f
-07                                 f
-08                                 f
-09                                  E
-10                                 fw
-11                                 fw
-12                                ff
-13                                ff
-14                                ff
-15                                ff
-16                                AA
-17                                ff                ggg gg gg ggg gg ggg
-18   DD ffff  DD ffff             ff              ggg gggggg ggg ggggggg ggggg
-19   DDDDD D fffff  DD ffffffff
-20   DDDDD D fffffff              ff
-21   DDDDD D D ffffff
-22   DDDDD D D fff
+00   TTTTTT         fffffffffff a ddddd  f  ddd  f  TTTTTTT  f    dddd
+01   ffffffffffffffffffffffffff a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   d dddd  gg                 a  f f
+03   f ff f ffffff d d dddddddd a    f
+04                              a    f           BBBBBBBBBB
+05     dddf                     a  f
+06 a f f ttttttt           w gg a  f
+07                              a  f
+08                              a  f
+09                              a   E
+10                              a  fw
+11                              a  fw
+12                              a ff
+13                              a ff
+14                              a ff
+15                              a ff
+16                              a AA
+17                              a ff                ggg gg gg ggg gg ggg
+18   BB ffff  BB ffff           a ff              ggg gggggg ggg ggggggg ggggg
+19   BBBBB B fffff  BB ffffffff a
+20   BBBBB B fffffff            a ff
+21   BBBBB B B ffffff           a
+22   BBBBB B B fff              a
 23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
+bg: c=ui.cursorline.primary  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

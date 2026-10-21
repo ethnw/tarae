@@ -1,97 +1,97 @@
 # chat_explore · 100x30 · theme meok · cursor 27:65
 ## text
-00  tarae  ›  src  ›  demo.rs                                     claude › follow                ready
-01  ──────────────────────────────────────────────────────────    ────────────────────────────────────
-02   1 use std::collections::HashMap;                             demo.rs · L5
-03   2                                                            ▎ Who calls word_counts?
-04   3 ▎ Counts how often each word appears.
-05     ▎                                                          ▎ Finding the callers
-06     ▎ Words are split on whitespace; case is kept.             ▎ It's public, so other modules may…
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>
-08     {                                                          ◦ grep   word_counts\(  in src
-09   7     let mut counts = HashMap::new();                       ◦ glob   src/**/*.rs
-10   8     for word in text.split_whitespace() {                  ◦ read   src/lib.rs  L1–40
-11   9     │   *counts.entry(word).or_insert(0) += 1;
-12  10     }                                                      Only main does, at src/demo.rs:15.
-13  11     counts                                                 src/lib.rs:12 has a copy that splits
-14  12 }                                                          on commas.
-15  13                                                                                            2.4s
-16  14 fn main() {
-17  15     let text = "the quick brown fox jumps over the lazy
-18         dog";
-19  16     let counts = word_counts(text);
-20  17     println!("{} distinct words", counts.len()); //
-21         타래
-22  18 }
-23
-24
-25
-26                                                                ────────────────────────────────────
-27                                                                › Ask about demo.rs…
-28                                                                enter send  esc view  C-] go to
+00  tarae  ›  src  ›  demo.rs                                  │  claude › follow                ready
+01  ────────────────────────────────────────────────────────── │  ────────────────────────────────────
+02   1 use std::collections::HashMap;                          │  demo.rs · L5
+03   2                                                         │  ▎ Who calls word_counts?
+04   3 ▎ Counts how often each word appears.                   │
+05     ▎                                                       │  ▎ Finding the callers
+06     ▎ Words are split on whitespace; case is kept.          │  ▎ It's public, so other modules may…
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>  │
+08     {                                                       │  ◦ grep   word_counts\(  in src
+09   7     let mut counts = HashMap::new();                    │  ◦ glob   src/**/*.rs
+10   8     for word in text.split_whitespace() {               │  ◦ read   src/lib.rs  L1–40
+11   9     │   *counts.entry(word).or_insert(0) += 1;          │
+12  10     }                                                   │  Only main does, at src/demo.rs:15.
+13  11     counts                                              │  src/lib.rs:12 has a copy that splits
+14  12 }                                                       │  on commas.
+15  13                                                         │                                  2.4s
+16  14 fn main() {                                             │
+17  15     let text = "the quick brown fox jumps over the lazy │
+18         dog";                                               │
+19  16     let counts = word_counts(text);                     │
+20  17     println!("{} distinct words", counts.len()); //     │
+21         타래                                                │
+22  18 }                                                       │
+23                                                             │
+24                                                             │
+25                                                             │
+26                                                             │  ────────────────────────────────────
+27                                                             │  › Ask about demo.rs…
+28                                                             │  enter send  esc view  C-] go to
 29  ● chat                                                                      rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
-00                                                              ppppppppppppppppppppppppppppppppppppppp
-01                                                              ppppppppppppppppppppppppppppppppppppppp
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppp
-03                                                              ppppppppppppppppppppppppppppppppppppppp
-04                                                              ppppppppppppppppppppppppppppppppppppppp
-05                                                              ppppppppppppppppppppppppppppppppppppppp
-06                                                              ppppppppppppppppppppppppppppppppppppppp
-07                                                              ppppppppppppppppppppppppppppppppppppppp
-08                                                              ppppppppppppppppppppppppppppppppppppppp
-09                                                              ppppppppppppppppppppppppppppppppppppppp
-10                                                              ppppppppppppppppppppppppppppppppppppppp
-11                                                              ppppppppppppppppppppppppppppppppppppppp
-12                                                              ppppppppppppppppppppppppppppppppppppppp
-13                                                              ppppppppppppppppppppppppppppppppppppppp
-14                                                              ppppppppppppppppppppppppppppppppppppppp
-15                                                              ppppppppppppppppppppppppppppppppppppppp
-16                                                              ppppppppppppppppppppppppppppppppppppppp
-17                                                              ppppppppppppppppppppppppppppppppppppppp
-18                                                              ppppppppppppppppppppppppppppppppppppppp
-19                                                              ppppppppppppppppppppppppppppppppppppppp
-20                                                              ppppppppppppppppppppppppppppppppppppppp
-21                                                              ppppppppppppppppppppppppppppppppppppppp
-22                                                              ppppppppppppppppppppppppppppppppppppppp
-23                                                              ppppppppppppppppppppppppppppppppppppppp
-24                                                              ppppppppppppppppppppppppppppppppppppppp
-25                                                              ppppppppppppppppppppppppppppppppppppppp
-26                                                              ppppppppppppppppppppppppppppppppppppppp
-27                                                              ppppppppppppppppppppppppppppppppppppppp
-28                                                              ppppppppppppppppppppppppppppppppppppppp
-29
-## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT                                     TTTTTT a aaaaaa                fffff
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A                                                            fffffff f ff
-03   f                                                            a TTT TTTTT TTTTTTTTTTTT
-04   f f
-05     f                                                          f DDDDDDD DDD DDDDDDD
-06     f                                                          f dddd ddddddd dd ddddd ddddddd dddf
-07   f
-08                                                                d ffff   ggggggggggggg  ff fff
-09   f                                                            d ffff   ggggggggggg
-10   f                                                            d ffff   dddddddddd  fffff
-11   f
-12  ff
-13  ff
-14  ff
-15  ff                                                                                            ffff
-16  ff
-17  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg
-18         gggg
-19  ff
-20  ff              ggg gggggggg gggggg
+00
+01
+02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
 21
-22  ff
+22
 23
 24
 25
-26                                                                aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-27                                                                A fff fffff ffffffff
-28                                                                DDDDD ffff  DDD ffff  DDD ff ff
+26
+27
+28
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00  ddddd  f  ddd  f  TTTTTTT                                  a  TTTTTT a aaaaaa                fffff
+01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02   A                                                         a  fffffff f ff
+03   f                                                         a  a TTT TTTTT TTTTTTTTTTTT
+04   f f                                                       a
+05     f                                                       a  f DDDDDDD DDD DDDDDDD
+06     f                                                       a  f dddd ddddddd dd ddddd ddddddd dddf
+07   f                                                         a
+08                                                             a  d ffff   ggggggggggggg  ff fff
+09   f                                                         a  d ffff   ggggggggggg
+10   f                                                         a  d ffff   dddddddddd  fffff
+11   f                                                         a
+12  ff                                                         a
+13  ff                                                         a
+14  ff                                                         a
+15  ff                                                         a                                  ffff
+16  ff                                                         a
+17  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg a
+18         gggg                                                a
+19  ff                                                         a
+20  ff              ggg gggggggg gggggg                        a
+21                                                             a
+22  ff                                                         a
+23                                                             a
+24                                                             a
+25                                                             a
+26                                                             a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+27                                                             a  A fff fffff ffffffff
+28                                                             a  DDDDD ffff  DDD ffff  DDD ff ff
 29  a TTTT                                                                      dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup
+bg: c=ui.cursorline.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

@@ -127,8 +127,20 @@ configs carry over as they are.
   the screen above [in hanji](screenshots/hero-hanji.png)).
   You can also [write your own](configuration.md#custom-themes)
 - **One accent color** — coral in meok, vermilion in hanji — used boldly and sparingly; syntax colors stay calm
-- **Cards** — completion, docs, hover, and pickers float as cards with half a line of padding above and below and an
-  accent bar `▎` on the selected row. Themes without a background color get rounded borders instead
+- **Edges** — where docked surfaces meet (the side panel, the code, the chat, the bottom panel's top) there's one
+  thin line, as zellij divides panes, never a box; the docked panels sit on the code's own ground. The surface with
+  the keys has its lines in the accent, every other line is a faint wash — move with `C-w h/j/k/l` and the accent
+  moves with you. A theme can keep the older look — surfaces of their own colour with half a cell of ground between
+  them — with `"ui.edge" = "ground"` ([themes](configuration.md#custom-themes)). A group of panels shown one at
+  a time names them all in its header — the side panel's `files · outline · git`, the bottom panel's `terminal ·
+  tests · task` — the one in sight lit; `tab` / `S-tab` go to the next
+- **Frames** — what takes your keys floats in a rounded frame with its name in the top line: which-key (`╭─ space
+  ─╮`), a picker (its title; the list and the preview meet on one line), a prompt (`command`, `search`), and a card
+  of Claude's while it has the keys — its question as the name, its answers set into the bottom line, `╰─ y Run · n
+  No ─╯`. When the keys go elsewhere (you type in the chat) its lines go, its name and answers stay on its top and
+  bottom rows, and it says how to answer it (`C-q`).
+  Notes — completion, docs, hover, toasts, the follow card — float as cards of their own colour, without a frame; two
+  cards never touch. The selected row has an accent bar `▎`
 - **Path bar** — `project › folder › file ● › ƒ enclosing_fn`: the function, type, or module around the cursor comes
   from the tree-sitter tree. With several buffers open, the list shows on the right. Turn it off with
   `editor.header = false`

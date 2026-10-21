@@ -35,6 +35,9 @@
 "ui.menu.selected" = { fg = "ink_hi", bg = "surface_hi" }
 "ui.help" = { fg = "ink", bg = "surface" }
 "ui.window" = "faint"
+"ui.panel" = { fg = "ink", bg = "paper" }
+"ui.virtual.strong" = "wash"
+"ui.edge" = "lines"
 
 "error" = "red"
 "warning" = "amber"
@@ -102,8 +105,9 @@ sel = "#e9e2d3"
 sel_hi = "#e2d9c5"
 faint = "#9c9586"
 guide = "#e4ddcd"
-dim = "#7c776c"
-comment = "#706a5e"
+dim = "#74767e"
+wash = "#4e4b44"
+comment = "#5e5446"
 punct = "#7d786d"
 ink = "#34322d"
 ink_hi = "#1d1c19"

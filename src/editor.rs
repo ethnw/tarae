@@ -7119,7 +7119,7 @@ mod tests {
             parser
                 .screen()
                 .contents()
-                .contains("y Once   a This chat   s This session   A Always here   n No")
+                .contains("y Once · a This chat · s This session · A Always here · n No")
         );
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
         ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
@@ -7313,7 +7313,7 @@ mod tests {
         assert!(o.question.contains("Includes the terminal panel ("), "{}", o.question);
         assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         let s = draw(&mut ed);
-        assert!(s.contains("y Once   a This chat   n No"), "{s}");
+        assert!(s.contains("y Once · a This chat · n No"), "{s}");
         assert_eq!(answers(&log), 0, "nothing goes before the answer");
         feed(&mut ed, "<C-q>y");
         assert!(ed.offers.is_empty());

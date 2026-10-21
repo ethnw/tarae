@@ -896,7 +896,9 @@ mod tests {
         let title =
             rows.iter().position(|r| r.contains("build.rs") && r.contains("decided")).expect("the title");
         // (its rows under the title — wrapped at the code's width beside the chat)
-        let under: String = rows[title + 1..title + 5].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+        // (the code's side of each row: the chat beside it past its line)
+        let code = |r: &String| r.split(" │ ").next().unwrap_or_default().trim().to_string();
+        let under: String = rows[title + 1..title + 5].iter().map(code).collect::<Vec<_>>().join(" ");
         assert!(under.starts_with("▲ It changes a file that runs later outside the sandbox"), "{rows:#?}");
         assert!(under.contains("read all of it. (tools pack)"), "whole, not cut: {under}");
         let state = ed.ui_state().json();

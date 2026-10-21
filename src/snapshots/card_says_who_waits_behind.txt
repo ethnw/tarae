@@ -18,17 +18,17 @@
 15  14 fn main() {
 16  15     let text = "the quick brown fox jumps over the lazy dog";
 17  16     let counts = word_counts(text);
-18  17     println!("{} distinct words", counts.len()▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-19  18 }                                              ▎ Claude asks to see the screen
-20                                                 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-21                                                  ▎ main · Claude asks to see the screen  1/2 · +1
-22                                                    As text, once.
-23
-24                                                    2 more wait — 1 here, 1 in fix-login
-25                                                    space I lists them
-26
-27                                                    y Once   a This chat   n No
-28                                                 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+18  17     println!("{} distinct words", counts.len()); // 타래
+19  18 }
+20
+21                                                   ▎ Claude asks to see the screen
+22
+23                                                ╭─ main · Claude asks to see the screen  1/2 · +1 ─╮
+24                                                │ As text, once.                                   │
+25                                                │                                                  │
+26                                                │ 2 more wait — 1 here, 1 in fix-login             │
+27                                                │ space I lists them                               │
+28                                                ╰─ y Once · a This chat · n No ────────────────────╯
 29  ● normal   main ▲3 waiting                                                  rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -50,15 +50,15 @@
 16
 17
 18
-19                                                   11111111111111111111111111111111111111111111111
-20                                                   11111111111111111111111111111111111111111111111
-21                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-22                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-23                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-24                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-25                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-26                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
-27                                                 ppppppppppppppppppppppppppppppppppppppppppppppppppp
+19
+20
+21                                                  111111111111111111111111111111111111111111111111
+22
+23
+24
+25
+26
+27
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
@@ -83,15 +83,15 @@
 18  ff              ggg gggggggg gggggg
 19  ff
 20
-21                                                  a BBBB B BBBBBB BBBB BB BBB BBB BBBBBB  ddd d dd
-22                                                    dd ddddd ddddd
-23
-24                                                    d dddd dddd d d ddddd d dd ddddddddd
-25                                                    ddddd d ddddd dddd
-26
-27                                                    A        A dddd dddd   A dd
-28
+21
+22
+23                                                ff TTTT T TTTTTT TTTT TT TTT TTT TTTTTT  ddd d dd ff
+24                                                f dd ddddd ddddd                                   f
+25                                                f                                                  f
+26                                                f d dddd dddd d d ddddd d dd ddddddddd             f
+27                                                f ddddd d ddddd dddd                               f
+28                                                ff A      f A dddd dddd f A dd fffffffffffffffffffff
 29  a TTTTTT   aaaa ww wwwwwww                                                  dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus  B=bold
+bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

@@ -11,12 +11,12 @@
 08   7     let mut counts = HashMap::new();
 09   8     for word in text.split_whitespace() {
 10   9     │   *counts.entry(word).or_insert(0) += 1;
-11  10     }          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+11  10     }
 12  11     counts       ● mismatched types  rustc E0308
 13  12 }                  expected HashMap<&str, u32>, found HashMap<&str, usize>
 14  13
 15  14 fn main() {      · expected due to this
-16  15     let text = ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+16  15     let text =
 17 ▎16     let counts = word_counts(text);   ● mismatched types  +1
 18  17     println!("{} distinct words", counts.len()); // 타래
 19  18 }
@@ -36,12 +36,12 @@
 08
 09
 10
-11
+11                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 12                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 15                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16
+16                    ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 17     VVVVVVVVVVVVVVVVVAcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 18
 19

@@ -1,26 +1,26 @@
 # sandbox_blocked_step_120 · 120x30 · theme meok · cursor 2:5
 ## text
 00
-01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02    ›                                                                                    what the sandbox blocked  6/6
-03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-04     tier host  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
-05     AppArmor blocks user namespaces
-06     tarae's AppArmor profile would give own namespaces
-07
-08   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache                                  …/_cacache/index-v5
-09     ◦ allow writing in /private/tmp/tarae-shot-blocked                                  …/npm-cache/_cacache/index-v5
-10     ◦ allow port 5432 on this machine                                                                  npm connecting
-11     ◦ allow every port on this machine — the risky ones too                                            npm connecting
-12     ▲ run it outside the sandbox, once                                                                       npm test
-13     ◦ copy the step for own namespaces                                                 needs sudo, then restart tarae
-14
-15
-16
-17
-18
-19
-20   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+01  ╭─ what the sandbox blocked ─────────────────────────────────────────────────────────────────────────────────────────╮
+02  │ ›                                                                                                              6/6 │
+03  │ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+04  │  tier host  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm    │
+05  │  AppArmor blocks user namespaces                                                                                   │
+06  │  tarae's AppArmor profile would give own namespaces                                                                │
+07  │                                                                                                                    │
+08  │▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache                                  …/_cacache/index-v5 │
+09  │  ◦ allow writing in /private/tmp/tarae-shot-blocked                                  …/npm-cache/_cacache/index-v5 │
+10  │  ◦ allow port 5432 on this machine                                                                  npm connecting │
+11  │  ◦ allow every port on this machine — the risky ones too                                            npm connecting │
+12  │  ▲ run it outside the sandbox, once                                                                       npm test │
+13  │  ◦ copy the step for own namespaces                                                 needs sudo, then restart tarae │
+14  │                                                                                                                    │
+15  │                                                                                                                    │
+16  │                                                                                                                    │
+17  │                                                                                                                    │
+18  │                                                                                                                    │
+19  │                                                                                                                    │
+20  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 21
 22
 23
@@ -33,49 +33,18 @@
 ## bg · surface per cell, blank = ui.background
 00
 01
-02   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-03   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-04   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-05   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-06   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-07   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-08   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
-09   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-10   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-12   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-13   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-14   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-15   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-16   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-17   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19   pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00
-01
-02    A                                                                                    ffff fff fffffff fffffff  fff
-03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD ffff  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
-05     ffffffff ffffff ffff ffffffffff
-06     fffffff ffffffff fffffff fffff ffff fff ffffffffff
+02
+03
+04
+05
+06
 07
-08   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT                                  ddddddddddddddddddd
-09     d                                                                                   ddddddddddddddddddddddddddddd
-10     d                                                                                                  ddd dddddddddd
-11     d                                                                                                  ddd dddddddddd
-12     w                                                                                                        ddd dddd
-13     d                                                                                  ddddd ddddd dddd ddddddd ddddd
+08   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+09
+10
+11
+12
+13
 14
 15
 16
@@ -91,7 +60,38 @@
 26
 27
 28
+29
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00
+01  ff TTTT TTT TTTTTTT TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+02  f A                                                                                                              fff f
+03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff f
+04  f  BBBB ffff  BBBBBBBB ffff ffffffffff fffff fffffffff fffffff  BBBBBB ffffffffff ffffffff ffffff f ffff ffffffff    f
+05  f  ffffffff ffffff ffff ffffffffff                                                                                   f
+06  f  fffffff ffffffff fffffff fffff ffff fff ffffffffff                                                                f
+07  f                                                                                                                    f
+08  fa d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT                                  ddddddddddddddddddd f
+09  f  d                                                                                   ddddddddddddddddddddddddddddd f
+10  f  d                                                                                                  ddd dddddddddd f
+11  f  d                                                                                                  ddd dddddddddd f
+12  f  w                                                                                                        ddd dddd f
+13  f  d                                                                                  ddddd ddddd dddd ddddddd ddddd f
+14  f                                                                                                                    f
+15  f                                                                                                                    f
+16  f                                                                                                                    f
+17  f                                                                                                                    f
+18  f                                                                                                                    f
+19  f                                                                                                                    f
+20  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+21
+22
+23
+24
+25
+26
+27
+28
 29  a TTTTTT   DDDDD ffffff  DDDD ffffff  DDD fffff                                                 dddd   ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning
+bg: P=ui.menu.selected
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  B=bold

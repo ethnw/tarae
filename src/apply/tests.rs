@@ -310,7 +310,8 @@ fn what_was_read_is_one_row_that_keeps_its_end() {
         let read: Vec<&str> =
             screen.lines().filter(|l| l.contains("read ") || l.trim_end().ends_with("read")).collect();
         assert_eq!(read.len(), 1, "{cols} columns: one row\n{screen}");
-        let row = read[0].trim();
+        // (inside its card's frame)
+        let row = read[0].trim_matches([' ', '│']).trim();
         // (its start kept, cut at a folder — never mid-name)
         let cut = row.starts_with("read ~/…/") || row.starts_with("read /…/");
         assert!(cut && row.ends_with(&end), "{cols}: {row:?}\n{screen}");

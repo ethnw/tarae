@@ -4,7 +4,8 @@
 //! layers over another theme. Bad color names and unknown attributes are not silently dropped — reported
 //! via `Theme::warnings`.
 //! tarae-only UI keys: `ui.accent` (the single accent color), `ui.tint` (base for blending light colors —
-//! transparent variants).
+//! transparent variants), `ui.panel` (the docked panels' ground under `ui.edge = "lines"`), `ui.virtual.strong`
+//! (the dark wash: hint keys), `ui.edge` (a word, not a style — `Edge`: `"lines"` or `"ground"`).
 //! Four built-ins: `meok` (먹, dark) · `hanji` (한지, light) · `meok-transparent` · `hanji-transparent`
 //! (don't paint the background, the terminal's shows through). `"default"` = meok/hanji to match the terminal
 //! (`set_light` — term.rs asks at startup).
@@ -75,9 +76,22 @@ pub struct Theme {
     /// (the chat's laid-out messages) — a theme file read again under the same name is another.
     pub id: u64,
     styles: HashMap<String, Style>,
+    /// Where surfaces meet (`ui.edge`).
+    pub edge: Edge,
     /// Problems hit while reading (bad color names·unknown attributes) — shown as config warnings.
     pub warnings: Vec<String>,
     captures: CaptureStyles,
+}
+
+/// How docked surfaces meet and floating ones stand apart (`ui.edge`, design pass 2 D2/D3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Edge {
+    /// One thin line where surfaces meet (`│`, `─`, joins), the docked panels on the ground (`ui.panel`); what
+    /// takes keys floats in a frame with its name.
+    #[default]
+    Lines,
+    /// The half-cell ground between surfaces of their own colour; cards with half-block edges.
+    Ground,
 }
 
 /// `Theme::capture_styles`' table — rebuilt when languages bring new capture names; a copy starts empty.
@@ -177,6 +191,10 @@ fn builtin_table(name: &str) -> Option<toml::Table> {
             tint.insert("bg".into(), bg);
             table.insert("ui.tint".into(), Value::Table(tint));
         }
+        // (the docked panels' ground is the background: not painted either)
+        if let Some(panel) = table.get_mut("ui.panel").and_then(Value::as_table_mut) {
+            panel.remove("bg");
+        }
     }
     Some(table)
 }
@@ -255,7 +273,16 @@ fn from_table(name: &str, table: &toml::Table) -> Theme {
     let mut warnings = Vec::new();
     let palette = parse_palette(table.get("palette").and_then(Value::as_table), &mut warnings);
     let mut styles = HashMap::new();
-    for (k, v) in table.iter().filter(|(k, _)| *k != "palette") {
+    let edge = match table.get("ui.edge") {
+        None => Edge::default(),
+        Some(Value::String(s)) if s == "lines" => Edge::Lines,
+        Some(Value::String(s)) if s == "ground" => Edge::Ground,
+        Some(v) => {
+            warnings.push(format!("theme '{name}': \"ui.edge\": {v} — \"lines\" or \"ground\""));
+            Edge::default()
+        }
+    };
+    for (k, v) in table.iter().filter(|(k, _)| !matches!(k.as_str(), "palette" | "ui.edge")) {
         let mut warn = |what: String| warnings.push(format!("theme '{name}': \"{k}\": {what}"));
         if let Some(st) = parse_style(v, &palette, &mut warn) {
             styles.insert(k.clone(), st);
@@ -263,7 +290,7 @@ fn from_table(name: &str, table: &toml::Table) -> Theme {
     }
     static READ: AtomicU64 = AtomicU64::new(1);
     let id = READ.fetch_add(1, Ordering::Relaxed);
-    Theme { name: name.to_string(), id, styles, warnings, captures: CaptureStyles::default() }
+    Theme { name: name.to_string(), id, styles, edge, warnings, captures: CaptureStyles::default() }
 }
 
 /// Palette — values may be other palette names (`accent = "coral"`, any depth, warns on cycles).
@@ -447,6 +474,40 @@ mod tests {
         assert!(load("dracula").is_err(), "Helix themes are not read");
     }
 
+    /// A colour in CIELAB (D65), for distances between colours (CIE76 ΔE).
+    fn lab(c: Option<Color>) -> [f64; 3] {
+        let Some(Color::Rgb { r, g, b }) = c else {
+            panic!("a built-in theme's colour is a true colour: {c:?}")
+        };
+        let lin = |v: u8| {
+            let v = v as f64 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        let (r, g, b) = (lin(r), lin(g), lin(b));
+        let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+        let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+        [116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))]
+    }
+
+    fn delta_e(a: Option<Color>, b: Option<Color>) -> f64 {
+        let (a, b) = (lab(a), lab(b));
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    }
+
+    /// The code's comments are never drawn as what tarae adds to the code (`ui.virtual`: inlay hints, ghost text,
+    /// end-of-line diagnostics) — in every built-in theme a comment stands apart from the virtual text by a step
+    /// one sees at a glance (ΔE ≥ 12; a hair's difference, ΔE 5, read as the same grey).
+    #[test]
+    fn comments_are_never_drawn_as_virtual_text() {
+        for name in ["meok", "hanji"] {
+            let t = load(name).unwrap();
+            let de = delta_e(t.get("comment").fg, t.get("ui.virtual").fg);
+            assert!(de >= 12.0, "{name}: a comment is ΔE {de:.1} from virtual text (floor 12)");
+        }
+    }
+
     /// Every built-in theme's text clears its floor (WCAG 2 contrast) on each ground it's read on, read from the
     /// themes themselves: body text and the code's colours 4.5 on the ground and the cards (4.0 under the primary
     /// selection and on a card's selected row — hanji's paper has no room for 4.5 there without going muddy),
@@ -521,29 +582,12 @@ mod tests {
     /// search, 2026-10-21: the only warm colour ≥ 20 from all of them at 4.5:1).
     #[test]
     fn warnings_stand_apart_from_the_codes_colours() {
-        let lab = |c: Option<Color>| {
-            let Some(Color::Rgb { r, g, b }) = c else {
-                panic!("a built-in theme's colour is a true colour: {c:?}")
-            };
-            let lin = |v: u8| {
-                let v = v as f64 / 255.0;
-                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-            };
-            let (r, g, b) = (lin(r), lin(g), lin(b));
-            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
-            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
-            let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
-            [116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))]
-        };
         let code =
             ["variable", "keyword", "function", "type", "constant", "string", "attribute", "function.macro"];
         for (name, floor) in [("meok", 20.0), ("hanji", 20.0)] {
             let t = load(name).unwrap();
-            let w = lab(t.get("warning").fg);
             for k in code.into_iter().chain(["ui.accent", "error"]) {
-                let c = lab(t.get(k).fg);
-                let de = ((w[0] - c[0]).powi(2) + (w[1] - c[1]).powi(2) + (w[2] - c[2]).powi(2)).sqrt();
+                let de = delta_e(t.get("warning").fg, t.get(k).fg);
                 assert!(de >= floor, "{name}: warning is ΔE {de:.1} from {k} (floor {floor})");
             }
         }

@@ -2,6 +2,11 @@
 # Principle: use only one accent color, boldly. The code's hues are ayu's family (orange keywords, blue types, green
 # strings, yellow functions, magenta constants) fitted to the ink — alive, never neon; dimmed things come in only
 # three steps (dim·faint·surface). Every text clears its floor (body 4.5:1, comment 4, dim 3, faint 2).
+# Values run to the ends (design pass 2, 붓): the ground near ink, the text paper, the one strong thing paper white;
+# what's secondary in three washes — 짙은 먹 `wash` (hint keys), 중먹 `dim` (cool), 물먹 `faint`; the comments a warm,
+# lighter wash, ΔE ≥ 12 from 중먹, so code read is never drawn as what tarae adds to it (inlay hints, ghost text). Docked panels sit on the
+# ground (`ui.panel`); where surfaces meet, one thin line (`ui.edge` = "lines" — "ground" keeps the half-cell
+# ground between surfaces of their own colour).
 # Format: see the header of theme.rs.
 
 "ui.background" = { bg = "ink" }
@@ -37,6 +42,9 @@
 "ui.menu.selected" = { fg = "paper_hi", bg = "surface_hi" }
 "ui.help" = { fg = "paper", bg = "surface" }
 "ui.window" = "faint"
+"ui.panel" = { fg = "paper", bg = "ink" }
+"ui.virtual.strong" = "wash"
+"ui.edge" = "lines"
 
 "error" = "red"
 "warning" = "amber"
@@ -96,19 +104,20 @@
 "markup.quote" = { fg = "dim", italic = true }
 
 [palette]
-ink = "#0c0e12"
-line = "#13161b"
-surface = "#1a1d24"
-surface_hi = "#262a34"
-sel = "#232a38"
-sel_hi = "#2d3548"
-faint = "#545862"
-guide = "#21242b"
+ink = "#07080b"
+line = "#0f1116"
+surface = "#15181e"
+surface_hi = "#20242c"
+sel = "#1c2331"
+sel_hi = "#273146"
+faint = "#51545c"
+guide = "#191c22"
 dim = "#747884"
-comment = "#7d786e"
+wash = "#b8b3a8"
+comment = "#a39782"
 punct = "#8d909a"
-paper = "#d6d2c8"
-paper_hi = "#f1ede4"
+paper = "#e8e3d8"
+paper_hi = "#fbf8f1"
 coral = "#f4805a"
 coral_dim = "#9a5a44"
 orange = "#f19e53"

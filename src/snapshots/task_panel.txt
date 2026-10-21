@@ -18,7 +18,7 @@
 15  14 fn main() {
 16  15     let text = "the quick brown fox jumps over the lazy dog";
 17   check ▲  │  failed   ● 1   1.8s            C-w j scroll  ]q next  space q list  space m m again
-18   ─────────────────────────────────────────────────────────────────────────────────────────────────
+18 ────────────────────────────────────────────────────────────────────────────────────────────────────
 19      Compiling demo v0.1.0
 20   error[E0308]: mismatched types
 21    --> src/snapshots/fixtures/demo/src/main.rs:1:4
@@ -42,12 +42,12 @@
 14
 15
 16
-17 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-18 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-19 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-20 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-21 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+17
+18
+19
+20
+21
+22
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
@@ -68,12 +68,12 @@
 15  ff
 16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 17   TTTTT e  f  eeeeee   e B   dddd            DDD D ffffff  DD ffff  DDDDD D ffff  DDDDD D D fffff
-18   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+18 ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 19
 20   eeeeeeeeeeeee eeeeeeeeee eeeee
 21
 22   eeeeee eeeee eee eeeeeee eeee
 23  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
+bg: c=ui.cursorline.primary  A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  g=diff.plus  B=bold
