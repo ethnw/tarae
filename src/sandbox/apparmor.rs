@@ -1,6 +1,6 @@
 //! tarae's AppArmor profile (step 6h, `target/sb/step6-checks-notes.md` §5): on Ubuntu with its restriction on
 //! (`kernel.apparmor_restrict_unprivileged_userns = 1`) a user namespace made by an unconfined program holds no
-//! capability, so a session keeper gets none of its own (tier C). A profile naming tarae's binary by path with
+//! capability, so a session keeper gets none of its own (tier host). A profile naming tarae's binary by path with
 //! `userns,` lifts that for tarae alone — measured on 6.8, 7.0 and 7.3 (t5). It must name a **root-owned** path:
 //! whatever can write the path gets the permission. So the `.deb` ships it for `/usr/bin/tarae`
 //! (`packaging/apparmor/tarae` — `profile` for that path, pinned by a test), and for a tarae at another
@@ -124,9 +124,9 @@ pub fn step(place: &Place) -> Option<String> {
 }
 
 /// The hint (a toast once, and the tier's line) where Ubuntu's restriction keeps a keeper's namespaces from
-/// tarae and no profile names it: runs in `tier`, why — and the step that makes them `to` (the tier with the
-/// session's namespaces: `Tier::with_namespaces`), or why there's none.
-pub fn hint(tier: &str, to: &str, place: &Place) -> String {
+/// tarae and no profile names it: runs in `tier`, why — and the step that gives them the session's namespaces,
+/// or why there's none.
+pub fn hint(tier: &str, place: &Place) -> String {
     let why = format!(
         "Claude's commands run in tier {tier} here (no namespaces of their own): Ubuntu lets a program make \
          user namespaces only through an AppArmor profile that names it, and none names tarae"
@@ -134,7 +134,7 @@ pub fn hint(tier: &str, to: &str, place: &Place) -> String {
     let path = place.path.display();
     match (step(place), &place.root_owned) {
         (Some(step), _) => format!(
-            "{why}. To make them tier {to}, run once, then restart tarae — your terminal and tools keep user \
+            "{why}. To give them namespaces of their own, run once, then restart tarae — your terminal and tools keep user \
              namespaces, as VS Code's do; Claude's and plugins' commands don't: {step}"
         ),
         (None, Err(not)) => format!(
@@ -218,9 +218,9 @@ mod tests {
     /// for a tarae not only root can replace, never a profile for it, only where to install one that can have it.
     #[test]
     fn the_hint_gives_the_step_or_says_why_not() {
-        let root = hint("C", "A+", &place("/usr/local/bin/tarae", Ok(())));
-        assert!(root.starts_with("Claude's commands run in tier C here"), "{root}");
-        assert!(root.contains("To make them tier A+, run once"), "{root}");
+        let root = hint("host", &place("/usr/local/bin/tarae", Ok(())));
+        assert!(root.starts_with("Claude's commands run in tier host here"), "{root}");
+        assert!(root.contains("To give them namespaces of their own, run once"), "{root}");
         assert!(
             root.contains(
                 "your terminal and tools keep user namespaces, as VS Code's do; Claude's and plugins' commands \
@@ -229,13 +229,12 @@ mod tests {
             "{root}"
         );
         let cargo = hint(
-            "C",
-            "A+",
+            "host",
             &place("/home/u/.cargo/bin/tarae", Err("/home/u/.cargo/bin/tarae is uid 1000's".into())),
         );
         assert!(cargo.contains("isn't (/home/u/.cargo/bin/tarae is uid 1000's)"), "{cargo}");
         assert!(!cargo.contains("sudo") && !cargo.contains("apparmor_parser"), "no step for it: {cargo}");
-        let odd = hint("C", "A+", &place("/opt/my tarae/tarae", Ok(())));
+        let odd = hint("host", &place("/opt/my tarae/tarae", Ok(())));
         assert!(odd.contains("read as a pattern") && !odd.contains("sudo"), "{odd}");
     }
 }

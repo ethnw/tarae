@@ -2293,10 +2293,10 @@ mod tests {
             network: false,
         });
         let root = Path::new("/p");
-        let said = || "A+ (user net ipc pid mnt)".to_string();
+        let said = || "own (user net ipc pid mnt)".to_string();
         assert_eq!(keeper_what(Some(&g), said, root), format!("the session's keeper · {} · /p", g.line()),);
-        assert!(g.line().starts_with("tier A+ · Landlock ABI 8"), "{}", g.line());
-        assert_eq!(keeper_what(None, said, root), "the session's keeper · A+ (user net ipc pid mnt) · /p");
+        assert!(g.line().starts_with("tier own · Landlock ABI 8"), "{}", g.line());
+        assert_eq!(keeper_what(None, said, root), "the session's keeper · own (user net ipc pid mnt) · /p");
     }
 
     fn os(pid: u32, ppid: u32, name: &str) -> Os {

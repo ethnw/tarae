@@ -1,5 +1,5 @@
 //! The session's transparent proxy, as its keeper's birth makes it (step 6c, `target/sb/step6-plan.md` §6c): where
-//! the keeper has a network namespace of its own (A+, A) and the probe's batch landed (`tier::Probed.redirect`),
+//! the keeper has a network namespace of its own (tier own) and the probe's batch landed (`tier::Probed.redirect`),
 //! tarae — not the keeper — sends the session's routes and one owned nf_tables table (`tarae-netlink`) over netlink
 //! sockets the keeper opened in that netns before any run, and makes the keeper's planted sockets transparent. From
 //! then on a TCP connection or UDP datagram leaving the session for anything but loopback and the session's own
@@ -15,7 +15,7 @@
 //! lands there is refused and said in the log: a connect to the planted address itself, a mark tarae didn't give.
 //!
 //! What's still refused there, until 6e (UDP, DNS): datagrams, and the connections of a run tarae doesn't serve — a
-//! tier without the supervisor (B+, B), or a test's own-sockets run — which used to fail at once beyond loopback (no
+//! run without the supervisor (offline, in the session's namespaces), or a test's own-sockets run — which used to fail at once beyond loopback (no
 //! route: `ENETUNREACH`). `Taken` makes the refusal as quick and as plain as a closed port's: a connection is accepted
 //! and reset (`ECONNRESET` on its first read or write), a datagram answered with ICMP port unreachable from the raw
 //! socket the birth made in the session's netns (`Kind::Icmp4`) — a connected UDP socket, glibc's resolver's among

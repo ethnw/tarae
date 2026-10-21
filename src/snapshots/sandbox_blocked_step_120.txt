@@ -4,16 +4,16 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                                    what the sandbox blocked  6/6
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-04     tier C  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
+04     tier host  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
 05     AppArmor blocks user namespaces
-06     tarae's AppArmor profile would make this A+
+06     tarae's AppArmor profile would give own namespaces
 07
 08   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache                                  …/_cacache/index-v5
 09     ◦ allow writing in /private/tmp/tarae-shot-blocked                                  …/npm-cache/_cacache/index-v5
 10     ◦ allow port 5432 on this machine                                                                  npm connecting
 11     ◦ allow every port on this machine — the risky ones too                                            npm connecting
 12     ▲ run it outside the sandbox, once                                                                       npm test
-13     ◦ copy the step that makes this tier A+                                            needs sudo, then restart tarae
+13     ◦ copy the step for own namespaces                                                 needs sudo, then restart tarae
 14
 15
 16
@@ -66,9 +66,9 @@
 01
 02    A                                                                                    ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD f  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
+04     DDDD ffff  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
 05     ffffffff ffffff ffff ffffffffff
-06     fffffff ffffffff fffffff fffff ffff ffff ff
+06     fffffff ffffffff fffffff fffff ffff fff ffffffffff
 07
 08   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT                                  ddddddddddddddddddd
 09     d                                                                                   ddddddddddddddddddddddddddddd

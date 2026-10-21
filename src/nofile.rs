@@ -2,7 +2,7 @@
 //! back to what it starts.
 //!
 //! The soft limit is often 1024 (systemd's default) or 256 (macOS's launchd), and a session with a held served
-//! run in tier C holds about 30 of tarae's descriptors, its servers, files and terminal more: the 20th session's
+//! run in tier host holds about 30 of tarae's descriptors, its servers, files and terminal more: the 20th session's
 //! run couldn't be made (`docs/design/sandbox-keeper.md` §Many sessions). So `raise` lifts the soft limit to the
 //! hard one in `main` once it knows it's the editor — a subcommand that ends at once (`state`, `--version`) raises
 //! and pins nothing — before any thread runs; on macOS to `kern.maxfilesperproc` at most (`setrlimit` refuses

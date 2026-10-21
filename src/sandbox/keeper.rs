@@ -4,7 +4,7 @@
 //! tag (`env -i` can't shed it), and ends with it. Where user namespaces work (`tier.rs`) it's born in the
 //! session's own — user, ipc, mount, pid where a fresh `/proc` mounts (then it's their PID 1), net where the
 //! policy opens nothing — with the user's own ids (D5), its own `/proc`, `/dev/pts` and `/dev/shm` (D10), `lo`
-//! up, and every capability dropped before its exec; without, a plain fork server (tiers C/D).
+//! up, and every capability dropped before its exec; without, a plain fork server (no namespaces).
 //!
 //! tarae's side: `ready` (on the worker that makes a run's policy — `sandbox::confined`) finds the session's
 //! keeper or makes one (`born`: `clone3(CLONE_PIDFD | namespaces)`, tarae writing its id maps, raw calls until
@@ -518,7 +518,7 @@ impl Keeper {
         crate::log::Session::of(&self.root)
     }
 
-    /// Its tier and namespaces in words (`:procs`, the log): `A+ (user net ipc pid mnt)`, and a mirror its `lo`
+    /// Its tier and namespaces in words (`:procs`, the log): `own (user net ipc pid mnt)`, and a mirror its `lo`
     /// couldn't take (`lo_missing`). Not `tier::get`'s: the probe's own keeper says this while the probe is under way.
     pub fn said(&self) -> String {
         let served = super::supervisor::unavailable().is_none();
@@ -2996,7 +2996,7 @@ mod tests {
 
     /// A run holds no capability — none effective, permitted, inheritable nor ambient — and gains none by an exec
     /// (`NoNewPrivs`). Its bounding set is empty too where its keeper could empty it: root's (`drop_capabilities`)
-    /// or one born in namespaces (`capabilities_dropped`). A user's keeper without namespaces (tier C as a user)
+    /// or one born in namespaces (`capabilities_dropped`). A user's keeper without namespaces (tier host as a user)
     /// can't (`CAP_SETPCAP`): the bounding set stays this system's, inert under `NoNewPrivs` — a setuid or
     /// file-capability program gets nothing from it.
     #[test]
@@ -4153,7 +4153,7 @@ mod tests {
 
     /// Whether this system gives a keeper the session's namespaces — else says the test skips itself, with the
     /// probe's reason (on a machine without them that line is the proof the reason is right). A machine said to
-    /// give them (`TARAE_EXPECT_TIER`, as `the_probe_here` checks) fails instead: a birth broken into tier C
+    /// give them (`TARAE_EXPECT_TIER`, as `the_probe_here` checks) fails instead: a birth broken into tier host
     /// isn't a skip there.
     fn namespaced(test: &str) -> bool {
         if ns().user {
@@ -4161,7 +4161,7 @@ mod tests {
         }
         let why = super::super::tier::get().short.clone().unwrap_or_default();
         if let Ok(want) = std::env::var("TARAE_EXPECT_TIER").map(|w| w.trim().to_string())
-            && ["A+", "A", "B+", "B"].contains(&want.as_str())
+            && want == "own"
         {
             panic!("{test}: tier {want} expected here, the probe found none — {why}");
         }
@@ -5093,7 +5093,7 @@ mod tests {
         format!("pipe={piped} sock={sock}")
     }
 
-    /// `accepts` (6f′): a listener of its own on `127.0.0.1:$TARAE_PORT` (opened: in tier C a run's own loopback
+    /// `accepts` (6f′): a listener of its own on `127.0.0.1:$TARAE_PORT` (opened: in tier host a run's own loopback
     /// listener is this machine's), non-blocking first (`accept4` with nothing waiting: its errno), then a thread
     /// connecting and sending `hello`, accepted, then nothing coming under a 300 ms `SO_RCVTIMEO` — `nonblock=<errno>
     /// peer=<its address's ip> got=<what came> timed=<errno> <in time | off>`.
@@ -6240,8 +6240,8 @@ mod tests {
         k.end();
     }
 
-    /// F2: no process outside its session gives a run its environment. With the PID namespace (A+) the run
-    /// can't even name one: nothing it sees carries the stand-in's markers. Without it (A: Docker's masked
+    /// F2: no process outside its session gives a run its environment. With the PID namespace the run
+    /// can't even name one: nothing it sees carries the stand-in's markers. Without it (Docker's masked
     /// `/proc`) it sees the stand-in and reads its command line, never its environment (Landlock keeps a
     /// ptrace-mode read in the domain — `landlock::tests::a_confined_run_reads_no_environment_outside_it`).
     /// The stand-in is the test's own, with a harmless marker in its arguments and one in its environment;
@@ -6279,14 +6279,14 @@ mod tests {
         assert!(status.success(), "{out}");
         let n: Vec<usize> = out.split_whitespace().map(|w| w.parse().unwrap()).collect();
         let (seen, args, env, own_args, own_env) = (n[0], n[1], n[2], n[3], n[4]);
-        let tier = if pid_ns { "A+ (its own PID namespace)" } else { "A (no PID namespace)" };
+        let tier = if pid_ns { "own (its own PID namespace)" } else { "own (no PID namespace)" };
         let line = format!(
             "tier {tier}: the run sees {seen} processes — its own markers read in {own_args} (arguments) and \
              {own_env} (environment), the stand-in's arguments in {args}, its environment in {env}\n"
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         // The control: the loop finds the run's own markers, so a 0 for the stand-in's is a refusal or a
-        // process out of sight, not a loop that reads nothing (in A+ both of the stand-in's are 0).
+        // process out of sight, not a loop that reads nothing (with a PID namespace both of the stand-in's are 0).
         assert!(own_args >= 1 && own_env >= 1, "the run doesn't find its own markers: {line}");
         assert_eq!(env, 0, "an environment read outside the session: {line}");
         assert_eq!(args, usize::from(!pid_ns), "{line}");
@@ -6375,8 +6375,8 @@ mod tests {
 
     /// Step 7: two sessions' keepers side by side, a run of each — from one, everything a process can do to
     /// another of the same user: kill/signal, ptrace attach, its `/proc/<pid>/{cmdline,environ}` read,
-    /// `setpriority`. Each tier's expectation is the table: A+ names nothing of the other session (its own PID
-    /// namespace); without one (A, C/D) the other run is in sight and Landlock keeps ptrace and the environment
+    /// `setpriority`. Each tier's expectation is the table: with its own PID namespace a run names nothing of the
+    /// other session; without one (no fresh `/proc`, or no namespaces) the other run is in sight and Landlock keeps ptrace and the environment
     /// (a ptrace-mode read) in the run's own domain, signals from ABI 6 — what goes through is shared, pinned as
     /// shared and said (the user's decision 2026-10-10). The stand-in is the test's own; what a `setpriority` it
     /// was let do is checked on it from here, and it's alive after.
@@ -6443,7 +6443,7 @@ mod tests {
         };
         // From ABI 6 Landlock keeps a run's signals to its own processes (its scope); below, they're shared
         let signal = if abi >= 6 { Refused } else { Shared };
-        // (attempt, A+: its own PID namespace, A: the session's namespaces but that one, C/D: none)
+        // (attempt, with its own PID namespace, with the session's namespaces but that one, with none)
         let table = [
             ("cmdline", Unnamed, Shared, Shared),
             ("environ", Unnamed, Refused, Refused),
@@ -6872,8 +6872,8 @@ mod tests {
     /// loopback TCP listeners and UDP sockets, IPv4 and IPv6, an abstract unix listener, a unix socket in its
     /// project, a SysV shared memory segment, a file in `/dev/shm`, a pty. Each is the session's own where its
     /// keeper has the namespace — the network (its `lo`, its abstract names), IPC and its own `/dev/shm` and
-    /// `devpts` (A+, A) —; a unix socket by path is the supervisor's to refuse outside the project, in every tier
-    /// served. Without them (C/D) what goes through is shared, pinned as shared and said (the user's decision
+    /// `devpts` (tier own) —; a unix socket by path is the supervisor's to refuse outside the project, in every tier
+    /// served. Without them (no namespaces) what goes through is shared, pinned as shared and said (the user's decision
     /// 2026-10-10) — but the loopback: the trying session opens every port of this machine's
     /// (`llm.sandbox-localhost`), and where sessions share that loopback the other session's sockets on it are
     /// refused (step 8, D18) — `ECONNREFUSED`, what a loopback of the session's own with nothing there says, and
@@ -7962,7 +7962,7 @@ mod tests {
                 let why =
                     "no namespaces here: /dev/shm is this system's for both, nothing of a keeper's to judge";
                 if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
-                    && ["A+", "A", "B+", "B"].contains(&want.trim())
+                    && want.trim() == "own"
                 {
                     panic!("{test}: tier {want} expected here — {why}");
                 }
@@ -8477,7 +8477,7 @@ mod tests {
     /// Step 5: with the network open a run's connect to the proxy's address holds a real TCP socket of its own
     /// family — every option a client sets on it works (a unix socket in its place broke Python's `TCP_NODELAY`,
     /// M5) and its `O_NONBLOCK` is kept — and what it sends goes through tarae's proxy to the host it names, in
-    /// tier C (D-e) and a netns without TPROXY alike (in a TPROXY session the address isn't the proxy's:
+    /// tier host (D-e) and a netns without TPROXY alike (in a TPROXY session the address isn't the proxy's:
     /// `in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own`). The outside is a listener of the test's on this
     /// machine's own address, named for the proxy (`proxy::TEST_NAMES`), beyond this machine for a policy made with
     /// no own addresses.
@@ -8555,7 +8555,7 @@ mod tests {
     /// Step 5e: a host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy — reached through
     /// the supervisor's TCP pair as macOS's runs reach it through their ports — and the main loop is asked, for
     /// that run; the session's answer lets it through, and the session's next run reaches the host unasked. The
-    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier C and a netns without TPROXY alike.
+    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier host and a netns without TPROXY alike.
     #[test]
     fn an_unknown_host_waits_for_the_answer() {
         use super::super::proxy::{self, FromProxy, Scope, ToProxy};
@@ -8642,7 +8642,7 @@ mod tests {
     /// takes it (TPROXY: a name looked up, its stand-in address connected to) and through the proxy variable's
     /// address elsewhere — and waits there on the main loop's answer: `y` lets this run's request through alone; the
     /// next run is asked again, and a no refuses it, nothing more arriving outside. The test stands in for the main
-    /// loop (`proxy::TEST_ASKS`). In tier C, a netns without TPROXY and TPROXY's.
+    /// loop (`proxy::TEST_ASKS`). In tier host, a netns without TPROXY and TPROXY's.
     #[test]
     fn with_the_network_closed_a_connection_waits_on_the_card() {
         use super::super::proxy::{self, FromProxy, Scope, ToProxy};
@@ -8741,7 +8741,7 @@ mod tests {
 
     /// Step 5: with the network through the proxy, a connect beyond this machine that doesn't go through it — a
     /// tool that ignores `HTTPS_PROXY` — is refused (`EPERM`, `network-direct`) and said in words that name the
-    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier C and the netns alike —
+    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier host and the netns alike —
     /// but where the session's network takes what goes beyond (6d, TPROXY), the connect isn't the supervisor's to
     /// refuse: it reaches a planted socket, the proxy's to decide by the host it names (here none: still nothing
     /// arrives); the datagram is refused as before (UDP: 6e's).
@@ -8829,7 +8829,7 @@ mod tests {
     /// Step 5c (Q4, closing what D-c opened): with the network through the proxy a resolver `resolv.conf` names
     /// (a stand-in of the test's on this machine's loopback, on its own port) isn't reached — names are the
     /// proxy's to look up, and an open port 53 would be a way out no host rule sees. The datagram is refused,
-    /// said as a name lookup, and nothing arrives; in tier C and a netns without TPROXY alike (with it, names are the
+    /// said as a name lookup, and nothing arrives; in tier host and a netns without TPROXY alike (with it, names are the
     /// session's: 6e). (Measured first: no
     /// tool going through the proxy looked a name up itself — `measure_through_the_proxy`.)
     #[test]
@@ -8871,7 +8871,7 @@ mod tests {
     }
 
     /// The served tiers here, each run's keeper born in them (`keeper_for`), with the session's network or not:
-    /// tier C's (no namespaces); the session's netns where this system gives one, born without the session's network
+    /// tier host's (no namespaces); the session's netns where this system gives one, born without the session's network
     /// — a netns without TPROXY, whose runs go out by the proxy's variable and the pair (6f's F3); and, with `tproxy`,
     /// that netns with the session's network where this system gives it (the swap's ways are the same there; the
     /// proxy's address isn't the proxy's — 6f). None where nothing's served.
@@ -8922,7 +8922,7 @@ mod tests {
     ) -> Option<Copied> {
         served_tiers(test, false)?;
         let w = Watchdog::new(test, COPIED_LIMIT);
-        w.waiting_for("the keeper's birth (tier C)");
+        w.waiting_for("the keeper's birth (tier host)");
         let k = keeper_for(test, Ns::NONE, false);
         w.waiting_for("the project's policy and rules");
         let (mut p, mut c, root) = project_served(test, ports, Some(&k), &[], Ok(()));
@@ -8986,7 +8986,7 @@ mod tests {
     /// By copies: a run's `accept` is tarae's (6f′, G2 (b)) — on its copy of the run's listener, as the run would:
     /// non-blocking with nothing waiting `EAGAIN` at once; blocking, the connection comes, its peer's address written
     /// where the run asked, and what it sent read on the accepted socket; blocking with nothing coming, `EAGAIN` once
-    /// its `SO_RCVTIMEO` is past (300 ms), as the kernel's accept. (Its port opened: in tier C the run's own
+    /// its `SO_RCVTIMEO` is past (300 ms), as the kernel's accept. (Its port opened: in tier host the run's own
     /// loopback listener is this machine's — unopened, its connect is refused and the accept waits on, until the
     /// listener's `SO_RCVTIMEO`.)
     #[test]
@@ -9134,7 +9134,7 @@ mod tests {
 
     /// This machine's own address beyond loopback (a container's, a LAN's, Docker's bridge's) is this machine,
     /// not beyond it: with the network open a listener of the test's there isn't reached — refused, said, nothing
-    /// arrives — until its port is opened (`llm.sandbox-ports`); in tier C and the session's netns alike. The own
+    /// arrives — until its port is opened (`llm.sandbox-ports`); in tier host and the session's netns alike. The own
     /// addresses as a policy reads them when it's made (`Here::now`).
     #[test]
     fn this_machines_own_address_is_reached_only_where_opened() {
@@ -9169,7 +9169,7 @@ mod tests {
 
     /// A socket tarae put out of the session isn't listened on: once its connect beyond is refused (a closed port
     /// beyond — `outside`), or once a connection made is undone (`connect(AF_UNSPEC)`), it's unbound again and a
-    /// `listen` would bind it to every address of this machine — refused with `EINVAL` and said; in tier C and the
+    /// `listen` would bind it to every address of this machine — refused with `EINVAL` and said; in tier host and the
     /// session's netns alike. (A run's own listener: `two_runs_share_the_sessions_loopback`.)
     #[test]
     fn a_socket_put_out_of_the_session_isnt_listened_on() {
@@ -9293,7 +9293,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// In the session's netns a run makes its own internet sockets — TCP's and UDP's only, as tier C's tarae makes
+    /// In the session's netns a run makes its own internet sockets — TCP's and UDP's only, as tier host's tarae makes
     /// them: SCTP, MPTCP, UDP-Lite and ICMP's, whose options and messages name addresses tarae never sees, refused.
     #[test]
     fn a_run_makes_tcp_and_udp_sockets_only() {
@@ -10510,7 +10510,7 @@ mod tests {
     }
 
     /// The review's second pass, its third finding: a scope goes only to a keeper whose birth made `/sys/fs/cgroup`
-    /// read-only in a mount namespace of its own. One born without namespaces (tier C's) has none to do it in: its runs
+    /// read-only in a mount namespace of its own. One born without namespaces (tier host's) has none to do it in: its runs
     /// could move themselves between the scope's cgroups, all the user's — so it gets no scope (never even asked for
     /// one), said; its runs in its own cgroup.
     #[test]
@@ -11314,12 +11314,12 @@ mod tests {
     }
 
     /// A keeper gets the session's network only where it has a netns of its own and the probe's network landed
-    /// (D-b): none without a netns (tier C; a policy that opens something where tarae can't swap; `net` without a user
+    /// (D-b): none without a netns (tier host; a policy that opens something where tarae can't swap; `net` without a user
     /// namespace makes none), none where the probe's batch didn't land — whatever the other says.
     #[test]
     fn a_keeper_gets_the_network_only_with_a_netns_and_the_probes_yes() {
         let (yes, no): (Result<(), String>, Result<(), String>) = (Ok(()), Err("no NFT_TPROXY here".into()));
-        assert!(network_for(Ns::session(true, true), &yes).is_some(), "A+");
+        assert!(network_for(Ns::session(true, true), &yes).is_some(), "the session's namespaces");
         assert!(network_for(Ns::session(true, false), &yes).is_some(), "A: no PID namespace, its netns");
         assert!(network_for(Ns::NONE, &yes).is_none(), "no namespaces");
         assert!(network_for(Ns::session(false, true), &yes).is_none(), "the session's, without its netns");

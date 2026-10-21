@@ -859,8 +859,8 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   the output's `Operation not permitted` lines instead
 - **What it blocked is yours to open**, never Claude's: `space m s` on a command's panel (`space x s` on a test
   run's, or `:sandbox-blocked`) lists what could open — over the list, what the session's last sandboxed run
-  was kept from and shared (`tier C  loopback this machine's, other sessions' refused  shared processes, …`, or
-  `sandbox Seatbelt …`), and why it isn't the top tier in a few words, faint under it (`AppArmor blocks user
+  was kept from and shared (`tier host  loopback this machine's, other sessions' refused  shared processes, …`, or
+  `sandbox Seatbelt …`), and what's missing in a few words, faint under it (`AppArmor blocks user
   namespaces · copies: pidfd_getfd refused`; the whole reason is in Claude's report and `tarae state`). A narrow
   panel gives its room by importance — what's shared, the loopback, the network, Landlock's ABI — each part whole
   where it fits (a long one that doesn't leaves room to shorter ones after it), and what's shared keeps its first
@@ -987,7 +987,7 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   the warning color, whole (`▲ It changes a file that runs later outside the sandbox … — read all of it. (tools
   pack)`); `tarae state`'s `edit_review` lists its `warnings`
 - **Where it ran.** Each of Claude's commands' rows in the chat ends with where it ran, from the run's own
-  record: `ok · sandbox` (on Linux its tier, `sandbox A+`, and `partial` below Landlock ABI 3), `+ Docker socket`
+  record: `ok · sandbox` (on Linux its tier, `sandbox own`, and `partial` below Landlock ABI 3), `+ Docker socket`
   or the socket granted, `+ network`; `outside`, `no sandbox`, `sandbox off` — past the sandbox (a Docker socket
   counts) in the warning color — and `▲2` for what it warned of. A click on that end of the row (`ok · sandbox
   ▲2`, from its verdict on), or `K` in the task panel
@@ -1019,11 +1019,11 @@ instruction, and is the parent of whatever the command leaves running. Everythin
 keeper is born in namespaces of the session's own: its loopback, its process numbers, its System V IPC, `/dev/shm`
 and terminals. How much of that a session gets is its tier:
 
-- **A+**: user namespaces work.
-- **A**: the same, but `/proc` is masked (Docker's default), so the session has no process numbering of its own.
-- **B+, B**: as A+, A, but tarae can't serve a command's sockets (below): a command gets no socket.
-- **C**: no user namespaces — Ubuntu's restriction without tarae's profile, or a container's seccomp profile.
-- **D**: as C, and tarae can't serve a command's sockets.
+- **own**: user namespaces work. Where `/proc` is masked (Docker's default) the session has no process numbering of
+  its own, said.
+- **host**: no user namespaces — Ubuntu's restriction without tarae's profile, or a container's seccomp profile.
+- **offline**: tarae can't serve a command's sockets (below): a command reaches no network — with the session's
+  namespaces its own loopback, without them no socket at all.
 - **By copies**: in a container without `CAP_SYS_PTRACE` (below), tarae serves sockets by copies, and the session
   has no network of its own: its loopback is this machine's, with other sessions' sockets on it refused.
 
@@ -1033,22 +1033,22 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Kept apart | Shared |
 |---|---|---|
-| A+, TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+, tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+ by copies: the session's user namespace, no network one | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
-| A+, the project in /dev/shm | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
-| A+, its lo without an IPv6 address | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
-| A+, the network closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A, TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A, tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
-| B+ | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| B | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| C, tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| D | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| D, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| own, TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own, tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own by copies: the session's user namespace, no network one | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
+| own, the project in /dev/shm | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| own, its lo without an IPv6 address | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| own, the network closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own without a PID namespace, TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
+| offline, the session's namespaces | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| offline, the session's namespaces without a PID one | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| host, tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| offline, no namespaces | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| offline, no namespaces, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | Seatbelt, no port open, the network closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
 | Seatbelt, ports open, the network closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
 | Seatbelt, no port open, the network open | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
@@ -1062,14 +1062,14 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   the network's way for each case too.
 - **On macOS** a loopback port a command may reach is reached whoever listens on it, another session's command
   too: Seatbelt can't tell whose a listener is. Claude's result says so.
-- **Raising the tier.** Where Ubuntu's restriction is why, the sandbox panel says so faint under its header
-  ("tarae's AppArmor profile would make this A+"), and its last row copies the step that installs the profile:
+- **Getting namespaces.** Where Ubuntu's restriction is why, the sandbox panel says so faint under its header
+  ("tarae's AppArmor profile would give own namespaces"), and its last row copies the step that installs the profile:
   run it with `sudo`, then restart tarae. In a container, `--cap-add SYS_PTRACE` turns copies into the full way of
   serving sockets.
 - **Where it's said.** Claude's result says the tier once a conversation, and again when it changes: what its
-  commands are kept from and what they share. A command sees it in `TARAE_SANDBOX_STATUS` (`A+:6`, `C:4`, or
-  `seatbelt` on macOS). You see it over the sandbox panel's list (above) and on the keeper's row in `:procs`;
-  `tarae state` has it as `sandbox`, with the step that would raise it, and `tarae state --watch sandbox` says
+  commands are kept from and what they share. A command sees it in `TARAE_SANDBOX_STATUS` (`own:6`, `host:4`,
+  or `seatbelt` on macOS). You see it over the sandbox panel's list (above) and on the keeper's row in `:procs`;
+  `tarae state` has it as `sandbox`, with the step that would give it namespaces, and `tarae state --watch sandbox` says
   when it changes. Claude's `ui` tool has it too. Claude isn't told the step: it can't take it.
 
 - **How much depends on the kernel.** tarae reads Landlock's version (its ABI) from the kernel, so a
@@ -1110,7 +1110,7 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   multicast or broadcast. This machine — its loopback and its own addresses (its LAN's, Docker's bridge's, as
   they were when the command started) — it reaches only on the ports `llm.sandbox-ports` and
   `llm.sandbox-localhost` open. Claude's result says so.
-- **No proxy variable where the session has a network of its own** (tiers A+ and A). Every connection a command
+- **No proxy variable where the session has a network of its own** (tier own). Every connection a command
   makes and every name it looks up is tarae's to take: a name gets an address of the session's own, and a
   connection's first bytes (TLS's server name, HTTP's `Host`) say where it goes, checked as through the proxy. So
   a tool goes out as it would anywhere, with nothing to set. Measured with curl, cargo, npm, pip, Go and Gradle. A
@@ -1121,7 +1121,7 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   command's socket with (`pidfd_getfd`), so tarae makes every socket the command has — its unix sockets and
   `socketpair`s too, and the connections its servers accept — and keeps its own copy of each. Ports, unix
   sockets in the project and the network work as elsewhere, with the session's commands on the container's
-  loopback (tier C). What it costs:
+  loopback (tier host). What it costs:
   - a socket closed reaches its peer late (≈ 0.1 s while the command is busy, up to ≈ 1 s after a quiet spell),
     as tarae lets its copy go only once no process holds the socket — and not at all while a process tarae
     can't look into (ssh-agent, gpg-agent) runs among the command's; a port a command closed is free again for
@@ -1142,7 +1142,7 @@ macOS (Seatbelt). A test keeps this table equal to the code:
     to tarae, not to init, and its connections are served after the command is over
   - when tarae itself runs inside such a sandbox (a tarae started by one of Claude's commands)
 - **Ubuntu and user namespaces.** From 23.10 on, Ubuntu lets a program make user namespaces only through an
-  AppArmor profile that names it. Without one, tarae gives a session no namespaces of its own (tier C), and the
+  AppArmor profile that names it. Without one, tarae gives a session no namespaces of its own (tier host), and the
   first sandboxed command says so once: why, and the `sudo` step that installs tarae's profile (the sandbox
   panel's last row copies it). tarae never
   writes the profile itself, and offers it only for a tarae at a path only root can replace — its `.deb` puts
@@ -1159,8 +1159,8 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   then — or the next one's. It's in `:procs` under its session, as `java · left by a run`, and it ends when
   its session ends, when tarae quits (or restarts), or when one of Claude's commands in that project starts
   under other rules (a grant since, a setting): it holds the old ones. Its parent is the session's keeper,
-  whatever it does to its environment, and it ends with the keeper (in tier A+ the session's whole process
-  numbering goes at once). Whatever a program tarae ran leaves is reaped by tarae once it has ended (on its
+  whatever it does to its environment, and it ends with the keeper (with a PID namespace the session's whole
+  process numbering goes at once). Whatever a program tarae ran leaves is reaped by tarae once it has ended (on its
   `:procs` look, after 10 seconds) — the terminal's `nohup`s too, which tarae otherwise leaves be. Never a
   process tarae started itself: that one is its owner's to wait for.
 - **Gradle runs in the sandbox** with `llm.sandbox-localhost`, as on macOS — but a Gradle project's home is
@@ -1195,10 +1195,10 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   `package.json`, `make`'s first build beside its `Makefile`.
 - **Files named like keys** (`.env`, `*.pem`, `id_*` …, and a key's other names in the project — hard links made
   earlier, tools' output too) are closed one of two ways, said in Claude's result. Where the session's commands have
-  a user namespace (tiers A+ … B) and tarae doesn't run as root, each command hides them by mounts of its own: a key
+  a user namespace (tier own, or offline with namespaces) and tarae doesn't run as root, each command hides them by mounts of its own: a key
   reads as an empty file it may not open, and can't be written, renamed, removed, replaced or linked; everything
   beside it works as usual — `sed -i`, a save by rename. Up to 1,024 keys (a run costs about 0.07 ms more a key,
-  measured on Debian 12). Otherwise — tiers C and D, past 1,024 keys, or **tarae run as root** (a dev container: the
+  measured on Debian 12). Otherwise — no namespaces, past 1,024 keys, or **tarae run as root** (a dev container: the
   kernel lets a namespace map root only with a capability nothing of tarae's keeps) — their folders are closed
   around them: a file made or replaced beside a key is read only from Claude's next command, and `sed -i` there
   fails. The same when another mount of the key's filesystem reaches it — a second bind of the workspace, toolbox's

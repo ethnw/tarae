@@ -1,7 +1,7 @@
 //! Step 6e′'s M5 (`target/sb/step6e-design.md`): the M4 tools — curl, cargo, npm, pip, Go, Gradle — through the
 //! real path (`sandbox::policy`, `command`, `spawn`, `after_run`), each fetching one package from a registry of the
-//! test's own. Where the session takes a run's connections (`Policy.redirected`: TPROXY, tiers A+ and A) the run
-//! has no proxy URL, no proxy variable and no proxy line in its Gradle home; elsewhere (tier C) its way is the
+//! test's own. Where the session takes a run's connections (`Policy.redirected`: TPROXY, tier own) the run
+//! has no proxy URL, no proxy variable and no proxy line in its Gradle home; elsewhere (tier host) its way is the
 //! URL. Nothing leaves the machine: the registries are the test's own servers on this machine's own address, under
 //! `example.invalid` names (`TEST_NAMES`) — curl's and cargo's plain HTTP, served here (so they run wherever curl
 //! and cargo are: the checks' own image), the others' HTTPS (`Repo.java`, its certificate trusted by each tool's

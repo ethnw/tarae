@@ -36,7 +36,7 @@ files and decided each address it reached. It left four things open:
 | D7 | `TARAE_SANDBOX_STATUS`, and the state line's words (Showing it) |
 | D10 | The session's mount namespace changes only `/proc`, `/dev/pts` and `/dev/shm`. Files stay Landlock's: denied, never hidden |
 | D11 | A dead keeper is remade, the run under way is reported failed, and tarae stops remaking after two deaths in 10 minutes |
-| D12 | Where `/proc` can't be mounted there is no PID namespace (tier A), never the host's `/proc` |
+| D12 | Where `/proc` can't be mounted there is no PID namespace (tier own without one), never the host's `/proc` |
 | D13 | The boundary is the session. A new conversation, a session behind and the main checkout's session each keep their keeper — a new conversation unless the last one granted writes or ports: those are in the policy key (D14) |
 | D14 | Any policy-key change ends the keeper; its daemons start cold once |
 | D15 | The keeper is born by `clone3` from tarae, with raw system calls until its exec |
@@ -46,8 +46,8 @@ files and decided each address it reached. It left four things open:
 | D23 | The supervisor and the proxy talk only over a Rust channel (`mpsc`) of typed, owned messages. **Supervisor → proxy**: the traffic end (`OwnedFd`), the session's id, and the connection's rules as a read-only snapshot (an `Arc`, never mutated). **Proxy → supervisor**: `Refused` and log lines. No socketpair between them, and no shared mutable state (no `Mutex` or other cell both sides write). The run's traffic socketpair stays. **Why not a socket**: in one process a socket isolates nothing; the channel keeps the same discipline at no serialization cost. If D21 is ever done, these messages move onto the keeper channel's wire format then (`channel.rs`). The keeper's own channel stays `SOCK_SEQPACKET` + `SCM_RIGHTS`: the keeper is another process |
 | D-c | ~~With the network open, the resolvers `resolv.conf` names are reached on port 53 only~~ (2026-10-07) — superseded: through the proxy names are the proxy's (step 5c), in a TPROXY session the session's (6e); 6f took the route's last of it out |
 | D-d | Link-local addresses (the cloud metadata servers among them), multicast and broadcast, and their IPv4-mapped and carried forms, are never reached (2026-10-07; D-c's port-53 exception gone in 6f) |
-| D-e | ~~Tier C goes out by the same swap~~ (2026-10-07) — superseded: tier C goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
-| D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused in C (2026-10-07) |
+| D-e | ~~Tier host goes out by the same swap~~ (2026-10-07) — superseded: tier host goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
+| D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused without one (2026-10-07) |
 
 ## The shape
 
@@ -260,11 +260,11 @@ the keeper.
 
 ### Its protection
 
-| Property | A+ / B+ | A / B | C / D | Test |
+| Property | The session's namespaces | The same, no PID namespace | No namespaces | Test |
 |---|---|---|---|---|
 | non-dumpable | yes | yes | yes | `the_keeper_is_not_dumpable` |
 | no capability in what it forks | dropped before exec | dropped before exec | dropped at its start (it has some only as root) | `a_command_holds_no_capability` |
-| unreachable by its runs' signals | PID 1, and Landlock ABI 6 | Landlock ABI 6; below it a run can kill it | as A / B | `a_command_cant_signal_the_keeper` (from ABI 6, and below it in A+/B+); else `a_killed_keeper_fails_closed_and_is_remade` |
+| unreachable by its runs' signals | PID 1, and Landlock ABI 6 | Landlock ABI 6; below it a run can kill it | as without a PID namespace | `a_command_cant_signal_the_keeper` (from ABI 6, and below it with a PID namespace); else `a_killed_keeper_fails_closed_and_is_remade` |
 | unreachable by ptrace and `/proc/<pid>/{mem,environ,fd}` | non-dumpable + Landlock's ptrace scope | same | same | `the_keeper_is_not_dumpable` |
 | holds only its channel and stdio | yes | yes | yes | `a_command_holds_only_its_stdio` |
 | ends with tarae | yes, its namespaces too | yes, its tree first | yes, its tree first | `the_keeper_ends_with_its_channel` |
@@ -292,7 +292,7 @@ refused outright, as before.
 ## Sockets and routing (*built*, step 4)
 
 **One decision per run** (`tier::RunNet`, made in `linux::confine` with its rules, carried to the keeper as the run's
-`net`): `Routed` in a netns tier served, `Served` in C, `Own` and `Plain` unserved. In `Routed` the run makes its own
+`net`): `Routed` in tier own, `Served` in host, `Own` and `Plain` offline. In `Routed` the run makes its own
 internet sockets — TCP's and UDP's only, by type and protocol, as C's `socket()` makes them (`seccomp::Mode::Routed`):
 not raw, ICMP's, UDP-Lite's, SCTP's or MPTCP's, whose own options and messages (SCTP's `CONNECTX`, its `DSTADDR`
 cmsgs) choose destinations tarae never sees; they belong to the session's netns. `connect`, `bind`, `listen`, an
@@ -313,7 +313,7 @@ addressed `sendto`, `sendmsg` and `sendmmsg` still go to the supervisor, which r
 | anything else beyond, network open, otherwise | refused: `EPERM`, `network-direct` | only the proxy and the session's network go out (6f took `Out` — a socket of tarae's connected beyond, unreachable since step 5 — away) |
 | anything else, network closed | refused: `EPERM`, `network-outbound` | as before |
 
-In tier C (`Served`, no netns) the same table without the session: loopback is this machine's where opened, else
+In tier host (`Served`, no netns) the same table without the session: loopback is this machine's where opened, else
 refused; beyond goes only by the proxy's address.
 
 **The egress swap** (`supervisor::swapped_for`), for Machine and OwnAddress (kept until connect leaves the supervisor:
@@ -352,10 +352,10 @@ floor — `SETFD`, already in the v5.9 uapi header, is older than it.)
 
 Unix sockets by path cross namespaces, so the supervisor's path rule (the session's project and `RunDir`) and ABI 9
 stay their guard. Abstract names are per netns: in `Routed` tarae binds and connects them on the run's own socket,
-so a run reaches only its session's (D-f; this machine's listener on the same name isn't reached); in C they stay
+so a run reaches only its session's (D-f; this machine's listener on the same name isn't reached); in host they stay
 refused.
 
-**Where sessions share a loopback** (*built*, step 8, `owners.rs`; tier C, and every session served by copies — born
+**Where sessions share a loopback** (*built*, step 8, `owners.rs`; tier host, and every session served by copies — born
 without a netns), D18's rule: tarae makes every internet socket a run has, so one table (`owners::OWNERS`) holds each
 socket's cookie (`SO_COOKIE`: 64-bit, never reused) against its session and its keeper, from the served `socket`
 (again at `bind`, `listen`, a connect and a send). A connect
@@ -419,7 +419,7 @@ lookup with 100 / 1 000 / 10 000 sockets in the netns, median:
 | machine | TCP listeners: sock_diag | `/proc/net/tcp{,6}` | UDP sockets: sock_diag | `/proc/net/udp{,6}` |
 |---|---|---|---|---|
 | Ubuntu 24.04, kernel 7.0, amd64 (the real C) | 0.075 / 0.118 / 1.01 ms | 2.2 / 4.1 / 29.3 ms | 0.068 / 0.147 / 1.21 ms | 0.39 / 3.1 / 102 ms |
-| colima's VM, arm64 (C) | 0.41 / 0.41 / 0.74 ms | 1.6 / 2.2 / 11.3 ms | 0.025 / 0.063 / 0.66 ms | 0.22 / 1.1 / 27.6 ms |
+| colima's VM, arm64 (host) | 0.41 / 0.41 / 0.74 ms | 1.6 / 2.2 / 11.3 ms | 0.025 / 0.063 / 0.66 ms | 0.22 / 1.1 / 27.6 ms |
 
 A UDP ask walks every UDP socket of the namespace in the kernel (no table of listeners, as TCP has), the port
 filtered there: on Ubuntu a fifth more than TCP's at 10 000 sockets, on colima no more — nothing to change for it. The `/proc` fallback for UDP is dearer than TCP's at 10 000 (102 ms against 30 a lookup,
@@ -454,8 +454,8 @@ narrowed to it: refused, said, nothing taken in; the sender's own session takes 
 Where `pidfd_getfd` is refused (Docker's default profile, a container without `--cap-add SYS_PTRACE`), the supervisor
 can't take a run's socket to make a call on it. The probe (`supervisor::serving`) then answers `Serving::Copies`, not
 "can't serve": the session is born without a netns (every socket is tarae's; Docker refuses new namespaces anyway) and
-its runs are `RunNet::Copied` — tier C, said "served by tarae's own copies of their sockets".
-- **tarae makes every socket the run has** (`seccomp::Mode::Copied`): internet ones as in C, and also unix stream and
+its runs are `RunNet::Copied` — tier host, said "served by tarae's own copies of their sockets".
+- **tarae makes every socket the run has** (`seccomp::Mode::Copied`): internet ones as in tier host, and also unix stream and
   netlink route ones, `socketpair` and `accept`/`accept4`. Each is kept as a copy by inode before the run holds it
   (`Copies::keep`); a call on descriptor `n` finds it by the inode `readlink /proc/<tid>/fd/<n>` names
   (`socket:[…]`, `PTRACE_MODE_READ` only). Netlink keeps its routing-only rule.
@@ -560,11 +560,14 @@ or not, nothing goes (no rule names an address).
 
 | Tier | The keeper's namespaces | Supervisor | Beyond this machine, the network open (6f) | Leftovers owned by |
 |---|---|---|---|---|
-| **A+** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`) | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill |
-| **A** | user, net, ipc, mnt (`devpts`, `/dev/shm`); no fresh `/proc` | serving | as A+ | the keeper's tree |
-| **B+ / B** | as A+ / A | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | as A+ / A |
-| **C** | none (no unprivileged user namespaces; or served by copies — Docker's default profile, §By copies) | serving (by copies: every socket tarae's) | the proxy's variable and the pair (6f's F2) | the keeper's tree |
-| **D** | none | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | the keeper's tree |
+| **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said; served by copies, no net | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
+| **host** | none (no unprivileged user namespaces; or served by copies — Docker's default profile, §By copies) | serving (by copies: every socket tarae's) | the proxy's variable and the pair (6f's F2) | the keeper's tree |
+| **offline** | as own, or none | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | as own, or the keeper's tree |
+
+The tier is what a user can tell apart: whether a command reaches the network at all (served or offline), and whether
+its loopback, IPC, `/dev/shm` and terminals are the session's own (own) or this machine's (host). The rest — a PID
+namespace or not, how the network goes, the session's namespaces in offline or none — is each row's and `why`'s to
+say (§What each tier keeps apart).
 
 In every served tier opened ports and this machine's own addresses go by the swap (§Sockets and routing) until connect
 leaves the supervisor (Landlock ABI 9's step, D2). The file guarantees (Landlock ABI ≥ 3 full, 2 partial, < 2 none)
@@ -582,22 +585,22 @@ truncating: a run can empty any file of the user's).
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |
 |---|---|---|---|
-| A+, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+ by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
-| A+, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
-| A+, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
-| A+, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
-| B+ | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| B | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| C, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| D | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| D, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
+| own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
+| offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| host, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| offline, no namespaces | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| offline, no namespaces, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | Seatbelt, no port open, the network closed | closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
 | Seatbelt, ports open, the network closed | closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
 | Seatbelt, no port open, the network open | tarae's proxy | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
@@ -623,7 +626,7 @@ the session's network lands (TPROXY). What failure says:
 | `clone3`/`unshare` EPERM or ENOSYS in a container | Docker's default seccomp profile |
 | ENOSPC, `user.max_user_namespaces` = 0, `kernel.unprivileged_userns_clone` = 0 | user namespaces turned off |
 | `/proc/version` says WSL 1 | WSL 1 |
-| mounting `procfs` refused | `/proc` masked (Docker's default): tier A, not A+ |
+| mounting `procfs` refused | `/proc` masked (Docker's default): own without a PID namespace |
 
 The remedy on Ubuntu is said once: an AppArmor profile granting `userns` to tarae's binary, else the sysctl (said
 second: it weakens the whole system). tarae ships no profile.
@@ -638,24 +641,27 @@ words (`line`, `sentence`, `shared_said`, `brief`), pinned by `sandbox_guarantee
 - **Claude's report** (9b): the tier's sentence once a conversation, and again when it changes — what the run is
   kept from and what it shares with other sessions' commands, and what that means ("its localhost is the
   session's own"). Pinned by `sandbox_report.txt` per tier and `golden::the_report_says_the_tier_once`.
-- **The run's environment** (9c): `TARAE_SANDBOX_STATUS` = `<tier>:<Landlock ABI>` (`A+:6`, `C:4`), or `seatbelt`.
+- **The run's environment** (9c): `TARAE_SANDBOX_STATUS` = `<tier>:<Landlock ABI>` (`own:6`, `host:4`), or `seatbelt`.
   Set after `runenv`'s floor, so the filter can't drop it; removed where a run has no sandbox
   (`golden::the_status_is_the_tier_and_the_abi`).
 - **`tarae state`** (9d): each session's `sandbox` — tier, ABI, the keeper's namespaces, the network's way, what's
-  kept and shared, the hint — and `--watch sandbox` when it changes; `ui_state.json` pins it (`uistate::V` stays 2: a field added doesn't move it).
+  kept and shared, the hint — and `--watch sandbox` when it changes; `ui_state.json` pins it (`uistate::V` 3: the tier's values changed when the tiers folded).
   Claude's `ui` answer carries it; the `ui:` line each request carries doesn't.
-- **The sandbox panel** (9e, `:sandbox-blocked`, `space m s`): a header over the list (`Picker.head`) — `tier C
+- **The sandbox panel** (9e, `:sandbox-blocked`, `space m s`): a header over the list (`Picker.head`) — `tier host
   Landlock ABI 4  loopback …  network …  shared …` as key hints, a fallback's reason in a few words faint below
   (`Guarantees::brief`, from `tier::brief`). Narrow, it folds whole items by `Guarantees::FOLD`; the tier always
   shows. `:procs`' keeper row says the same words.
-- **How the tier would go up** (9f, `tier::hint`): where Ubuntu's restriction is why and no profile is on tarae, the
-  run's `Guarantees.hint` says "tarae's AppArmor profile would make this A+" (C → A+, D → B+:
-  `Tier::with_namespaces`), faint under the panel's why. The list's last row copies the step ("copy the step that
-  makes this tier A+" — needs sudo, then restart tarae) through the system clipboard (`clipboard::copy`). `tarae
+- **How the runs would get namespaces** (9f, `tier::hint`): where Ubuntu's restriction is why and no profile is on
+  tarae, the run's `Guarantees.hint` says "tarae's AppArmor profile would give own namespaces" (host becomes own;
+  offline stays offline, with the session's namespaces), faint under the panel's why. The list's last row copies the
+  step ("copy the step for own namespaces" — needs sudo, then restart tarae) through the system clipboard (`clipboard::copy`). `tarae
   state`'s `hint` has the whole of it. Not in Claude's report: Claude can't take the step (`sudo`, outside the
   sandbox, the machine's own policy); its `ui` answer has the hint when it's asked why.
 
 ## Steps
+
+The history below (Steps, Measured, the Appendix) keeps the tiers' letters of before 2026-10-17: A+ and A are own with
+and without a PID namespace, B+ and B offline in the session's namespaces, C host, D offline without namespaces.
 
 The roadmap's numbers ([roadmap.md](../roadmap.md#the-linux-sandbox-keeper)). Each landed on its own, its tests each
 seen failing once with the change broken — how is in the appendix, §How each test was seen failing; the story is in
@@ -991,8 +997,8 @@ curl, Node, Java with an HTTPS GET, `cargo fetch`; A+ and C beside unsandboxed, 
   (step 5) checking the addresses it connects to, on macOS too.
 - **Linux: own addresses read once a policy.** An address that comes up during a run (a bridge, a new lease) is
   beyond this machine to that run until its next policy.
-- **The fresh `/proc`'s cost under Landlock** (A+ +0.2 s on a Gradle run 2, step 4's M4): a micro-benchmark —
-  `/proc/self/stat` read 100,000 times under the same rules, in A against A+ — would say whether it's per lookup,
+- **The fresh `/proc`'s cost under Landlock** (+0.2 s on a Gradle run 2 with a PID namespace, step 4's M4): a
+  micro-benchmark — `/proc/self/stat` read 100,000 times under the same rules, without a PID namespace and with one — would say whether it's per lookup,
   and what in Landlock's walk costs more on the fresh procfs instance. On the roadmap.
 - **A tool's cache folders that aren't there yet** (`cargo fetch` on a fresh `~/.cargo`, step 4's M5): with the
   network open their grant covers only what exists when the policy is made. The option chosen: tarae makes the

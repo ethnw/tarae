@@ -244,7 +244,7 @@ fn version_and_help_print_without_a_terminal() {
 ///
 /// A thread names itself as it starts (Rust's `Builder::name`: from inside it, first thing), so for its first
 /// moments it shows its creator's name — the main thread's `tarae`. One caught then and gone before the next look
-/// (a short job; seen on Debian in A+, where the start makes more of them) is no unnamed thread: one counts only
+/// (a short job; seen on Debian in tier own, where the start makes more of them) is no unnamed thread: one counts only
 /// once two looks, 20 ms apart, find it still `tarae` — and past its start: it had a CPU since the first look
 /// (its `schedstat` time grew) or waits in a call. On a busy VM a thread just made can wait for a CPU longer
 /// than that, still in its first slice (deb12, frictions16: `schedstat 11680 18509 1` — 12 µs run, one
@@ -1224,7 +1224,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 2, "the schema's version (`uistate::V`)");
+    assert_eq!(s["v"], 3, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();

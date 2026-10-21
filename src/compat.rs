@@ -384,7 +384,7 @@ pub struct Verdict {
     pub pending: Option<String>,
     /// How it ended — None: it never ran.
     pub ended: Option<crate::task::State>,
-    /// Where it ran, as its chat row says it (`Guard::where_ran`: `sandbox`, `sandbox A+`, `outside` …).
+    /// Where it ran, as its chat row says it (`Guard::where_ran`: `sandbox`, `sandbox own`, `outside` …).
     pub ran: Option<String>,
     /// The run's own time (its second run's, warm, where one was timed), and the same command's unsandboxed.
     pub took: Option<Duration>,
@@ -1789,7 +1789,7 @@ timeout = 60
     /// entries in `TARAE_COMPAT_LANE` (`quick`: the quick ones; `asks`: the asks ones; else all but those), each
     /// verdict on stderr and its cell on
     /// stdout as a `COMPAT` line (`line`) for the xtask's table — on a Linux tier's column (`TARAE_COMPAT_TIER`:
-    /// `A+`, `C`) a run at another tier ends the stack there, said. Without the variable it does nothing.
+    /// `own`, `host`) a run at another tier ends the stack there, said. Without the variable it does nothing.
     #[test]
     #[ignore]
     fn driver() {

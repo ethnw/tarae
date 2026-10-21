@@ -341,11 +341,9 @@ impl Editor {
     pub fn sandbox_grant(&mut self, arg: &str) -> Result<(), String> {
         if arg == PROFILE_STEP {
             let hint = self.session.sandbox.as_ref().and_then(|g| g.hint.as_ref());
-            let (step, to) =
-                hint.and_then(|h| Some((h.step.clone()?, h.to.said()))).ok_or("no step to copy")?;
-            let what =
-                format!("the step that makes this tier {to} — run it in a terminal, then restart tarae");
-            crate::clipboard::copy(&self.events.jobs(), step, what);
+            let step = hint.and_then(|h| h.step.clone()).ok_or("no step to copy")?;
+            let what = "the step for own namespaces — run it in a terminal, then restart tarae";
+            crate::clipboard::copy(&self.events.jobs(), step, what.to_string());
             return Ok(());
         }
         let (run, list) =
@@ -665,7 +663,7 @@ mod tests {
             root_owned: Ok(()),
             packaged: false,
         };
-        let hint = Hint::of(Tier::C, &place);
+        let hint = Hint::of(Tier::Host, &place);
         let step = hint.step.clone().expect("a root-owned plain path: a step");
         let mut ed = Editor::new(crate::config::Config::default());
         ed.session.sandbox = Some(Guarantees::landlock(Found {
@@ -684,13 +682,13 @@ mod tests {
         ed.sandbox_blocked(Which::Either);
         let p = ed.picker.as_ref().expect("the panel");
         let rows: Vec<(&str, &str)> = p.items().iter().map(|i| (i.label.as_str(), i.hint.as_str())).collect();
-        assert_eq!(rows, [("copy the step that makes this tier A+", "needs sudo, then restart tarae")]);
+        assert_eq!(rows, [("copy the step for own namespaces", "needs sudo, then restart tarae")]);
         let head = p.head.as_ref().unwrap();
-        assert_eq!(head.then.as_deref(), Some("tarae's AppArmor profile would make this A+"));
+        assert_eq!(head.then.as_deref(), Some("tarae's AppArmor profile would give own namespaces"));
         assert_eq!((head.note.as_deref(), &p.empty), (Some(NOTHING_BLOCKED), &None), "said above the row");
         feed(&mut ed, "<ret>");
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let said = "copied the step that makes this tier A+ — run it in a terminal, then restart tarae";
+        let said = "copied the step for own namespaces — run it in a terminal, then restart tarae";
         while !ed.toasts.iter().any(|t| t.text == said) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("{said:?} before the timeout"));

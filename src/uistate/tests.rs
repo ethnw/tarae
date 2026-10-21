@@ -1739,9 +1739,9 @@ fn tarae_state_says_the_sandbox() {
         frame(ed);
         sandbox.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
     };
-    // The first run: its keeper has every namespace (A+, its own network: TPROXY)
+    // The first run: its keeper has every namespace (its own network: TPROXY)
     let own = landlock_run(Ns::session(true, true), false);
-    let line = "tier A+ · Landlock ABI 8 · loopback its own · network closed · shared nothing";
+    let line = "tier own · Landlock ABI 8 · loopback its own · network closed · shared nothing";
     watch::sandbox(&mut ed, own.clone());
     let e = events(&mut ed);
     assert_eq!(e.len(), 1, "{e:?}");
@@ -1758,7 +1758,7 @@ fn tarae_state_says_the_sandbox() {
     assert_eq!(
         ed.ui_state().json()["sessions"][0]["sandbox"],
         json!({
-            "by": "landlock", "tier": "A+", "abi": 8, "partial": false,
+            "by": "landlock", "tier": "own", "abi": 8, "partial": false,
             "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
             "network": { "open": false, "asked": false, "listed": false, "way": "tproxy" }, "kept": kept, "shared": [],
             "why": null, "hint": null, "line": line,
@@ -1773,7 +1773,7 @@ fn tarae_state_says_the_sandbox() {
     assert_eq!(e.len(), 1, "{e:?}");
     assert_eq!(
         (&e[0]["was"], &e[0]["tier"], &e[0]["namespaces"]["netns"]),
-        (&json!(line), &json!("A+"), &json!(false))
+        (&json!(line), &json!("own"), &json!(false))
     );
     assert_eq!(e[0]["network"]["way"], "copies");
     assert_eq!(e[0]["why"], "served by tarae's copies of its sockets: pidfd_getfd refused");
@@ -1817,7 +1817,7 @@ fn tarae_state_says_the_sandbox() {
     );
     let c = ed.ui_state_claude();
     let text = c.text_claude(false);
-    let said = format!("sandbox: {} — not the top tier: {}\n", mine.line(), mine.why.as_ref().unwrap());
+    let said = format!("sandbox: {} — what's missing: {}\n", mine.line(), mine.why.as_ref().unwrap());
     assert!(text.contains(&said) && !text.contains(line), "{text}");
     assert_eq!(c.json()["sessions"][1]["sandbox"], Value::Null, "another session's: not Claude's");
     assert!(c.context_line().is_none_or(|(l, _)| !l.contains("sandbox")), "{:?}", c.context_line());

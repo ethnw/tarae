@@ -4,13 +4,13 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                                    what the sandbox blocked  1/1
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-04     tier C  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
+04     tier host  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
 05     AppArmor blocks user namespaces
-06     tarae's AppArmor profile would make this A+
+06     tarae's AppArmor profile would give own namespaces
 07
 08     the sandbox blocked nothing in that run
 09
-10   ▎ ◦ copy the step that makes this tier A+                                            needs sudo, then restart tarae
+10   ▎ ◦ copy the step for own namespaces                                                 needs sudo, then restart tarae
 11
 12
 13
@@ -66,13 +66,13 @@
 01
 02    A                                                                                    ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD f  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
+04     DDDD ffff  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
 05     ffffffff ffffff ffff ffffffffff
-06     fffffff ffffffff fffffff fffff ffff ffff ff
+06     fffffff ffffffff fffffff fffff ffff fff ffffffffff
 07
 08     fff fffffff fffffff fffffff ff ffff fff
 09
-10   a d TTTT TTT TTTT TTTT TTTTT TTTT TTTT TT                                            ddddd ddddd dddd ddddddd ddddd
+10   a d TTTT TTT TTTT TTT TTT TTTTTTTTTT                                                 ddddd ddddd dddd ddddddd ddddd
 11
 12
 13

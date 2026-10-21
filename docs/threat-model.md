@@ -64,7 +64,7 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 One sandbox per command on macOS (Seatbelt, `sandbox-exec`). On Linux each session has a *keeper*: a process
 that forks every command, born in the session's own namespaces where the system allows; each command gets
 Landlock and seccomp of its own, and tarae decides every call that names an address. How much of that a session
-gets is its **tier** (A+ … D, §1.8). The rules are the same on both systems; the kernel features differ.
+gets is its **tier** (own, host or offline, §1.8). The rules are the same on both systems; the kernel features differ.
 
 ### 1.1 Files it writes
 
@@ -317,22 +317,22 @@ table is the code's — a test fails when they differ.
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |
 |---|---|---|---|
-| A+, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A+ by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
-| A+, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
-| A+, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
-| A+, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| A, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| A by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
-| B+ | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| B | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| C, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| C, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| D | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| D, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
+| own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| own without a PID namespace, by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
+| offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
+| offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
+| host, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| host, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
+| offline, no namespaces | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
+| offline, no namespaces, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | Seatbelt, no port open, the network closed | closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
 | Seatbelt, ports open, the network closed | closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
 | Seatbelt, no port open, the network open | tarae's proxy | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
@@ -352,7 +352,7 @@ Every "kept apart" cell is shown by these (each runs two sessions with stand-ins
 
 Below Landlock ABI 6 a run can signal its own session's other commands; at ABI 2 files are shared too.
 
-Not kept — said, not closed: what each tier's "Shared" column lists. In C and D, and always on macOS, shared memory
+Not kept — said, not closed: what each tier's "Shared" column lists. Without the session's namespaces, and always on macOS, shared memory
 (SysV, POSIX) is reachable: a run can read and write what another session's commands — or your other programs —
 keep there. On macOS a loopback port it may reach is reached whoever listens there: Seatbelt can't tell whose a
 listener is.
@@ -385,11 +385,9 @@ Not kept:
 
 | Tier | When | What it means |
 |---|---|---|
-| A+ | unprivileged user namespaces work, `/proc` can be mounted | the session's own processes, loopback, IPC, `/dev/shm`, terminals |
-| A | the same, `/proc` masked (Docker's default) | as A+, but processes are shared (command lines, priority) |
-| B+, B | as A+, A, but tarae can't serve a run's sockets (Yama 2/3, inside another seccomp listener) | no socket at all |
-| C | no user namespaces (Ubuntu's restriction without tarae's profile; a container) | files and signals kept; processes, SysV IPC, `/dev/shm` shared |
-| D | as C, and no sockets | as C, no network |
+| own | unprivileged user namespaces work, and tarae serves a run's sockets | the session's own processes, loopback, IPC, `/dev/shm`, terminals; where `/proc` is masked (Docker's default) no PID namespace: processes shared (command lines, priority) |
+| host | no user namespaces (Ubuntu's restriction without tarae's profile; a container), sockets served | files and signals kept; loopback this machine's, other sessions' sockets refused; processes, SysV IPC, `/dev/shm` shared |
+| offline | tarae can't serve a run's sockets (Yama 2/3, inside another seccomp listener), with the session's namespaces or none | no network; with the namespaces its own loopback, IPC, `/dev/shm`, terminals; without, no socket at all and those shared |
 
 The tier is said to Claude once a conversation (test: `sandbox::golden::the_report_says_the_tier_once`), to the
 run as `TARAE_SANDBOX_STATUS` (test: `sandbox::golden::the_status_is_the_tier_and_the_abi`), and to you (the
@@ -404,7 +402,7 @@ Kept:
 - **Looking into other processes** (macOS `lsof`-style details; Linux `/proc/<pid>/environ` and other details
   outside the session).
   test: `sandbox::tests::a_run_signals_and_looks_into_only_its_own_processes` ·
-  `sandbox::keeper::tests::a_run_reads_no_details_outside_its_session` · `sandbox::keeper::tests::a_run_sees_only_its_sessions_processes` (A+)
+  `sandbox::keeper::tests::a_run_reads_no_details_outside_its_session` · `sandbox::keeper::tests::a_run_sees_only_its_sessions_processes` (with a PID namespace)
 - **Other terminals**: a run can't open your tty or another pty.
   test: `sandbox::tests::a_run_cant_open_another_terminal` (macOS) · `sandbox::keeper::tests::a_run_opens_only_the_ptys_it_makes`
 - **The keeper** (Linux): a run can't signal or trace it; it isn't dumpable; a run holds no capability and no
@@ -431,7 +429,7 @@ Kept:
 
 Not kept:
 - **Command lines and priority**: visible and lowerable (renice) where processes are shared — macOS, and Linux
-  tiers A, B, C, D. macOS: starting environments too (§1.4).
+  without a PID namespace of the session's (host, and own or offline where `/proc` is masked). macOS: starting environments too (§1.4).
 - **tarae parses what a run sends** — the supervisor reads a run's call arguments from its memory, the proxy
   parses its requests — inside tarae's own process. A bug there is a bug in tarae: a panic ends the editor
   (`panic = "abort"`), a memory-safety bug would own it. Rust, with seeded parser loops
@@ -452,8 +450,8 @@ Not kept:
 ### 1.10 What a run leaves running
 
 Kept:
-- Linux: whatever a run leaves (a daemon) is the keeper's child; the session ends it, and in A+ the PID namespace
-  ends it in one kill. It stays confined: everything a run starts inherits its Landlock and seccomp.
+- Linux: whatever a run leaves (a daemon) is the keeper's child; the session ends it, and with a PID namespace of the
+  session's that namespace ends it in one kill. It stays confined: everything a run starts inherits its Landlock and seccomp.
   test: `sandbox::keeper::tests::leftovers_are_the_keepers_children` · `sandbox::keeper::tests::the_keeper_ends_with_its_channel` ·
   `sandbox::keeper::tests::keepers_end_together_not_one_after_another`
 - It stays listed under its session in `:procs`.
@@ -654,7 +652,7 @@ Not Claude's, but a hostile repository reaches them:
 | G6 | macOS: shared memory, renice, loopback whoever's | no Seatbelt rule | said |
 | G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | open; the proxy could check |
 | G8 | macOS: a leftover without its tag isn't ended | no subreaper | said; stays sandboxed |
-| G9 | Linux C/D: processes, SysV IPC, `/dev/shm` shared; A/B: processes | no namespaces there | said; the AppArmor profile raises C to A+ |
+| G9 | Linux without namespaces: processes, SysV IPC, `/dev/shm` shared; without a PID namespace: processes | no namespaces there | said; the AppArmor profile gives own namespaces |
 | G10 | Linux: a new protected name in a folder without one | Landlock only grants | caught after the run, asked before anything runs it — Claude's next run, your task, your preflight (§1.2) |
 | G11 | Linux ABI 2: truncation | kernel | every run asks |
 | G12 | The supervisor and proxy parse hostile input inside tarae | threads (D19) | fuzzing; a confined process (D21); a review |

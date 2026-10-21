@@ -410,7 +410,7 @@ pub struct Chat {
 }
 
 /// Where a command of Claude's ran (cardburden 4), from its run's own record — its guard (`Guard::where_ran`),
-/// the card it ran from, Claude's reason there: the mark its row ends with (`sandbox`, `sandbox A+ + Docker
+/// the card it ran from, Claude's reason there: the mark its row ends with (`sandbox`, `sandbox own + Docker
 /// socket`, `outside`), whether that's past the sandbox (drawn in the warning color), why in words, and what it
 /// warned of (`cardwarn.rs`).
 #[derive(Clone, Debug, PartialEq, Eq)]

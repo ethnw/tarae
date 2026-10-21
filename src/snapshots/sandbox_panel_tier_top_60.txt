@@ -4,7 +4,7 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                        what the sandbox blocked  0/0
 03    ──────────────────────────────────────────────────────
-04     tier A+  loopback its own  shared nothing
+04     tier own  loopback its own  shared nothing
 05
 06     the sandbox blocked nothing in that run
 07
@@ -54,7 +54,7 @@
 01
 02    A                        ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD ff  DDDDDDDD fff fff  DDDDDD fffffff
+04     DDDD fff  DDDDDDDD fff fff  DDDDDD fffffff
 05
 06     fff fffffff fffffff fffffff ff ffff fff
 07

@@ -56,7 +56,7 @@ from each other. Daemons such as Gradle's stay warm between runs.
 1. **Landlock's network rights** — done. The kernel refuses a run's own connects and binds; only tarae makes them.
 2. **One keeper per session** — done. A fork server and child subreaper on every system.
 3. **Namespaces by tier** — done. Where user namespaces work, the keeper is PID 1 of the session's own user,
-   network, IPC, PID and mount namespaces. Each tier, from A+ (all of them) to D (none), says what it keeps apart.
+   network, IPC, PID and mount namespaces. Each tier (own, host, offline) says what it keeps apart.
 4. **Routing every socket** — done. The supervisor routes each address-bearing call by one table: to the session's
    own loopback, to this machine, or out. An outbound socket is replaced by one made in tarae's own network, so
    the session's network stays closed. Link-local, metadata, multicast, broadcast and unspecified addresses are

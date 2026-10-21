@@ -704,7 +704,7 @@ mod tests {
              {control:?}) — Docker's default seccomp profile refuses them itself"
         );
         if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
-            && ["A+", "A", "B+", "B"].contains(&want.trim())
+            && want.trim() == "own"
         {
             panic!("tier {want} expected here: {why}");
         }

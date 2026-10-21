@@ -3777,14 +3777,14 @@ fn snapshot_sandbox_blocked_with_step() {
     for (w, h) in [(120, 30), (60, 24)] {
         let mut s = Shot::new(w, h);
         blocked_npm_run(&mut s);
-        s.ed.session.sandbox = Some(tier_c_restricted());
+        s.ed.session.sandbox = Some(host_restricted());
         s.keys(" ms");
         s.until("the list", |ed| ed.picker.is_some());
         let p = s.ed.picker.as_ref().unwrap();
         let labels: Vec<String> = p.items().iter().map(|i| i.label.clone()).collect();
         assert_eq!(
             labels[labels.len() - 2..],
-            ["run it outside the sandbox, once", "copy the step that makes this tier A+"],
+            ["run it outside the sandbox, once", "copy the step for own namespaces"],
             "{labels:?}"
         );
         // (something was blocked: "blocked nothing" is never said over its rows)
@@ -3799,7 +3799,7 @@ fn snapshot_sandbox_blocked_with_step() {
         let at = s.ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
         assert_eq!(at.as_deref(), labels.last().map(String::as_str), "on the step's row");
         s.keys("<ret>");
-        let said = "copied the step that makes this tier A+ — run it in a terminal, then restart tarae";
+        let said = "copied the step for own namespaces — run it in a terminal, then restart tarae";
         s.until("the copy", |ed| ed.toasts.iter().any(|t| t.text == said));
         assert!(crate::clipboard::written(&step) && s.ed.offers.is_empty(), "{step}");
         // (and the blocked rows above it still act: Enter on the first puts its grant's card up)
@@ -3905,9 +3905,9 @@ fn blocked_npm_run(s: &mut Shot) {
     s.ed.session.task_run = Some(r);
 }
 
-/// Tier C served by copies on colima (no user namespaces, Landlock ABI 4): every part of the state line there, and a
+/// Tier host, served by copies on colima (no user namespaces, Landlock ABI 4): every part of the state line there, and a
 /// fallback's why.
-fn tier_c_by_copies() -> crate::sandbox::guarantees::Guarantees {
+fn host_by_copies() -> crate::sandbox::guarantees::Guarantees {
     use crate::sandbox::guarantees::{Found, Guarantees, Ns};
     Guarantees::landlock(Found {
         ns: Ns::NONE,
@@ -3927,8 +3927,8 @@ fn tier_c_by_copies() -> crate::sandbox::guarantees::Guarantees {
     })
 }
 
-/// Tier C on Ubuntu with its restriction on and no profile on tarae (24.04, ABI 4; served): the profile's hint (9f).
-fn tier_c_restricted() -> crate::sandbox::guarantees::Guarantees {
+/// Tier host on Ubuntu with its restriction on and no profile on tarae (24.04, ABI 4; served): the profile's hint (9f).
+fn host_restricted() -> crate::sandbox::guarantees::Guarantees {
     use crate::sandbox::guarantees::{Found, Guarantees, Hint, Ns, Tier};
     let place = crate::sandbox::apparmor::Place {
         path: crate::sandbox::apparmor::PACKAGED.into(),
@@ -3945,13 +3945,13 @@ fn tier_c_restricted() -> crate::sandbox::guarantees::Guarantees {
         lo_missing: Vec::new(),
         short: Some("no user namespaces: Ubuntu's restriction".into()),
         brief: Some("AppArmor blocks user namespaces".into()),
-        hint: Some(Hint::of(Tier::C, &place)),
+        hint: Some(Hint::of(Tier::Host, &place)),
         network: false,
     })
 }
 
 /// 9e: the sandbox panel's state line (`space m s`) — the session's last run's sandbox as key hints over the list,
-/// a fallback's why faint under it, and (9f) where tarae's AppArmor profile would raise the tier, that and where its
+/// a fallback's why faint under it, and (9f) where tarae's AppArmor profile would give commands namespaces of their own, that and where its
 /// step is, on rows of its own; at 60 columns the least important parts folded (`Guarantees::FOLD`); before any
 /// sandboxed run, said so in its place. Nothing blocked: the list says so where its first row would be. With
 /// `TARAE_FRAMES_DIR` set, each in both themes (`target/sb/shots-9e.sh` draws them).
@@ -3973,8 +3973,8 @@ fn snapshot_sandbox_panel_tier() {
     });
     for (w, h) in [(120, 30), (60, 24)] {
         let scenes = [
-            ("fallback", Some(tier_c_by_copies())),
-            ("hint", Some(tier_c_restricted())),
+            ("fallback", Some(host_by_copies())),
+            ("hint", Some(host_restricted())),
             ("top", Some(top.clone())),
             ("empty", None),
         ];
@@ -4000,7 +4000,7 @@ fn snapshot_sandbox_panel_tier() {
 #[test]
 fn the_state_line_folds_its_least_important_part_first() {
     use crate::sandbox::guarantees::Guarantees;
-    let pairs = tier_c_by_copies().panel_pairs();
+    let pairs = host_by_copies().panel_pairs();
     let keys = |w: usize| -> Vec<&str> {
         super::fold_hints(&pairs, Guarantees::FOLD, w).iter().map(|p| p.0).collect()
     };
@@ -4018,15 +4018,15 @@ fn the_state_line_folds_its_least_important_part_first() {
     // without the loopback)
     assert_eq!(keys(100), ["tier", "Landlock", "network", "shared"]);
     // (what's shared keeps fewer items before it goes — each whole — and what's left fits)
-    let at_30 = super::fold_hints(&pairs, Guarantees::FOLD, 30);
-    let shared = &at_30.iter().find(|p| p.0 == "shared").expect("shared, fewer").1;
+    let at_34 = super::fold_hints(&pairs, Guarantees::FOLD, 34);
+    let shared = &at_34.iter().find(|p| p.0 == "shared").expect("shared, fewer").1;
     let all = &pairs.iter().find(|p| p.0 == "shared").unwrap().1;
     let (kept, more) = shared.rsplit_once(" +").expect("how many more");
-    assert!(kept.split(", ").all(|i| all.split(", ").any(|a| a == i)), "{at_30:?}");
+    assert!(kept.split(", ").all(|i| all.split(", ").any(|a| a == i)), "{at_34:?}");
     assert_eq!(kept.split(", ").count() + more.parse::<usize>().unwrap(), all.split(", ").count());
     let wide: usize =
-        at_30.iter().map(|(k, m)| k.len() + 1 + m.chars().count()).sum::<usize>() + 2 * (at_30.len() - 1);
-    assert!(wide <= 30, "{at_30:?}");
+        at_34.iter().map(|(k, m)| k.len() + 1 + m.chars().count()).sum::<usize>() + 2 * (at_34.len() - 1);
+    assert!(wide <= 34, "{at_34:?}");
 }
 
 /// Claude's command in the task panel: no `space m m again` — that runs the user's task, not this one.

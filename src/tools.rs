@@ -4586,7 +4586,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         let said = AtomicBool::new(false);
-        let hint = || Some("Claude's commands run in tier C here".to_string());
+        let hint = || Some("Claude's commands run in tier host here".to_string());
         let warnings = |ed: &crate::editor::Editor| {
             let w = ed.toasts.iter().filter(|t| t.kind == crate::editor::ToastKind::Warning);
             w.map(|t| t.text.clone()).collect::<Vec<_>>()
@@ -4594,7 +4594,7 @@ mod tests {
         super::hint_once_by(&mut ed, None, &said);
         assert!(warnings(&ed).is_empty(), "no hint, nothing said");
         super::hint_once_by(&mut ed, hint(), &said);
-        assert_eq!(warnings(&ed), ["Claude's commands run in tier C here"], "the first run's");
+        assert_eq!(warnings(&ed), ["Claude's commands run in tier host here"], "the first run's");
         ed.toasts.clear();
         super::hint_once_by(&mut ed, hint(), &said);
         assert!(warnings(&ed).is_empty(), "not again once it has gone: {:?}", warnings(&ed));

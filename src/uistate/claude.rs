@@ -186,7 +186,7 @@ impl UiState {
         // (its own session's sandbox, decision 13 — here, not in the context's `ui:` line every request reads: the
         // run reports say it once a conversation)
         if let Some(g) = self.sessions.iter().find(|s| s.id == self.front).and_then(|s| s.sandbox.as_ref()) {
-            let why = g.why.as_ref().map(|w| format!(" — not the top tier: {w}")).unwrap_or_default();
+            let why = g.why.as_ref().map(|w| format!(" — what's missing: {w}")).unwrap_or_default();
             out.push(format!("sandbox: {}{why}", g.line_after_label()));
         }
         out.extend(self.card_lines());

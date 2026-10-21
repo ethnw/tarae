@@ -4,9 +4,9 @@
 //!
 //! With user namespaces a keeper is PID 1 of the session's user, ipc, pid and mount namespaces — and its
 //! network one when its policy opens nothing (`for_policy`: until step 4's routing, an opened port or the
-//! network would reach the session's empty loopback) — tier A+; where a fresh `/proc` can't be mounted
-//! (Docker's masked `/proc`), the same without the PID namespace (D12) — A; without user namespaces none —
-//! C. Each with tarae serving its runs' calls; not serving (`supervisor::unavailable`), B+, B and D.
+//! network would reach the session's empty loopback); where a fresh `/proc` can't be mounted (Docker's masked
+//! `/proc`), the same without the PID namespace (D12); without user namespaces none. Served, the first two are
+//! tier own, the last host; not serving (`supervisor::unavailable`), any of them is offline.
 
 use std::io;
 use std::path::Path;
@@ -444,8 +444,8 @@ pub fn brief(s: &Seen) -> String {
 }
 
 /// The hint (6h; a toast once, and the tier's line): where Ubuntu's restriction is why a keeper got no namespaces
-/// and tarae runs under no profile — runs in `tier`, why, and the step that makes them A (`apparmor::hint`, by the
-/// binary's `place`) — and the tier they'd be in (9f, `Hint`). Under a profile that still didn't let it, none: that
+/// and tarae runs under no profile — runs in `tier`, why, and the step that gives them namespaces of their own
+/// (`apparmor::hint`, by the binary's `place`; 9f, `Hint`). Under a profile that still didn't let it, none: that
 /// profile isn't the one tarae ships.
 pub fn hint(s: &Seen, tier: Tier, place: &super::apparmor::Place) -> Option<super::guarantees::Hint> {
     let ours_missing = cause(s) == Cause::Restriction && !confined(s.apparmor.as_deref());
@@ -515,8 +515,8 @@ pub fn get() -> &'static Probed {
         }
         #[allow(unused_mut)]
         let mut p = probe();
-        // (M4's cut: the session's namespaces without the PID one — tier A, no fresh `/proc` — on a machine
-        // that gives A+)
+        // (M4's cut: the session's namespaces without the PID one — no fresh `/proc` — on a machine that gives
+        // all of them)
         #[cfg(test)]
         if std::env::var_os("TARAE_TEST_NO_PID").is_some() && p.ns.pid {
             p.ns.pid = false;
@@ -584,7 +584,7 @@ fn ns_for(probed: &Probed, in_shm: bool) -> Ns {
 }
 
 /// Whether the keeper of a policy that opens the network takes its runs' connections in the session's network
-/// (TPROXY, A+/A) — its namespaces as `for_policy` gives them such a policy, and the keeper's own rule
+/// (TPROXY, tier own) — its namespaces as `for_policy` gives them such a policy, and the keeper's own rule
 /// (`keeper::network_for`). Then its runs get no proxy URL (6e′, `Policy.redirected`). Probes the first time (a
 /// worker's). Decided before there's a keeper: it must be what the keeper is born with
 /// (`the_proxy_url_is_decided_as_the_keeper_is_born`).
@@ -899,8 +899,8 @@ mod tests {
         let (by_copies, p) = asked(true);
         assert_eq!(by_copies, [(false, false)], "one keeper, no netns, no network tried");
         assert!(!p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
-        // (N1: the letter as `Tier::of` has it, and what's missing said — why, and what it leaves)
-        assert_eq!(p.tier(), Tier::APlus);
+        // (N1: the tier as `Tier::of` has it, and what's missing said — why, and what it leaves)
+        assert_eq!(p.tier(), Tier::Own);
         assert_eq!(p.short.as_deref(), Some(BY_COPIES), "not all of them, and why");
         assert!(p.ns.said().ends_with(NO_NETNS), "{}", p.ns.said());
         let (taken, p) = asked(false);
@@ -1071,10 +1071,16 @@ mod tests {
         };
         let hint = |s: &Seen, tier| super::hint(s, tier, &place).map(|h| h.said);
         let unconfined = restricted(BirthStep::Map, Some("unconfined"));
-        let said = hint(&unconfined, Tier::C).expect("restricted, no profile: the hint");
-        assert!(said.contains("tier C") && said.contains("sudo apparmor_parser -r"), "{said}");
-        assert!(hint(&unconfined, Tier::D).is_some_and(|h| h.contains("tier D")), "the tier the runs are in");
-        assert!(hint(&restricted(BirthStep::Devpts, None), Tier::C).is_some(), "no label read: no profile");
+        let said = hint(&unconfined, Tier::Host).expect("restricted, no profile: the hint");
+        assert!(said.contains("tier host") && said.contains("sudo apparmor_parser -r"), "{said}");
+        assert!(
+            hint(&unconfined, Tier::Offline).is_some_and(|h| h.contains("tier offline")),
+            "the tier the runs are in"
+        );
+        assert!(
+            hint(&restricted(BirthStep::Devpts, None), Tier::Host).is_some(),
+            "no label read: no profile"
+        );
         let none = [
             (restricted(BirthStep::Map, Some("/usr/bin/tarae (unconfined)")), "under a profile already"),
             (Seen { restrict_userns: Some(0), ..unconfined.clone() }, "the restriction off"),
@@ -1090,13 +1096,13 @@ mod tests {
             ),
         ];
         for (s, what) in none {
-            assert_eq!(hint(&s, Tier::C), None, "{what}");
+            assert_eq!(hint(&s, Tier::Host), None, "{what}");
         }
     }
 
     /// 9f: a run's guarantees carry the hint where the probe's would be said — Ubuntu's restriction on and no
-    /// profile on tarae — naming the tier the profile gives (the session's namespaces: C's runs A+, D's B+) in the
-    /// panel's words, the whole hint in `tarae state`'s. A profile attached, or a system without the restriction
+    /// profile on tarae — saying what the profile gives (the session's namespaces, served or not) in the panel's
+    /// words, the whole hint in `tarae state`'s. A profile attached, or a system without the restriction
     /// (Debian), none; nor Seatbelt's, which has no tiers.
     #[test]
     fn the_profile_hint_says_how_to_raise_the_tier() {
@@ -1130,16 +1136,21 @@ mod tests {
         };
         let c = run(&ubuntu("unconfined"), true);
         let said = c.hint_brief().expect("restricted, no profile: the hint");
-        assert_eq!(said, "tarae's AppArmor profile would make this A+");
+        assert_eq!(said, "tarae's AppArmor profile would give own namespaces");
         let step = c.step_row().map(|r| r.0);
-        assert_eq!(step.as_deref(), Some("copy the step that makes this tier A+"), "the step's row");
+        assert_eq!(step.as_deref(), Some("copy the step for own namespaces"), "the step's row");
         let whole = c.json()["hint"].as_str().unwrap_or_default().to_string();
         assert!(
-            whole.contains("To make them tier A+") && whole.contains("sudo apparmor_parser -r"),
+            whole.contains("To give them namespaces of their own")
+                && whole.contains("sudo apparmor_parser -r"),
             "{whole}"
         );
-        let d = run(&ubuntu("unconfined"), false).hint_brief().unwrap_or_default();
-        assert!(d.contains("would make this B+"), "not served, the profile gives B+: {d}");
+        let offline = run(&ubuntu("unconfined"), false);
+        assert!(
+            offline.hint.as_ref().is_some_and(|h| h.said.contains("tier offline")),
+            "not served: offline"
+        );
+        assert_eq!(offline.hint_brief(), Some(said), "not served, the profile still gives namespaces");
         let debian = Seen { restrict_userns: None, ..ubuntu("unconfined") };
         let none = [
             (run(&ubuntu("/usr/bin/tarae (unconfined)"), true), "a profile attached"),
@@ -1329,9 +1340,15 @@ mod tests {
         assert_eq!(Ns::session(true, true).said(), "user net ipc pid mnt");
         assert_eq!(Ns::session(false, true).said(), format!("user ipc pid mnt; {NO_NETNS}"));
         assert_eq!(
-            [(Ns::session(true, true), true), (Ns::session(true, false), false), (Ns::NONE, true)]
-                .map(|(n, s)| Tier::of(n, s).said()),
-            ["A+", "B", "C"]
+            [
+                (Ns::session(true, true), true),
+                (Ns::session(true, false), true),
+                (Ns::session(true, false), false),
+                (Ns::NONE, true),
+                (Ns::NONE, false)
+            ]
+            .map(|(n, s)| Tier::of(n, s).said()),
+            ["own", "own", "offline", "host", "offline"]
         );
     }
 }

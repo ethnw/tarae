@@ -4,16 +4,16 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                        what the sandbox blocked  6/6
 03    ──────────────────────────────────────────────────────
-04     tier C  shared processes, signals, System V IPC +1
+04     tier host  shared processes, signals, System V IPC +1
 05     AppArmor blocks user namespaces
-06     tarae's AppArmor profile would make this A+
+06     tarae's AppArmor profile would give own namespaces
 07
 08   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/n…
 09     ◦ allow writing in /private/tmp/tarae-shot-blocked
 10     ◦ allow port 5432 on this machine      npm connecting
 11     ◦ allow every port on this machine — the risky ones …
 12     ▲ run it outside the sandbox, once           npm test
-13     ◦ copy the step that makes this tier A+  needs sudo,…
+13     ◦ copy the step for own namespaces  needs sudo, then…
 14
 15
 16
@@ -54,16 +54,16 @@
 01
 02    A                        ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD f  DDDDDD ffffffffff ffffffff ffffff f fff ff
+04     DDDD ffff  DDDDDD ffffffffff ffffffff ffffff f fff ff
 05     ffffffff ffffff ffff ffffffffff
-06     fffffff ffffffff fffffff fffff ffff ffff ff
+06     fffffff ffffffff fffffff fffff ffff fff ffffffffff
 07
 08   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
 09     d
 10     d                                      ddd dddddddddd
 11     d
 12     w                                            ddd dddd
-13     d                                        ddddd dddddd
+13     d                                   ddddd ddddd ddddd
 14
 15
 16

@@ -255,7 +255,7 @@ impl Served {
         self.net == RunNet::Routed
     }
 
-    /// Whether tarae made the run's internet sockets, bound to `lo` (tier C: served or by copies).
+    /// Whether tarae made the run's internet sockets, bound to `lo` (tier host: served or by copies).
     fn makes_sockets(&self) -> bool {
         matches!(self.net, RunNet::Served | RunNet::Copied)
     }
@@ -1253,7 +1253,7 @@ fn cloexec(c: &Caller, n: u64) -> bool {
 
 /// The socket a call routed `Machine` or `OwnAddress` (`route`) is made on — this machine, its port opened: the
 /// caller's descriptor `n` (`sock`) as it is where it's already that — a socket of tarae's bound alike put there
-/// before, or in tier C (`Served`) one tarae made for this machine's loopback — else a socket of tarae's own made
+/// before, or in tier host (`Served`) one tarae made for this machine's loopback — else a socket of tarae's own made
 /// in its namespace, carrying what the run set (its `O_NONBLOCK`, close-on-exec, `CARRIED`), bound to the loopback
 /// device for `Machine` (to none for `OwnAddress`), put in place of the run's at `n` (`SECCOMP_ADDFD_FLAG_SETFD`)
 /// before any call is made on it. (Kept for opened ports until connect leaves the supervisor: 6f's F1.) Refused (`EADDRNOTAVAIL`, said as `network-bound`): a socket the run bound (its source address can't
@@ -1280,7 +1280,7 @@ fn swapped_for(
         Some(_) => {
             return refused("on a socket already put out of the session the other way").map(|_| sock);
         }
-        // (tier C: tarae made every internet socket, bound to `lo` — this machine's already)
+        // (tier host: tarae made every internet socket, bound to `lo` — this machine's already)
         None if p.makes_sockets() && route == Route::Machine => return Ok(sock),
         None => {}
     }
@@ -1375,7 +1375,7 @@ fn swapped_for(
     Ok(new)
 }
 
-/// The socket a call naming `to` (routed `route`) goes on — the caller's own (`Session`, and tier C's for
+/// The socket a call naming `to` (routed `route`) goes on — the caller's own (`Session`, and tier host's for
 /// this machine), else as `swapped_for` makes it — or its refusal, said.
 fn routed_socket(
     l: &Listener,
@@ -4351,8 +4351,8 @@ mod tests {
     /// meanwhile (the client's, and its daemon's — run 1's supervisor serves the daemon it left). Step 4's
     /// (M4 after): `v5` the policy closed (no `llm.sandbox-localhost`: the daemon is the session's own, its
     /// connects routed there without a look at the session's listeners); `v6` the real rules without the
-    /// grants on the session's own device places (`session_devices`) — with `TARAE_TEST_NO_PID` (tier A, no
-    /// fresh `/proc`), the Landlock cut of step 3's +0.2 s.
+    /// grants on the session's own device places (`session_devices`) — with `TARAE_TEST_NO_PID` (no PID
+    /// namespace, no fresh `/proc`), the Landlock cut of step 3's +0.2 s.
     fn m4_run(root: &Path, task: &str, variant: &str) -> Option<(u128, bool, String, Totals)> {
         use super::super::linux;
         let localhost = !matches!(variant, "v2" | "v5");
@@ -4426,7 +4426,7 @@ mod tests {
     /// runs took, the supervisors' calls during run 2, and what the keeper holds after it (its daemons kept, its
     /// own children). `$TARAE_M4_VARIANT`: one change to the path (`m4_run`), `v0` without. Between pairs the
     /// keeper ends (`end_leftovers`): its daemons with it, run 1 cold. `TARAE_TEST_NO_NS`: without namespaces
-    /// (tier C), A/B in one machine. Run by `target/sb/m4-keeper.sh` in a container with a JDK and Gradle.
+    /// (tier host), A/B in one machine. Run by `target/sb/m4-keeper.sh` in a container with a JDK and Gradle.
     #[test]
     #[ignore = "a measurement (M4): run by target/sb/m4-keeper.sh"]
     fn measure_gradle_pairs() {
@@ -4477,7 +4477,7 @@ mod tests {
     /// tool reaching the real network — run through the real path with the network open (so through tarae's
     /// proxy), twice: the resolvers' port 53 as D-c opens it, then closed (no resolver in the policy). How each
     /// ended, how long it took, its last lines, and how many calls named a resolver's port 53 while it was open —
-    /// which tools look a name up even with a proxy, and which fail without. `TARAE_TEST_NO_NS`: tier C. Reaches
+    /// which tools look a name up even with a proxy, and which fail without. `TARAE_TEST_NO_NS`: tier host. Reaches
     /// the real network: run by hand on a VM (`target/sb/step5-notes.md`), never in `cargo test`.
     #[test]
     #[ignore = "a measurement (step 5c, Q4): run by hand on a VM"]

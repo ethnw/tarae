@@ -202,7 +202,7 @@ impl Guard {
     }
 
     /// Where a run under this guard ran, from its own record (cardburden 4): the mark its chat row ends with
-    /// (`sandbox` — Linux: its tier, `sandbox A+`, and `partial` below Landlock ABI 3 —, `+ Docker socket` or the
+    /// (`sandbox` — Linux: its tier, `sandbox own`, and `partial` below Landlock ABI 3 —, `+ Docker socket` or the
     /// socket's name, `+ network`; `outside`, `no sandbox`, `sandbox off`), whether that's past the sandbox (a
     /// Docker socket is as much as outside — `allow::Grant::as_outside`), and in words.
     pub fn where_ran(&self) -> (String, bool, String) {
@@ -7179,7 +7179,7 @@ mod tests {
     /// 6e′: where the session's network takes a run's connections (Linux, `Here.redirects` — the probe's, on a
     /// run's way), the run has no proxy URL and none of what hangs on it — no proxy variable, none of the packs'
     /// proxy lines (Node's flag, Maven's settings) — and its key isn't that of a run that has them (a daemon
-    /// started with proxy lines isn't reused). Where it doesn't (tier C), as before; the network closed, nothing to
+    /// started with proxy lines isn't reused). Where it doesn't (no TPROXY), as before; the network closed, nothing to
     /// take; macOS keeps the run's own port whatever `redirects` says.
     #[test]
     fn where_the_session_takes_the_connections_a_run_gets_no_proxy_lines() {
@@ -7203,12 +7203,12 @@ mod tests {
         let (taken, vars) = made(Os::Linux, true, true);
         assert!(taken.redirected && taken.supervised, "{taken:?}");
         assert_eq!((taken.proxy_url(), vars), (None, Vec::<String>::new()));
-        let (tier_c, vars) = made(Os::Linux, true, false);
-        assert!(!tier_c.redirected && tier_c.proxy_url().is_some());
+        let (proxied, vars) = made(Os::Linux, true, false);
+        assert!(!proxied.redirected && proxied.proxy_url().is_some());
         for v in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY"] {
-            assert!(vars.iter().any(|s| s == v), "tier C: {v} — {vars:?}");
+            assert!(vars.iter().any(|s| s == v), "no TPROXY: {v} — {vars:?}");
         }
-        assert_ne!(policy_key(&taken), policy_key(&tier_c), "with the lines or without: two keys");
+        assert_ne!(policy_key(&taken), policy_key(&proxied), "with the lines or without: two keys");
         // (and the report says which: no variable to name, or the one a tool mustn't ignore — Linux's report: on
         // macOS a Linux policy has no port of its own to the proxy, and reads as loopback only)
         #[cfg(target_os = "linux")]
@@ -7216,7 +7216,7 @@ mod tests {
             let said = |p: &Policy| {
                 Guard::In(Box::new(p.clone())).report(&[]).split_whitespace().collect::<Vec<_>>().join(" ")
             };
-            let (taken_said, tier_c_said) = (said(&taken), said(&tier_c));
+            let (taken_said, proxied_said) = (said(&taken), said(&proxied));
             assert!(
                 taken_said.contains(
                     "through tarae's proxy, which takes every connection they make and answers their names (no \
@@ -7225,8 +7225,8 @@ mod tests {
                 "{taken_said}"
             );
             assert!(
-                tier_c_said.contains("only through tarae's proxy (HTTPS_PROXY, set for every run)"),
-                "{tier_c_said}"
+                proxied_said.contains("only through tarae's proxy (HTTPS_PROXY, set for every run)"),
+                "{proxied_said}"
             );
         }
         // (piece C: closed, each host asked goes the same way — taken, no proxy line)
@@ -9065,7 +9065,7 @@ mod tests {
                     named like a key can't let what's new in it be read";
         assert!(notes.contains(said), "{notes}");
         // (root in a user namespace: why not mounts, said — 7d)
-        let namespaced = matches!(&c.confine, Some(Ok(c)) if ["A+", "A", "B+", "B"].contains(&c.tier()));
+        let namespaced = matches!(&c.confine, Some(Ok(c)) if c.keeper.as_ref().is_some_and(|k| k.ns.user));
         // SAFETY: a plain call.
         let root = unsafe { libc::geteuid() } == 0;
         let why = "not hidden by mounts of the run's own: tarae runs as root";
@@ -9078,13 +9078,14 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn skipped_for_mounts(p: &Policy, test: &str, mounts: bool) -> bool {
         let c = confined(Policy { run: RunDir::new().ok(), ..p.clone() });
-        let (here, tier) = match &c.confine {
-            Some(Ok(c)) => (!c.covers.keys.is_empty(), c.tier()),
-            _ => (false, "none"),
+        let (here, tier, namespaced) = match &c.confine {
+            Some(Ok(c)) => {
+                (!c.covers.keys.is_empty(), c.tier(), c.keeper.as_ref().is_some_and(|k| k.ns.user))
+            }
+            _ => (false, "none", false),
         };
         if here != mounts {
             // SAFETY: a plain call.
-            let namespaced = ["A+", "A", "B+", "B"].contains(&tier);
             let why = match unsafe { libc::geteuid() } {
                 0 if namespaced => {
                     "tarae runs as root, which can't map itself into a run's own user namespace".into()
@@ -9093,7 +9094,7 @@ mod tests {
             };
             // (a machine said to give namespaces fails instead where it doesn't: keys not hidden there isn't a skip)
             if let Ok(want) = std::env::var("TARAE_EXPECT_TIER")
-                && ["A+", "A", "B+", "B"].contains(&want.trim())
+                && want.trim() == "own"
                 && want.trim() != tier
             {
                 panic!("{test}: tier {want} expected here, the runs are {tier} — {why}");
@@ -9460,7 +9461,7 @@ mod tests {
     /// holds that mount is granted whole by `/`'s rule, so home's path through it is a hole too. What else that mount
     /// and its folder hold still reads, and the project in home reads through either way (its own rule). Two second
     /// mounts, each where it can be made: a bind in a namespace of the test binary's own (`with_a_second_bind`: a
-    /// stand-in `run/host/home/u` in the test's own folder) — refused in C/D, whose containers can't make one — and
+    /// stand-in `run/host/home/u` in the test's own folder) — refused without namespaces, whose containers can't make one — and
     /// the checkout's target volume mounted again by `cargo xtask linux` (`TARAE_TEST_SECOND_MOUNT`, any tier). Each
     /// sees its break too: with the other ways not looked at (`TARAE_TEST_NO_HOLES_ELSEWHERE`, in its child) the fake
     /// key is read through the second mount — so a pass is the reads refused, not the report alone.
@@ -9502,10 +9503,9 @@ mod tests {
         match check(&home, &second, Some((&home, &second))) {
             Ok(()) => {}
             // (where a tier with user namespaces is said to be, a namespace of the test's own can be made: refused is
-            // a failure there; C/D's containers refuse it — the second mount below is theirs)
+            // a failure there; containers without namespaces refuse it — the second mount below is theirs)
             Err(SecondBind::Refused(why))
-                if !std::env::var("TARAE_EXPECT_TIER")
-                    .is_ok_and(|t| ["A+", "A", "B+", "B"].contains(&t.trim())) =>
+                if !std::env::var("TARAE_EXPECT_TIER").is_ok_and(|t| t.trim() == "own") =>
             {
                 refused = Some(why)
             }
@@ -9652,7 +9652,7 @@ mod tests {
         );
     }
 
-    /// For real, on Linux with a PID namespace of the session's (A+, B+): a run sees only its session's processes —
+    /// For real, on Linux with a PID namespace of the session's: a run sees only its session's processes —
     /// not its keeper by tarae's number for it, nor tarae — and no process's `/proc/<pid>/root` (its keeper's mount
     /// namespace holds no mount over a key; another run's has its own) takes it to a key: Landlock keeps a run's
     /// reach into other processes to its own domain, and the keeper isn't dumpable.
@@ -11325,7 +11325,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let (tier, abi) = want.split_once(':').unwrap_or_else(|| panic!("<tier>:<ABI>: {want}"));
-            assert!(["A+", "A", "B+", "B", "C", "D"].contains(&tier) && abi.parse::<u32>().is_ok(), "{want}");
+            assert!(["own", "host", "offline"].contains(&tier) && abi.parse::<u32>().is_ok(), "{want}");
         }
         assert_eq!(run, want, "the run's own tier, not the outer one nor none");
         assert_eq!(user, "outer", "a user's run: only what tarae was started with");

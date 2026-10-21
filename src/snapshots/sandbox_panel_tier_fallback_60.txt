@@ -4,7 +4,7 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                        what the sandbox blocked  0/0
 03    ──────────────────────────────────────────────────────
-04     tier C  shared processes, signals, System V IPC +1
+04     tier host  shared processes, signals, System V IPC +1
 05     AppArmor blocks user namespaces
 06     copies: pidfd_getfd refused
 07
@@ -54,7 +54,7 @@
 01
 02    A                        ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD f  DDDDDD ffffffffff ffffffff ffffff f fff ff
+04     DDDD ffff  DDDDDD ffffffffff ffffffff ffffff f fff ff
 05     ffffffff ffffff ffff ffffffffff
 06     fffffff fffffffffff fffffff
 07

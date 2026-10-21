@@ -1,7 +1,7 @@
-//! `cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux a+|c|all [--linux-only]] [--dry-run]` — the "must work"
+//! `cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux own|host|all [--linux-only]] [--dry-run]` — the "must work"
 //! compatibility suite (`target/sb/compat-plan.md` §4–§5). tarae's tests built under `perf` (a debug supervisor
 //! serving every connect would skew the times), then the ignored driver (`compat::tests::driver`, `src/compat.rs`)
-//! run here and, asked, on Linux tiers in Docker through `cargo xtask linux` — A+ with `--userns`, C under Docker's
+//! run here and, asked, on Linux tiers in Docker through `cargo xtask linux` — own with `--userns`, host under Docker's
 //! own profiles (Ubuntu 24.04's restriction's tier) (`--linux-only`: not here). On Linux a stack runs in the image
 //! its manifest names (`image`: `compat/linux/<image>.Dockerfile` on `rust:<pin>`, built here when its tag — the
 //! recipe's hash — isn't there yet, the tags it built before dropped; none: `rust:<pin>`) with its own volume as
@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use crate::linux::{COMPAT, quoted};
 use crate::{Result, root};
 
-const USAGE: &str = "usage: cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux a+|c|all [--linux-only]] [--dry-run]";
+const USAGE: &str = "usage: cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux own|host|all [--linux-only]] [--dry-run]";
 
 /// The manifests and fixtures, and where the tables and their history go, from the checkout's root.
 const MANIFESTS: &str = "compat";
@@ -71,31 +71,31 @@ impl Lane {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tier {
-    APlus,
-    C,
+    Own,
+    Host,
 }
 
 impl Tier {
     fn column(self) -> &'static str {
         match self {
-            Tier::APlus => "Linux A+",
-            Tier::C => "Linux C",
+            Tier::Own => "Linux own",
+            Tier::Host => "Linux host",
         }
     }
 
-    /// The tier as tarae's runs say it (`sandbox A+`): the driver checks each run was at it (`TARAE_COMPAT_TIER`).
+    /// The tier as tarae's runs say it (`sandbox own`): the driver checks each run was at it (`TARAE_COMPAT_TIER`).
     fn word(self) -> &'static str {
         match self {
-            Tier::APlus => "A+",
-            Tier::C => "C",
+            Tier::Own => "own",
+            Tier::Host => "host",
         }
     }
 
     /// `cargo xtask linux`'s arguments for it.
     fn args(self) -> &'static [&'static str] {
         match self {
-            Tier::APlus => &["--userns"],
-            Tier::C => &[],
+            Tier::Own => &["--userns"],
+            Tier::Host => &[],
         }
     }
 }
@@ -131,10 +131,10 @@ fn ask(args: &[String]) -> Result<Ask> {
             }
             "--linux" => {
                 a.linux = match it.next() {
-                    Some("a+") => vec![Tier::APlus],
-                    Some("c") => vec![Tier::C],
-                    Some("all") => vec![Tier::APlus, Tier::C],
-                    t => return Err(format!("--linux {}: a+, c or all — {USAGE}", t.unwrap_or("?"))),
+                    Some("own") => vec![Tier::Own],
+                    Some("host") => vec![Tier::Host],
+                    Some("all") => vec![Tier::Own, Tier::Host],
+                    t => return Err(format!("--linux {}: own, host or all — {USAGE}", t.unwrap_or("?"))),
                 }
             }
             "--dry-run" => a.dry = true,
@@ -147,7 +147,7 @@ fn ask(args: &[String]) -> Result<Ask> {
         }
     }
     if !a.here && a.linux.is_empty() {
-        return Err(format!("--linux-only: with --linux a+, c or all — {USAGE}"));
+        return Err(format!("--linux-only: with --linux own, host or all — {USAGE}"));
     }
     Ok(a)
 }
@@ -787,21 +787,21 @@ asks = true
             Ask {
                 stacks: vec!["node-npm".into(), "go".into()],
                 lane: Lane::Quick,
-                linux: vec![Tier::APlus, Tier::C],
+                linux: vec![Tier::Own, Tier::Host],
                 here: true,
                 dry: true
             }
         );
-        assert!(!ask(&args("--linux c --linux-only")).unwrap().here);
+        assert!(!ask(&args("--linux host --linux-only")).unwrap().here);
         let a = ask(&[]).unwrap();
         assert_eq!((a.lane, a.linux.len(), a.dry), (Lane::Gate, 0, false));
-        assert_eq!(ask(&args("--linux c")).unwrap().linux, vec![Tier::C]);
+        assert_eq!(ask(&args("--linux host")).unwrap().linux, vec![Tier::Host]);
         assert_eq!(ask(&args("--lane net")).unwrap().lane, Lane::Net);
         assert_eq!(ask(&args("--lane asks")).unwrap().lane, Lane::Asks);
         for (bad, why) in [
             ("--lane", "--lane ?"),
             ("--lane fast", "gate, quick, asks or net"),
-            ("--linux b", "a+, c or all"),
+            ("--linux b", "own, host or all"),
             ("--repeat", "--repeat?"),
             ("../node", "a stack's name"),
             ("--linux-only", "--linux-only: with --linux"),
@@ -837,7 +837,7 @@ asks = true
         let s = [stack("node-npm", NODE).unwrap()];
         let tag = "tarae-compat-node:1.99-0123456789ab";
         let recipes = BTreeMap::from([("node".to_string(), (tag.to_string(), "FROM $BASE".to_string()))]);
-        let p = plan(&s, Lane::Gate, &[Tier::APlus, Tier::C], "cargo", "rust:1.99", &recipes);
+        let p = plan(&s, Lane::Gate, &[Tier::Own, Tier::Host], "cargo", "rust:1.99", &recipes);
         let drive = "-- --ignored --exact compat::tests::driver --nocapture --test-threads=1";
         assert_eq!(
             p,
@@ -862,17 +862,17 @@ asks = true
                 "cargo xtask linux '--env' 'CARGO_BUILD_JOBS=2' 'test' '--keep' '--profile' 'compat-tests' '--bin' \
                  'tarae'"
                     .into(),
-                format!("# node-npm, Linux A+: in {tag}, home tarae-compat-node-npm-cache"),
+                format!("# node-npm, Linux own: in {tag}, home tarae-compat-node-npm-cache"),
                 format!(
                     "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
-                     '--env' 'TARAE_COMPAT_TIER=A+' '--userns' '--image' '{tag}' '--volume' \
+                     '--env' 'TARAE_COMPAT_TIER=own' '--userns' '--image' '{tag}' '--volume' \
                      'tarae-compat-node-npm-cache:/root' 'test' '--kept' \
                      '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
                 ),
-                format!("# node-npm, Linux C: in {tag}, home tarae-compat-node-npm-cache"),
+                format!("# node-npm, Linux host: in {tag}, home tarae-compat-node-npm-cache"),
                 format!(
                     "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
-                     '--env' 'TARAE_COMPAT_TIER=C' '--image' '{tag}' '--volume' \
+                     '--env' 'TARAE_COMPAT_TIER=host' '--image' '{tag}' '--volume' \
                      'tarae-compat-node-npm-cache:/root' 'test' '--kept' '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
                 ),
             ]
@@ -882,12 +882,12 @@ asks = true
             stack("rust", "stack = \"rust\"").unwrap(),
             stack("go", "stack = \"go\"\nimage = \"go\"").unwrap(),
         ];
-        let p = plan(&rust, Lane::Gate, &[Tier::C], "cargo", "rust:1.99", &recipes);
+        let p = plan(&rust, Lane::Gate, &[Tier::Host], "cargo", "rust:1.99", &recipes);
         assert!(
             p.contains(&"# go: no recipe compat/linux/go.Dockerfile — its stacks' cells skipped".to_string())
         );
         assert!(
-            p.contains(&"# rust, Linux C: in rust:1.99, home tarae-compat-rust-cache".to_string()),
+            p.contains(&"# rust, Linux host: in rust:1.99, home tarae-compat-rust-cache".to_string()),
             "{p:#?}"
         );
         assert!(!p.iter().any(|l| l.contains("'--image'") && l.contains("STACKS=rust")));
@@ -924,14 +924,14 @@ asks = true
         assert_eq!(of(&cells, "macOS", "(manifest)"), "✗ x\ty", "the cell is the line's rest");
         let mut skipped = Driven::default();
         skipped.line(&format!("skipped — Docker isn't reachable: {}", "no socket"));
-        fill(&mut cells, "Linux C", &s, Lane::Quick, &skipped);
-        assert_eq!(of(&cells, "Linux C", "test"), "– skipped: Docker isn't reachable: no socket");
+        fill(&mut cells, "Linux host", &s, Lane::Quick, &skipped);
+        assert_eq!(of(&cells, "Linux host", "test"), "– skipped: Docker isn't reachable: no socket");
         assert!(
-            !cells.contains_key(&("Linux C".into(), "node-npm".into(), "lint".into())),
+            !cells.contains_key(&("Linux host".into(), "node-npm".into(), "lint".into())),
             "not in the lane"
         );
-        fill(&mut cells, "Linux A+", &s, Lane::Quick, &Driven::default());
-        assert_eq!(of(&cells, "Linux A+", "test"), "✗ harness (its output above)");
+        fill(&mut cells, "Linux own", &s, Lane::Quick, &Driven::default());
+        assert_eq!(of(&cells, "Linux own", "test"), "✗ harness (its output above)");
     }
 
     #[test]
@@ -942,8 +942,8 @@ asks = true
             ("macOS", "test", "✓"),
             ("macOS", "lint", "✗ card"),
             ("macOS", "add", "⊘"),
-            ("Linux C", "test", "✓ 1.7×"),
-            ("Linux C", "lint", "– skipped: a | b"),
+            ("Linux host", "test", "✓ 1.7×"),
+            ("Linux host", "lint", "– skipped: a | b"),
         ] {
             cells.insert((c.into(), "node-npm".into(), e.into()), cell.into());
         }
@@ -952,12 +952,13 @@ asks = true
             was.insert(("macOS".into(), "node-npm".into(), "lint".into()), "✓".into());
             was
         });
-        let t = table("2026-10-15, def, the gate lane", &["macOS", "Linux C"], &s, Lane::Gate, &cells, &past);
+        let t =
+            table("2026-10-15, def, the gate lane", &["macOS", "Linux host"], &s, Lane::Gate, &cells, &past);
         assert_eq!(
             t,
             "# compat — 2026-10-15, def, the gate lane\n\n\
              ## node-npm\n\n\
-             | command | macOS | Linux C | pending |\n\
+             | command | macOS | Linux host | pending |\n\
              |---|---|---|---|\n\
              | test | ✓ | ✓ 1.7× |  |\n\
              | lint | ✗ card | – skipped: a \\| b |  |\n\

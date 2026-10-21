@@ -436,20 +436,23 @@ fn the_report_is_pinned() {
     let tiers: [(&str, Option<Found>); 7] = [
         ("Seatbelt", None),
         (
-            "A+, ABI 11",
+            "own, ABI 11",
             Some(Found { abi: 11, network: false, ..tier_found(Ns::session(true, true), true, false, true) }),
         ),
         (
-            "A, ABI 6",
+            "own without a PID namespace, ABI 6",
             Some(Found {
                 short: no_pid.clone(),
                 brief: no_pid_brief.clone(),
                 ..tier_found(Ns::session(true, false), true, false, false)
             }),
         ),
-        ("B+, ABI 6", Some(tier_found(Ns::session(true, true), false, false, false))),
         (
-            "C, ABI 4",
+            "offline in the session's namespaces, ABI 6",
+            Some(tier_found(Ns::session(true, true), false, false, false)),
+        ),
+        (
+            "host, ABI 4",
             Some(Found {
                 abi: 4,
                 short: none.clone(),
@@ -458,7 +461,7 @@ fn the_report_is_pinned() {
             }),
         ),
         (
-            "C by copies, ABI 11",
+            "host by copies, ABI 11",
             Some(Found {
                 abi: 11,
                 short: none.clone(),
@@ -466,7 +469,10 @@ fn the_report_is_pinned() {
                 ..tier_found(Ns::NONE, true, true, false)
             }),
         ),
-        ("D, ABI 3", Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false, false, false) })),
+        (
+            "offline without namespaces, ABI 3",
+            Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false, false, false) }),
+        ),
     ];
     for (label, found) in tiers {
         let g = found.map(Guarantees::landlock).or_else(|| calm.guarantees());
@@ -509,20 +515,24 @@ fn tier_found(
     }
 }
 
-/// 9c, D7 (decision 12, N1): a run's `TARAE_SANDBOX_STATUS` is its tier's letter and Landlock's ABI — by copies still
-/// its tier's letter, a partial ABI just its number — or Seatbelt's `seatbelt`.
+/// 9c, D7 (decision 12, N1): a run's `TARAE_SANDBOX_STATUS` is its tier's name and Landlock's ABI — by copies still
+/// its tier's name, a partial ABI just its number — or Seatbelt's `seatbelt`.
 #[test]
 fn the_status_is_the_tier_and_the_abi() {
     use super::guarantees::{Found, Guarantees, Ns};
     let status = |f: Found| Guarantees::landlock(f).status();
-    assert_eq!(status(Found { abi: 8, ..tier_found(Ns::session(true, true), true, false, true) }), "A+:8");
+    assert_eq!(status(Found { abi: 8, ..tier_found(Ns::session(true, true), true, false, true) }), "own:8");
     assert_eq!(
         status(tier_found(Ns::session(false, true), true, true, false)),
-        "A+:6",
-        "by copies: still A+"
+        "own:6",
+        "by copies: still own"
     );
-    assert_eq!(status(Found { abi: 4, ..tier_found(Ns::NONE, true, false, false) }), "C:4", "colima's");
-    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::session(true, false), false, false, false) }), "B:2");
+    assert_eq!(status(Found { abi: 4, ..tier_found(Ns::NONE, true, false, false) }), "host:4", "colima's");
+    assert_eq!(
+        status(Found { abi: 2, ..tier_found(Ns::session(true, false), false, false, false) }),
+        "offline:2"
+    );
+    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::NONE, false, false, false) }), "offline:2");
     assert_eq!(Guarantees::seatbelt(true, true).status(), "seatbelt");
 }
 
@@ -557,8 +567,8 @@ fn the_report_says_the_tier_once() {
 /// 9a: what each tier's runs are kept apart from and share, in every place's words (`guarantees.rs`) — every tier,
 /// Landlock ABI 2 to 11, each network way (TPROXY, tarae's proxy by its variable, by copies — with the session's user
 /// namespace too —, no socket), and Seatbelt's, ports and the network each open or not. Beside the golden, what each
-/// must share whatever the words, and (9f) the profile's hint where Ubuntu's restriction is why C or D has no
-/// namespaces — its tier up (A+, B+) in the panel's words, then whole —, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
+/// must share whatever the words, and (9f) the profile's hint where Ubuntu's restriction is why a keeper has no
+/// namespaces — what the profile would give in the panel's words, then whole —, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
 /// tried (7, 9 and 11 add nothing a run is kept from) — and nothing else: what's shared is said shared everywhere, the
 /// rest kept.
 #[test]
@@ -593,59 +603,64 @@ fn the_guarantees_say_each_tier() {
     // (its label, its tier, what its keeper is, what it shares at ABI 2, 3 to 5 and from 6)
     type Scene = (&'static str, Option<Tier>, Found, [&'static [Part]; 3]);
     let scenes: Vec<Scene> = vec![
-        ("A+, TPROXY", Some(Tier::APlus), a_plus(), [&[Files], &[], &[]]),
+        ("own, TPROXY", Some(Tier::Own), a_plus(), [&[Files], &[], &[]]),
         (
-            "A+, tarae's proxy",
-            Some(Tier::APlus),
+            "own, tarae's proxy",
+            Some(Tier::Own),
             found(Ns::session(true, true), true, false, false),
             [&[Files], &[], &[]],
         ),
         (
-            "A+ by copies: the session's user namespace, no network one",
-            Some(Tier::APlus),
+            "own by copies: the session's user namespace, no network one",
+            Some(Tier::Own),
             found(Ns::session(false, true), true, true, false),
             [&[Files], &[], &[]],
         ),
         (
-            "A+, the project in /dev/shm",
-            Some(Tier::APlus),
+            "own, the project in /dev/shm",
+            Some(Tier::Own),
             found(Ns { shm: false, ..Ns::session(true, true) }, true, false, true),
             [&[Files, Shm], &[Shm], &[Shm]],
         ),
         (
-            "A+, its lo without an IPv6 address",
-            Some(Tier::APlus),
+            "own, its lo without an IPv6 address",
+            Some(Tier::Own),
             Found { lo_missing: vec!["IPv6"], ..a_plus() },
             [&[Files], &[], &[]],
         ),
         (
-            "A+, the network closed",
-            Some(Tier::APlus),
+            "own, the network closed",
+            Some(Tier::Own),
             Found { network: false, ..a_plus() },
             [&[Files], &[], &[]],
         ),
         (
-            "A, TPROXY",
-            Some(Tier::A),
+            "own without a PID namespace, TPROXY",
+            Some(Tier::Own),
             a(false, true),
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
-            "A, tarae's proxy",
-            Some(Tier::A),
+            "own without a PID namespace, tarae's proxy",
+            Some(Tier::Own),
             a(false, false),
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
-            "A by copies",
-            Some(Tier::A),
+            "own without a PID namespace, by copies",
+            Some(Tier::Own),
             a(true, false),
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
-        ("B+", Some(Tier::BPlus), found(Ns::session(true, true), false, false, false), [&[Files], &[], &[]]),
         (
-            "B",
-            Some(Tier::B),
+            "offline, the session's namespaces",
+            Some(Tier::Offline),
+            found(Ns::session(true, true), false, false, false),
+            [&[Files], &[], &[]],
+        ),
+        (
+            "offline, the session's namespaces without a PID one",
+            Some(Tier::Offline),
             Found {
                 short: no_pid.clone(),
                 brief: no_pid_brief.clone(),
@@ -654,26 +669,26 @@ fn the_guarantees_say_each_tier() {
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
-            "C, tarae's proxy",
-            Some(Tier::C),
+            "host, tarae's proxy",
+            Some(Tier::Host),
             Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true, false, false) },
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
-            "C by copies",
-            Some(Tier::C),
+            "host by copies",
+            Some(Tier::Host),
             Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true, true, false) },
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
-            "C, Ubuntu's restriction, no profile",
-            Some(Tier::C),
+            "host, Ubuntu's restriction, no profile",
+            Some(Tier::Host),
             ubuntu(true),
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
-            "D",
-            Some(Tier::D),
+            "offline, no namespaces",
+            Some(Tier::Offline),
             Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, false, false, false) },
             [
                 &[Files, Processes, Signals, Ipc, Shm, Ptys],
@@ -682,8 +697,8 @@ fn the_guarantees_say_each_tier() {
             ],
         ),
         (
-            "D, Ubuntu's restriction, no profile",
-            Some(Tier::D),
+            "offline, no namespaces, Ubuntu's restriction, no profile",
+            Some(Tier::Offline),
             ubuntu(false),
             [
                 &[Files, Processes, Signals, Ipc, Shm, Ptys],

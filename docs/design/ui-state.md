@@ -64,7 +64,7 @@ JSON for programs, and a short text form for people and Claude, from the same st
 
 ```json
 {
-  "v": 2,
+  "v": 3,
   "tarae": { "pid": 4182, "boot": "9f3ac1d0", "version": "0.9.0" },
   "frame": 4812,
   "input": 1033,
@@ -182,7 +182,7 @@ side git · 4 rows · in hand git:src/term.rs
   - `waited_ms` / `in_sight_ms`: from `since` and `offer_seen`.
   - `at`: its rect, as drawn.
   - (a run, in `runs`: `ran` — cardburden 4 — where Claude's command ran, from its run's record: `where`
-    (`sandbox`, `sandbox A+ + Docker socket`, `outside`), `past` (past the sandbox), `why`, and `warned` — each
+    (`sandbox`, `sandbox own + Docker socket`, `outside`), `past` (past the sandbox), `why`, and `warned` — each
     warning's `id`, `said`, `whose`; `null` for another's run or one in line.)
   - `same_as` (cardburden 3): a run card the same as one answered before since tarae started (`sinceyes.rs`)
     — `{ card, answer, at, unchanged }`: that card's id, its answer (`y` `a` `A` `n`) and when, and whether

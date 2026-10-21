@@ -5,7 +5,7 @@
 //! In the session's netns its loopback is the session's own: a port nothing opened to this machine stays
 //! there, where the session's own listener answers (or nothing does — its `lo` refuses it as any closed port).
 //! A port `llm.sandbox-ports`/`-localhost` opened goes to this machine unless the session listens there itself
-//! (D2). Without a netns of its own (tier C) loopback is this machine's, reached only where it's opened. This
+//! (D2). Without a netns of its own (tier host) loopback is this machine's, reached only where it's opened. This
 //! machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine too, in every tier:
 //! reached only where the port's opened — a service listening on every address isn't reached through them. Beyond
 //! this machine, with the network open, only two ways go: the session's own network (TPROXY: a TCP connect and a
@@ -223,7 +223,7 @@ pub fn route(
     }
 }
 
-/// `route`'s answer where sessions share this machine's loopback (no netns of the session's own: tier C, served by
+/// `route`'s answer where sessions share this machine's loopback (no netns of the session's own: tier host, served by
 /// copies): a call it sends to this machine (`Machine`, `OwnAddress` — one of its own addresses lands on what
 /// listens on every address, loopback's too) that would land on another session's socket (`anothers`, asked only
 /// then) is refused (step 8, D18) — and one whose socket's owner can't be told (`anothers`' Err) too, as `Untold`.
@@ -282,7 +282,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// Every row of step 4's table (`target/sb/step4-plan.md` §3), in the session's netns and without one (C):
+    /// Every row of step 4's table (`target/sb/step4-plan.md` §3), in the session's netns and without one (host):
     /// loopback stays the session's unless opened and nothing of the session's listens there; opened, it's this
     /// machine's; without a netns it's this machine's where opened, else refused. Beyond, with the network open but
     /// neither the proxy nor the session's network (the next tests' ways): refused as direct — nothing else goes out
@@ -442,7 +442,7 @@ mod tests {
     /// — the run's own socket, marked, to the planted socket — with the proxy's variable set or not: a tool that
     /// ignores `HTTPS_PROXY` is no longer refused as direct, its host the proxy's to decide. What isn't beyond stays as
     /// it was: the session's loopback, opened ports, this machine's own addresses, the never-reached, a resolver's
-    /// port 53 (6e's), the network closed. Without a netns (C) there's no session's network: as before.
+    /// port 53 (6e's), the network closed. Without a netns (host) there's no session's network: as before.
     #[test]
     fn the_sessions_network_takes_what_goes_beyond() {
         let resolvers: Vec<SocketAddr> =
@@ -461,7 +461,7 @@ mod tests {
         let own = |ip: IpAddr| Some(ip == "192.168.1.5".parse::<IpAddr>().unwrap());
         use Refusal::*;
         use Route::*;
-        // (to, reach, in the session's netns, in C)
+        // (to, reach, in the session's netns, without one)
         let rows: Vec<(&str, Reach, Route, Route)> = vec![
             ("93.184.216.34:443", proxied, Redirected, Refused(Direct)),
             ("[2606:2800:220:1::1]:443", proxied, Redirected, Refused(Direct)),
@@ -488,7 +488,7 @@ mod tests {
     /// a planted socket where tarae answers it — whoever it's addressed to: a resolver `resolv.conf` names (the
     /// loopback stub, GCP's link-local one, a LAN's), one it doesn't, loopback's `::1`; a datagram to another port
     /// stays refused. With the network closed it's as before (the session's own loopback: its question reaches the
-    /// planted socket unmarked, and is refused there), and without a netns (C) there's nothing to answer it.
+    /// planted socket unmarked, and is refused there), and without a netns (host) there's nothing to answer it.
     #[test]
     fn where_the_session_answers_names_every_question_is_its_own() {
         let resolvers: Vec<SocketAddr> =
@@ -510,7 +510,7 @@ mod tests {
         let own = |ip: IpAddr| Some(ip == "192.168.1.5".parse::<IpAddr>().unwrap());
         use Refusal::*;
         use Route::*;
-        // (to, reach, in the session's netns, in C)
+        // (to, reach, in the session's netns, without one)
         let rows: Vec<(&str, Reach, Route, Route)> = vec![
             ("127.0.0.53:53", open, Redirected, Refused(Direct)),
             ("169.254.169.254:53", open, Redirected, Refused(Direct)),

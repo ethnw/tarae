@@ -11,7 +11,7 @@
 //! A keeper's namespaces (`Ns`), its tier (`Tier`) and how a run's sockets go (`RunNet`) are here for that — reading
 //! them from a process and making them are `tier.rs`'s.
 
-/// A keeper's namespaces: none (tiers C/D), or the session's — `user` with its ipc and mount namespaces,
+/// A keeper's namespaces: none (tiers host and offline), or the session's — `user` with its ipc and mount namespaces,
 /// `pid` (and a fresh `/proc`) where it mounts, `net` (only `lo`, up) where the policy opens nothing, and a
 /// `/dev/shm` of its own (`shm`) but where the project or a place it writes is in this system's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct Ns {
 /// seccomp mode (the keeper's run) both take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunNet {
-    /// Without a network namespace of its own (tier C): tarae makes its internet sockets, bound to `lo`, and
+    /// Without a network namespace of its own (tier host): tarae makes its internet sockets, bound to `lo`, and
     /// every call naming an address (`seccomp::Mode::Served`); Landlock handles TCP and UDP.
     Served,
     /// In the network namespace its keeper made: its internet sockets its own, every call naming an address
@@ -72,8 +72,8 @@ impl Ns {
     }
 
     /// Whether a run of a keeper born with these, its sockets going as `net` says, gets only the ptys it makes
-    /// (3b, `sandbox::ptys`): without a `devpts` of the session's own (no `user`: C/D) and served — `D`'s runs
-    /// (`Plain`: no supervisor) keep this system's `/dev/pts`, said. One answer for its rules (`linux::confine`)
+    /// (3b, `sandbox::ptys`): without a `devpts` of the session's own (no `user`) and served — offline runs without
+    /// namespaces (`Plain`: no supervisor) keep this system's `/dev/pts`, said. One answer for its rules (`linux::confine`)
     /// and its filter (the keeper's run).
     pub fn serves_ptys(self, net: RunNet) -> bool {
         !self.user && matches!(net, RunNet::Served | RunNet::Copied)
@@ -85,50 +85,43 @@ impl Ns {
 /// run's (served or not), its guarantees' to say (the `Loopback` row).
 pub const NO_NETNS: &str = "no network namespace of its own: its loopback is this machine's";
 
-/// A tier (§Tiers): the namespaces, and whether tarae serves the runs' calls.
+/// A tier (§Tiers): whether the keeper has the session's namespaces, and whether tarae serves the runs' calls —
+/// what a user can tell apart. The rest (a PID namespace, how the network goes) is the rows' and `why`'s to say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
-    APlus,
-    A,
-    BPlus,
-    B,
-    C,
-    D,
+    /// The session's own namespaces, served.
+    Own,
+    /// This machine's namespaces, served.
+    Host,
+    /// Not served: a run reaches no network, with the session's namespaces or without.
+    Offline,
 }
 
 impl Tier {
-    /// The tier of a keeper with `ns` — `net` aside: a policy that opens something has none until routing —
-    /// served or not.
+    /// The tier of a keeper with `ns`, served or not.
     pub fn of(ns: Ns, served: bool) -> Tier {
-        match (ns.user, ns.pid, served) {
-            (true, true, true) => Tier::APlus,
-            (true, false, true) => Tier::A,
-            (true, true, false) => Tier::BPlus,
-            (true, false, false) => Tier::B,
-            (false, _, true) => Tier::C,
-            (false, _, false) => Tier::D,
+        match (served, ns.user) {
+            (true, true) => Tier::Own,
+            (true, false) => Tier::Host,
+            (false, _) => Tier::Offline,
         }
     }
 
-    /// The tier a keeper here gets with the session's namespaces, served or not as now — what tarae's AppArmor
-    /// profile makes of C and D where Ubuntu's restriction is why they have none (9f): A+ and B+ (a fresh `/proc`
-    /// mounts there: measured A+ on Ubuntu 24.04 with the profile).
-    pub fn with_namespaces(self) -> Tier {
-        match self {
-            Tier::C => Tier::APlus,
-            Tier::D => Tier::BPlus,
-            t => t,
-        }
-    }
-
+    /// Its name: the state line's, `TARAE_SANDBOX_STATUS`'s, the log's.
     pub fn said(self) -> &'static str {
         match self {
-            Tier::APlus => "A+",
-            Tier::A => "A",
-            Tier::BPlus => "B+",
-            Tier::B => "B",
-            Tier::C => "C",
-            Tier::D => "D",
+            Tier::Own => "own",
+            Tier::Host => "host",
+            Tier::Offline => "offline",
+        }
+    }
+
+    /// The head of Claude's sentence (`Guarantees::sentence`).
+    fn head(self) -> &'static str {
+        match self {
+            Tier::Own => "Own namespaces",
+            Tier::Host => "Host namespaces",
+            Tier::Offline => "Offline",
         }
     }
 }
@@ -198,7 +191,7 @@ pub enum Way {
     Proxy,
     /// To tarae's proxy, every socket the run has made by tarae (6f′: `pidfd_getfd` refused).
     Copies,
-    /// Nowhere: not served, a run makes no socket that leaves its namespace (B+, B, D).
+    /// Nowhere: not served (tier offline), a run makes no socket that leaves its namespace.
     NoSocket,
 }
 
@@ -214,14 +207,13 @@ impl Way {
     }
 }
 
-/// How a run's tier would go up (9f; 6h's `tier::hint`): where Ubuntu's restriction kept a keeper's namespaces
-/// from a tarae under no profile — the tier tarae's AppArmor profile would give its runs, and the whole hint: why,
-/// then the step or why there's none (`apparmor::hint`) — and the step alone, the shell line the sandbox panel copies
-/// (None for a tarae no profile should name: `apparmor::step`) — and where that tarae is, so a run's own tier can
-/// have its words (`Guarantees::landlock`).
+/// How a run would get namespaces of its own (9f; 6h's `tier::hint`): where Ubuntu's restriction kept a keeper's
+/// namespaces from a tarae under no profile — the whole hint: why, then the step or why there's none
+/// (`apparmor::hint`) — and the step alone, the shell line the sandbox panel copies (None for a tarae no profile
+/// should name: `apparmor::step`) — and where that tarae is, so a run's own tier can have its words
+/// (`Guarantees::landlock`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
-    pub to: Tier,
     pub said: String,
     pub step: Option<String>,
     pub place: super::apparmor::Place,
@@ -230,9 +222,8 @@ pub struct Hint {
 impl Hint {
     /// The hint for runs in `tier`, for the tarae at `place`.
     pub fn of(tier: Tier, place: &super::apparmor::Place) -> Hint {
-        let to = tier.with_namespaces();
-        let said = super::apparmor::hint(tier.said(), to.said(), place);
-        Hint { to, said, step: super::apparmor::step(place), place: place.clone() }
+        let said = super::apparmor::hint(tier.said(), place);
+        Hint { said, step: super::apparmor::step(place), place: place.clone() }
     }
 }
 
@@ -252,7 +243,7 @@ pub struct Guarantees {
     /// registries (C1b, `!Egress.any`); others asked on a card. Neither this nor `asks`: any host.
     pub listed: bool,
     pub way: Way,
-    /// Why not the top tier — the probe's, the supervisor's, no TPROXY's, Landlock's — None at the top.
+    /// What's missing — the probe's, the supervisor's, no TPROXY's, Landlock's — None where nothing is.
     pub why: Option<String>,
     /// The same in a few words, ` · ` between (the sandbox panel, 9e, under the tier): `AppArmor blocks user
     /// namespaces · copies: pidfd_getfd refused` — `why` is the report's and `tarae state`'s.
@@ -290,7 +281,7 @@ pub struct Found {
     pub network: bool,
 }
 
-/// The loopback of a run served without a network namespace of its own (C, by copies): this machine's — another
+/// The loopback of a run served without a network namespace of its own (host, by copies): this machine's — another
 /// session's socket on it refused (step 8).
 const THEIRS_REFUSED: &str = "this machine's, other sessions' sockets refused";
 
@@ -299,6 +290,12 @@ const THEIRS_SHORT: &str = "this machine's, other sessions' refused";
 
 /// The profile's step in a few words, beside its row in the sandbox panel (9f).
 pub const STEP_SAID: &str = "needs sudo, then restart tarae";
+
+/// What the profile would give the runs, in the sandbox panel under the why (`hint_brief`).
+const HINT_BRIEF: &str = "tarae's AppArmor profile would give own namespaces";
+
+/// The sandbox panel's row that copies the profile's step (`step_row`).
+const STEP_ROW: &str = "copy the step for own namespaces";
 
 /// The terminals of a run that opens only those it makes (3b).
 const ONLY_MADE: &str = "only those it makes";
@@ -556,7 +553,7 @@ impl Guarantees {
     /// `tarae state`'s `sandbox` object of a session (9d, pinned by `ui_state.json`): what enforces it — the tier
     /// and Landlock's ABI (null on macOS: `by` `seatbelt`), the keeper's namespaces (`netns`: a network namespace
     /// of the session's own — false where it's served by copies, N1) — how the network goes, each part kept apart
-    /// or shared (`Part::key`, `how` where there's more to say), `why` not the top tier, `hint` how it would go up
+    /// or shared (`Part::key`, `how` where there's more to say), `why` what's missing, `hint` how it would get namespaces
     /// (9f: why, and the profile's step — whole; null where none), and the state `line`.
     pub fn json(&self) -> serde_json::Value {
         use serde_json::json;
@@ -585,11 +582,11 @@ impl Guarantees {
         })
     }
 
-    /// The hint in a few words, for the sandbox panel under the why (9f): what the profile would make of the tier —
+    /// The hint in a few words, for the sandbox panel under the why (9f): what the profile would give the runs —
     /// its step is the list's row to copy (`step_row`); where there's none, the one way to one.
     pub fn hint_brief(&self) -> Option<String> {
         let h = self.hint.as_ref()?;
-        let made = format!("tarae's AppArmor profile would make this {}", h.to.said());
+        let made = HINT_BRIEF.to_string();
         Some(match h.step {
             Some(_) => made,
             None => format!("{made} · for a tarae installed at {}", super::apparmor::PACKAGED),
@@ -599,15 +596,15 @@ impl Guarantees {
     /// The sandbox panel's row for the profile's step (9f): what Enter does, and what the step is in a few words —
     /// None where there's no step to copy.
     pub fn step_row(&self) -> Option<(String, &'static str)> {
-        let h = self.hint.as_ref().filter(|h| h.step.is_some())?;
-        Some((format!("copy the step that makes this tier {}", h.to.said()), STEP_SAID))
+        self.hint.as_ref().filter(|h| h.step.is_some())?;
+        Some((STEP_ROW.to_string(), STEP_SAID))
     }
 
     /// One sentence for Claude: the tier, what's kept apart from other sessions' commands and what's shared.
     pub fn sentence(&self) -> String {
         let head = match self.by {
             By::Landlock { tier, abi, .. } => {
-                format!("Tier {}{} (Landlock ABI {abi})", tier.said(), if abi < 3 { ", partial" } else { "" })
+                format!("{}{} (Landlock ABI {abi})", tier.head(), if abi < 3 { ", partial" } else { "" })
             }
             By::Seatbelt => "Seatbelt".to_string(),
         };
@@ -632,9 +629,9 @@ impl Guarantees {
 }
 
 impl Guarantees {
-    /// The run's `TARAE_SANDBOX_STATUS` (9c, D7; decision 12): `<tier>:<Landlock ABI>` — `A+:8`, colima's `C:4`; a
-    /// partial ABI (below 3) is just its number, `B:2` — and Seatbelt's `seatbelt`. The tier's letter only: served by
-    /// copies is still its tier (N1), what it lacks is the state's to say.
+    /// The run's `TARAE_SANDBOX_STATUS` (9c, D7; decision 12): `<tier>:<Landlock ABI>` — `own:8`, colima's
+    /// `host:4`; a partial ABI (below 3) is just its number, `offline:2` — and Seatbelt's `seatbelt`. The tier's name
+    /// only: served by copies is still its tier (N1), what it lacks is the state's to say.
     pub fn status(&self) -> String {
         match self.by {
             By::Landlock { tier, abi, .. } => format!("{}:{abi}", tier.said()),
@@ -739,8 +736,8 @@ pub fn said_as_found(g: &Guarantees, found: &[(Part, Option<bool>)]) -> Vec<Stri
 mod tests {
     use super::*;
 
-    /// 9f: a run's hint names the run's own tier and the one the profile would make of it — never the probe's, which
-    /// can differ: a probe served, a run not (D, "would make this B+"), or the other way (C, A+).
+    /// 9f: a run's hint names the run's own tier — never the probe's, which can differ: a probe served, a run not
+    /// (offline), or the other way (host) — and what the profile would give it: namespaces, never a tier.
     #[test]
     fn the_hint_names_the_runs_own_tier() {
         let place = super::super::apparmor::Place {
@@ -763,17 +760,14 @@ mod tests {
                 network: false,
             })
         };
-        for (served, probed, tier, to) in [
-            (false, Tier::C, "D", Tier::BPlus),
-            (true, Tier::D, "C", Tier::APlus),
-            (true, Tier::C, "C", Tier::APlus),
-        ] {
+        for (served, probed, tier) in
+            [(false, Tier::Host, "offline"), (true, Tier::Offline, "host"), (true, Tier::Host, "host")]
+        {
             let g = run(served, probed);
             let h = g.hint.as_ref().expect("the hint");
-            assert_eq!(h.to, to, "served {served}, probed in {probed:?}");
             assert!(h.said.starts_with(&format!("Claude's commands run in tier {tier} here")), "{}", h.said);
-            let line = g.hint_brief().unwrap_or_default();
-            assert!(line.ends_with(&format!("would make this {}", to.said())), "{line}");
+            assert!(h.said.contains("To give them namespaces of their own, run once"), "{}", h.said);
+            assert_eq!(g.hint_brief().as_deref(), Some(HINT_BRIEF), "probed in {probed:?}");
         }
     }
 

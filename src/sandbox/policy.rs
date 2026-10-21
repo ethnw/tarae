@@ -55,8 +55,8 @@ pub struct Policy {
     /// supervisor knows the run). Made for the `Here` a policy is made for (`policy_in`), so both systems'
     /// policies pin alike on either (`golden`); `for_project`: this system's.
     pub supervised: bool,
-    /// Linux (6e′): its keeper's session network takes its runs' connections and answers their names (TPROXY, A+/A
-    /// — `tier::redirects`, as `Here.redirects` says): no proxy URL, so no proxy variable nor the packs' proxy
+    /// Linux (6e′): its keeper's session network takes its runs' connections and answers their names (TPROXY, tier
+    /// own — `tier::redirects`, as `Here.redirects` says): no proxy URL, so no proxy variable nor the packs' proxy
     /// lines — a tool goes out as it would anywhere. Made for the `Here` (a stand-in's: false), as `supervised`.
     pub redirected: bool,
     /// The hosts its network reaches through the proxy, as its rules there hold them (`llm.sandbox-hosts`, and
@@ -160,7 +160,7 @@ impl Policy {
     /// connections over (`supervised`: Linux), that address (`route::PROXY` — no credential: the supervisor
     /// knows the run). None: the network closed, or no way to the proxy was made — nothing goes beyond this
     /// machine; or the session's network takes its connections (`redirected`, 6e′ — M5: the tools go out without
-    /// one). (Step 6f: a run's own one in tier C.)
+    /// one). (Step 6f: a run's own one in tier host.)
     pub fn proxy_url(&self) -> Option<proxy::ProxyUrl> {
         match (&self.proxy, self.supervised) {
             _ if !self.network || self.redirected => None,

@@ -233,7 +233,7 @@
             "part": "loopback"
           }
         ],
-        "line": "tier A+ · Landlock ABI 8 · loopback this machine's, other sessions' sockets refused · network closed · shared nothing",
+        "line": "tier own · Landlock ABI 8 · loopback this machine's, other sessions' sockets refused · network closed · shared nothing",
         "namespaces": {
           "net": false,
           "netns": false,
@@ -249,7 +249,7 @@
         },
         "partial": false,
         "shared": [],
-        "tier": "A+",
+        "tier": "own",
         "why": "served by tarae's copies of its sockets: pidfd_getfd refused"
       }
     },
@@ -395,5 +395,5 @@
       "where": "waiting"
     }
   ],
-  "v": 2
+  "v": 3
 }

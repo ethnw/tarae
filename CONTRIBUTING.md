@@ -78,7 +78,7 @@ an aarch64 VM, slow and liable to stall; a Docker on a real x86_64 machine (`DOC
 
 `cargo xtask linux --docker-default test|clippy` runs the container as a dev container usually is, without the
 `CAP_SYS_PTRACE` the checks otherwise add: Docker's default profile refuses `pidfd_getfd`, so the sandbox serves its
-runs by its own copies of their sockets (tier C). It doesn't go with `--userns`. Killed or interrupted (SIGTERM,
+runs by its own copies of their sockets (tier host). It doesn't go with `--userns`. Killed or interrupted (SIGTERM,
 SIGINT, SIGHUP), `cargo xtask linux` kills its container before it exits — a `timeout` around it ends the run, not
 just the client. A sandbox test that could wait for good has a watchdog (`sandbox::watchdog`): past its limit it
 ends the test binary, saying which test and what it waited for.
@@ -87,26 +87,27 @@ The sandbox's tiers ([design](docs/design/sandbox-keeper.md#tiers)) are reached 
 
 | Options | The container | Tier |
 |---|---|---|
-| none | Docker's seccomp and AppArmor profiles, `CAP_SYS_PTRACE` added | C |
-| `--userns` | those profiles and the masked paths lifted | A+, where the kernel lets a program make user namespaces |
-| `--userns=masked` | the same, `/proc` left masked | A |
-| `--docker-default` | as `docker run` makes one: no `CAP_SYS_PTRACE` | C, served by copies |
+| none | Docker's seccomp and AppArmor profiles, `CAP_SYS_PTRACE` added | host |
+| `--userns` | those profiles and the masked paths lifted | own, where the kernel lets a program make user namespaces |
+| `--userns=masked` | the same, `/proc` left masked | own, without a PID namespace |
+| `--docker-default` | as `docker run` makes one: no `CAP_SYS_PTRACE` | host, served by copies |
 
 The options go in this order: `--env NAME=VALUE`… first, then `--userns[=masked]` or `--docker-default`, then
 `--cgroup`, `--image`, `--platform`, then `clippy` or `test`. An `--env` after `--userns` is an error (`not
---env`). `--env TARAE_EXPECT_TIER=A+` makes a test that finds a lower tier fail rather than skip itself.
+--env`). `--env TARAE_EXPECT_TIER=own` makes a test that finds no namespaces fail rather than skip itself.
 `--env TARAE_TEST_COPIES=1` serves runs by copies where tarae could take their sockets (a session with user
 namespaces but no network of its own). `test --as-user …` runs the tests as an ordinary user of the container's
 (root's ways differ: it can't map itself into a run's user namespace), and `test --installed …` runs tarae's tests
 from `/usr/bin/tarae`, where an AppArmor profile on the machine attaches by that path.
 
 No one machine reaches every tier. colima's VM (`tarae-test`: Linux 6.8, Landlock ABI 4, Ubuntu's restriction
-on) gives C. A Debian 12 VM (6.1, ABI 2) gives A+, A and C with the options above, and partial Landlock. An
-Ubuntu 26.10 VM (7.3, ABI 11) gives C, and A+ with its restriction lifted or tarae's profile installed. Point
+on) gives host. A Debian 12 VM (6.1, ABI 2) gives own (with and without a PID namespace) and host with the
+options above, and partial Landlock. An Ubuntu 26.10 VM (7.3, ABI 11) gives host, and own with its restriction
+lifted or tarae's profile installed. Point
 `DOCKER_HOST` at a VM's Docker to run there.
 
 The keepers' memory with many sessions (1 to 32, idle and each keeping a run) is a `perf_` test, so it needs an
-optimized build: `cargo xtask linux [--env TARAE_EXPECT_TIER=A+ --userns] test --profile perf --bin tarae --
+optimized build: `cargo xtask linux [--env TARAE_EXPECT_TIER=own --userns] test --profile perf --bin tarae --
 --exact sandbox::keeper::tests::perf_keepers_memory_per_session --nocapture`. The numbers it gave are in the
 [design](docs/design/sandbox-keeper.md#measured).
 

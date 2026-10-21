@@ -1,4 +1,4 @@
-//! A run's terminals where its session has no `devpts` of its own (3b, `target/sb/linux7-plan.md`: tiers C/D,
+//! A run's terminals where its session has no `devpts` of its own (3b, `target/sb/linux7-plan.md`: no namespaces,
 //! served — `tier::serves_ptys`). There `/dev/pts` is this system's — every pty of the user's, other sessions'
 //! too — so a run's Landlock rules grant none of it (`linux::confine`) but a pool tarae opened for that run before
 //! it started (`Ptys::open`), granted by inode: a number freed and taken again is a new inode, never granted.

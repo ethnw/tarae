@@ -134,12 +134,12 @@ fn with_cgroup(mut a: Vec<String>, on: bool) -> Vec<String> {
 /// What `--userns` lets the container do, so the sandbox's tier tests reach a real session keeper
 /// (`src/sandbox/tier.rs`): Docker's default seccomp profile refuses new namespaces, its `docker-default`
 /// AppArmor profile refuses mounting, and its masked paths make a fresh `/proc` too revealing to mount. Only
-/// the container is loosened — never what tarae does; without the option it's Docker's defaults (tier C).
+/// the container is loosened — never what tarae does; without the option it's Docker's defaults (tier host).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Userns {
-    /// `--userns`: all three lifted — tier A+ where the kernel allows unprivileged user namespaces.
+    /// `--userns`: all three lifted — tier own where the kernel allows unprivileged user namespaces.
     Full,
-    /// `--userns=masked`: `/proc` left masked — tier A (no PID namespace, D12).
+    /// `--userns=masked`: `/proc` left masked — tier own without a PID namespace (D12).
     Masked,
 }
 
@@ -1647,8 +1647,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `--userns` lifts the container's own seccomp, AppArmor and masked paths (tier A+), `--userns=masked`
-    /// keeps `/proc` masked (tier A), and without it the container is Docker's defaults: no `--security-opt`.
+    /// `--userns` lifts the container's own seccomp, AppArmor and masked paths (tier own), `--userns=masked`
+    /// keeps `/proc` masked (own, no PID namespace), and without it the container is Docker's defaults: no `--security-opt`.
     /// Its options go after `--cap-add SYS_PTRACE`, before the image, with the rest kept.
     #[test]
     fn userns_loosens_only_the_container() {

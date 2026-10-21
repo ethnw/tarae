@@ -108,7 +108,7 @@ pub struct Confine {
     /// probe's rules).
     pub guarantees: Option<super::guarantees::Guarantees>,
     /// The ptys its run may open of this system's `/dev/pts` (3b, `tier::serves_ptys`) — what the supervisor puts
-    /// in place of those the run makes; None: all of it (D) or the session's own (A+ … B).
+    /// in place of those the run makes; None: all of it (offline, no namespaces) or the session's own (namespaces).
     pub ptys: Option<Arc<super::ptys::Ptys>>,
     pub made: Arc<Made>,
     pub closed: Vec<PathBuf>,
@@ -136,7 +136,7 @@ pub struct Confine {
 }
 
 impl Confine {
-    /// The tier its runs go at (`A+` … `D`, its guarantees'); empty: no keeper's.
+    /// The tier its runs go at (`own`, `host`, `offline`: its guarantees'); empty: no keeper's.
     pub fn tier(&self) -> &'static str {
         self.guarantees.as_ref().and_then(|g| g.tier()).map_or("", |t| t.said())
     }
@@ -834,13 +834,13 @@ pub struct There {
 }
 
 /// The most files named like keys a run's child hides by mounts (7d, `Covers`): past it, they're closed as 7b closes
-/// them, its folders split. (Measured in `many_keys_are_hidden_at_once` on Debian 12, 6.1, in A+, a test build, the
+/// them, its folders split. (Measured in `many_keys_are_hidden_at_once` on Debian 12, 6.1, in tier own, a test build, the
 /// fastest of five: a project of 1,024 keys run hiding them took 108 ms, the same closing none 39 ms — about 70 µs a
 /// key: its checks against the mount table, its own and the mounts.)
 pub const COVERS_MAX: usize = 1024;
 
 /// The files named like keys hidden from a run by mounts (7d), where its keeper gave the session a user namespace
-/// (A+ … B) and tarae doesn't run as root (`confine`): its child makes a user and mount namespace of its own, mounts `shut` — an empty file nobody may open
+/// and tarae doesn't run as root (`confine`): its child makes a user and mount namespace of its own, mounts `shut` — an empty file nobody may open
 /// (mode 0), tarae's — read-only over each, drops every capability, then confines itself (`keeper::child`). So its
 /// folders stay one Landlock rule each, and a file made or replaced beside a key is read at once. A key read is
 /// refused (EACCES, as Landlock's); written, refused too (its mount is read-only); renamed, removed or replaced
