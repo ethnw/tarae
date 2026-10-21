@@ -5105,7 +5105,7 @@ impl PickerBox {
                 preview_w: 0,
             };
         }
-        let preview = p.preview;
+        let preview = p.preview && !p.preview_hidden;
         // (a narrow screen keeps its rows and columns for the list: no margins)
         let (mx, my) = if lay.edit_w >= 60 && lay.body_h >= 16 { (PICKER_MX, PICKER_MY) } else { (0, 0) };
         let w = lay.edit_w.saturating_sub(2 * mx).max(24);
@@ -5123,7 +5123,8 @@ impl PickerBox {
         // open (typing narrows the rows, a list redone — `:granted`'s `d` — the items: neither makes it jump),
         // `LIST_MIN` at least. A picker with a preview keeps the screen for the
         // code it shows; a live search's and a server's lists come and go with each key: they keep it too
-        let list_rows = if preview || p.live || p.requery {
+        // (one whose preview `C-t` put away keeps its height: the list doesn't jump)
+        let list_rows = if p.preview || p.live || p.requery {
             full
         } else {
             let most = p.tallest.get().max(p.len()).max(p.counts().1);
@@ -13284,7 +13285,12 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "close")])
     } else if let Some(p) = editor.picker.as_ref() {
         // Every other list (uxaudit D6): what enter does there, where it's one thing — typing narrows it, esc closes
+        // (a place: `C-v` opens it beside — Helix's key, `C-s` its twin under, H1)
+        let place = p.current().is_some_and(|i| i.action.is_place());
         match picker_enter(p.kind) {
+            Some(enter) if place => {
+                hints(&[("enter", enter), ("C-v", "split"), ("type", "narrow"), ("esc", "close")])
+            }
             Some(enter) => hints(&[("enter", enter), ("type", "narrow"), ("esc", "close")]),
             None => hints(&[("type", "narrow"), ("esc", "close")]),
         }
@@ -16577,6 +16583,175 @@ mod tests {
         assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
         ed.session.task_run = None;
         assert_eq!(lay(&ed).0, 0, "no panel without a run");
+    }
+
+    /// One experience (uxaudit D7): every surface that scrolls moves by the code's measures — `C-d`/`C-u` half its
+    /// rows in sight, `C-e`/`C-y` (and `C-n`/`C-p`) a row, `C-f`/`C-b` all of them: an output panel (the task's), the
+    /// hover text, a picker (its page keys, and Helix's Home/End).
+    #[test]
+    fn every_surface_scrolls_by_the_codes_measures() {
+        use crate::task::{Run, Task};
+        let mut ed = Editor::new(Config::default());
+        // (some code: not the start screen)
+        ed.docs[0].text = Rope::from_str("x\n");
+        let (w, h) = (120, 40);
+        let draw = |ed: &mut Editor| render(ed, &mut Vec::new(), w, h).unwrap();
+        // The task panel, with tarae's keys
+        let mut r =
+            Run::for_test(Task { name: "t".into(), cmd: "printf ''".into(), cwd: std::env::temp_dir() });
+        r.output = (0..400).map(|i| (false, format!("output {i}"))).collect();
+        ed.session.task_run = Some(r);
+        draw(&mut ed);
+        ed.bottom_take_keys();
+        let rows = ed.slot_rows(crate::sizes::Slot::Task);
+        let top = |ed: &Editor| ed.session.task_run.as_ref().unwrap().top(rows);
+        let half = (rows / 2).max(1);
+        for (keys, at) in [
+            ("g", 0),
+            ("C-d", half),
+            ("C-e", half + 1),
+            ("C-n", half + 2),
+            ("C-y", half + 1),
+            ("C-p", half),
+            ("C-u", 0),
+            ("C-f", rows),
+            ("pagedown", 2 * rows),
+            ("C-b", rows),
+        ] {
+            ed.handle_key(keys.parse().unwrap());
+            draw(&mut ed);
+            assert_eq!(top(&ed), at, "the task panel, {keys} ({rows} rows)");
+        }
+        ed.handle_key(Key::plain(crate::key::Code::Esc));
+        ed.session.task_run = None;
+        // Hover text: half its rows, a row
+        ed.popup = Some(
+            (0..60)
+                .map(|i| {
+                    crate::markdown::Line::Code(vec![crate::markdown::Span {
+                        text: format!("doc {i}"),
+                        style: Style::default(),
+                    }])
+                })
+                .collect(),
+        );
+        draw(&mut ed);
+        let (.., ph) = ed.screen.popup.get().expect("docs card drawn");
+        for (keys, at) in [("C-d", ph / 2), ("C-e", ph / 2 + 1), ("C-y", ph / 2), ("C-u", 0)] {
+            ed.handle_key(keys.parse().unwrap());
+            assert_eq!(ed.popup_scroll, at, "the hover text, {keys} ({ph} rows)");
+            assert!(ed.popup.is_some(), "{keys} scrolls it, it stays");
+        }
+        ed.popup = None;
+        // A picker: half its rows, all of them, the ends
+        let item = |n: usize| crate::picker::Item {
+            label: format!("buffer {n}"),
+            action: Action::Buffer(ed.docs[0].id),
+            hint: String::new(),
+            glyph: None,
+        };
+        ed.open_picker(Picker::new("buffers", (0..200).map(item).collect(), false), None);
+        draw(&mut ed);
+        let rows = ed.picker.as_ref().unwrap().view.len();
+        assert!(rows > 4, "{rows} rows in sight");
+        let selected = |ed: &Editor| ed.picker.as_ref().unwrap().selected;
+        for (keys, at) in
+            [("C-d", rows / 2), ("C-u", 0), ("pagedown", rows), ("pageup", 0), ("end", 199), ("home", 0)]
+        {
+            ed.handle_key(keys.parse().unwrap());
+            draw(&mut ed);
+            assert_eq!(selected(&ed), at, "the picker, {keys} ({rows} rows)");
+        }
+    }
+
+    /// Helix's picker keys (uxaudit H1): `C-v` opens the row beside (a split), `C-s` under, `A-ret` with the list
+    /// kept up, `C-t` puts the preview away and back — a row that isn't a place says so, nothing opened.
+    #[test]
+    fn a_pickers_row_opens_in_a_split_or_with_the_list_kept_up() {
+        let mut ed = Editor::new(Config::default());
+        let (w, h) = (140, 40);
+        let draw = |ed: &mut Editor| render(ed, &mut Vec::new(), w, h).unwrap();
+        let id = ed.docs[0].id;
+        let buffers = |ed: &mut Editor| {
+            let item = |n: usize| crate::picker::Item {
+                label: format!("buffer {n}"),
+                action: Action::Buffer(id),
+                hint: String::new(),
+                glyph: None,
+            };
+            ed.open_picker(Picker::of("files", "files", (0..3).map(item).collect(), false), None);
+            draw(ed);
+        };
+        buffers(&mut ed);
+        assert!(ed.screen.picker_preview_x.is_some(), "its preview, at this width");
+        // (a place's row says `C-v split` — a command's doesn't, below)
+        let hints = key_hints(&ed).unwrap_or_default();
+        assert!(hints.contains(&("C-v", "split".to_string())), "{hints:?}");
+        ed.handle_key("C-t".parse().unwrap());
+        draw(&mut ed);
+        assert!(ed.screen.picker_preview_x.is_none(), "C-t: the preview away");
+        ed.handle_key("C-t".parse().unwrap());
+        draw(&mut ed);
+        assert!(ed.screen.picker_preview_x.is_some(), "C-t again: back");
+        // (a screen with no room for one: said, nothing changed)
+        render(&mut ed, &mut Vec::new(), 70, h).unwrap();
+        ed.handle_key("C-t".parse().unwrap());
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("no room for the preview"), "{said}");
+        assert!(!ed.picker.as_ref().unwrap().preview_hidden);
+        draw(&mut ed);
+        ed.handle_key("A-ret".parse().unwrap());
+        assert!(ed.picker.is_some(), "A-ret: opened, the list kept up");
+        assert_eq!(ed.session.views.len(), 1);
+        ed.handle_key("C-v".parse().unwrap());
+        assert!(ed.picker.is_none(), "C-v: the list closes");
+        assert_eq!(ed.session.views.len(), 2, "… the row opened in a split");
+        assert_eq!(ed.session.split.leaves().last(), Some(&ed.session.focus), "the new pane has the keys");
+        buffers(&mut ed);
+        ed.handle_key("C-s".parse().unwrap());
+        assert_eq!(ed.session.views.len(), 3, "C-s: another");
+        // A place that doesn't open (a folder, as a file deleted since would be a new one): said, and the pane made
+        // for it goes — no split nobody asked for
+        let gone = crate::scratch::Scratch::new("picker-split-fails");
+        let folder = crate::picker::Item {
+            label: "a folder".into(),
+            action: Action::Open(gone.path().to_path_buf()),
+            hint: String::new(),
+            glyph: None,
+        };
+        ed.open_picker(Picker::new("buffers", vec![folder], false), None);
+        ed.handle_key("C-v".parse().unwrap());
+        assert_eq!(ed.session.views.len(), 3, "the split for it taken back");
+        assert!(ed.toasts.iter().any(|t| t.kind == crate::editor::ToastKind::Error), "said");
+        ed.toasts.clear();
+        // (a buffer closed since the list was made: said too)
+        let closed = crate::picker::Item {
+            label: "a closed buffer".into(),
+            action: Action::Buffer(999_999),
+            hint: String::new(),
+            glyph: None,
+        };
+        ed.open_picker(Picker::new("buffers", vec![closed], false), None);
+        ed.handle_key("C-v".parse().unwrap());
+        assert_eq!(ed.session.views.len(), 3);
+        assert!(ed.toasts.iter().any(|t| t.text.contains("that buffer is closed")), "said");
+        // A row that isn't a place: said, nothing opened, the list up
+        let cmd = crate::picker::Item {
+            label: "a command".into(),
+            action: Action::Command("normal_mode"),
+            hint: String::new(),
+            glyph: None,
+        };
+        ed.open_picker(Picker::of("commands", "commands", vec![cmd], false), None);
+        draw(&mut ed);
+        let split_said =
+            |ed: &Editor| key_hints(ed).unwrap_or_default().contains(&("C-v", "split".to_string()));
+        assert!(!split_said(&ed), "a command's row: no `C-v split` hint (C-v is refused there)");
+        ed.handle_key("C-v".parse().unwrap());
+        assert_eq!(ed.session.views.len(), 3);
+        assert!(ed.picker.is_some());
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("C-v does nothing in this list"), "{said}");
     }
 
     /// #233: a report read with `C-d` under a finished task's tall output (the code keeps 19 rows) — every

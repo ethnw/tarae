@@ -1063,6 +1063,75 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A plugin's panel moves by tarae's moving keys — they never come to the plugin (docs/plugins.md, the WIT's
+    /// `panel`; user, 2026-10-21) — by the rows it drew: `C-d` half of them, `C-f` all, `C-e`/`C-y` the view a row
+    /// with the selection kept in sight; a letter still comes.
+    #[test]
+    fn a_panels_moving_keys_are_taraes_never_the_plugins() {
+        let (mut ed, dir) = setup("panel-moves", "x\n");
+        answer(&mut ed, approval, true);
+        ed.plugin_run("table", "").unwrap();
+        settle_until(&mut ed, |ed| panel(ed).is_some());
+        let draw = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 100, 40).unwrap();
+        draw(&mut ed);
+        let (_, y1, first, _) = ed.screen.plugin_panel.get().expect("the panel drawn");
+        let rows = y1 - first;
+        assert!(rows > 2 && rows < 15, "{rows} rows in sight of its 30");
+        let at = |ed: &Editor| panel(ed).map(|p| (p.selected, p.scroll.get())).unwrap();
+        ed.toasts.clear();
+        for (k, selected) in [
+            ("C-f", rows),
+            ("C-b", 0),
+            ("pagedown", rows),
+            ("C-u", rows - rows / 2),
+            ("C-d", rows - rows / 2 + rows / 2),
+            ("home", 0),
+            ("end", 29),
+            ("g", 0),
+            ("C-n", 1),
+            ("C-p", 0),
+        ] {
+            key(&mut ed, k);
+            draw(&mut ed);
+            assert_eq!(at(&ed).0, selected, "{k} ({rows} rows)");
+        }
+        // `C-e`: the view a row, the selection on the nearest row in sight; `C-y` back, the selection staying
+        key(&mut ed, "C-e");
+        draw(&mut ed);
+        assert_eq!(at(&ed), (1, 1), "C-e");
+        key(&mut ed, "C-y");
+        draw(&mut ed);
+        assert_eq!(at(&ed), (1, 0), "C-y");
+        // The wheel: the same act, three rows — the selection follows into sight
+        let wheel = |ed: &mut Editor| {
+            let m = crate::event::Mouse {
+                kind: crate::event::MouseKind::ScrollDown,
+                x: 10,
+                y: first as u16,
+                alt: false,
+            };
+            ed.handle_mouse(m);
+            draw(ed);
+        };
+        wheel(&mut ed);
+        assert_eq!(at(&ed), (3, 3), "the wheel past the selection: the nearest row in sight");
+        for _ in 0..4 {
+            key(&mut ed, "j");
+        }
+        draw(&mut ed);
+        assert_eq!(at(&ed), (7, 3));
+        wheel(&mut ed);
+        assert_eq!(at(&ed), (7, 6), "the wheel: the view, the selection where it was");
+        key(&mut ed, "g");
+        key(&mut ed, "j");
+        draw(&mut ed);
+        settle_for(&mut ed, Duration::from_millis(100));
+        assert!(!toasts(&ed).contains("key "), "a moving key reached the plugin: {}", toasts(&ed));
+        key(&mut ed, "d");
+        until_said(&mut ed, r#"key d Some(1)"#);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn a_plugins_line_answers_what_was_typed() {
         let (mut ed, dir) = setup("prompt", "x\n");

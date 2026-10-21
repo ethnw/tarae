@@ -107,6 +107,9 @@ pub struct CodeReview {
     /// the next click opened the file above the one aimed at).
     top: Option<usize>,
     past: usize,
+    /// The rail's rows in sight at the last frame, its folders' too (`fit`'s room) — what `C-e`/`C-y` keep the file
+    /// in hand within.
+    room: usize,
     /// The git tab is in front of the rail (`space g` during a review; `space g`/Esc there gives the
     /// column back — `Editor::review_rail_up`).
     pub behind: bool,
@@ -188,6 +191,7 @@ impl CodeReview {
             scroll: 0,
             shown: None,
             top: None,
+            room: 0,
             past: 0,
             behind: false,
             rail_need: Default::default(),
@@ -533,6 +537,7 @@ impl CodeReview {
     /// (a row said, the reviewer's verdict), a list longer than its rows moves the other way: each file stays
     /// on its row (one that fits them all moves down with the head — none hidden to keep it still).
     pub fn fit(&mut self, marked: Option<usize>, room: usize, top: usize) {
+        self.room = room;
         let rows = self.rail_rows();
         let end = rows.len().saturating_sub(room);
         if let Some(was) = self.top.replace(top)
@@ -556,6 +561,26 @@ impl CodeReview {
             }
         }
         self.scroll = self.scroll.min(end + self.past);
+    }
+
+    /// The rail's view `by` rows (`C-e`/`C-y`; the wheel's while it has the keys) — its rows, folders too, within the
+    /// room `fit` was given at the last frame: the file in hand stays unless it would leave them, then the nearest
+    /// file in sight.
+    pub fn scroll_keeping(&mut self, by: isize) {
+        let rail = self.rail_rows();
+        let room = if self.room == 0 { crate::key::UNDRAWN_ROWS } else { self.room };
+        self.scroll_by(by);
+        self.scroll = self.scroll.min(rail.len().saturating_sub(room));
+        let sight = self.scroll..(self.scroll + room).min(rail.len());
+        let here = rail.iter().position(|t| t.item == Some(self.selected));
+        let near = match here {
+            Some(h) if h < sight.start => sight.clone().find(|&i| rail[i].item.is_some()),
+            Some(h) if h >= sight.end => sight.clone().rev().find(|&i| rail[i].item.is_some()),
+            _ => None,
+        };
+        if let Some(f) = near.and_then(|i| rail[i].item) {
+            self.selected = f;
+        }
     }
 
     /// The wheel, or a click on `↑ N more` / `↓ N more`: the rail scrolled by `by` rows (`fit` keeps it in the
@@ -2156,6 +2181,7 @@ fn open_at(
         scroll: 0,
         shown: None,
         top: None,
+        room: 0,
         past: 0,
         behind: false,
         rail_need: Default::default(),
@@ -4498,11 +4524,20 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     if !ed.review_rail_up() {
         return false;
     }
+    // (the files drawn: the hand moves a file at a time, so `C-d` is half the files in sight and `C-f` all of them —
+    // counting the folders' rows too would carry it past the screen; `C-e`/`C-y` scroll rows, `room` below)
+    let rows = ed.screen.review_rail.borrow().len();
     let Some(r) = ed.session.code_review.as_mut().filter(|r| r.focus) else { return false };
     let order = r.rail_order();
     let at = order.iter().position(|&i| i == r.selected).unwrap_or(0);
     let pick = |k: usize| order.get(k.min(order.len().saturating_sub(1))).copied();
-    if let Some(m) = crate::key::list_move(key) {
+    if let Some(m) = crate::key::list_move(key, rows) {
+        // (`C-e`/`C-y`: the rail's view — its rows, folders too — the file in hand staying unless it would leave
+        // it, then the nearest file in sight)
+        if let crate::key::ListMove::Scroll(by) = m {
+            r.scroll_keeping(by);
+            return true;
+        }
         r.selected = pick(m.from(at, order.len())).unwrap_or(r.selected);
         return true;
     }

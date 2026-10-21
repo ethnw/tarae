@@ -478,7 +478,13 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 | Task panel | `o` | A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output &lt;step>`) |
 | Task panel | `K` | Where Claude's command in it ran, and why — its sandbox, the card it ran from, its warnings |
 | The chat | click on a command's row end (`ok · sandbox ▲1`) | Why it ran there — its sandbox, the card it ran from, Claude's reason, its warnings |
-| The chat | `C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel | Scroll the conversation — `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor) |
+| The chat | `C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel | Scroll the conversation — half the rows in sight, a page, a row; `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor) |
+| A list or output panel (side panel, review rail, `:procs`, test, task, terminal, a plugin's) | `j` `k` `↓` `↑` `C-n` `C-p` · `C-e` `C-y` · `C-d` `C-u` · `C-f` `C-b` `PageDown` `PageUp` · `g` `G` `Home` `End` | A row · the view a row, the selection staying unless it would leave it (the wheel too, three rows, while the panel has the keys) · half the rows in sight · all of them · the ends — the same keys everywhere, as the code's; a plugin's panel never gets them |
+| Hover text, docs | `C-d` `C-u` · `C-e` `C-y` | Scroll it half its rows · a row |
+| The terminal, its program with the keys | `S-pageup` `S-pagedown` | Scroll back a page · forward (the program's next key brings it down; a full-screen program gets them) |
+| A picker | `C-n` `C-p` `↓` `↑` `Tab` · `C-d` `C-u` · `PageDown` `PageUp` · `Home` `End` | A row · half the rows in sight · all of them · the first and last |
+| A picker of files or places | `C-v` `C-s` · `A-ret` | Open it in a split, beside · under (Helix's keys) · open it, the list kept up |
+| A picker | `C-t` · `C-f` `C-b`, wheel over it | The preview away and back · scroll it |
 
 ## `:` commands
 

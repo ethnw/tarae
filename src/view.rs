@@ -622,7 +622,7 @@ pub fn chat_chord(ed: &Editor, key: Key) -> bool {
 /// The keys a view mode with nothing under way lets go on down the chain (`keys_to`'s layer): `C-w`, and the
 /// chat's chords.
 pub fn passes(ed: &Editor) -> Vec<Key> {
-    let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false };
+    let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false, shift: false };
     let mut v = vec![ctrl('w'), Key { alt: true, ..ctrl('w') }];
     v.extend(CHAT_CHORDS.iter().map(|&c| ctrl(c)).filter(|&k| chat_chord(ed, k)));
     v

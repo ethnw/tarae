@@ -300,8 +300,10 @@ pub struct Picker {
     pub view: Vec<Row>,
     /// Tree rows on the visible lines, top to bottom (pinned headings first) — for clicks.
     lines: Vec<usize>,
-    /// Whether to use the right-hand preview pane (off when there's no file to show, e.g. code actions).
+    /// Whether to use the right-hand preview pane (off when there's no file to show, e.g. code actions) · `C-t`
+    /// put it away (Helix's key; the list keeps its height).
     pub preview: bool,
+    pub preview_hidden: bool,
     /// Global search results: the pattern (`C-r` replaces the listed matches).
     pub grep: Option<String>,
     /// What each hit's code is shown for — its matches stand out in the row (`g r`: the name, whole word).
@@ -377,6 +379,7 @@ impl Picker {
             view: Vec::new(),
             lines: Vec::new(),
             preview: true,
+            preview_hidden: false,
             grep: None,
             emphasis: None,
             preview_scroll: 0,
@@ -1056,6 +1059,20 @@ pub enum Preview {
 }
 
 impl Action {
+    /// A place to open — a file, a line in one, a buffer: what `C-s`/`C-v` open in a split and `A-ret` opens with
+    /// the list kept up (`Editor::picker_open_place`).
+    pub fn is_place(&self) -> bool {
+        matches!(
+            self,
+            Action::Open(_)
+                | Action::Goto { .. }
+                | Action::Note { .. }
+                | Action::Buffer(_)
+                | Action::ChangedFile(_)
+                | Action::Jump { .. }
+        )
+    }
+
     /// What its row was decided as (`stamp.rs`): a `:granted` answer, by its key — a default is nobody's.
     pub fn stamp(&self) -> Option<crate::stamp::Stamp> {
         match self {

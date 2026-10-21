@@ -263,6 +263,77 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (scrolling alike, uxaudit D7: the finished turn, `C-u` from the empty input — half the rows in sight)
+    Scene {
+        name: "scroll-chat",
+        claude: "full",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?Change 1 of 1",
+            "@1",
+            "y",
+            "@20?Nothing else",
+            "@1",
+            "\x15",
+            "@1",
+        ],
+    },
+    // (Z2: the terminal's past by `S-pageup` while the shell has the keys — every terminal emulator's key)
+    Scene {
+        name: "scroll-term",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "T", "@3", "seq 1 300", "\r", "@?298", "@1", "\x1b[5;2~", "@1"],
+    },
+    // (D7: the wheel over `:procs` scrolls it, the selection stays — filling the screen, `C-w z`, so the wheel's
+    // row is the panel's at 80×24 and 160×45 alike; a shell first, a row more)
+    Scene {
+        name: "scroll-procs",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "T",
+            "@3",
+            "\x1c",
+            "@1",
+            ":procs",
+            "\r",
+            "@2",
+            "\x17",
+            "z",
+            "@1",
+            "\x1b[<65;20;8M",
+            "@1",
+        ],
+    },
+    // (H1, Helix's picker keys: the file picker's hints, then `C-v` — the file opened beside, in a split — and `C-t`,
+    // the preview put away)
+    Scene {
+        name: "picker-hints",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "f", "@?README", "READ", "@1"],
+    },
+    Scene {
+        name: "picker-split",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "f", "@?README", "READ", "@1", "\x16", "@1"],
+    },
+    Scene {
+        name: "picker-nopreview",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "f", "@?README", "READ", "@1", "\x14", "@1"],
+    },
     // (the chat's view mode on the finished turn: `esc` from the input, up a few rows, a word and a line selected)
     Scene {
         name: "chatview",

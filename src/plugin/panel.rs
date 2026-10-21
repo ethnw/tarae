@@ -79,8 +79,17 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         return false;
     };
     let n = st.panel.rows.len();
-    if let Some(m) = crate::key::list_move(key) {
-        st.selected = m.from(st.selected, n);
+    let rows = ed.screen.plugin_panel.get().map_or(0, |(_, y1, first, _)| y1.saturating_sub(first));
+    if let Some(m) = crate::key::list_move(key, rows) {
+        st.selected = match m {
+            // (`C-e`/`C-y`: the view, the selection staying unless it would leave it)
+            crate::key::ListMove::Scroll(by) => {
+                let (top, at) = crate::key::in_sight(by, st.scroll.get(), st.selected, n, rows, 0);
+                st.scroll.set(top);
+                at
+            }
+            m => m.from(st.selected, n),
+        };
         return true;
     }
     match (key.code, key.ctrl, key.alt) {
@@ -166,10 +175,15 @@ impl Editor {
         self.plugin_panel_took_keys();
     }
 
-    /// The wheel over the panel: the selection moves.
+    /// The wheel over the panel: its view `by` rows, as `C-e`/`C-y` — the selection (what its keys act on) stays
+    /// unless it would leave the rows in sight, then the nearest.
     pub fn plugin_panel_wheel(&mut self, by: isize) {
+        let rows = self.screen.plugin_panel.get().map_or(0, |(_, y1, first, _)| y1.saturating_sub(first));
         if let Some(st) = self.plugins.as_mut().and_then(|p| p.panel.as_mut()) {
-            st.selected = st.selected.saturating_add_signed(by).min(st.panel.rows.len().saturating_sub(1));
+            let n = st.panel.rows.len();
+            let (top, at) = crate::key::in_sight(by, st.scroll.get(), st.selected, n, rows, 0);
+            st.scroll.set(top);
+            st.selected = at;
         }
     }
 

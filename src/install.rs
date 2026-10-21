@@ -449,7 +449,7 @@ mod tests {
             "x".into(),
             What::Install { tool: "sh".into(), run, cwd: std::env::temp_dir(), then: Then::Lsp },
         ));
-        let y = Key { code: Code::Char('y'), ctrl: false, alt: false };
+        let y = Key { code: Code::Char('y'), ctrl: false, alt: false, shift: false };
         assert!(!ed.offer_key(y), "not drawn (too narrow, a picker over it): y isn't an answer");
         assert!(!ed.offers[0].installing());
         ed.screen.offer_buttons = vec![(20, 50, 59, 'y'), (20, 62, 71, 'n'), (20, 74, 81, 'N')];

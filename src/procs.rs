@@ -2411,9 +2411,18 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         return false;
     }
     let n = ed.procs.rows.len();
+    let rows = ed.screen.procs_panel.get().map_or(0, |a| a.shown);
     let Some(p) = ed.procs.panel.as_mut().filter(|p| p.focus) else { return false };
-    if let Some(m) = crate::key::list_move(key) {
-        p.selected = m.from(p.selected, n);
+    if let Some(m) = crate::key::list_move(key, rows) {
+        p.selected = match m {
+            // (`C-e`/`C-y`: the view, the selection staying unless it would leave it)
+            crate::key::ListMove::Scroll(by) => {
+                let (top, at) = crate::key::in_sight(by, p.scroll.get(), p.selected, n, rows, 0);
+                p.scroll.set(top);
+                at
+            }
+            m => m.from(p.selected, n),
+        };
         return true;
     }
     match (key.code, key.ctrl, key.alt) {
@@ -2563,6 +2572,89 @@ pub(crate) mod tests {
 
     fn os(pid: u32, ppid: u32, name: &str) -> Os {
         Os { pid, ppid, name: name.into(), started: 1_000, rss: 10 * MB, ..Default::default() }
+    }
+
+    /// The wheel over `:procs` scrolls it as `C-e`/`C-y` do, three rows — the selection stays where it was until it
+    /// would leave the rows in sight, then on the nearest one: never out of sight, as `s` and `r` act on it (uxaudit
+    /// D7: the wheel moved the selection, as nowhere else but pickers; the review: a hidden row was stopped).
+    #[test]
+    fn the_wheel_scrolls_procs_and_keeps_the_selection_in_sight() {
+        use crate::event::{Mouse, MouseKind};
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let mut procs = vec![os(me, 1, "tarae")];
+        procs.extend((0..60).map(|i| os(50_000 + i, me, "sleep")));
+        ed.procs_toggle();
+        ed.procs_sampled(sample(procs));
+        let draw = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
+        draw(&mut ed);
+        let a = ed.screen.procs_panel.get().expect(":procs drawn");
+        assert!(ed.procs.rows.len() > a.shown, "more rows than it shows");
+        let wheel =
+            |ed: &mut Editor, kind| ed.handle_mouse(Mouse { kind, x: 5, y: a.first as u16, alt: false });
+        let at = |ed: &Editor| {
+            (ed.procs.panel.as_ref().unwrap().selected, ed.screen.procs_panel.get().unwrap().scroll)
+        };
+        for _ in 0..5 {
+            ed.handle_key(Key::plain(Code::Char('j')));
+        }
+        draw(&mut ed);
+        assert_eq!(at(&ed), (5, 0));
+        // (selected, first row shown) — and the selected row always among the rows drawn
+        for (kind, want, why) in [
+            (MouseKind::ScrollDown, (5, 3), "scrolled, the selection where it was"),
+            (MouseKind::ScrollDown, (6, 6), "it would have left: the nearest row in sight"),
+            (MouseKind::ScrollDown, (9, 9), "again"),
+            (MouseKind::ScrollUp, (9, 6), "back up, the selection where it was"),
+        ] {
+            wheel(&mut ed, kind);
+            draw(&mut ed);
+            assert_eq!(at(&ed), want, "{why}");
+            let a = ed.screen.procs_panel.get().unwrap();
+            assert!((a.scroll..a.scroll + a.shown).contains(&at(&ed).0), "{why}: the selection out of sight");
+        }
+        ed.handle_key(Key::plain(Code::Char('g')));
+        draw(&mut ed);
+        assert_eq!(at(&ed), (0, 0));
+        // `C-e`/`C-y`: the view a row, the selection staying until it would leave the rows in sight (the code's act)
+        // — (selected, first row shown)
+        for (key, want) in [("C-e", (1, 1)), ("C-e", (2, 2)), ("C-y", (2, 1)), ("C-y", (2, 0))] {
+            ed.handle_key(key.parse().unwrap());
+            draw(&mut ed);
+            assert_eq!(at(&ed), want, "{key}");
+        }
+    }
+
+    /// `s` acts on a row you can see: the wheel past the selection brings it along, into sight, and `s` names that
+    /// row (the review: a hidden row was stopped). Held servers' rows — `s` on one only says it isn't running: no
+    /// process is stopped in a test.
+    #[test]
+    fn after_the_wheel_s_names_a_row_in_sight() {
+        use crate::event::{Mouse, MouseKind};
+        let mut ed = Editor::new(crate::config::Config::default());
+        let root = ed.session.root.clone();
+        let held = |i: usize| Held { name: format!("server{i:02}"), root: root.clone(), what: String::new() };
+        ed.procs.held = (0..60).map(held).collect();
+        ed.procs_toggle();
+        ed.procs_sampled(sample(vec![os(std::process::id(), 1, "tarae")]));
+        let draw = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
+        draw(&mut ed);
+        let a = ed.screen.procs_panel.get().expect(":procs drawn");
+        assert!(ed.procs.rows.len() > a.shown + 6, "{} rows, {} shown", ed.procs.rows.len(), a.shown);
+        ed.handle_key(Key::plain(Code::Char('j')));
+        for _ in 0..4 {
+            ed.handle_mouse(Mouse { kind: MouseKind::ScrollDown, x: 5, y: a.first as u16, alt: false });
+            draw(&mut ed);
+        }
+        let a = ed.screen.procs_panel.get().unwrap();
+        let p = ed.procs.panel.as_ref().unwrap();
+        assert!(a.scroll >= 12, "scrolled past the selection: from row {}", a.scroll);
+        assert!((a.scroll..a.scroll + a.shown).contains(&p.selected), "row {} out of sight", p.selected);
+        let title = ed.procs.rows[p.selected].title.clone();
+        assert!(title.starts_with("server"), "{title}");
+        ed.handle_key(Key::plain(Code::Char('s')));
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(said, format!("{title} isn't running — r starts it"), "s names the row in sight");
     }
 
     fn sample(procs: Vec<Os>) -> Sample {

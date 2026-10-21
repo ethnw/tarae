@@ -174,11 +174,17 @@ configs carry over as they are.
   case), what `.gitignore` leaves out left out and hidden files searched (not `.git`), each key's search stopping
   the one before, the first results within a fraction of a second and the rest as they come. Each row is a line's code with its matches standing out, the preview at
   the line. A pattern not finished yet (`fn draw(`) keeps the last results and says why beside the query —
-  quietly, no error. Lists fill in on a worker thread. `C-n`/`C-p` or arrows, `Tab`, `Enter`, `Esc`
+  quietly, no error. Lists fill in on a worker thread. `C-n`/`C-p` or arrows, `Tab`, `C-d`/`C-u` half the rows in
+  sight, `PageDown`/`PageUp` all of them, `Home`/`End` the first and last, `Enter`, `Esc` — and Helix's: `C-v` opens a
+  file or a place beside, `C-s` under (a split), `A-Enter` opens it with the list kept up, `C-t` puts the preview away
+  and back
 - **Side panel** — `space e` shows the project's files as a tree left of the code, `space o` the outline of the
   file you're editing (its functions, types, and modules from the tree-sitter tree, nested — no language server
   needed), `space q` the list below, `space g` git. Left alone it follows you: the current file with its folders
-  opened, or the definition around the cursor. With the keys in it, `j`/`k` move, `h`/`l` fold and unfold, Enter
+  opened, or the definition around the cursor. With the keys in it, `j`/`k` move (as in every list panel — `C-n`/`C-p`
+  a row too, `C-e`/`C-y` (and the wheel, three rows) the view with the selection staying in sight, `C-d`/`C-u` half the rows in sight,
+  `C-f`/`C-b` all of them, `g`/`G` the ends: the review's rail, `:procs`, the test, task and terminal panels, a
+  plugin's), `h`/`l` fold and unfold, Enter
   opens (the code gets the keys back), Tab steps files → outline → list → git, Esc leaves it showing, `q` or the same key again closes it; `space` and `:` still
   work. `C-w e` goes to it from whichever window you're in, whatever tab it shows (closed, it opens at the tab it
   last showed), and back again; `C-w h`/`j`/`k`/`l` stay between the code's windows. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
@@ -205,7 +211,8 @@ configs carry over as they are.
   is `editor.terminal-escape`); `space T` shows it with the keys — from wherever it is, behind another tab or
   shown without them — and hides it (it keeps running) only from inside: tarae's keys on its panel (`C-w j`, a
   click on its header), where `q` hides it too. The wheel over it scrolls
-  back; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
+  back, and so do `Shift+PageUp`/`Shift+PageDown` while it has the keys (a page; the next key it gets brings it
+  back down; a full-screen program, which keeps no past, gets them as from any terminal) — if your terminal leaves them to the program; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
   program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead (alt+drag still selects —
   the panel's title says so), a full-screen one that
   doesn't gets the wheel as arrow keys, and a paste arrives marked as one (a shell doesn't run it line by line)

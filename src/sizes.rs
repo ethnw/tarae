@@ -278,8 +278,9 @@ impl crate::editor::Editor {
     }
 }
 
-/// Keys while the bottom slot has them (test and task output, the terminal's scrollback): `j`/`k` a line,
-/// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs, `q` closes it
+/// Keys while the bottom slot has them (test and task output, the terminal's scrollback): the list panels' moves
+/// (`key::list_move`: `j`/`k` a line, `C-d`/`C-u` half the panel, `C-f`/`C-b` all of it, `g`/`G` the start/end),
+/// `tab`/`S-tab` its other tabs, `q` closes it
 /// (`slot_close`); on the terminal `i` (Enter) types in it, on a task or test panel Enter runs the user's run
 /// waiting there now, on the task panel `o` a preflight step's output and `K` where Claude's command ran; Esc
 /// back to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the
@@ -297,7 +298,6 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         return false;
     };
     let rows = ed.slot_rows(slot);
-    let half = (rows / 2).max(1) as isize;
     let by = match (key.code, key.ctrl) {
         (Code::Char(' ' | ':' | '[' | ']'), false) | (Code::Char('w'), true) => return false,
         // The slot's other tabs
@@ -351,12 +351,12 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
             crate::queued::run_now(ed, which);
             return true;
         }
-        (Code::Char('j') | Code::Down, false) | (Code::Char('e'), true) => 1,
-        (Code::Char('k') | Code::Up, false) | (Code::Char('y'), true) => -1,
-        (Code::Char('d'), true) | (Code::PageDown, _) => half,
-        (Code::Char('u'), true) | (Code::PageUp, _) => -half,
-        (Code::Char('g') | Code::Home, false) => isize::MIN / 2,
-        (Code::Char('G') | Code::End, false) => isize::MAX / 2,
+        _ if let Some(m) = crate::key::list_move(key, rows) => match m {
+            // (an output has no selection: its view is what moves)
+            crate::key::ListMove::By(by) | crate::key::ListMove::Scroll(by) => by,
+            crate::key::ListMove::First => isize::MIN / 2,
+            crate::key::ListMove::Last => isize::MAX / 2,
+        },
         _ => {
             let (place, out) = match slot {
                 Slot::Terminal => ("the terminal's panel", "i type in it, esc code"),
@@ -593,7 +593,7 @@ impl crate::editor::Editor {
     }
 
     /// The rows of output the slot's panel showed last frame (before one: 10).
-    fn slot_rows(&self, slot: Slot) -> usize {
+    pub(crate) fn slot_rows(&self, slot: Slot) -> usize {
         let s = &self.screen;
         match slot {
             Slot::Test => s.test_panel.get().map(|p| p.2),

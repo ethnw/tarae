@@ -4287,6 +4287,100 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `C-e`/`C-y` on the review's rail scroll it, the file in hand staying until it would leave the rows in sight —
+/// then the nearest file in sight — as every list's and the code's (uxaudit D7).
+#[test]
+fn review_rail_c_e_scrolls_it_and_keeps_the_file_in_hand() {
+    use crate::codereview::{Base, CodeReview, File};
+    let dir = crate::scratch::Scratch::new("rail-ce");
+    let dir = dir.path().to_path_buf();
+    let files: Vec<File> = (0..30)
+        .map(|i| {
+            let rel = format!("f{i:02}.txt");
+            std::fs::write(dir.join(&rel), "x\n").unwrap();
+            File { path: dir.join(&rel), rel, added: 1, removed: 0, new: true, gone: false, binary: false }
+        })
+        .collect();
+    let mut s = Shot::new(100, 24);
+    s.ed.open(&dir.join("f00.txt")).unwrap();
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
+    s.frame();
+    crate::codereview::rail_focus(&mut s.ed);
+    s.frame();
+    let first = |s: &Shot| s.ed.screen.review_rail.borrow()[0].1;
+    let hand = |s: &Shot| s.ed.session.code_review.as_ref().unwrap().selected;
+    s.keys("gj");
+    assert_eq!((first(&s), hand(&s)), (0, 1));
+    s.keys("<C-e>");
+    assert_eq!((first(&s), hand(&s)), (1, 1), "the rail moved, the file in hand stayed");
+    s.keys("<C-e>");
+    assert_eq!((first(&s), hand(&s)), (2, 2), "it would have left: the nearest file in sight");
+    s.keys("<C-y><C-y>");
+    assert_eq!((first(&s), hand(&s)), (0, 2), "back up, the file where it was");
+}
+
+/// …and in folders, whose rows the rail's view counts too: a file still drawn stays in hand, one gone from sight
+/// gives way to the nearest drawn, and the view goes no further than the last file.
+#[test]
+fn review_rail_c_e_counts_its_folders_rows() {
+    use crate::codereview::{Base, CodeReview, File};
+    let dir = crate::scratch::Scratch::new("rail-ce-folders");
+    let dir = dir.path().to_path_buf();
+    let files: Vec<File> = (0..30)
+        .map(|i| {
+            let rel = format!("d{}/f{i:02}.txt", i / 10);
+            std::fs::create_dir_all(dir.join(format!("d{}", i / 10))).unwrap();
+            std::fs::write(dir.join(&rel), "x\n").unwrap();
+            File { path: dir.join(&rel), rel, added: 1, removed: 0, new: true, gone: false, binary: false }
+        })
+        .collect();
+    let mut s = Shot::new(100, 24);
+    s.ed.open(&dir.join("d0/f00.txt")).unwrap();
+    s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files));
+    s.frame();
+    crate::codereview::rail_focus(&mut s.ed);
+    s.frame();
+    let drawn = |s: &Shot| s.ed.screen.review_rail.borrow().iter().map(|r| r.1).collect::<Vec<_>>();
+    let hand = |s: &Shot| s.ed.session.code_review.as_ref().unwrap().selected;
+    // `C-d`/`C-f` move the hand by the files in sight (half, all) — a file at a time, the folders' rows between
+    // them not counted: from the top, `C-f` lands on the first file below the screen
+    s.keys("g");
+    let files = drawn(&s);
+    s.keys("<C-d>");
+    assert_eq!(hand(&s), files.len() / 2, "C-d: half the {} files drawn ({files:?})", files.len());
+    s.keys("g<C-f>");
+    assert_eq!(hand(&s), files.len(), "C-f: the first file past the screen ({files:?})");
+    assert!(drawn(&s).contains(&hand(&s)), "brought into sight");
+    s.keys("gj");
+    for key in ["<C-e>"; 40].into_iter().chain(["<C-y>"; 40]) {
+        let before = hand(&s);
+        s.keys(key);
+        let (now, files) = (hand(&s), drawn(&s));
+        assert!(files.contains(&now), "{key}: file {now} in hand, not drawn ({files:?})");
+        if files.contains(&before) {
+            assert_eq!(now, before, "{key}: file {before} still drawn, the hand moved to {now} ({files:?})");
+        }
+        if key == "<C-e>" && files.contains(&29) {
+            assert_eq!(files.last(), Some(&29), "no further than the last file");
+        }
+    }
+    // The wheel while the rail has the keys: the same act, three rows at a time
+    s.keys("g");
+    let y = s.ed.screen.review_rail.borrow()[0].0 as u16;
+    for kind in
+        [crate::event::MouseKind::ScrollDown; 8].into_iter().chain([crate::event::MouseKind::ScrollUp; 8])
+    {
+        let before = hand(&s);
+        s.ed.handle_mouse(crate::event::Mouse { kind, x: 4, y, alt: false });
+        s.frame();
+        let (now, files) = (hand(&s), drawn(&s));
+        assert!(files.contains(&now), "the wheel: file {now} in hand, not drawn ({files:?})");
+        if files.contains(&before) {
+            assert_eq!(now, before, "the wheel: file {before} still drawn, the hand moved to {now}");
+        }
+    }
+}
+
 /// frictions25 R1/R2: netgrant's review — its 50 files (3248e87f's) in folders, 14 with lines moved, scrolled
 /// into the middle — at two sizes: every row drawn with a file's name clicks that file; then the head grows
 /// (the reviewer's row and its verdict, a file changed since viewed — a row the rail used to leave uncounted)
@@ -4694,6 +4788,89 @@ fn snapshot_side_panel_outline() {
     s.until("outline", |ed| ed.session.sidebar.as_ref().is_some_and(|sb| !sb.lines().is_empty()));
     s.keys("j");
     s.check("side_panel_outline");
+}
+
+/// `C-e`/`C-y` in the side panel scroll its view, the selection staying where it is until it would leave the rows in
+/// sight — then on the nearest one — as the code's `C-e` (uxaudit D7: one key, one act everywhere).
+#[test]
+fn side_panel_c_e_scrolls_the_view_and_keeps_the_selection() {
+    let mut s = Shot::new(112, 24);
+    let many: String = (0..80).map(|i| format!("fn f{i}() {{}}\n")).collect();
+    s.file("src/many.rs", &many);
+    s.ed.sidebar_show(crate::sidebar::Mode::Outline);
+    s.until("outline", |ed| ed.session.sidebar.as_ref().is_some_and(|sb| sb.lines().len() >= 80));
+    let at = |s: &Shot| s.ed.session.sidebar.as_ref().map(|sb| (sb.scroll, sb.selected)).unwrap();
+    s.keys("gjj");
+    assert_eq!(at(&s), (0, 2));
+    s.keys("<C-e><C-e>");
+    assert_eq!(at(&s), (2, 2), "the view moved, the selection stayed");
+    s.keys("<C-e>");
+    assert_eq!(at(&s), (3, 3), "it would have left: on the nearest row in sight");
+    s.keys("<C-y><C-y>");
+    assert_eq!(at(&s), (1, 3), "back up, the selection where it was");
+    s.keys("j");
+    assert_eq!(at(&s), (1, 4), "j moves the selection");
+    // The wheel, while it has the keys: the same act, three rows at a time
+    let y = s.ed.screen.sidebar.borrow()[0].0 as u16;
+    let wheel = |s: &mut Shot| {
+        s.ed.handle_mouse(crate::event::Mouse {
+            kind: crate::event::MouseKind::ScrollDown,
+            x: 2,
+            y,
+            alt: false,
+        });
+        s.frame();
+    };
+    wheel(&mut s);
+    assert_eq!(at(&s), (4, 4), "the wheel: the view, the selection where it was");
+    wheel(&mut s);
+    assert_eq!(at(&s), (7, 7), "the wheel past it: on the nearest row in sight");
+}
+
+/// `C-e`/`C-y` over a list with headings (the list tab: a file's heading over each place): wherever the view goes,
+/// the selection is on a row that picks something and in sight — never on a heading, never below the rows shown.
+#[test]
+fn side_panel_c_e_over_headings_keeps_the_selection_on_a_row_in_sight() {
+    let mut s = Shot::new(112, 24);
+    s.file("src/demo.rs", DEMO_RS);
+    let cwd = std::env::current_dir().unwrap();
+    let item = |i: usize| crate::quickfix::Item {
+        path: cwd.join(format!("src/f{i:02}.rs")),
+        line: 1,
+        col: 1,
+        message: format!("place {i}"),
+        severity: 1,
+        mark: None,
+    };
+    s.ed.qlist_set("cargo check", (0..30).map(item).collect());
+    s.ed.sidebar_show(crate::sidebar::Mode::List);
+    s.keys("g");
+    let check = |s: &Shot, key: &str| {
+        let sb = s.ed.session.sidebar.as_ref().unwrap();
+        let rows = s.ed.screen.sidebar.borrow().len();
+        let lines = sb.lines();
+        assert!(
+            lines[sb.selected].target != crate::sidebar::Target::None,
+            "{key}: on a heading ({})",
+            sb.selected
+        );
+        assert!(
+            (sb.scroll + sb.pins.len()..sb.scroll + rows).contains(&sb.selected),
+            "{key}: row {} out of sight (rows {}.., {rows} shown, {} pinned)",
+            sb.selected,
+            sb.scroll,
+            sb.pins.len()
+        );
+    };
+    for _ in 0..40 {
+        s.keys("<C-e>");
+        check(&s, "C-e");
+    }
+    assert!(s.ed.session.sidebar.as_ref().unwrap().scroll > 10, "it scrolled");
+    for _ in 0..40 {
+        s.keys("<C-y>");
+        check(&s, "C-y");
+    }
 }
 
 /// The list tab: a build's places under their files, severity glyphs, the current one marked.

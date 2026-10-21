@@ -117,8 +117,10 @@ interface types {
         port: u64,
     }
 
-    /// The plugin's panel, below the code: a table. You move through its rows (j/k and the like); other keys
-    /// come to the plugin (`key`).
+    /// The plugin's panel, below the code: a table. You move through its rows with tarae's moving keys, as in
+    /// every list panel — j k ↓ ↑ C-n C-p, C-e C-y, C-d C-u, C-f C-b, the page keys, g G, Home End — and
+    /// space, : and C-w stay the editor's, esc gives the keys back: those never come to the plugin. Other keys
+    /// do (`key`).
     record panel {
         title: string,
         /// Column names (none: no header row).
@@ -190,8 +192,9 @@ interface types {
         /// At the right of the panel's header: what it's of.
         note: string,
         rows: list<side-row>,
-        /// Its keys, for the panel's foot: ("e", "events"). Keys the panel doesn't take itself (moving,
-        /// folding: j k g G h l, enter, tab, esc, q) come to the plugin (`key`, with the row's id).
+        /// Its keys, for the panel's foot: ("e", "events"). Keys the panel doesn't take itself come to the
+        /// plugin (`key`, with the row's id) — never tarae's moving keys (j k ↓ ↑ C-n C-p, C-e C-y, C-d C-u,
+        /// C-f C-b, the page keys, g G, Home End), folding (h l), enter, tab, esc, q, space, : or C-w.
         keys: list<tuple<string, string>>,
         /// Show the side panel at this tab now — without the keys, or (`focus`) with them.
         open: bool,
@@ -291,7 +294,7 @@ interface types {
         /// A timer went off.
         tick(u64),
         /// A key in its panel or its side tab (tarae's name for it: "d", "ret", "C-k", …), the row selected
-        /// then, and that row's id (if it has ids).
+        /// then, and that row's id (if it has ids). Never one of tarae's moving keys (`panel`'s note).
         key(tuple<string, option<u64>, option<string>>),
         /// What was typed at its prompt, or chosen in its pick (none: esc).
         answer(tuple<u64, option<string>>),

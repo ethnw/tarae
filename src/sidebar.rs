@@ -323,6 +323,31 @@ impl Sidebar {
         }
     }
 
+    /// The view `by` rows (`C-e`/`C-y`; the wheel's three while it has the keys), `rows` in sight: the selection
+    /// stays unless it would leave them, then on the nearest row in sight it can land on — inward, past headings,
+    /// below the folders the new top pins (`fit`'s, not the last frame's); none in sight, the view stays.
+    pub fn scroll_keeping(&mut self, by: isize, rows: usize) {
+        let (depths, lands): (Vec<usize>, Vec<bool>) =
+            self.lines().iter().map(|l| (l.depth, l.target != Target::None)).unzip();
+        let n = depths.len();
+        if n == 0 {
+            return;
+        }
+        let rows = if rows == 0 { crate::key::UNDRAWN_ROWS } else { rows };
+        let (top, _) = crate::key::in_sight(by, self.scroll, self.selected, n, rows, 0);
+        let pinned = pins_from(top, rows, &depths).len();
+        let (top, at) = crate::key::in_sight(by, self.scroll, self.selected, n, rows, pinned);
+        if at == self.selected {
+            self.scroll = top;
+        } else {
+            let sight = (top + pinned).min(top + rows - 1)..(top + rows).min(n);
+            if let Some(i) = inward(at, by, sight, |i| lands[i]) {
+                (self.scroll, self.selected) = (top, i);
+            }
+        }
+        self.shown = Some(self.selected);
+    }
+
     /// `delta` rows on, stepping over headings (the list's folders and files), within the rows.
     fn move_by(&mut self, delta: isize, lines: &[Line]) {
         let n = lines.len() as isize;
@@ -1084,6 +1109,36 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
     true
 }
 
+/// The folders pinned over the top of `rows` from `top` (`depths`: each row's) — as `fit` works them out while it
+/// doesn't follow the selection.
+fn pins_from(top: usize, rows: usize, depths: &[usize]) -> Vec<usize> {
+    let mut pins: Vec<usize> = Vec::new();
+    let Some(last) = depths.len().checked_sub(1) else { return pins };
+    for _ in 0..4 {
+        let next = crate::filetree::enclosing(|i| depths[i], (top + pins.len()).min(last), rows / 2);
+        let settled = next.len() == pins.len();
+        pins = next;
+        if settled {
+            break;
+        }
+    }
+    pins
+}
+
+/// The row a selection pushed to the edge of the rows in `sight` lands on (it's at `at`, the view scrolled `by`):
+/// the nearest one that `lands` toward the inside — down from the top edge (`C-e`), up from the bottom (`C-y`) —
+/// then the other way; None when no row in sight lands.
+fn inward(
+    at: usize,
+    by: isize,
+    sight: std::ops::Range<usize>,
+    lands: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let (down, up) = ((at..sight.end).collect::<Vec<_>>(), (sight.start..=at).rev().collect::<Vec<_>>());
+    let order = if by > 0 { [down, up] } else { [up, down] };
+    order.into_iter().flatten().find(|&i| sight.contains(&i) && lands(i))
+}
+
 /// Keys while the panel has focus (normal mode, nothing pending). False = not the panel's.
 pub fn key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != EdMode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
@@ -1139,12 +1194,15 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         }
     }
     let before = ed.session.sidebar.as_ref().map(|s| s.selected);
+    let rows = ed.screen.sidebar.borrow().len();
     let Some(s) = ed.session.sidebar.as_mut() else { return false };
     match (key.code, key.ctrl) {
         // Still the editor's: the space menu, the command line, the windows (`C-w e` back to the code)
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
-        _ if let Some(m) = crate::key::list_move(key) => match m {
+        _ if let Some(m) = crate::key::list_move(key, rows) => match m {
             crate::key::ListMove::By(by) => s.move_by(by, &lines),
+            // (`C-e`/`C-y`: the view, the selection staying unless it would leave it — the wheel's rule too)
+            crate::key::ListMove::Scroll(by) => s.scroll_keeping(by, rows),
             // (onto the nearest row that's pickable)
             end => {
                 s.selected = end.from(s.selected, n);
@@ -1212,6 +1270,19 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A selection a scroll pushed to the view's edge lands inward, past a heading there — down from the top, up
+    /// from the bottom, the other way when that side has none — and nowhere when no row in sight lands.
+    #[test]
+    fn a_pushed_selection_lands_inward_past_headings() {
+        // (rows 10..18 in sight; the even ones are headings)
+        let lands = |i: usize| i % 2 == 1;
+        assert_eq!(inward(10, 1, 10..18, lands), Some(11), "C-e: down from the top edge");
+        assert_eq!(inward(16, -1, 10..18, lands), Some(15), "C-y: up from the bottom edge, not below it");
+        assert_eq!(inward(17, -1, 10..18, lands), Some(17), "a row that lands stays");
+        assert_eq!(inward(17, 1, 10..18, |i| i == 12), Some(12), "none that way: the other");
+        assert_eq!(inward(10, 1, 10..18, |_| false), None, "none in sight");
+    }
 
     /// A file in a review: the git tab lists no hunks for it — they're against the review's base, not the
     /// index, so `s`/`d` there would stage or put back the wrong lines — a note says where they are.

@@ -402,9 +402,15 @@ impl Keymaps {
         out
     }
 
+    /// (a shifted page key no binding names is the page key: shift is carried only for the terminal's past —
+    /// `Key.shift`)
     pub fn lookup(&self, mode: Mode, keys: &[Key]) -> Lookup<'_> {
         let node = self.root(mode);
-        match node.search(keys) {
+        let found = node.search(keys).or_else(|| {
+            let plain: Vec<Key> = keys.iter().map(|k| k.unshifted()).collect();
+            keys.iter().any(|k| k.shift).then(|| node.search(&plain)).flatten()
+        });
+        match found {
             Some(KeyTrie::Leaf(cmds)) => Lookup::Matched(cmds),
             Some(KeyTrie::Node(_)) => Lookup::Pending,
             None => Lookup::NotFound,
@@ -559,8 +565,30 @@ mod tests {
         (
             "The chat",
             "`C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel",
-            "Scroll the conversation — `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor)",
+            "Scroll the conversation — half the rows in sight, a page, a row; `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor)",
         ),
+        (
+            "A list or output panel (side panel, review rail, `:procs`, test, task, terminal, a plugin's)",
+            "`j` `k` `↓` `↑` `C-n` `C-p` · `C-e` `C-y` · `C-d` `C-u` · `C-f` `C-b` `PageDown` `PageUp` · `g` `G` `Home` `End`",
+            "A row · the view a row, the selection staying unless it would leave it (the wheel too, three rows, while the panel has the keys) · half the rows in sight · all of them · the ends — the same keys everywhere, as the code's; a plugin's panel never gets them",
+        ),
+        ("Hover text, docs", "`C-d` `C-u` · `C-e` `C-y`", "Scroll it half its rows · a row"),
+        (
+            "The terminal, its program with the keys",
+            "`S-pageup` `S-pagedown`",
+            "Scroll back a page · forward (the program's next key brings it down; a full-screen program gets them)",
+        ),
+        (
+            "A picker",
+            "`C-n` `C-p` `↓` `↑` `Tab` · `C-d` `C-u` · `PageDown` `PageUp` · `Home` `End`",
+            "A row · half the rows in sight · all of them · the first and last",
+        ),
+        (
+            "A picker of files or places",
+            "`C-v` `C-s` · `A-ret`",
+            "Open it in a split, beside · under (Helix's keys) · open it, the list kept up",
+        ),
+        ("A picker", "`C-t` · `C-f` `C-b`, wheel over it", "The preview away and back · scroll it"),
     ];
 
     /// `docs/reference/keymap.md` — the default keymap per mode and submode (descriptions = command docs,
@@ -649,6 +677,20 @@ mod tests {
         assert!(matches!(km.lookup(Mode::Normal, &keys("g")), Lookup::Pending));
         // select inherits the rest of normal
         assert_eq!(name(&km, Mode::Select, "d").as_deref(), Some("delete_selection"));
+    }
+
+    /// A shifted page key no binding names is the page key in the code — its shift is the terminal's past's only
+    /// (`Key.shift`, uxaudit Z2); one bound by name is its own.
+    #[test]
+    fn a_shifted_page_key_is_the_page_key_unless_bound() {
+        let km = Keymaps::default();
+        assert_eq!(name(&km, Mode::Normal, "S-pageup").as_deref(), Some("page_up"));
+        assert_eq!(name(&km, Mode::Insert, "S-pagedown").as_deref(), Some("page_down"));
+        let mut km = km;
+        let user: toml::Table = toml::from_str("[normal]\nS-pageup = \"goto_file_start\"").unwrap();
+        km.merge_user(&user, &mut Vec::new());
+        assert_eq!(name(&km, Mode::Normal, "S-pageup").as_deref(), Some("goto_file_start"));
+        assert_eq!(name(&km, Mode::Normal, "pageup").as_deref(), Some("page_up"));
     }
 
     #[test]

@@ -1423,6 +1423,11 @@ fn a_card_that_comes_as_keys_come_waits_and_the_state_says_so() {
     sb.write("a.txt", "one\ntwo\nthree\n");
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
+    // (a first key seen before the file is written: the card can only come while keys are coming in — written
+    // first, a fast read put it up before any key, and it took the keys at once)
+    let input = t.state_json(0)["input"].as_u64().unwrap();
+    t.send("j");
+    t.state_json(input + 1);
     sb.write(".tarae.toml", "[editor]\nrestart-build = \"true\"\n");
     // (a key every 150 ms until the card is up: it comes as they come in)
     let end = std::time::Instant::now() + std::time::Duration::from_secs(20);

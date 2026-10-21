@@ -357,7 +357,7 @@ impl Editor {
     pub(crate) fn granted_key(&mut self, c: char) {
         let Some(p) = self.picker.as_mut() else { return };
         let key = crate::key::Key::plain(crate::key::Code::Char(c));
-        if let Some(m) = crate::key::list_move(key) {
+        if let Some(m) = crate::key::list_move(key, p.view.len()) {
             return match m {
                 crate::key::ListMove::By(by) => p.move_by(by),
                 m => p.select_near(m.from(p.selected, p.len())),

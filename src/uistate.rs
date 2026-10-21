@@ -322,7 +322,7 @@ fn ch(c: char) -> Key {
 }
 
 fn ctrl(c: char) -> Key {
-    Key { code: Code::Char(c), ctrl: true, alt: false }
+    Key { code: Code::Char(c), ctrl: true, alt: false, shift: false }
 }
 
 impl Editor {
@@ -373,9 +373,10 @@ impl Editor {
             let takes = self.card_takes(o).into_iter().map(ch).collect();
             v.push(layer(Region::Card(o.id), Filter::Only(takes)));
         }
-        // (`handle_key_inner`:) floating text — Esc closes it, `C-d`/`C-u` scroll it
+        // (`handle_key_inner`:) floating text — Esc closes it, `C-d`/`C-u` and `C-e`/`C-y` scroll it
         if self.popup.is_some() {
-            v.push(shortcut(Region::Popup, Filter::Only(vec![Key::plain(Code::Esc), ctrl('d'), ctrl('u')])));
+            let keys = vec![Key::plain(Code::Esc), ctrl('d'), ctrl('u'), ctrl('e'), ctrl('y')];
+            v.push(shortcut(Region::Popup, Filter::Only(keys)));
         }
         let pending = !self.pending.is_empty();
         // `llm::review_key`: back in the chat or the code, only `C-q` returns to it

@@ -2164,8 +2164,10 @@ impl Editor {
                 K::Down => s.review_rail_more.borrow().iter().find(|r| r.0 == y).map_or(0, |r| r.1),
                 _ => 0,
             };
+            // (with the keys, the file in hand follows into sight — as `C-e`/`C-y`; without them it's the code's
+            // file and the wheel only looks)
             if by != 0 {
-                return r.scroll_by(by);
+                return if r.focus { r.scroll_keeping(by) } else { r.scroll_by(by) };
             }
         }
         if m.kind == K::Down && on_rail {
@@ -2229,11 +2231,15 @@ impl Editor {
             match m.kind {
                 K::Down => self
                     .procs_click((a.first..a.first + a.shown).contains(&y).then(|| a.scroll + y - a.first)),
+                // (the wheel scrolls it as `C-e`/`C-y` do, three rows: the selection stays unless it would leave
+                // the rows in sight, then the nearest — `s` and `r` act on it, so it's never out of sight)
                 K::ScrollDown | K::ScrollUp => {
                     let n = self.procs.rows.len();
                     if let Some(p) = self.procs.panel.as_mut() {
                         let by = if m.kind == K::ScrollDown { 3 } else { -3 };
-                        p.selected = p.selected.saturating_add_signed(by).min(n.saturating_sub(1));
+                        let (top, at) = crate::key::in_sight(by, p.scroll.get(), p.selected, n, a.shown, 0);
+                        p.scroll.set(top);
+                        p.selected = at;
                     }
                 }
                 _ => {}
@@ -2304,12 +2310,18 @@ impl Editor {
             && x < s.panes.iter().map(|p| p.1.x).min().unwrap_or(0)
         {
             let row = s.sidebar.borrow().iter().find(|l| l.0 == y).map(|l| l.1);
+            let rows = s.sidebar.borrow().len();
             let sb = self.session.sidebar.as_mut().unwrap();
+            // (with the keys, as `C-e`/`C-y`: the selection, what they act on, follows into sight; without them it
+            // marks where the code is and comes back there by itself — the wheel only looks)
             match m.kind {
                 K::Down => {
                     if let Some(r) = row {
                         self.sidebar_activate(r);
                     }
+                }
+                K::ScrollDown | K::ScrollUp if sb.focus => {
+                    sb.scroll_keeping(if m.kind == K::ScrollDown { 3 } else { -3 }, rows)
                 }
                 K::ScrollDown => sb.scroll += 3,
                 K::ScrollUp => sb.scroll = sb.scroll.saturating_sub(3),
@@ -2873,6 +2885,11 @@ impl Editor {
         if !matches!((key.code, key.ctrl, key.alt), (Code::Char(_), false, false) | (Code::Backspace, ..)) {
             p.filter_now();
         }
+        // (the list's rows in sight, last frame)
+        let rows = match p.view.len() {
+            0 => crate::key::UNDRAWN_ROWS,
+            n => n,
+        };
         match (key.code, key.ctrl) {
             (Code::Esc, _) | (Code::Char('c'), true) => {
                 // A plugin's pick: it hears nothing was chosen
@@ -2892,6 +2909,29 @@ impl Editor {
             }
             (Code::Right, _) if p.in_tree() => return p.tree_right(),
             (Code::Left, _) if p.in_tree() => return p.tree_left(),
+            // Helix's picker keys (uxaudit H1): a place opened in a split — `C-s` under, `C-v` beside — or with
+            // the list kept up (`A-ret`); `C-t` the preview away and back; Home/End the first row and the last
+            (Code::Char('s'), true) if !key.alt => {
+                return self.picker_open_place(key, Some(crate::split::Dir::Horizontal));
+            }
+            (Code::Char('v'), true) if !key.alt => {
+                return self.picker_open_place(key, Some(crate::split::Dir::Vertical));
+            }
+            (Code::Enter, false) if key.alt => return self.picker_open_place(key, None),
+            // (where none is drawn either way, said: a list with no preview, a screen too narrow for one)
+            (Code::Char('t'), true) => {
+                let room = self.screen.picker_preview_x.is_some() || p.preview_hidden;
+                return match (p.preview, room) {
+                    (false, _) => self.key_unused(key, "this list", "it has no preview"),
+                    (true, false) => self.set_status("no room for the preview — the screen is too narrow"),
+                    (true, true) => p.preview_hidden = !p.preview_hidden,
+                };
+            }
+            (Code::Home | Code::End, _) => {
+                p.preview_scroll = 0;
+                let row = if key.code == Code::Home { 0 } else { p.len().saturating_sub(1) };
+                p.select_near(row);
+            }
             // Places: keep the listed ones as the list (`]q`)
             (Code::Char('q'), true) => {
                 self.qlist_from_picker();
@@ -2965,8 +3005,11 @@ impl Editor {
             }
             (Code::Down | Code::Tab, _) | (Code::Char('n'), true) => p.move_by(1),
             (Code::Up | Code::BackTab, _) | (Code::Char('p'), true) => p.move_by(-1),
-            (Code::PageDown, _) | (Code::Char('d'), true) => p.move_by(10),
-            (Code::PageUp, _) | (Code::Char('u'), true) => p.move_by(-10),
+            // (half the rows in sight, as everywhere — the page keys all of them)
+            (Code::Char('d'), true) => p.move_by(crate::key::half(rows)),
+            (Code::Char('u'), true) => p.move_by(-crate::key::half(rows)),
+            (Code::PageDown, _) => p.move_by(rows as isize),
+            (Code::PageUp, _) => p.move_by(-(rows as isize)),
             // The preview pane
             (Code::Char('f'), true) => p.preview_scroll += 10,
             (Code::Char('b'), true) => p.preview_scroll = p.preview_scroll.saturating_sub(10),
@@ -2980,6 +3023,30 @@ impl Editor {
         }
         self.preview_theme();
         self.code_action_preview();
+    }
+
+    /// The picker's row opened in a split (`C-s` under, `C-v` beside — the list closes) or with the list kept up
+    /// (`A-ret`: None), as Helix's pickers do (uxaudit H1) — a place only (`Action::is_place`); another row says
+    /// so.
+    fn picker_open_place(&mut self, key: Key, split: Option<crate::split::Dir>) {
+        let Some(action) = self.picker.as_ref().and_then(|p| p.current()).map(|i| i.action.clone()) else {
+            return;
+        };
+        if !action.is_place() {
+            return self.key_unused(key, "this list", "its rows aren't places to open; enter picks one");
+        }
+        let made = split.map(|dir| {
+            self.keep_last_picker();
+            self.theme_before = None;
+            self.split_view(dir);
+        });
+        if let Err(e) = self.picker_action(action) {
+            // (the place didn't open: the pane made for it goes — no split nobody asked for)
+            if made.is_some() {
+                self.close_view();
+            }
+            self.set_error(format!("{e:#}"));
+        }
     }
 
     /// Runs one command by name (`:theme` → theme picker, etc.).
@@ -3016,7 +3083,15 @@ impl Editor {
     }
 
     pub(crate) fn run_picker_action(&mut self, action: Action) {
-        let result = match action {
+        if let Err(e) = self.picker_action(action) {
+            self.set_error(format!("{e:#}"));
+        }
+    }
+
+    /// A picker's row acted on — what went wrong, for the caller to say (`run_picker_action`) or undo first
+    /// (`picker_open_place`: the split made for it).
+    fn picker_action(&mut self, action: Action) -> anyhow::Result<()> {
+        match action {
             Action::Code(i) => {
                 self.run_code_action(i);
                 Ok(())
@@ -3054,21 +3129,20 @@ impl Editor {
             }
             // Open it at its first change
             Action::ChangedFile(n) => match self.session.changed_files.get(n).cloned() {
-                Some(c) => {
-                    return self.run_picker_action(Action::Goto { path: c.path, line: c.line, col: 0 });
-                }
-                None => Ok(()),
+                Some(c) => self.picker_action(Action::Goto { path: c.path, line: c.line, col: 0 }),
+                None => Err(anyhow::anyhow!("that file isn't among the changed ones any more")),
             },
             Action::Jump { index, .. } => {
                 self.jump_to_entry(index);
                 Ok(())
             }
-            Action::Buffer(id) => {
-                if let Some(i) = self.docs.iter().position(|d| d.id == id) {
+            Action::Buffer(id) => match self.docs.iter().position(|d| d.id == id) {
+                Some(i) => {
                     self.current = i;
+                    Ok(())
                 }
-                Ok(())
-            }
+                None => Err(anyhow::anyhow!("that buffer is closed")),
+            },
             Action::Open(path) => self.open(&path),
             Action::Command(name) => {
                 self.run_command_by_name(name);
@@ -3083,9 +3157,6 @@ impl Editor {
                 }),
             Action::Goto { path, line, col } => self.open_at(&path, line, col),
             Action::Note { path, line, .. } => self.open_at(&path, line, 0),
-        };
-        if let Err(e) = result {
-            self.set_error(format!("{e:#}"));
         }
     }
 
@@ -3613,20 +3684,23 @@ impl Editor {
                 self.diag_card_hidden = Some((self.doc().id, self.cursor_line()));
             }
         }
-        // Floating text: C-d/C-u scroll it, other keys close it (esc only closes).
+        // Floating text: C-d/C-u scroll it half its rows, C-e/C-y a row (as the code's), other keys close it (esc
+        // only closes).
         if let Some(lines) = &self.popup
             && key.ctrl
+            && !key.alt
         {
-            match key.code {
-                Code::Char('d') => {
-                    took(Handler::Popup);
-                    return self.popup_scroll = (self.popup_scroll + 8).min(lines.len());
-                }
-                Code::Char('u') => {
-                    took(Handler::Popup);
-                    return self.popup_scroll = self.popup_scroll.saturating_sub(8);
-                }
-                _ => {}
+            let rows = self.screen.popup.get().map_or(16, |(_, _, _, h)| h);
+            let by = match key.code {
+                Code::Char('d') => Some(crate::key::half(rows)),
+                Code::Char('u') => Some(-crate::key::half(rows)),
+                Code::Char('e') => Some(1),
+                Code::Char('y') => Some(-1),
+                _ => None,
+            };
+            if let Some(by) = by {
+                took(Handler::Popup);
+                return self.popup_scroll = self.popup_scroll.saturating_add_signed(by).min(lines.len());
             }
         }
         self.popup_scroll = 0;

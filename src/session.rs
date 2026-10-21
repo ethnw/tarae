@@ -1152,7 +1152,7 @@ impl Editor {
             return true;
         }
         let Some(i) = self.sessions.iter().position(|l| l.id == id) else { return false };
-        let esc = Key { code: Code::Esc, ctrl: false, alt: false };
+        let esc = Key { code: Code::Esc, ctrl: false, alt: false, shift: false };
         if self.picker.is_some() {
             self.handle_key(esc);
         }

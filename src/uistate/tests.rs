@@ -469,12 +469,17 @@ fn chat_view(ed: &mut Editor) {
 const PROBES: &[&str] =
     &["y", "n", "a", "A", "v", "r", "j", "x", "i", "[", "3", " ", ":", "<C-q>", "<C-w>", "<esc>", "<C-d>"];
 
-/// Every scene × every probe key: the handler that took the key (`took`) is the one `keys_to` said.
+/// The keys that move, as every surface takes them (uxaudit D7, Z2, H1): a row, half the rows, a page, the ends,
+/// the terminal's past, a picker's split, preview and keep-open keys — the routing test sends them too.
+const MOVES: &[&str] =
+    &["<C-e>", "<C-y>", "<C-f>", "<pagedown>", "<home>", "<S-pageup>", "<C-v>", "<C-t>", "<A-ret>"];
+
+/// Every scene × every probe key and move: the handler that took the key (`took`) is the one `keys_to` said.
 /// A model that's off in any scene shows here as `scene · key: model says X, handle_key took Y`.
 fn mismatches(scenes: &[Scene], model: impl Fn(&Editor) -> KeysTo) -> Vec<String> {
     let mut off = Vec::new();
     for (name, setup) in scenes {
-        for probe in PROBES {
+        for probe in PROBES.iter().chain(MOVES) {
             let mut ed = editor();
             setup(&mut ed);
             frame(&mut ed);
@@ -502,7 +507,8 @@ fn keys_to_is_where_handle_key_sends_every_key() {
         return;
     }
     let off = mismatches(SCENES, Editor::keys_to);
-    assert!(off.is_empty(), "{} of {}:\n{}", off.len(), SCENES.len() * PROBES.len(), off.join("\n"));
+    let all = SCENES.len() * (PROBES.len() + MOVES.len());
+    assert!(off.is_empty(), "{} of {all}:\n{}", off.len(), off.join("\n"));
 }
 
 /// The routing test's second entrance (`shuttle.rs`): a shuttle isn't a handler of the chain — it comes in

@@ -165,6 +165,9 @@ pub fn encode(key: Key, app_cursor: bool) -> Option<Vec<u8>> {
         Code::Left => arrow(b'D'),
         Code::Home => arrow(b'H'),
         Code::End => arrow(b'F'),
+        // (shifted, as terminals send it: `S-pageup` to a full-screen program)
+        Code::PageUp if key.shift => b"\x1b[5;2~".to_vec(),
+        Code::PageDown if key.shift => b"\x1b[6;2~".to_vec(),
         Code::PageUp => b"\x1b[5~".to_vec(),
         Code::PageDown => b"\x1b[6~".to_vec(),
         Code::F(n @ 1..=4) => vec![0x1b, b'O', b'P' + n - 1],
@@ -492,7 +495,8 @@ impl Editor {
     }
 
     /// Keys while the terminal has them: the escape key (`editor.terminal-escape`, `C-\`) gives them back to
-    /// the code; the rest go to the program.
+    /// the code; `S-pageup`/`S-pagedown` scroll its past a page, as every terminal emulator's do (uxaudit Z2 —
+    /// the next key the program gets brings it back down); the rest go to the program.
     pub fn terminal_key(&mut self, key: Key) -> bool {
         let escape: Option<Key> = self.config.terminal_escape.parse().ok();
         let Some(t) = self.session.terminal.as_mut().filter(|t| t.focus && t.visible && t.exited.is_none())
@@ -503,6 +507,17 @@ impl Editor {
             t.focus = false;
             // Filling the screen (`C-w z`): tarae's keys stay on it — the code isn't in sight
             self.bottom_focus = self.zoom == Some(crate::sizes::Zoom::Bottom);
+            return true;
+        }
+        // (a full-screen program's alternate screen keeps no past: the key is the program's, as a terminal sends it)
+        if key.shift
+            && !key.ctrl
+            && !key.alt
+            && matches!(key.code, Code::PageUp | Code::PageDown)
+            && !t.parser.screen().alternate_screen()
+        {
+            let page = t.parser.screen().size().0.max(1) as isize;
+            self.terminal_scroll_by(if key.code == Code::PageUp { page } else { -page });
             return true;
         }
         // Typing scrolls back to the bottom
@@ -629,13 +644,13 @@ mod tests {
 
     #[test]
     fn keys_as_terminal_bytes() {
-        let k = |code, ctrl, alt| encode(Key { code, ctrl, alt }, false).unwrap();
+        let k = |code, ctrl, alt| encode(Key { code, ctrl, alt, shift: false }, false).unwrap();
         assert_eq!(k(Code::Char('c'), true, false), [3], "C-c");
         assert_eq!(k(Code::Char('a'), false, true), [0x1b, b'a'], "A-a");
         assert_eq!(k(Code::Char('타'), false, false), "타".as_bytes());
         assert_eq!(k(Code::Up, false, false), b"\x1b[A");
         assert_eq!(
-            encode(Key { code: Code::Up, ctrl: false, alt: false }, true).unwrap(),
+            encode(Key { code: Code::Up, ctrl: false, alt: false, shift: false }, true).unwrap(),
             b"\x1bOA",
             "app cursor"
         );
@@ -1092,7 +1107,7 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false };
+        let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false, shift: false };
         for c in "echo hi-there".chars() {
             ed.handle_key(key(c));
         }
@@ -1111,16 +1126,16 @@ mod tests {
             }
         }
         assert!(seen(&ed), "{:?}", ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()));
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         assert!(!ed.session.terminal.as_ref().unwrap().focus);
         ed.handle_key(key('i'));
         assert_eq!(ed.mode, crate::editor::Mode::Insert, "the code has the keys again");
         ed.handle_key(Key::plain(Code::Esc));
         // C-\\ from the code gives the keys back to it; from inside (tarae's keys on its panel) space T
         // hides it, again shows it (#144)
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         assert!(ed.session.terminal.as_ref().unwrap().focus);
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         ed.bottom_take_keys();
         for k in [' ', 'T'] {
             ed.handle_key(key(k));
@@ -1133,18 +1148,88 @@ mod tests {
         assert!(t.visible && t.focus, "shown with the keys, the same shell");
         // `q` on its panel with tarae's keys hides it as `space T` does, the shell running on — as every list or
         // output panel's `q` closes it (uxaudit D2); `C-w q` there too (D3)
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         ed.bottom_take_keys();
         ed.handle_key(key('q'));
         let t = ed.session.terminal.as_ref().unwrap();
         assert!(!t.visible && t.exited.is_none(), "hidden, running");
         assert!(!ed.bottom_focus);
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
-        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         ed.bottom_take_keys();
-        ed.handle_key(Key { code: Code::Char('w'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('w'), ctrl: true, alt: false, shift: false });
         ed.handle_key(key('q'));
         assert!(!ed.session.terminal.as_ref().unwrap().visible, "C-w q: hidden too");
+    }
+
+    /// `S-pageup`/`S-pagedown` scroll the terminal's past a page while its program has the keys — every terminal
+    /// emulator's keys (uxaudit Z2) — the keys staying the program's; the next key it gets brings it back down.
+    #[test]
+    fn shift_page_keys_scroll_the_terminals_past() {
+        if no_pty_here("shift_page_keys_scroll_the_terminals_past") {
+            return;
+        }
+        let (config, _) = crate::config::parse("");
+        let mut ed = Editor::new(config);
+        ed.terminal_run(
+            vec!["/bin/sh".into()],
+            vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
+        );
+        while ed.session.terminal.is_none() {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+                ed.handle_event(ev);
+            }
+        }
+        for c in "i=0; while [ $i -lt 300 ]; do echo past$i; i=$((i+1)); done".chars() {
+            ed.handle_key(Key::plain(Code::Char(c)));
+        }
+        ed.handle_key(Key::plain(Code::Enter));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let done = |ed: &Editor| {
+            ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("past299"))
+        };
+        while !done(&ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(done(&ed), "its output came");
+        let back = |ed: &Editor| ed.session.terminal.as_ref().unwrap().parser.screen().scrollback();
+        let page = ed.session.terminal.as_ref().unwrap().parser.screen().size().0 as usize;
+        ed.handle_key("S-pageup".parse().unwrap());
+        ed.handle_key("S-pageup".parse().unwrap());
+        assert_eq!(back(&ed), 2 * page, "two pages back");
+        ed.handle_key("S-pagedown".parse().unwrap());
+        assert_eq!(back(&ed), page, "one forward");
+        assert!(ed.session.terminal.as_ref().unwrap().focus, "the keys still the program's");
+        ed.handle_key("pageup".parse().unwrap());
+        assert_eq!(back(&ed), 0, "a key the program gets: back down");
+        // A full-screen program (its alternate screen keeps no past): the key is the program's, as a terminal
+        // sends it — the tty's echo shows it arrive (the line cleared first: the pageup above left the shell a `~`)
+        ed.handle_key("C-u".parse().unwrap());
+        for c in "printf '\\033[?1049h'; cat".chars() {
+            ed.handle_key(Key::plain(Code::Char(c)));
+        }
+        ed.handle_key(Key::plain(Code::Enter));
+        let full = |ed: &Editor| ed.session.terminal.as_ref().unwrap().parser.screen().alternate_screen();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !full(&ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(full(&ed), "on its alternate screen");
+        ed.handle_key("S-pageup".parse().unwrap());
+        let came =
+            |ed: &Editor| ed.session.terminal.as_ref().unwrap().parser.screen().contents().contains("[5;2~");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !came(&ed) && std::time::Instant::now() < end {
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
+                ed.handle_event(ev);
+            }
+        }
+        assert!(came(&ed), "{:?}", ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()));
+        assert_eq!(back(&ed), 0, "nothing scrolled");
     }
 
     /// #58: a `:preflight` started while the terminal holds the bottom slot shows at once — its tab in the
@@ -1218,8 +1303,8 @@ mod tests {
             let mut bytes = Vec::new();
             crate::term::render(ed, &mut bytes, 140, 40).unwrap();
         };
-        let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false };
-        let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false };
+        let key = |c: char| Key { code: Code::Char(c), ctrl: false, alt: false, shift: false };
+        let ctrl = |c: char| Key { code: Code::Char(c), ctrl: true, alt: false, shift: false };
         let focus = |ed: &Editor| ed.session.terminal.as_ref().unwrap().focus;
         draw(&mut ed);
         let small = ed.screen.bottom_h;

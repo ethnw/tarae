@@ -2887,8 +2887,11 @@ pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
     true
 }
 
-/// Lines a page key scrolls the conversation.
-const PAGE: usize = 10;
+/// The conversation's rows in sight (as drawn last frame; `key::UNDRAWN_ROWS` before it) — a page key's
+/// measure: `C-d`/`C-u` half of them, PageDown/PageUp all, as everywhere (uxaudit D7).
+fn page(ed: &Editor) -> usize {
+    ed.screen.chat_view.get().map_or(crate::key::UNDRAWN_ROWS, |a| a.2.max(1))
+}
 
 pub fn key(ed: &mut Editor, key: Key) -> bool {
     // (the second key of a sequence — `C-w >` from an empty input — is the keymap's)
@@ -2899,6 +2902,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if crate::view::chat_view_of(ed).is_some() && !crate::view::chat_chord(ed, key) {
         return false;
     }
+    let page = page(ed);
+    let half = crate::key::half(page) as usize;
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.focused) else { return false };
     // An empty input: `C-w` is the windows' (sizes — `C-w >` widens the chat), nothing to delete
     if key.ctrl && key.code == Code::Char('w') && c.input.is_empty() {
@@ -2957,8 +2962,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         },
         // The editor's page keys page the conversation (#153) — `C-u` from an empty input (with text it
         // clears up to the cursor, as readline's; `↑` scrolls only from an empty input too)
-        (Code::Char('d'), true, _) => c.scroll = c.scroll.saturating_sub(PAGE),
-        (Code::Char('u'), true, _) if c.input.is_empty() => c.scroll += PAGE,
+        (Code::Char('d'), true, _) => c.scroll = c.scroll.saturating_sub(half),
+        (Code::Char('u'), true, _) if c.input.is_empty() => c.scroll += half,
         (Code::Char('u'), true, _) => {
             c.input.drain(..c.cursor);
             c.cursor = 0;
@@ -2990,10 +2995,10 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             c.cursor = c.input.len();
         }
         (Code::PageUp, ..) | (Code::Up, ..) if c.input.is_empty() || key.code == Code::PageUp => {
-            c.scroll += if key.code == Code::PageUp { PAGE } else { 1 };
+            c.scroll += if key.code == Code::PageUp { page } else { 1 };
         }
         (Code::PageDown, ..) | (Code::Down, ..) if c.input.is_empty() || key.code == Code::PageDown => {
-            c.scroll = c.scroll.saturating_sub(if key.code == Code::PageDown { PAGE } else { 1 });
+            c.scroll = c.scroll.saturating_sub(if key.code == Code::PageDown { page } else { 1 });
         }
         // Tab in an empty chat = cycles through example questions
         (Code::Tab, ..) if c.msgs.is_empty() => {
@@ -3215,26 +3220,32 @@ mod tests {
         assert!(!ed.session.chat.as_ref().unwrap().busy(), "the turn is over");
     }
 
-    /// #153: the editor's page keys page the conversation — `C-u` up from an empty input, `C-d` down; with
-    /// text in the input `C-u` still clears up to the cursor.
+    /// #153: the editor's page keys page the conversation — `C-u` up from an empty input, `C-d` down, half the
+    /// rows in sight as the code's (uxaudit D7), PageUp/PageDown all of them; with text in the input `C-u` still
+    /// clears up to the cursor.
     #[test]
     fn page_keys_page_the_chat() {
         let mut ed = editor("");
         let mut c = Chat::new();
         c.focused = true;
         ed.session.chat = Some(c);
+        // (12 rows of conversation in sight)
+        ed.screen.chat_view.set(Some((0, 60, 12, 0)));
         let press = |ed: &mut Editor, k: &str| assert!(key(ed, k.parse().unwrap()), "{k} is the chat's");
         let scroll = |ed: &Editor| ed.session.chat.as_ref().unwrap().scroll;
         press(&mut ed, "C-u");
         press(&mut ed, "C-u");
-        assert_eq!(scroll(&ed), 2 * PAGE);
+        assert_eq!(scroll(&ed), 12, "half of 12, twice");
         press(&mut ed, "C-d");
-        assert_eq!(scroll(&ed), PAGE);
+        assert_eq!(scroll(&ed), 6);
+        press(&mut ed, "pageup");
+        assert_eq!(scroll(&ed), 18, "a page");
+        press(&mut ed, "pagedown");
         let c = ed.session.chat.as_mut().unwrap();
         (c.input, c.cursor) = ("draft".into(), 5);
         press(&mut ed, "C-u");
         let c = ed.session.chat.as_ref().unwrap();
-        assert_eq!((c.input.as_str(), c.scroll), ("", PAGE), "with text: cleared, not scrolled");
+        assert_eq!((c.input.as_str(), c.scroll), ("", 6), "with text: cleared, not scrolled");
         press(&mut ed, "C-d");
         assert_eq!(scroll(&ed), 0);
     }
