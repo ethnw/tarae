@@ -4,6 +4,12 @@
 # Its files that are code: a token-like line there is code, not a token (`tokens::not_settings`)
 [sandbox]
 not-settings = ["rb"]
+# Rubies the user installed (rbenv's, chruby's): their files are the install's, none closed by a name like a key's
+# (RubyGems' `ssl_certs/*/*.pem`, read at every `gem install`)
+installs = ["~/.rbenv", "~/.rubies"]
+# Ruby's library (by version) and its gems, as an install lays them out, wherever it is: below one, a file is the
+# install's. Never a bare `gems`: a monorepo's own private gems are kept in one, their `.env`s with them
+packages = ["lib/ruby/gems", "lib/ruby/2.*", "lib/ruby/3.*"]
 
 [language.ruby]
 extensions = ["rb"]

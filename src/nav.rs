@@ -2081,6 +2081,11 @@ fn scopes(
     for p in paths {
         let abs = root.join(p);
         let real = crate::paths::real(&abs);
+        // (a file named like a key not open to Claude, outside the project too: left out and said, before any card —
+        // a search never opens one, Read's card does; a yes here would have searched nothing — f29 review N2)
+        if let Some(r) = real.as_ref().filter(|r| !r.starts_with(&root) && r.is_file() && keys.shut(r)) {
+            return Err(crate::reads::key_left_out(&crate::allow::tilde(r)));
+        }
         match &real {
             Some(r) if r.starts_with(&root) => {}
             // (a `..` past what's there: where it leads can't be told — the card says the path as given)
@@ -2878,6 +2883,16 @@ mod tests {
         assert_eq!(only_there.unwrap().replace("fake-token", "nowhere"), nowhere.unwrap(), "not counted");
         let named = run_search(&dir, Some(".env"), &q("alpha", Output::Lines), &[], &shut).unwrap_err();
         assert!(named.contains(".env is named like a key") && named.contains("Read asks"), "{named}");
+        // (one outside the project too — said, no card: a yes on one searched nothing, review N2)
+        let beside = crate::scratch::Scratch::new("nav-keys-outside");
+        let key = beside.join("id_ed25519");
+        std::fs::write(&key, "alpha tarae-fake-token\n").unwrap();
+        let at = key.display().to_string();
+        let named = run_search(&dir, Some(&at), &q("alpha", Output::Lines), &[], &shut).unwrap_err();
+        assert!(
+            named.contains("id_ed25519 is named like a key") && !named.starts_with("asks the user:"),
+            "{named}"
+        );
         assert!(file_in(&dir, &env, &shut).unwrap_err().contains("named like a key"));
         assert_eq!(file_in(&dir, &env, &open), Ok(env.clone()));
         assert_eq!(file_in(&dir, &dir.join("a.rs"), &shut), Ok(dir.join("a.rs")), "the rest as before");

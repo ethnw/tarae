@@ -207,6 +207,11 @@ Kept:
 Not kept:
 - **Outside home a run reads anything your user can** — `/etc`, `/opt`, `/Volumes`, other users' world-readable
   files. Programs need `/usr`, `/opt`, `/Applications`; tarae doesn't list them. Keep secrets in home.
+- **A file named like a key outside home, in no place runs close them** (`/opt/app/.env`): Claude's Read asks for
+  it on its own card, but a run reads it, and what a run prints reaches Claude just the same — the gap is the
+  runs'. Closing those names to runs outside home too (with the CA bundles and installs read, as in the places
+  they close) is its own piece, planned after frictions29.
+  test: `sandbox::tests::every_user_of_the_key_rule_gives_one_answer` (the one row where they part)
 - **Another checkout of the same repository is readable unasked** — sessions of one repository read each other's
   code as a matter of course. Its *writes* are kept.
 - **A file's metadata** (that it exists, its size and time) stays readable everywhere: every program looks.
@@ -225,6 +230,30 @@ Kept:
   `sandbox::tests::a_key_reached_through_another_mount_is_closed_there` ·
   `sandbox::tests::a_run_reaches_no_key_through_another_process_root` ·
   `sandbox::tests::a_key_swapped_after_the_walk_stops_its_run` · `sandbox::tests::a_run_holds_no_descriptor_but_its_stdio`
+- A file named like a key is closed where another program or session could have put it, and read where only this
+  run writes, one rule for runs and Claude's Read (frictions29: a key made in a granted folder after the grant was
+  read unasked). Closed: your read grants and the folders you opened for writing, the other checkouts (a nested
+  worktree's main checkout too), the temp folders — `/tmp`, `$TMPDIR` and its siblings, which every program of
+  yours writes — and beside the project when one holds it, as in the project; there Claude's Read asks on the key's
+  own card (`y` once) and a run can't read it, even one it made (its report says to make it under its own
+  `$TMPDIR`; a JVM's `java.io.tmpdir` is the user's, `-Djava.io.tmpdir=$TMPDIR` moves it). Read: a run's own
+  folder (its `TMPDIR`), and nowhere wider closes them, so a toolchain's folders in home stay readable — Claude's
+  Read too. Outside home Claude's Read asks for one wherever it is; runs read one there that's in no place they
+  close ("not kept" in §1.3). tarae's own tools (search, read, the message's context) still leave out every file named like
+  a key outside the project by its name. Linux's runs close them in the project only (Landlock only grants);
+  Claude's Read goes by the rule as designed there too. Inside those places a toolchain's own files read: an
+  install the packs name (pyenv's, conda's, rbenv's, asdf's and mise's installs) and what's below an install's
+  packages as its layout has them (`lib/python3*/site-packages`, `lib/ruby/gems`, `lib/ruby/3.*` — never a bare
+  `gems`, a monorepo's own) as below tools' output; CA bundles by a `ca` name (`cacert.pem`, `ca-bundle.pem`,
+  `tls-ca-bundle.pem`) outside the project — in it they're closed as any `*.pem` — and not `cert.pem`, often a
+  certificate and its key in one file. One rule says it (`Policy::key_rule`): the profile, the report, the run's panel and
+  `also` go by it, so a refused key is offered as that one file (`y` once), never as its folder, whose read would
+  close it again.
+  test: `reads::tests::a_key_named_file_outside_the_project_asks_for_itself` ·
+  `sandbox::tests::every_user_of_the_key_rule_gives_one_answer` ·
+  `sandbox::tests::files_named_like_keys_are_closed_where_a_grant_or_a_default_opened_outside` ·
+  `sandbox::tests::keys_close_in_a_main_checkout_above_and_a_folder_opened_for_writing_ca_bundles_read` ·
+  `sandbox::tests::a_key_in_a_granted_place_outside_is_closed_and_a_ca_bundle_reads` (macOS)
 - Settings a tool reads that hold a token (git's `extraHeader`, Go's env, pip's index URL, `~/.npmrc`) are read
   from a copy without the token lines.
   test: `sandbox::tests::settings_holding_a_token_are_read_from_copies` ·
@@ -250,6 +279,10 @@ Kept:
   test: `sandbox::apart::two_sessions_cant_reach_each_others_processes`
 
 Not kept:
+- **Linux: a file named like a key in a place outside the project a run reads** — a folder you granted, another
+  checkout, the temp folders: Landlock only grants, so a name can't be closed inside a granted folder; in the
+  project its folders are granted entry by entry around each key (`linux::there`), outside they aren't yet.
+  Claude's own reads ask there as on macOS.
 - **A token inside a file that isn't named like a key** and isn't a known tool's settings: `config/prod.yml`
   with a password in it is an ordinary project file.
 - **cargo's `credentials.toml`** isn't read, but cargo takes no copy without it: the report says so in cargo's

@@ -59,6 +59,10 @@
 //!   all the same.
 //! - `bins`: where a toolchain puts programs the user runs — never written, nor what holds them (with the
 //!   folders on `PATH`, `~/.local/bin`, and the homes themselves: `sandbox::RunsLater`).
+//! - `installs`: a toolchain's installs in home (pyenv's, conda's): where a grant opens one to runs, nothing in
+//!   it is closed by a name like a key's. `packages`: the folders an install keeps its packages in, anchored in
+//!   its layout (`lib/python3*/site-packages`, `lib/ruby/gems` — two parts or more, a lone folder name being any
+//!   project's too): below one, in a place outside the project opened to runs, likewise.
 //! - `quiet-writes`: where a denied write is expected — matched only at that place, for the user's home on
 //!   the system tarae runs on (`sandbox::quiet_places`).
 //! - `[[sandbox.settings]]`: a tool's settings that can hold a token (`tokens.rs`): `tool`, `var` (what points
@@ -142,6 +146,9 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     ("engine-sockets", Reach::BuiltIn),
     // (widens: files never looked in for a token)
     ("not-settings", Reach::BuiltIn),
+    // (widen: files named like keys read there)
+    ("installs", Reach::BuiltIn),
+    ("packages", Reach::BuiltIn),
 ];
 
 /// `[claude]`'s keys and how a runtime folder's pack counts for each.
@@ -469,6 +476,13 @@ pub struct Packs {
     /// The extensions of files that are code, never settings (`not-settings`, `tokens::not_settings`): a
     /// token-like line there is code. Each one of its pack's languages' (a test says).
     pub not_settings: Vec<String>,
+    /// A toolchain's installs in home (`installs`): in a place opened to runs, nothing in one is closed by a name
+    /// like a key's (`Policy::key_spared`).
+    pub installs: Vec<String>,
+    /// The folders an install keeps its packages in, as its layout has them (`packages`: two parts or more, `/`
+    /// between, a part's `*` one at most — `lib/python3*/site-packages`): below one, in a place outside the
+    /// project opened to runs, a file is the package's (`sandbox::key_named_below`).
+    pub packages: Vec<String>,
     /// What was wrong: a built-in pack's entry left out (a mistake in tarae's pack — a test fails), a runtime
     /// folder's key that's the built-in packs' only.
     pub problems: Vec<String>,
@@ -757,6 +771,22 @@ fn read_key_of(
             }
         }
         ("sandbox", "bins") => places(&mut out.bins, v, Kind::Read)?,
+        ("sandbox", "installs") => places(&mut out.installs, v, Kind::Read)?,
+        ("sandbox", "packages") => {
+            for p in list(v)? {
+                // (anchored: two parts at least — a lone folder name is any project's too — a part's `*` one at
+                // most, never the whole part)
+                let parts: Vec<&str> = p.split('/').collect();
+                let part_ok = |s: &&str| plain(&s.replacen('*', "x", 1)) && *s != "*";
+                match parts.len() >= 2 && parts.iter().all(part_ok) {
+                    true if !out.packages.contains(&p) => out.packages.push(p),
+                    true => {}
+                    false => {
+                        wrong.push(format!("`{p}` isn't two parts or more, of plain names, one `*` a part"))
+                    }
+                }
+            }
+        }
         ("sandbox", "quiet-writes") => places(&mut out.quiet_writes, v, Kind::Read)?,
         ("sandbox", "settings") => {
             for s in v.as_array().ok_or("`settings` isn't a list ([[sandbox.settings]])")? {

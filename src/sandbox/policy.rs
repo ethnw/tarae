@@ -3,6 +3,146 @@
 
 use super::*;
 
+/// What a run's rule for the files named like keys says of one (`Policy::key_rule`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyRule {
+    /// Closed by its name below this place — the project's root, or a place outside it a grant or a default
+    /// opened (`key_places`): only the user's opening of that file (`Grant::Key`) lets a run read it.
+    Closed(PathBuf),
+    /// macOS: named like a key in home where nothing opened it — every place a grant opens closes the names like
+    /// keys in it, so a read of a folder of it wouldn't open it: only `Grant::Key` does, its read too.
+    ClosedOnceRead,
+}
+
+/// A policy's key rule taken apart from it (`Policy::key_rules`): what's decided after its run, on a worker —
+/// the run's panel (`blocked::choices`), `also`'s card — goes by the rule the run had.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRules {
+    root: PathBuf,
+    keys: Option<Vec<PathBuf>>,
+    places: Vec<PathBuf>,
+    spared: Vec<PathBuf>,
+    supervised: bool,
+    reads: Reads,
+    run: Option<PathBuf>,
+    write: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+}
+
+impl KeyRules {
+    /// `Policy::key_rule`.
+    pub fn rule(&self, real: &Path) -> Option<KeyRule> {
+        self.view().rule(real)
+    }
+
+    fn view(&self) -> KeyView<'_> {
+        KeyView {
+            root: &self.root,
+            keys: self.keys.as_deref(),
+            places: &self.places,
+            spared: &self.spared,
+            supervised: self.supervised,
+            reads: &self.reads,
+            run: self.run.as_deref(),
+            write: &self.write,
+            files: &self.files,
+        }
+    }
+
+    /// Whether anything below the folder `at` (real, outside the project) may be closed by this rule or read from
+    /// a copy: a key place it holds or is in, a part of home runs don't read, a setting with a copy. False: below it
+    /// runs read every file named like a key — a toolchain's folder, an install (`reads::decide_with` doesn't walk
+    /// it).
+    pub fn may_close_below(&self, at: &Path) -> bool {
+        let v = self.view();
+        let in_home = self.reads.home.as_ref().is_some_and(|h| at.starts_with(h) || h.starts_with(at));
+        self.keys.is_some()
+            && !self.supervised
+            && (self.places.iter().any(|k| k.starts_with(at) || at.starts_with(k))
+                || (in_home && !v.reads_place(at))
+                || self.reads.copies.hidden.iter().any(|(f, _)| f.starts_with(at)))
+    }
+
+    /// Whether only the user's opening of that file (`Grant::Key`) lets a run read `real`.
+    pub fn closes(&self, real: &Path) -> bool {
+        self.rule(real).is_some()
+    }
+
+    /// Whether runs read a copy of `real` in its place (a setting holding a token, `tokens::Copies`): the file
+    /// itself never — Claude's Read asks for it as for a key (`reads::key_closed`).
+    pub fn copied(&self, real: &Path) -> bool {
+        self.reads.copies.instead_of(real).is_some()
+    }
+
+    /// The rule as designed, whatever the system enforces: macOS's profile's (Linux's Landlock only grants, so it
+    /// closes none outside the project yet) — what Claude's reads go by (`reads::key_closed`).
+    pub fn designed(self) -> KeyRules {
+        KeyRules { supervised: false, ..self }
+    }
+}
+
+/// What the key rule reads of a policy (`Policy::key_view`, `KeyRules`) — the rule written once.
+struct KeyView<'a> {
+    root: &'a Path,
+    keys: Option<&'a [PathBuf]>,
+    places: &'a [PathBuf],
+    spared: &'a [PathBuf],
+    supervised: bool,
+    reads: &'a Reads,
+    run: Option<&'a Path>,
+    write: &'a [PathBuf],
+    files: &'a [PathBuf],
+}
+
+impl KeyView<'_> {
+    fn rule(&self, real: &Path) -> Option<KeyRule> {
+        // (`keys` None: closed nowhere — a test's policy; a file the user opened; what no run reads anyway)
+        let opened = self.keys?;
+        // (what no run reads is the kept places' rule; a setting holding a token, read from a copy, the copies' —
+        // its report says so, and no key grant opens it)
+        if opened.iter().any(|f| f == real)
+            || self.reads.kept_holds(self.root, real)
+            || self.reads.copies.instead_of(real).is_some()
+        {
+            return None;
+        }
+        if real.starts_with(self.root) {
+            return key_named_in(self.root, real).then(|| KeyRule::Closed(self.root.to_path_buf()));
+        }
+        // (Linux: Landlock only grants — nothing closes them outside the project; the run's own folder, its
+        // `TMPDIR`, only it writes: what's there is its own)
+        if self.supervised
+            || self.spared.iter().any(|s| real.starts_with(s))
+            || self.run.is_some_and(|d| real.starts_with(d))
+        {
+            return None;
+        }
+        if let Some(k) = self.places.iter().find(|k| key_named_below(k, real)) {
+            return Some(KeyRule::Closed(k.clone()));
+        }
+        // (in no place that closes it: read as any file there, or — in home, nothing opening it — any folder of it
+        // opened would close it)
+        let unread = self.reads.home.as_ref().is_some_and(|h| real.starts_with(h)) && !self.reads_place(real);
+        let named = self.places.iter().all(|k| !real.starts_with(k)) && key_named_below(Path::new("/"), real);
+        (unread && named).then_some(KeyRule::ClosedOnceRead)
+    }
+
+    /// Whether the profile's reads in home let a run read `real`, its names aside: the project, where it writes,
+    /// what's allowed, a file the user opened (macOS: `Y<n>`, after the deny of home).
+    fn reads_place(&self, real: &Path) -> bool {
+        match &self.reads.home {
+            Some(home) if real.starts_with(home) => {
+                real.starts_with(self.root)
+                    || self.run.is_some_and(|d| real.starts_with(d))
+                    || self.write.iter().chain(&self.reads.allow).any(|w| real.starts_with(w))
+                    || self.files.iter().any(|f| f == real)
+                    || (!self.supervised && self.keys.is_some_and(|k| k.iter().any(|f| f == real)))
+            }
+            _ => true,
+        }
+    }
+}
+
 /// What a sandboxed command may do. Every path is real (canonical).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
@@ -79,6 +219,16 @@ pub struct Policy {
     /// these the user opened, each that file (`allow::Grant::Key`; real paths) — macOS by the profile (7a), Linux
     /// by Landlock's rules around them (`linux::there`, 7b). None: closed to it nowhere (a test's policy).
     pub keys: Option<Vec<PathBuf>>,
+    /// The places outside the project a grant or a default opened — the repository's other checkouts, what the
+    /// user let Claude read (`Env::key_places`), the temp folders — where the files named like keys are closed
+    /// as in the project (macOS's profile; Landlock only grants, so Linux doesn't close them there). Never in the
+    /// project (its own rule — a place holding it leaves it out), never wider: a CA bundle elsewhere is read. Real
+    /// paths.
+    pub key_places: Vec<PathBuf>,
+    /// Inside those, the places whose files stay read whatever their names: a toolchain's installs (the packs'
+    /// `installs` — pyenv's, conda's: their CA bundles, their packages' test keys). Not the user's `$TMPDIR`:
+    /// every program of theirs writes there (frictions29 round 3) — the run's own is its `RunDir`. Real paths.
+    pub key_spared: Vec<PathBuf>,
     /// The folders the checkout's build tool named that stay closed, and why (`asked_dir_verdict`) — said with
     /// the result and on the panel — and who named them (`builds-said`: `cargo`).
     pub refused: Vec<(PathBuf, String)>,
@@ -242,6 +392,32 @@ impl Policy {
                 "file-read-data file-read-xattr (require-all (subpath (param \"ROOT\")) {})",
                 key_files(&below(&self.root))
             )));
+            // …and below the places outside it a grant or a default opened (frictions29), alike: one rule for
+            // the places as deep as each other (the regex counts a place's parts, as `below` does the root's)
+            let mut deep: Vec<(String, String)> = Vec::new();
+            for (i, place) in self.key_places.iter().enumerate().filter(|_| !self.supervised) {
+                let (at, sub) = (below(place), format!(" (subpath (param \"KP{i}\"))"));
+                match deep.iter_mut().find(|(b, _)| *b == at) {
+                    Some((_, subs)) => subs.push_str(&sub),
+                    None => deep.push((at, sub)),
+                }
+            }
+            // (never in the project: a place holding it — a folder granted above it, the temp folder it's in —
+            // leaves it to the root's rule, whose exceptions are counted from the root; nor in what's spared — an
+            // install — nor the run's own folder, which only it writes; below an install's packages there a file
+            // is the package's)
+            let installs = (0..self.key_spared.len()).map(|i| format!(" (subpath (param \"KI{i}\"))"));
+            let spared: String = std::iter::once(run.to_string()).chain(installs).collect();
+            let not = match spared.is_empty() {
+                true => "(require-not (subpath (param \"ROOT\")))".to_string(),
+                false => format!("(require-not (require-any (subpath (param \"ROOT\")){spared}))"),
+            };
+            for (at, subs) in deep {
+                p.push_str(&deny(&format!(
+                    "file-read-data file-read-xattr (require-all (require-any{subs}) {not} {})",
+                    key_files_outside(&at)
+                )));
+            }
             let open: String = (0..keys.len()).map(|i| format!(" (literal (param \"Y{i}\"))")).collect();
             if !open.is_empty() {
                 p.push_str(&format!("(allow file-read-data file-read-xattr{open})\n"));
@@ -555,18 +731,42 @@ impl Policy {
         if is_terminal(real) {
             return self.terminals;
         }
-        if self.keys.as_ref().is_some_and(|k| !k.iter().any(|f| f == real)) && key_named_in(&self.root, real)
-        {
-            return false;
+        let k = self.key_view();
+        !matches!(k.rule(real), Some(KeyRule::Closed(_))) && k.reads_place(real)
+    }
+
+    /// What the rule for the files named like keys says of `real` (frictions29 A: one rule — the profile's,
+    /// `reads_allow`, the report, the run's panel and `also` go by it). None: a run reads it as any file there.
+    pub fn key_rule(&self, real: &Path) -> Option<KeyRule> {
+        self.key_view().rule(real)
+    }
+
+    /// The key rule taken apart from the policy, for what's decided after its run on a worker (`KeyRules`).
+    pub fn key_rules(&self) -> KeyRules {
+        KeyRules {
+            root: self.root.clone(),
+            keys: self.keys.clone(),
+            places: self.key_places.clone(),
+            spared: self.key_spared.clone(),
+            supervised: self.supervised,
+            reads: self.reads.clone(),
+            run: self.run.as_ref().map(|d| d.path().to_path_buf()),
+            write: self.write.clone(),
+            files: self.files.clone(),
         }
-        match &r.home {
-            Some(home) if real.starts_with(home) => {
-                real.starts_with(&self.root)
-                    || self.run.as_ref().is_some_and(|d| real.starts_with(d.path()))
-                    || self.write.iter().chain(&r.allow).any(|w| real.starts_with(w))
-                    || self.files.iter().any(|f| f == real)
-            }
-            _ => true,
+    }
+
+    fn key_view(&self) -> KeyView<'_> {
+        KeyView {
+            root: &self.root,
+            keys: self.keys.as_deref(),
+            places: &self.key_places,
+            spared: &self.key_spared,
+            supervised: self.supervised,
+            reads: &self.reads,
+            run: self.run.as_ref().map(|d| d.path()),
+            write: &self.write,
+            files: &self.files,
         }
     }
 
@@ -804,6 +1004,10 @@ impl Policy {
         v.extend(self.caches.iter().enumerate().map(|(i, p)| (format!("C{i}"), s(p))));
         v.extend(self.sockets.iter().enumerate().map(|(i, p)| (format!("S{i}"), s(p))));
         v.extend(self.keys.iter().flatten().enumerate().map(|(i, p)| (format!("Y{i}"), s(p))));
+        let places = self.key_places.iter().filter(|_| self.keys.is_some() && !self.supervised);
+        v.extend(places.enumerate().map(|(i, p)| (format!("KP{i}"), s(p))));
+        let spared = self.key_spared.iter().filter(|_| self.keys.is_some() && !self.supervised);
+        v.extend(spared.enumerate().map(|(i, p)| (format!("KI{i}"), s(p))));
         let r = &self.reads;
         v.extend(r.home.iter().map(|h| ("HOME".to_string(), s(h))));
         v.extend(
@@ -842,6 +1046,9 @@ impl Policy {
         if let Some(t) = &env.tmp {
             write.push(user_temp(t));
         }
+        // (the files named like keys closed there as in the project — the temp folders too, read and written by
+        // every session's runs; a run's own `TMPDIR` is its `RunDir`, not among them)
+        let mut key_places: Vec<PathBuf> = env.key_places.iter().chain(&write).cloned().collect();
         // The folders the packs' `ask` names: the tool's own — but never where nothing is written, a shared cache
         // or a toolchain's home among it; its caches (Go's module cache) as the others, read — each judged but
         // for its own places, which the caches rule keeps (another toolchain's cache or home still refuses it)
@@ -887,16 +1094,33 @@ impl Policy {
                 Err(_) => {}
             }
         }
+        let mut user_writes = Vec::new();
         for w in &env.write {
             let p = match (w.strip_prefix("~/"), &env.home) {
                 (Some(rest), Some(home)) => home.join(rest),
                 _ => root.join(w),
             };
             write.push(profile_path(&p));
+            user_writes.push(profile_path(&p));
         }
         // Never the project or what holds it (that would open .git again); inside it, the project's rule
         write.retain(|w| !root.starts_with(w) && !w.starts_with(&root));
         write.dedup();
+        // (a folder the user opened for writing — `llm.sandbox-write`, a write grant — is read too: its keys closed;
+        // only as it's opened: not one holding the project, which isn't, nor `/`)
+        key_places.extend(user_writes.into_iter().filter(|w| write.contains(w)));
+        // (a read place holding the project stays — a granted ancestor, the main checkout of a nested worktree: its
+        // rule leaves the project to the project's own; one in the project is the project's)
+        // (what's spared — an install the packs name — is never one, and is left out of those holding it; only
+        // what one holds is kept: the profile's parameters. `$TMPDIR` isn't: every program of the user's writes
+        // there — a run's own is its `RunDir`)
+        let mut key_spared = env.key_spared.clone();
+        key_places.retain(|k| !k.starts_with(&root) && !key_spared.iter().any(|s| k.starts_with(s)));
+        crate::sorting::sort(&mut key_places);
+        key_places.dedup();
+        key_spared.retain(|s| key_places.iter().any(|k| s.starts_with(k)));
+        crate::sorting::sort(&mut key_spared);
+        key_spared.dedup();
         let mut ports: Vec<u16> = env.ports.clone();
         crate::sorting::sort(&mut ports);
         ports.dedup();
@@ -939,6 +1163,8 @@ impl Policy {
             sockets: Vec::new(),
             terminals: false,
             keys: Some(Vec::new()),
+            key_places,
+            key_spared,
             refused,
             refused_asked,
             named_by: env.builder.who.clone(),

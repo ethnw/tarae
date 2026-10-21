@@ -34,6 +34,8 @@ pub struct BlockedRun {
     /// Which run it was (the panel's) — the user's run again of it goes on by itself when it was Claude's last
     /// turn's failed one (piece D3, `Chat.failed`).
     pub key: Option<RunKey>,
+    /// Its policy's rule for the files named like keys (`Policy::key_rules`): what a refused one offers.
+    pub keys: Option<crate::sandbox::KeyRules>,
 }
 
 /// A run of the session's: its command's or its tests', and which of them (`generation`: each spawn a new one).
@@ -54,6 +56,7 @@ impl BlockedRun {
             env: Vec::new(),
             report: None,
             key: None,
+            keys: None,
         }
     }
 
@@ -86,8 +89,19 @@ pub struct Choice {
 /// What could open for `denials` in a session that may do `caps`: the places in home a read may open
 /// (`allow::read_choices` — never what's kept from every run, `Caps.kept`), the folders a write may open
 /// (`allow::write_choices` — never where a write runs something later, `Caps.later`), a port on this machine
-/// (not a risky one) — each once.
+/// (not a risky one) — each once. A file named like a key goes by the run's own rule (`keys`, its policy's
+/// `key_rules` — None: the project's only).
+#[cfg(test)]
 pub fn choices(denials: &[Denial], caps: &crate::caps::Caps) -> Vec<Choice> {
+    choices_by(denials, caps, None)
+}
+
+/// `choices`, by the run's rule for the files named like keys.
+pub fn choices_by(
+    denials: &[Denial],
+    caps: &crate::caps::Caps,
+    keys: Option<&crate::sandbox::KeyRules>,
+) -> Vec<Choice> {
     let mut out: Vec<Choice> = Vec::new();
     let home = caps.home.as_deref().unwrap_or(Path::new("/"));
     let (root, kept, later) = (caps.root.as_path(), &caps.kept, &caps.later);
@@ -122,9 +136,14 @@ pub fn choices(denials: &[Denial], caps: &crate::caps::Caps) -> Vec<Choice> {
             });
         }
         let read = d.op.starts_with("file-read-data") || d.op == crate::sandbox::EITHER;
-        // A file named like a key in the project (7a, 7b): that one file — no folder of it (the project is
-        // read anyway; what's closed is the name)
-        let key = file && read && crate::sandbox::key_named_in(&crate::sandbox::profile_path(root), &target);
+        // A file the run's rule closes by its name (7a, 7b; outside the project, frictions29 — macOS: a place a
+        // grant or a default opened, or one whose folders a grant would close it in): that one file — no folder
+        // of it (the place is read anyway, or opening it would close the name again)
+        let closes = |t: &Path| match keys {
+            Some(k) => k.closes(t),
+            None => crate::sandbox::key_named_in(&crate::sandbox::profile_path(root), t),
+        };
+        let key = file && read && closes(&target) && !kept.iter().any(|k| target.starts_with(k));
         if key {
             found.push(Choice {
                 grant: Grant::Key(target.clone()),
@@ -220,6 +239,10 @@ impl Editor {
             Some(crate::sandbox::Guard::In(p)) => p.denials_from(),
             _ => None,
         };
+        let keys = |g: Option<&crate::sandbox::Guard>| match g {
+            Some(crate::sandbox::Guard::In(p)) => Some(p.key_rules()),
+            _ => None,
+        };
         // (a run on a commit's tree: not offered — its tree is gone, so neither a grant nor a run outside could
         // run it again where it ran — review of #212)
         let task = self.session.task_run.as_ref().filter(|r| r.base.is_none()).and_then(|r| {
@@ -231,6 +254,7 @@ impl Editor {
                     from: from(r.guard.as_ref()),
                     env,
                     key: Some(RunKey { tests: false, generation: r.generation() }),
+                    keys: keys(r.guard.as_ref()),
                     ..BlockedRun::of(Job::Command(r.task.cmd.clone(), r.task.cwd.clone()))
                 },
             ))
@@ -240,7 +264,8 @@ impl Editor {
             let from = from(r.guard.as_ref());
             let (denials, env) = denials(r.guard.as_ref(), &r.output)?;
             let key = Some(RunKey { tests: true, generation: r.generation() });
-            Some((r.started, BlockedRun { denials, from, env, key, ..BlockedRun::of(job) }))
+            let keys = keys(r.guard.as_ref());
+            Some((r.started, BlockedRun { denials, from, env, key, keys, ..BlockedRun::of(job) }))
         });
         match which {
             Which::Task => task.map(|t| t.1),
@@ -275,7 +300,7 @@ impl Editor {
         // places never opened are looked for)
         let basis = self.caps_basis();
         self.events.jobs().spawn(move || {
-            let mut list = choices(&run.denials, &basis.build());
+            let mut list = choices_by(&run.denials, &basis.build(), run.keys.as_ref());
             list.extend(env_choices(&run.env));
             move |ed: &mut Editor| ed.blocked_open(Some(run), list)
         });
@@ -892,7 +917,7 @@ mod tests {
     /// A file named like a key refused in the project (macOS, 7a) offers that one file, once — never a folder of
     /// it (the project is read anyway), never kept past this run (`Caps::storable`, cardauto 6); kept by an
     /// earlier build's `A`, it reaches the run (`with_allowed`) and `:sandbox-disallow` takes it back. One outside
-    /// the project isn't this (home's rules: its folders).
+    /// the project goes by the run's own rule (`choices_by`); with none, home's rules (its folders).
     #[test]
     fn a_key_named_file_refused_offers_that_file() {
         let d = |target: &str| Denial {
@@ -911,6 +936,8 @@ mod tests {
         let g = Grant::Key(env.clone());
         let why = format!("node was reading {}, named like a key", crate::allow::tilde(&env));
         assert_eq!(got, [(&g, "node reading …/app/.env", why.as_str())]);
+        // (outside the project, by the run's own rule: `sandbox::tests::every_user_of_the_key_rule_gives_one_answer`;
+        // with none, the project's only)
         let outside = choices(&[d("/Users/u/q/.env")], &crate::caps::Caps::at(home, root));
         assert!(outside.iter().all(|c| matches!(c.grant, Grant::Read(_))), "{outside:?}");
         assert!(!g.keepable() && !g.as_outside() && g.risk().is_some_and(|r| r.contains("reaches Claude")));

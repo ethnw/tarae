@@ -171,6 +171,13 @@ not-settings = ["py"]
 reads = [
     "~/.pip/pip.conf", "~/.config/pip/pip.conf", "~/Library/Application Support/pip/pip.conf", "{uv-python}",
 ]
+# Pythons the user installed, at their managers' own places: opened to runs (a read grant), what's in them is the
+# install's — no file in them is closed by a name like a key's (grpc's `roots.pem`, conda's `ssl/cacert.pem`)
+installs = ["~/.pyenv", "~/miniconda3", "~/anaconda3", "~/miniforge3", "~/mambaforge"]
+# Where an install keeps its packages, as its layout has them, wherever it is: below one, in a place opened to runs
+# outside the project, a file is the package's — not closed by its name (a CA bundle a package ships, its test
+# keys). Anchored in `lib/python3*`: a folder named `site-packages` alone could be anyone's
+packages = ["lib/python3*/site-packages", "lib/python3*/dist-packages"]
 # What of the user's environment a run gets for Python (measured: `PYTHON*`, ~50 names), its environments
 # (venv, conda, pyenv) and installers (pip, uv) — an index URL with a password left out as a token
 pass = ["PYTHON*", "VIRTUAL_ENV", "CONDA_*", "PYENV*", "PIP_*", "UV_*"]

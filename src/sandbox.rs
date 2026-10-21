@@ -77,7 +77,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-pub use policy::Policy;
+pub use policy::{KeyRules, Policy};
 
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -486,7 +486,7 @@ impl Guard {
         let (mut names, mut git, mut caches, mut all) = (Vec::new(), false, Vec::new(), true);
         let (mut secret, mut services, mut copied) = (Vec::new(), Vec::new(), Vec::new());
         let (mut homes, mut ports, mut keys) = (Vec::new(), Vec::new(), Vec::new());
-        let mut beyond = Vec::new();
+        let (mut beyond, mut temp_keys) = (Vec::new(), Vec::new());
         let refused_port = &crate::sandboxpack::get().refused_port;
         let (mut entries, mut signals, mut looks, mut attaches) = (false, false, false, false);
         let mut sealed = false;
@@ -526,8 +526,21 @@ impl Guard {
                         false => names.push(rel.display().to_string()),
                     }
                 }
-                Ok(rel) if !p.reads_allow(path) && key_named_in(&p.root, path) => {
-                    keys.push(rel.display().to_string())
+                // (a read the key rule refused — never a write: one refused where keys are closed is the place's)
+                _ if !d.op.starts_with("file-write")
+                    && p.key_rule(path).is_some()
+                    && !p.reads_allow(path) =>
+                {
+                    let shown = match path.strip_prefix(&p.root) {
+                        Ok(rel) => rel.display().to_string(),
+                        Err(_) => crate::allow::tilde(path),
+                    };
+                    // (in a temp folder every program writes: one the run made there too — its own goes in its
+                    // `TMPDIR`)
+                    match p.key_rule(path) {
+                        Some(policy::KeyRule::Closed(k)) if shared_temp(&k) => temp_keys.push(shown),
+                        _ => keys.push(shown),
+                    }
                 }
                 _ if p.caches.iter().any(|c| path.starts_with(c)) => {
                     let of = p.caches_said.iter().position(|s| s.dirs.iter().any(|c| path.starts_with(c)));
@@ -562,6 +575,8 @@ impl Guard {
         secret.dedup();
         crate::sorting::sort(&mut keys);
         keys.dedup();
+        crate::sorting::sort(&mut temp_keys);
+        temp_keys.dedup();
         services.dedup();
         crate::sorting::sort(&mut copied);
         copied.dedup();
@@ -591,6 +606,15 @@ impl Guard {
                  command needs {it}, tell the user: the run's panel (space m s) lets your commands read that file. \
                  Don't work around it.\n",
                 keys.join(", ")
+            ));
+        }
+        if !temp_keys.is_empty() {
+            let it = if temp_keys.len() == 1 { "it" } else { "them" };
+            s.push_str(&format!(
+                "{}: named like a key in the shared temp folder, which every program writes, so your commands \
+                 can't read {it} — even one a command of yours made there. Make such a file under $TMPDIR \
+                 instead: that folder is this run's own (a JVM: -Djava.io.tmpdir=$TMPDIR).\n",
+                temp_keys.join(", ")
             ));
         }
         if !names.is_empty() {
@@ -823,12 +847,20 @@ impl Guard {
                 };
                 // (7a, 7b — names from the data, `secretnames`; what a file made beside one does on Linux is
                 // `linux::unread_said`'s, in the notes)
-                let keys = match p.keys.is_some() {
-                    true => {
+                // (macOS: in the places outside a grant or a default opened too — Landlock only grants, so Linux
+                // closes them in the project alone)
+                let keys = match (p.keys.is_some(), !p.supervised) {
+                    (true, true) => {
+                        " In the project, the repository's other checkouts, the temp folders and what the user let it \
+                         read or write it can't read a file named like a key or a token (but templates, public keys, \
+                         CA bundles and a toolchain's installs and packages) — the user can open one from the run's \
+                         panel."
+                    }
+                    (true, false) => {
                         " In the project it can't read a file named like a key or a token (but templates and \
                          public keys) — the user can open one from the run's panel."
                     }
-                    false => "",
+                    (false, _) => "",
                 };
                 // (what's shared with other sessions' commands isn't here: the guarantees' paragraph, 9b)
                 let (names_where, net, linux) = match linux {
@@ -2802,6 +2834,13 @@ pub(crate) fn key_exception_regexes() -> Vec<String> {
     in_runs(crate::secretnames::exceptions().map(glob_regex))
 }
 
+/// Their exceptions outside the project too (`secretnames::outside_exceptions`: the CA bundles), alike.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn key_outside_exception_regexes() -> Vec<String> {
+    let all = crate::secretnames::exceptions().chain(crate::secretnames::outside_exceptions());
+    in_runs(all.map(glob_regex))
+}
+
 /// The start of a regex matching below `root` however deep: as many path parts as the root has — no path in it,
 /// so a name in the root's own path (a checkout under `.claude/worktrees`) doesn't close the whole project.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
@@ -2836,10 +2875,30 @@ pub(crate) fn protected_writes(root: &Path) -> String {
 /// filters for a `require-all`. Runs' profile's rule.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub(crate) fn key_files(at: &str) -> String {
-    let outputs = outputs_regex();
+    key_files_but(at, &outputs_regex(), key_exception_regexes())
+}
+
+/// `key_files` for a place outside the project opened to runs: below an install's packages too (the packs'
+/// `packages`, a part's `*` any characters but `/`), and the exceptions outside the project too (the CA
+/// bundles) — `key_named_below`.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+pub(crate) fn key_files_outside(at: &str) -> String {
+    let part = |s: &str| match s.split_once('*') {
+        Some((a, b)) => format!("{}[^/]*{}", as_written(a), as_written(b)),
+        None => as_written(s),
+    };
+    let packages = crate::sandboxpack::get().packages.iter();
+    let packages = packages.map(|p| p.split('/').map(part).collect::<Vec<_>>().join("/"));
+    let but: Vec<String> = std::iter::once(outputs_regex()).chain(packages).collect();
+    key_files_but(at, &but.join("|"), key_outside_exception_regexes())
+}
+
+/// `key_files`, but below the folders `outputs` names (regex alternatives) and the names `exceptions` take back.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+fn key_files_but(at: &str, outputs: &str, exceptions: Vec<String>) -> String {
     let names =
         |v: Vec<String>| -> String { v.iter().map(|r| format!(" (regex #\"{at}({r})$\")")).collect() };
-    let (named, except) = (names(key_regexes()), names(key_exception_regexes()));
+    let (named, except) = (names(key_regexes()), names(exceptions));
     format!("(require-any{named}) (require-not (require-any{except} (regex #\"{at}({outputs})/\")))")
 }
 
@@ -2897,6 +2956,35 @@ pub fn key_named_in(root: &Path, path: &Path) -> bool {
     let Some((_, folders)) = parts.split_last() else { return false };
     crate::secretnames::named_secret(rel)
         && !folders.iter().any(|p| outputs().iter().any(|o| *p == o.as_str()))
+}
+
+/// Whether `path` (real) is a file named like a key below `place`, a place outside the project opened to runs
+/// (`Policy::key_places`): as in the project (`key_named_in`), and not below an install's packages either (the
+/// packs' `packages`, anchored in an install's layout: grpc's `roots.pem` in `lib/python3.12/site-packages`,
+/// RubyGems' certificates in `lib/ruby/3.3.0`), and its name taken back by the exceptions outside the project too
+/// (the CA bundles — `secretnames::named_secret_outside`). The rule in Rust of `key_files_outside`.
+pub fn key_named_below(place: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(place) else { return false };
+    let parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let Some((_, folders)) = parts.split_last() else { return false };
+    let output = folders.iter().any(|p| outputs().iter().any(|o| p == o));
+    let packaged = crate::sandboxpack::get().packages.iter().any(|p| {
+        let want: Vec<&str> = p.split('/').collect();
+        let fits = |w: &[String]| w.iter().zip(&want).all(|(f, p)| crate::secretnames::wild(p, f));
+        !want.is_empty() && folders.windows(want.len()).any(fits)
+    });
+    crate::secretnames::named_secret_outside(rel) && !output && !packaged
+}
+
+/// Whether `path` (real) is a file named like a key that Claude's reads and tarae's tools leave closed until it's
+/// opened: in the project at `root` as `key_named_in` says, and anywhere outside it by its name — but below tools'
+/// output or an install's packages, as runs' rule says (`key_named_below`; frictions29: a granted folder outside,
+/// or one read by default, let one made there be read without a card).
+pub fn key_named(root: &Path, path: &Path) -> bool {
+    match path.starts_with(root) {
+        true => key_named_in(root, path),
+        false => key_named_below(Path::new("/"), path),
+    }
 }
 
 /// Device files every program writes to and asks (`ioctl`) — `/dev/null`, dyld's `/dev/dtracehelper` at every
@@ -3133,6 +3221,13 @@ pub struct Env {
     pub home: Option<PathBuf>,
     /// `$TMPDIR`, real.
     pub tmp: Option<PathBuf>,
+    /// The places outside the project a grant or a default opened to its runs — the repository's other checkouts,
+    /// what the user let Claude read — where the files named like keys stay closed as in the project (the temp
+    /// folders are added with the policy: `Policy::key_places`). Real paths.
+    pub key_places: Vec<PathBuf>,
+    /// The toolchains' installs in home (the packs' `installs`, real, when there): in a key place, nothing in one
+    /// is closed by its name (`Policy::key_spared`).
+    pub key_spared: Vec<PathBuf>,
     /// The tools' shared caches (the packs' `caches`: their folders in their homes, real, when there).
     pub caches: Vec<CachesSaid>,
     /// Single files a run writes: the caches' own files, the packs' `write-files` (`sandboxpack::filled`).
@@ -3203,6 +3298,22 @@ pub fn profile_path(p: &Path) -> PathBuf {
         (Some(dir), Some(name)) if dir != p => profile_path(dir).join(name),
         _ => p.to_path_buf(),
     }
+}
+
+/// The toolchains' installs the packs name (`installs`) where `vars` puts them, real — those there.
+fn installs_in(vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> {
+    let packs = crate::sandboxpack::get().installs.iter().flat_map(|i| vars.places_both(i));
+    let mut v: Vec<PathBuf> = packs.filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+    crate::sorting::sort(&mut v);
+    v.dedup();
+    v
+}
+
+/// Whether `place` (real), where the files named like keys are closed (`Policy::key_places`), is a temp folder
+/// every program writes — `/private/tmp`, the user's `$TMPDIR` and its siblings — not the run's own (its
+/// `RunDir`, never one).
+fn shared_temp(place: &Path) -> bool {
+    place == Path::new(TMP) || place.starts_with("/private/var/folders")
 }
 
 /// The user's own temp space: `$TMPDIR` is `/private/var/folders/xx/yyy/T` — its parent holds `C` (caches
@@ -3306,6 +3417,10 @@ pub(crate) fn env_in(
         .filter(|c| crate::allow::keepable(c, real_home.as_deref()))
         .chain(reads.iter().cloned())
         .collect();
+    // (what a grant or a default opened: there the names like keys stay closed — not the configs above, the
+    // toolchains' folders nor PATH's: a crate's test keys, a CA bundle, are a build's to read)
+    let key_places = also.clone();
+    let key_spared = vars.as_ref().map(installs_in).unwrap_or_default();
     let above: Vec<PathBuf> = real_home.iter().flat_map(|h| reads_above(&profile_path(root), h)).collect();
     also.extend(above.iter().cloned());
     let reads = real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| reads_for(h, &also, v));
@@ -3322,6 +3437,8 @@ pub(crate) fn env_in(
         root: profile_path(root),
         home,
         tmp,
+        key_places,
+        key_spared,
         caches,
         files,
         dirs: Vec::new(),
@@ -3535,6 +3652,17 @@ pub fn policy_from(root: &Path, w: crate::tools::Widened, here: &Here) -> Result
     #[cfg(target_os = "linux")]
     let p = confined(p);
     Ok(p)
+}
+
+/// The rule for the files named like keys a run would have with the settings and grants `w` (`tools::with_allowed`)
+/// — for what's asked before the session's first run (`also`): computed as a policy is, nothing made for a run, no
+/// proxy port. Blocks (a worker's).
+pub fn key_rules_for(root: &Path, w: crate::tools::Widened, here: &Here) -> KeyRules {
+    let (env, _) = env_in(root, &w.llm, &w.reads, here);
+    let mut p = Policy::for_project(&env);
+    p.supervised = here.os == Os::Linux;
+    w.onto(&mut p);
+    p.key_rules()
 }
 
 /// `policy_in`, for a run about to start — only here, on a run's way, is anything made for it: its own folder
@@ -6665,14 +6793,17 @@ mod tests {
         assert!(!p.writes_allow(Path::new("/dev/ttys012")));
         let none = Policy::for_project(&Env { reads: Reads::default(), ..env(Path::new("/Users/u/p")) });
         let text = none.profile();
-        // (but the project's own rule: files named like keys in it — `files_named_like_keys_are_closed_…`)
+        // (but the rules of files named like keys: the project's, and the temp folders' —
+        // `files_named_like_keys_are_closed_…`)
         let keys = "(deny file-read-data file-read-xattr (require-all (subpath (param \"ROOT\"))";
+        let places = "(deny file-read-data file-read-xattr (require-all (require-any (subpath (param \"KP";
         let reads: Vec<&str> = text
             .lines()
             .filter(|l| {
                 l.contains("file-read")
                     && !l.contains(TERMINALS)
                     && !l.starts_with(keys)
+                    && !l.starts_with(places)
                     && *l != "(allow file-read*)"
             })
             .collect();
@@ -6823,7 +6954,7 @@ mod tests {
         let deny = deny.unwrap_or_else(|| panic!("{text}"));
         assert!(deny.contains("\\.[eE][nN][vV]") && deny.contains("[^/]*\\.[pP][eE][mM]"), "{deny}");
         assert!(deny.contains("(require-not (require-any") && deny.contains("node_modules|"), "{deny}");
-        assert!(deny.contains("[^/]*\\.[pP][uU][bB])$"), "the exceptions: {deny}");
+        assert!(deny.contains("[^/]*\\.[pP][uU][bB]"), "the exceptions: {deny}");
         let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s}: {text}"));
         assert!(at(deny) > at("(allow file-read-data file-read-xattr (subpath (param \"ROOT\"))"), "{text}");
         assert!(!text.contains("/Users/u") && !text.contains("Y0"), "paths only as parameters: {text}");
@@ -6854,8 +6985,328 @@ mod tests {
         assert!(reads(&open, ".env") && !said(&open).contains("named like a key"));
         assert!(!open.profile().contains("[pP][eE][mM]"));
         let summary = |p: &Policy| Guard::In(Box::new(p.clone())).report(&[]);
-        assert!(summary(&mac).contains("In the project it can't read a file named like a key or a token"));
+        let said = match mac.supervised {
+            false => "what the user let it read or write it can't read a file named like a key or a token",
+            true => "In the project it can't read a file named like a key or a token",
+        };
+        assert!(summary(&mac).contains(said), "{}", summary(&mac));
         assert!(!summary(&open).contains("named like a key"));
+    }
+
+    /// frictions29, second review: a nested worktree's main checkout (`app/.claude/worktrees/feat` — another
+    /// checkout, holding the project) closes `app/.env`; a folder opened for writing (`llm.sandbox-write`, a write
+    /// grant — readable too) closes the keys in it; in a granted toolchain install a CA bundle reads by its name
+    /// (`cacert.pem` — runtime/secret-names.txt's exception) or below its packages (grpc's `roots.pem`), a private
+    /// key beside them doesn't, nor a `cert.pem` (a certificate and its key in one file as often — review N9).
+    #[test]
+    fn keys_close_in_a_main_checkout_above_and_a_folder_opened_for_writing_ca_bundles_read() {
+        let root = Path::new("/Users/u/app/.claude/worktrees/feat");
+        let places = ["/Users/u/app", "/Users/u/py"].map(PathBuf::from);
+        let e = env(root);
+        let allow = places.iter().cloned().chain([PathBuf::from("/Users/u/out")]).collect();
+        let reads = Reads { allow, ..e.reads.clone() };
+        let p = Policy::for_project(&Env {
+            key_places: places.to_vec(),
+            reads,
+            write: vec!["~/out".into()],
+            ..e
+        });
+        assert!(p.key_places.contains(&PathBuf::from("/Users/u/out")), "{:?}", p.key_places);
+        if p.supervised {
+            return;
+        }
+        let reads = |f: &str| p.reads_allow(Path::new(f));
+        for f in [
+            "/Users/u/app/.env",
+            "/Users/u/out/deploy.key",
+            "/Users/u/py/ssl/server.pem",
+            "/Users/u/py/ssl/cert.pem",
+        ] {
+            assert!(!reads(f), "{f}");
+        }
+        for f in [
+            "/Users/u/app/src/main.rs",
+            "/Users/u/py/lib/python3.12/site-packages/certifi/cacert.pem",
+            "/Users/u/py/lib/python3.12/site-packages/grpc/_cython/_credentials/roots.pem",
+            "/Users/u/py/ssl/cacert.pem",
+            "/Users/u/out/build.log",
+        ] {
+            assert!(reads(f), "{f}");
+        }
+        let text = p.profile();
+        assert!(text.contains("[cC][aA][cC][eE][rR][tT]\\.[pP][eE][mM]"), "the exception in the profile");
+        assert!(text.contains("lib/python3[^/]*/site-packages"), "the packages in the rule outside: {text}");
+        // (the CA bundles' names: an exception in the rules outside, not in the project's — review)
+        let rule = "(deny file-read-data file-read-xattr (require-all (subpath (param \"ROOT\"))";
+        let project = text.lines().find(|l| l.starts_with(rule)).unwrap();
+        assert!(project.contains("[pP][eE][mM]"), "the project's key rule: {project}");
+        assert!(!project.contains("[cC][aA][cC][eE][rR][tT]"), "{project}");
+    }
+
+    /// frictions29 A: one rule for the files named like keys. Each place — the project and below tools' output in
+    /// it, a read grant (below its tools' output, an install's packages, a CA bundle, a `cert.pem`), another
+    /// checkout, a write grant and `llm.sandbox-write`, the temp folders and `$TMPDIR` itself, an install the packs
+    /// name, a toolchain's folder, home where nothing opened, outside home, a file the user opened — gets one answer
+    /// from every user: the policy (`key_rule`, and taken apart, `key_rules`), the profile's parameters, the rule in
+    /// Rust (`reads_allow`), the report, the run's panel (`blocked::choices_by`), `also {read}` (`tools::also_read`)
+    /// and Claude's Read (in home it asks where runs close one and reads where they read it, by macOS's rule on every
+    /// system; outside home it asks wherever — cardauto D3 — the one said exception, where runs read one that isn't
+    /// in a place they close). Linux's runs close them in the project only (review: F1, F3, F4, N1, N3, N10, N12,
+    /// N13 — each user decided its own way; frictions29 round 3: Claude's Read asked where runs read).
+    #[test]
+    fn every_user_of_the_key_rule_gives_one_answer() {
+        use crate::allow::{Allowed, Grant};
+        use policy::KeyRule::{Closed, ClosedOnceRead};
+        let root = Path::new("/Users/u/code/p");
+        let e = env(root);
+        let places = ["/Users/u/ref", "/Users/u/wt/p2", "/Users/u/.pyenv"].map(PathBuf::from);
+        let allow = places.iter().cloned().chain([PathBuf::from("/Users/u/.cargo")]).collect();
+        let reads = Reads { allow, ..e.reads.clone() };
+        let (write, key_spared) =
+            (vec!["~/out".into(), "/opt/w".into()], vec![PathBuf::from("/Users/u/.pyenv")]);
+        let mut p = Policy::for_project(&Env { key_places: places.to_vec(), key_spared, reads, write, ..e });
+        let opened = PathBuf::from("/Users/u/ref/opened.key");
+        p.keys = Some(vec![opened.clone()]);
+        assert!(!p.key_places.contains(&places[2]), "an install is never one: {:?}", p.key_places);
+        let w = profile_path(Path::new("/opt/w"));
+        let at = |k: &str| Some(Closed(PathBuf::from(k)));
+        let f = PathBuf::from;
+        // (each file, and what macOS's runs say of it)
+        let rows = [
+            (f("/Users/u/code/p/.env"), at("/Users/u/code/p")),
+            // (a CA bundle's name is an exception outside the project only — review)
+            (f("/Users/u/code/p/certs/cacert.pem"), at("/Users/u/code/p")),
+            (f("/Users/u/code/p/node_modules/x/test.pem"), None),
+            (f("/Users/u/ref/id_ed25519"), at("/Users/u/ref")),
+            (f("/Users/u/ref/README.md"), None),
+            (f("/Users/u/ref/id_ed25519.pub"), None),
+            (f("/Users/u/ref/node_modules/x/server.key"), None),
+            (f("/Users/u/ref/lib/python3.12/site-packages/grpc/_cython/_credentials/roots.pem"), None),
+            (f("/Users/u/ref/lib/ruby/3.3.0/rubygems/ssl_certs/rubygems.org/GlobalSignRootCA_R3.pem"), None),
+            (f("/Users/u/ref/certs/cert.pem"), at("/Users/u/ref")),
+            // (packages anchored in an install's layout: a monorepo's own `gems/` closes its keys — review)
+            (f("/Users/u/ref/gems/billing/.env"), at("/Users/u/ref")),
+            (f("/Users/u/ref/site-packages/x/deploy.key"), at("/Users/u/ref")),
+            (f("/Users/u/ref/ssl/cacert.pem"), None),
+            (opened.clone(), None),
+            (f("/Users/u/wt/p2/.env"), at("/Users/u/wt/p2")),
+            (f("/Users/u/out/deploy.key"), at("/Users/u/out")),
+            (w.join(".env"), Some(Closed(w.clone()))),
+            (f("/Users/u/.pyenv/versions/3.12/ssl/server.pem"), None),
+            (f("/Users/u/.cargo/registry/src/x/tests/key.pem"), None),
+            (f("/private/tmp/x/.env.local"), at("/private/tmp")),
+            (f("/private/var/folders/ab/cd/C/x/deploy.key"), at("/private/var/folders/ab/cd")),
+            // (`$TMPDIR` too: every program of the user's writes there — a run's own is its `RunDir`)
+            (f("/private/var/folders/ab/cd/T/x/deploy.key"), at("/private/var/folders/ab/cd")),
+            (f("/Users/u/q/.env"), Some(ClosedOnceRead)),
+            (f("/opt/x/.env"), None),
+        ];
+        // (taken apart, what's decided after a run goes by: `key_rules` copies each field the rule reads)
+        let rules = p.key_rules();
+        let designed = rules.clone().designed();
+        let none = Allowed::default();
+        let answered = Allowed {
+            read: vec![places[0].clone()],
+            write: vec![f("/Users/u/out")],
+            keys: vec![opened.clone()],
+            ..Default::default()
+        };
+        let caps = crate::caps::Caps {
+            home: Some("/Users/u".into()),
+            ..crate::caps::Caps::granted(root, &answered, &none, &none)
+        };
+        let mut read_asks_alone = Vec::new();
+        for (file, on_mac) in rows {
+            let closed_on_mac = on_mac.is_some();
+            let want = if !p.supervised || file.starts_with(root) { on_mac } else { None };
+            assert_eq!(p.key_rule(&file), want, "{file:?}: the rule");
+            assert_eq!(rules.rule(&file), want, "{file:?}: taken apart");
+            let some = want.is_some();
+            // (the rule in Rust: closed, never read; else read — but home where nothing opened)
+            match some {
+                true => assert!(!p.reads_allow(&file), "{file:?}: read"),
+                false if !file.starts_with("/Users/u/q") => {
+                    assert!(p.reads_allow(&file), "{file:?}: not read")
+                }
+                false => {}
+            }
+            // (the profile: the place that closes it a parameter of its rule)
+            if let Some(Closed(k)) = &want
+                && k != root
+            {
+                let params = p.params();
+                assert!(
+                    params.iter().any(|(n, v)| n.starts_with("KP") && Path::new(v) == k),
+                    "{k:?}: {params:?}"
+                );
+            }
+            let d = Denial {
+                process: "cat".into(),
+                op: "file-read-data".into(),
+                target: file.display().to_string(),
+            };
+            let said = Guard::In(Box::new(p.clone())).kept(std::slice::from_ref(&d)).0;
+            assert_eq!(said.contains("named like a key"), some, "{file:?}: the report: {said}");
+            let panel = crate::blocked::choices_by(&[d], &caps, Some(&rules));
+            let key = Grant::Key(file.clone());
+            assert_eq!(panel.iter().any(|c| c.grant == key), some, "{file:?}: the panel: {panel:?}");
+            assert!(!some || panel.iter().all(|c| !matches!(c.grant, Grant::Read(_))), "{file:?}: {panel:?}");
+            let also = crate::tools::also_read(file.clone(), &caps, Some(&rules));
+            assert_eq!(also.as_ref().ok() == Some(&Some(key)), some, "{file:?}: also: {also:?}");
+            // (Claude's Read, both ways: it asks where runs close one and reads where they read — by macOS's rule
+            // on every system, as designed — but outside home, where it asks wherever: cardauto D3)
+            let claude =
+                crate::caps::Caps { key_rules: Some(std::sync::Arc::new(designed.clone())), ..caps.clone() };
+            let asks = crate::reads::key_closed(&claude, &file);
+            let outside_home = !file.starts_with("/Users/u");
+            assert_eq!(asks, closed_on_mac || outside_home, "{file:?}: Claude's Read");
+            if asks != closed_on_mac {
+                read_asks_alone.push(file.clone());
+            }
+            // (the report: one closed in a shared temp folder says where a run's own goes)
+            let temp = matches!(&want, Some(Closed(k)) if k.starts_with("/private/tmp") || k.starts_with("/private/var"));
+            assert_eq!(said.contains("under $TMPDIR"), temp, "{file:?}: the report: {said}");
+        }
+        // (the one place they part, said: outside home in no place runs close — the threat model's "not kept")
+        assert_eq!(read_asks_alone, [f("/opt/x/.env")], "where Read asks and runs read");
+        // (a setting holding a token is read from a copy: the copies' rule, not the key rule — the report says so,
+        // the panel and `also` offer no key grant of the file, Claude's Read still asks for it — review: the key
+        // rule's `ClosedOnceRead` took it first)
+        let npmrc = f("/Users/u/.npmrc");
+        let mut c = p.clone();
+        c.reads.copies.hidden.push((npmrc.clone(), "NPM_CONFIG_USERCONFIG".into()));
+        assert_eq!(c.key_rule(&npmrc), None);
+        assert!(!c.reads_allow(&npmrc));
+        let d = Denial {
+            process: "npm".into(),
+            op: "file-read-data".into(),
+            target: npmrc.display().to_string(),
+        };
+        let said = Guard::In(Box::new(c.clone())).kept(std::slice::from_ref(&d)).0;
+        assert!(said.contains("holds a token") && !said.contains("named like a key"), "{said}");
+        let copied = c.key_rules();
+        let panel = crate::blocked::choices_by(&[d], &caps, Some(&copied));
+        assert!(panel.iter().all(|ch| ch.grant != Grant::Key(npmrc.clone())), "{panel:?}");
+        let also = crate::tools::also_read(npmrc.clone(), &caps, Some(&copied));
+        assert!(also.as_ref().ok() != Some(&Some(Grant::Key(npmrc.clone()))), "{also:?}");
+        let claude =
+            crate::caps::Caps { key_rules: Some(std::sync::Arc::new(copied.designed())), ..caps.clone() };
+        assert!(crate::reads::key_closed(&claude, &npmrc), "Claude's Read asks for the file");
+        // (a write refused where keys are closed is the place's, not a key's — review N15)
+        let write = Denial {
+            process: "sh".into(),
+            op: "file-write-create".into(),
+            target: "/Users/u/ref/.env".into(),
+        };
+        let said = Guard::In(Box::new(p.clone())).kept(&[write]).0;
+        assert!(!said.contains("named like a key"), "{said}");
+    }
+
+    /// frictions29: the files named like keys are closed in the places outside the project a grant or a default
+    /// opened — what the user let Claude read, the repository's other checkouts, the temp folders — as in the
+    /// project: but templates and public keys, what's below tools' output there, and a file the user opened. Never
+    /// wider (a CA bundle, a toolchain's folder read). A place holding the project (a folder granted above it)
+    /// closes them beside the project, and leaves the project to its own rule (review: it was dropped whole). Places
+    /// as deep as each other share one rule; each is a parameter; the rule in Rust agrees; the report names it.
+    #[test]
+    fn files_named_like_keys_are_closed_where_a_grant_or_a_default_opened_outside() {
+        let root = Path::new("/Users/u/code/p");
+        let places = ["/Users/u/ref", "/Users/u/doc", "/Users/u/wt/p2", "/Users/u/code", "/Users/u/code/p/x"]
+            .map(PathBuf::from);
+        // (read as a grant and a default make them, beside a toolchain's folder)
+        let e = env(root);
+        let allow = places[..4].iter().cloned().chain([PathBuf::from("/Users/u/.cargo")]).collect();
+        let reads = Reads { allow, ..e.reads.clone() };
+        let p = Policy::for_project(&Env { key_places: places.to_vec(), reads, ..e });
+        // (and the fixture's own `llm.sandbox-write` folder; its `/` and `/Users`, which hold the project, aren't
+        // opened; the temp folders as this system's policy has them — review N8: Linux's `/tmp`)
+        let mut want: Vec<PathBuf> = [
+            "/Users/u/Library/Caches/thing",
+            "/Users/u/code",
+            "/Users/u/doc",
+            "/Users/u/ref",
+            "/Users/u/wt/p2",
+            TMP,
+            "/private/var/folders/ab/cd",
+        ]
+        .map(PathBuf::from)
+        .to_vec();
+        crate::sorting::sort(&mut want);
+        assert_eq!(p.key_places, want, "the temp folders too, what holds the project; not in it");
+        // (`$TMPDIR` itself isn't spared: every program of the user's writes there — frictions29 round 3)
+        assert!(p.key_spared.is_empty(), "{:?}", p.key_spared);
+        // (Linux: Landlock only grants — nothing closes them there, and the rule in Rust doesn't say it does)
+        if p.supervised {
+            assert!(!p.profile().contains("KP0") && p.reads_allow(Path::new("/Users/u/ref/id_ed25519")));
+            return;
+        }
+        let text = p.profile();
+        let rules: Vec<&str> =
+            text.lines().filter(|l| l.contains("(require-all (require-any (subpath (param \"KP")).collect();
+        assert_eq!(rules.len(), 4, "one rule a depth: {rules:#?}");
+        // (`code`, `doc` and `ref` — KP1 to KP3 — are as deep as each other)
+        let three = "(subpath (param \"KP1\")) (subpath (param \"KP2\")) (subpath (param \"KP3\")))";
+        assert!(rules.iter().any(|r| r.contains(three)), "{rules:#?}");
+        assert!(rules.iter().all(|r| r.starts_with("(deny file-read-data file-read-xattr")), "{rules:#?}");
+        let not_root = "(require-not (subpath (param \"ROOT\")))";
+        assert!(rules.iter().all(|r| r.contains(not_root)), "the project left to its own rule: {rules:#?}");
+        assert!(
+            !text.contains("/Users/u") && !text.contains("/private/tmp"),
+            "paths only as parameters: {text}"
+        );
+        assert!(p.params().contains(&("KP6".into(), "/private/var/folders/ab/cd".into())));
+        assert!(!p.params().iter().any(|(n, _)| n.starts_with("KI")), "{:?}", p.params());
+        // (the run's own folder, its `TMPDIR`, only it writes: what's there is its own — even where a place holding
+        // it closes the names)
+        let s = crate::scratch::Scratch::new("keys-run-own");
+        let base = profile_path(&s);
+        let mut q = p.clone();
+        q.run = Some(RunDir::new_in(&base).unwrap());
+        let own = q.run.as_ref().map(|r| r.path().to_path_buf()).unwrap();
+        q.key_places.push(base.clone());
+        assert_eq!(q.key_rule(&own.join("server.key")), None, "the run's own");
+        assert_eq!(q.key_rule(&base.join("server.key")), Some(policy::KeyRule::Closed(base.clone())));
+        let own_rule = "(require-not (require-any (subpath (param \"ROOT\")) (subpath (param \"RUN\"))))";
+        assert!(q.profile().contains(own_rule), "{}", q.profile());
+        let reads = |p: &Policy, f: &str| p.reads_allow(Path::new(f));
+        for f in [
+            "/Users/u/ref/id_ed25519",
+            "/Users/u/doc/deep/Server.PEM",
+            "/Users/u/wt/p2/.env",
+            "/Users/u/code/other/id_rsa",
+            "/Users/u/code/p/.env",
+            "/private/tmp/x/.env.local",
+            "/private/var/folders/ab/cd/C/s/deploy.key",
+            "/private/var/folders/ab/cd/T/s/deploy.key",
+        ] {
+            assert!(!reads(&p, f), "{f}");
+        }
+        for f in [
+            "/Users/u/ref/README.md",
+            "/Users/u/ref/id_ed25519.pub",
+            "/Users/u/ref/node_modules/x/test.pem",
+            "/Users/u/code/p/node_modules/x/test.pem",
+            "/Users/u/code/other/README.md",
+            "/etc/ssl/cert.pem",
+            "/opt/certifi/cacert.pem",
+            "/Users/u/.cargo/registry/src/x/tests/key.pem",
+        ] {
+            assert!(reads(&p, f), "{f}");
+        }
+        let key = PathBuf::from("/Users/u/ref/id_ed25519");
+        let opened = Policy { keys: Some(vec![key.clone()]), ..p.clone() };
+        assert!(reads(&opened, "/Users/u/ref/id_ed25519") && !reads(&opened, "/Users/u/doc/deep/Server.PEM"));
+        let refused = [Denial {
+            process: "cat".into(),
+            op: "file-read-data".into(),
+            target: key.display().to_string(),
+        }];
+        let said = Guard::In(Box::new(p.clone())).kept(&refused).0;
+        assert!(said.contains("ref/id_ed25519: named like a key"), "{said}");
+        // (a test's policy closes them nowhere: no rule, no parameter)
+        let open = Policy { keys: None, ..p.clone() };
+        assert!(reads(&open, "/Users/u/ref/id_ed25519") && !open.profile().contains("KP0"));
+        assert!(!open.params().iter().any(|(k, _)| k.starts_with("KP")));
     }
 
     /// What a run never reads holds without any pack — `KEPT_FLOOR` beside `allow::SECRETS`, Claude's own,
@@ -9224,6 +9675,8 @@ mod tests {
             sockets: Vec::new(),
             terminals: false,
             keys: None,
+            key_places: Vec::new(),
+            key_spared: Vec::new(),
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -10473,6 +10926,8 @@ mod tests {
                 sockets: Vec::new(),
                 terminals: false,
                 keys: None,
+                key_places: Vec::new(),
+                key_spared: Vec::new(),
                 refused: Vec::new(),
                 named_by: String::new(),
                 refused_asked: Vec::new(),
@@ -10556,6 +11011,8 @@ mod tests {
             sockets: Vec::new(),
             terminals: false,
             keys: None,
+            key_places: Vec::new(),
+            key_spared: Vec::new(),
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -10626,6 +11083,8 @@ mod tests {
             sockets: Vec::new(),
             terminals: false,
             keys: None,
+            key_places: Vec::new(),
+            key_spared: Vec::new(),
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),
@@ -10887,6 +11346,80 @@ mod tests {
         );
         assert!(r.contains("Git's own folder is kept"), "{r}");
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (frictions29): a file named like a key made in a place a grant opened outside the
+    /// project, or in the temp folder, isn't read; beside it what isn't named so is, and so are a key below tools'
+    /// output there, one in a place no grant or default opened, and the system's CA bundle — and a toolchain's own
+    /// files in the grant (frictions29 A): below an install's packages (grpc's `roots.pem`, RubyGems'
+    /// certificates), a `ca` bundle by its name, anything in an install the packs name; a `cert.pem` beside them is
+    /// closed, and so are a monorepo's own `gems/` keys and a `cacert.pem` in the project (the bundles' names are an
+    /// exception outside it only). The file the user opened is read. A grant holding the project closes a key beside the project, and
+    /// the project reads as ever. Harmless: plain-text stand-ins in folders of the test's own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_key_in_a_granted_place_outside_is_closed_and_a_ca_bundle_reads() {
+        if skipped_inside("sandbox::tests::a_key_in_a_granted_place_outside_is_closed_and_a_ca_bundle_reads")
+        {
+            return;
+        }
+        let s = crate::scratch::Scratch::new("sb-key-places");
+        let tmp = crate::scratch::Scratch::in_dir(Path::new(TMP), "sb-key-places");
+        let (t, tmp) = (profile_path(&s), profile_path(&tmp));
+        let (root, granted, other) = (t.join("project"), t.join("ref"), t.join("other"));
+        let closed = [
+            granted.join("id_ed25519"),
+            tmp.join("deploy.pem"),
+            granted.join("certs/cert.pem"),
+            granted.join("gems/billing/.env"),
+            root.join("certs/cacert.pem"),
+        ];
+        let install = granted.join(".pyenv");
+        let open = [
+            granted.join("README.md"),
+            granted.join("node_modules/pkg/test.pem"),
+            other.join("server.key"),
+            granted.join("lib/python3.12/site-packages/grpc/_cython/_credentials/roots.pem"),
+            granted.join("lib/ruby/3.3.0/rubygems/ssl_certs/rubygems.org/GlobalSignRootCA_R3.pem"),
+            granted.join("ssl/cacert.pem"),
+            install.join("versions/3.12/ssl/server.pem"),
+        ];
+        for f in closed.iter().chain(&open).chain([&root.join("own.txt")]) {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, "tarae-fake-token").unwrap();
+        }
+        let env = Env {
+            root: root.clone(),
+            key_places: vec![granted.clone()],
+            key_spared: vec![install],
+            run_env: run_env_here(),
+            ..Env::default()
+        };
+        let p = Policy::for_project(&env);
+        assert_eq!(p.key_spared.len(), 1, "the install, inside the grant");
+        let cat = |p: &Policy, f: &Path| sh_under(p, &root, &format!("cat '{}' 2>/dev/null", f.display())).1;
+        for f in &closed {
+            assert_eq!(cat(&p, f), "", "{}: read", f.display());
+        }
+        for f in &open {
+            assert_eq!(cat(&p, f), "tarae-fake-token", "{}: not read", f.display());
+        }
+        let ca = sh_under(&p, &root, "head -c 1 /etc/ssl/cert.pem >/dev/null && echo read").1;
+        assert_eq!(ca, "read\n", "the CA bundle");
+        let opened = Policy { keys: Some(vec![closed[0].clone()]), ..p.clone() };
+        assert_eq!(cat(&opened, &closed[0]), "tarae-fake-token", "the file the user opened");
+        // A folder granted that holds the project: a key beside the project closed, the project's own files read
+        let env = Env {
+            root: root.clone(),
+            key_places: vec![t.clone()],
+            key_spared: Vec::new(),
+            run_env: run_env_here(),
+            ..Env::default()
+        };
+        let holding = Policy::for_project(&env);
+        assert_eq!(cat(&holding, &other.join("server.key")), "", "a key beside the project, in the grant");
+        assert_eq!(cat(&holding, &root.join("own.txt")), "tarae-fake-token", "the project's own");
+        assert_eq!(cat(&holding, &granted.join("README.md")), "tarae-fake-token");
     }
 
     /// For real, on macOS (card model P2) — reads under the real profile: in a stand-in home only the project,
@@ -11418,6 +11951,9 @@ mod tests {
         let mut here = Here::now();
         here.env.insert("HOME".into(), home.clone().into());
         here.env.remove("XDG_CACHE_HOME");
+        // (the user's own `PYTHONDONTWRITEBYTECODE` reaches a run — the pack passes `PYTHON*` — and no bytecode is
+        // written at all: not this test's question)
+        here.env.remove("PYTHONDONTWRITEBYTECODE");
         toolchain_found_in(&root, ToolDirs::default(), &here);
         let llm = crate::llm::LlmConfig::default();
         let p = run_policy_in(&root, &llm, &[], &here).expect("a run's policy");
@@ -11836,6 +12372,8 @@ mod tests {
             sockets: Vec::new(),
             terminals: false,
             keys: None,
+            key_places: Vec::new(),
+            key_spared: Vec::new(),
             refused: Vec::new(),
             named_by: String::new(),
             refused_asked: Vec::new(),

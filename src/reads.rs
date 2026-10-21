@@ -38,6 +38,28 @@ pub struct Look {
     /// those a Grep would search (`grep_keys`) — Glob only lists names, so none. They ask unless opened
     /// (`Grant::Key` — the run's panel's or this card's); `decide` leaves only those still closed.
     pub keys: Vec<PathBuf>,
+    /// A folder outside the project searched where it would go unasked, too big to look through for files named
+    /// like keys (past `KEYS_WALK_MAX` entries): it asks, and never goes unasked (`covered`).
+    pub cut: bool,
+}
+
+/// The entries a walk of a folder outside the project looks through for files named like keys at most
+/// (`decide_with`, on the worker that decides) — past them it can't tell, and the search asks. As many as a
+/// look through a place for tokens visits (`tokens::found_under`'s `VISIT_MAX`).
+const KEYS_WALK_MAX: usize = 10_000;
+
+#[cfg(test)]
+thread_local! {
+    /// (Tests: `KEYS_WALK_MAX` for this thread's `decide` — a walk cut short without 10,000 files.)
+    static WALK_MAX: std::cell::Cell<usize> = const { std::cell::Cell::new(KEYS_WALK_MAX) };
+}
+
+/// `KEYS_WALK_MAX` (tests: this thread's `WALK_MAX`).
+fn keys_walk_max() -> usize {
+    #[cfg(test)]
+    return WALK_MAX.with(|m| m.get());
+    #[cfg(not(test))]
+    KEYS_WALK_MAX
 }
 
 /// An ask waiting for its answer.
@@ -144,7 +166,8 @@ impl Gate {
             false => ("Grep", json!({ "path": at })),
         };
         let caps = self.basis.build();
-        let (look, covered, class) = decide(tool, &input, &caps, &self.made);
+        // (a folder's own files named like keys don't count: tarae's tools leave them out by name — `Keys::shut`)
+        let (look, covered, class) = decide_with(tool, &input, &caps, &self.made, file);
         if covered || by_default(class, &caps) {
             return Ok(());
         }
@@ -207,8 +230,16 @@ pub enum Own {
     Review,
 }
 
-/// Where the call reads — `cwd` is where relative paths start (claude's, the project's root).
+/// Where the call reads — `cwd` is where relative paths start (claude's, the project's root). (Tests: `decide`
+/// goes through `look_with`.)
+#[cfg(test)]
 pub fn look(tool: &str, input: &Value, cwd: &Path) -> Look {
+    look_with(tool, input, cwd, true)
+}
+
+/// `look`; `folder_keys` false: a folder searched names none of the files named like keys in it (tarae's own
+/// search leaves them out by name), only itself when it's one.
+fn look_with(tool: &str, input: &Value, cwd: &Path, folder_keys: bool) -> Look {
     let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
     let rel = |p: &str| if p.is_empty() { cwd.to_path_buf() } else { cwd.join(p) };
     let (given, pattern, filter) = match tool {
@@ -222,34 +253,44 @@ pub fn look(tool: &str, input: &Value, cwd: &Path) -> Look {
         _ => crate::paths::real(&rel(&given)),
     };
     let file = at.as_ref().is_some_and(|p| p.is_file());
+    // (a folder outside the project, or holding it, is walked only where it would go unasked — `decide_with`)
     let keys = match (tool, &at) {
-        ("Read", Some(at)) if crate::sandbox::key_named_in(cwd, at) => vec![at.clone()],
-        ("Grep", Some(at)) => grep_keys(cwd, at, &filter, &s("type")),
+        ("Read", Some(at)) if crate::sandbox::key_named(cwd, at) => vec![at.clone()],
+        ("Grep", Some(at)) if at.is_file() || folder_keys && at.starts_with(cwd) => {
+            grep_keys(cwd, at, &filter, &s("type"), None, None).unwrap_or_default()
+        }
+        // (a folder holding the project: the project's own, as ever — the rest of it where it'd go unasked)
+        ("Grep", Some(at)) if folder_keys && cwd.starts_with(at) => {
+            grep_keys(cwd, cwd, &filter, &s("type"), None, None).unwrap_or_default()
+        }
         _ => Vec::new(),
     };
-    Look { tool: tool.to_string(), at, pattern, filter, given, file, keys }
+    Look { tool: tool.to_string(), at, pattern, filter, given, file, keys, cut: false }
 }
 
-/// The files named like keys in the project at `root` a Grep of `at` (real) opens: `at` itself, filters or
-/// not, or those in the folder — in the project, when the folder holds it — that its file filters (`glob`,
-/// `type`) let through
-/// (`grep_opens`). What else Claude Code's Grep may leave out (ignored or hidden files, links) isn't guessed:
-/// every one counts. Not below a folder of tools' output, as `key_named_in`, nor in `.git` (git's own files —
-/// neither walked: `perf_grep_keys_in_this_repository`).
-fn grep_keys(root: &Path, at: &Path, glob: &str, kind: &str) -> Vec<PathBuf> {
+/// The files named like keys (`sandbox::key_named`) a Grep of `at` (real) opens, the project at `root`: `at`
+/// itself, filters or not, or those in the folder — the project's own rule inside it, by name alone outside it
+/// (a folder holding the project too) — that its file filters (`glob`, `type`) let through (`grep_opens`).
+/// What else Claude Code's Grep may leave out (ignored or hidden files, links) isn't guessed: every one counts.
+/// Not below a folder of tools' output, nor in `.git` (git's own files — neither walked:
+/// `perf_grep_keys_in_this_repository`), nor in `skip` (the project, when `at` holds it: its own were looked for
+/// already — a big one would cut the walk short). None: past `limit` entries, it can't tell.
+fn grep_keys(
+    root: &Path,
+    at: &Path,
+    glob: &str,
+    kind: &str,
+    limit: Option<usize>,
+    skip: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
     // (a file named on ripgrep's command line is searched whatever `-g`/`-t` say: they filter what a walk
     // finds, never what it starts from)
     if at.is_file() {
-        return crate::sandbox::key_named_in(root, at).then(|| at.to_path_buf()).into_iter().collect();
+        return Some(crate::sandbox::key_named(root, at).then(|| at.to_path_buf()).into_iter().collect());
     }
-    let from = if at.starts_with(root) {
-        at
-    } else if root.starts_with(at) {
-        root
-    } else {
-        return Vec::new();
-    };
+    let from = at;
     let outputs = crate::sandbox::outputs();
+    let skip = skip.map(Path::to_path_buf);
     let walk = ignore::WalkBuilder::new(from)
         .standard_filters(false)
         .follow_links(false)
@@ -257,21 +298,28 @@ fn grep_keys(root: &Path, at: &Path, glob: &str, kind: &str) -> Vec<PathBuf> {
             let name = e.file_name();
             e.depth() == 0
                 || !e.file_type().is_some_and(|t| t.is_dir())
-                || (name != ".git" && !outputs.iter().any(|o| name == o.as_str()))
+                || (name != ".git"
+                    && !outputs.iter().any(|o| name == o.as_str())
+                    && skip.as_deref() != Some(e.path()))
         })
         .build();
-    let mut keys: Vec<PathBuf> = walk
-        .flatten()
+    let mut keys: Vec<PathBuf> = Vec::new();
+    for (seen, e) in walk.flatten().enumerate() {
+        if limit.is_some_and(|l| seen >= l) {
+            return None;
+        }
         // (a link to a file counts as the file it leads to)
-        .filter_map(|e| match e.path_is_symlink() {
+        let file = match e.path_is_symlink() {
             true => crate::paths::real(e.path()).filter(|p| p.is_file()),
             false => e.file_type().is_some_and(|t| t.is_file()).then(|| e.into_path()),
-        })
-        .filter(|p| crate::sandbox::key_named_in(root, p) && grep_opens(p, glob, kind, [from, root]))
-        .collect();
+        };
+        keys.extend(
+            file.filter(|p| crate::sandbox::key_named(root, p) && grep_opens(p, glob, kind, [from, root])),
+        );
+    }
     crate::sorting::sort(&mut keys);
     keys.dedup();
-    keys
+    Some(keys)
 }
 
 /// Whether Grep's file filters could let `file` through — where it can't be told, they do. Its `glob`, as
@@ -436,11 +484,12 @@ impl Keys {
         self
     }
 
-    /// Whether `path` — where its links lead, as Read's `Look.keys` — is a file named like a key in the
-    /// project that isn't open to Claude. A worker's: it resolves the path, and may read the store.
+    /// Whether `path` — where its links lead, as Read's `Look.keys` — is a file named like a key (in the
+    /// project, or outside it by its name — `sandbox::key_named`) that isn't open to Claude. A worker's: it
+    /// resolves the path, and may read the store.
     pub fn shut(&self, path: &Path) -> bool {
         let real = crate::paths::real(path).unwrap_or_else(|| path.to_path_buf());
-        if !crate::sandbox::key_named_in(&self.root, &real) {
+        if !crate::sandbox::key_named(&self.root, &real) {
             return false;
         }
         let kept =
@@ -461,12 +510,12 @@ pub const KEY_LINE: &str = "(named like a key — not read)";
 pub const NOT_SENT: &str = "named like a key — not sent";
 
 /// Whether the file at `path` (a document's — real since it was opened, `Editor::open`) is named like a key
-/// in the project and not open to Claude: not opened for this conversation nor kept for the project
+/// (in the project, or outside it by its name — `sandbox::key_named`) and not open to Claude: not opened for this conversation nor kept for the project
 /// (`Grant::Key` — the read card's `a`/`A`, the run's panel), nor in `pass` (what this one message may carry
 /// — `input_pass`). The main thread's, for the message's context and the screen: no disk — the kept ones are
 /// the chat's copy (`Chat.kept_keys`; not read yet, none counts as kept).
 pub fn key_shut(ed: &Editor, path: &Path, pass: &[PathBuf]) -> bool {
-    if !crate::sandbox::key_named_in(&ed.session.root, path) {
+    if !crate::sandbox::key_named(&ed.session.root, path) {
         return false;
     }
     let path = path.to_path_buf();
@@ -648,7 +697,7 @@ pub fn kept_keys_load(ed: &mut Editor) {
 pub fn wait_for_kept(ed: &mut Editor, paths: &[PathBuf], own: Own) -> bool {
     let root = ed.session.root.clone();
     let Some(c) = ed.session.chat.as_mut() else { return false };
-    if c.kept_keys.is_some() || !paths.iter().any(|p| crate::sandbox::key_named_in(&root, p)) {
+    if c.kept_keys.is_some() || !paths.iter().any(|p| crate::sandbox::key_named(&root, p)) {
         return false;
     }
     let first = c.after_kept.is_empty();
@@ -760,6 +809,7 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
         given,
         file: true,
         keys,
+        cut: false,
     };
     let p = Pending {
         request_id: String::new(),
@@ -820,10 +870,14 @@ pub fn pointing_asks(ed: &Editor) -> bool {
 /// (`Made`) — and every file named like a key it opens opened (`Grant::Key`, the same grant a run's reads go
 /// by).
 pub fn covered(look: &Look, caps: &crate::caps::Caps, made: &Made) -> bool {
-    look.keys.iter().all(|k| caps.opens_key(k))
-        && look.at.as_ref().is_some_and(|at| {
-            caps.reads(at) || crate::log::is_log_real(at) || made.covers(at, SystemTime::now())
-        })
+    !look.cut && look.keys.iter().all(|k| caps.opens_key(k)) && place_covered(look, caps, made)
+}
+
+/// `covered`'s place alone, whatever files named like keys it opens.
+fn place_covered(look: &Look, caps: &crate::caps::Caps, made: &Made) -> bool {
+    look.at
+        .as_ref()
+        .is_some_and(|at| caps.reads(at) || crate::log::is_log_real(at) || made.covers(at, SystemTime::now()))
 }
 
 /// One of Claude's runs started (`tools::go`) — by the clock its files are stamped by (`file_clock`).
@@ -873,8 +927,10 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let request_id = request_id.to_string();
     // (the root, a real path, is where claude runs — its relative paths are from there)
     let basis = ed.caps_basis();
+    let (llm, here) = (ed.config.llm.clone(), ed.sandbox_here.clone());
     ed.events.jobs().spawn(move || {
-        let caps = basis.build();
+        let here = || here.map_or_else(crate::sandbox::Here::now, |h| h());
+        let caps = caps_for(&tool, &input, basis.build(), &llm, here);
         let (look, covered, class) = decide(&tool, &input, &caps, &made);
         let ok = covered || by_default(class, &caps);
         // (asked: its card says first what looks like a token there — a folder in the project too: its yes
@@ -910,8 +966,9 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
 }
 
 /// What `tool` reading `input` (from `caps.root`, where claude runs) reads, and whether it may go without
-/// asking: inside the checkout (a file named like a key there only once opened — `Look.keys`), a place read by
-/// default or allowed — this conversation's, kept for always (`caps`) —, or made by a run of this turn (`made`)
+/// asking: inside the checkout, a place read by default or allowed — a file named like a key, wherever it is,
+/// only once opened (`Look.keys`, `sandbox::key_named`: frictions29, a key made in a granted folder was read
+/// unasked) — — this conversation's, kept for always (`caps`) —, or made by a run of this turn (`made`)
 /// — its class too (the card's line says it): the chat's reads go without asking where the capability model
 /// reads by default as well (`by_default`). The chat asks the rest on a card; the reviewer refuses it
 /// (`reviewer.rs`: the checkout only).
@@ -921,12 +978,117 @@ pub fn decide(
     caps: &crate::caps::Caps,
     made: &Made,
 ) -> (Look, bool, crate::cards::Class) {
-    let mut look = look(tool, input, &caps.root);
+    decide_with(tool, input, caps, made, true)
+}
+
+/// `decide`, a folder's own files named like keys counted or not (`look_with`).
+fn decide_with(
+    tool: &str,
+    input: &Value,
+    caps: &crate::caps::Caps,
+    made: &Made,
+    folder_keys: bool,
+) -> (Look, bool, crate::cards::Class) {
+    let mut look = look_with(tool, input, &caps.root, folder_keys);
+    // (a folder outside the project, or holding it, searched where it would go unasked — a place read, or one
+    // read by default: its files named like keys looked for now, so many entries at most; past them, it asks.
+    // Where a card would ask for the place, nothing is walked: no Grep reaches that card today — the chat has no
+    // Grep or Glob (user decision 2026-10-13, `chat::tools`), and the reviewer, whose Grep comes here, never asks
+    // (`reviewer::read` refuses what isn't covered). A Grep back in the chat would need the walk before its card,
+    // or the card's yes would let the keys there through — frictions29 review)
+    if let Some(at) = look
+        .at
+        .clone()
+        .filter(|at| folder_keys && look.tool == "Grep" && !look.file && !at.starts_with(&caps.root))
+        && (place_covered(&look, caps, made) || by_default(caps.class(Some(&at)), caps))
+        && may_hold_closed(caps, &at)
+    {
+        let kind = input["type"].as_str().unwrap_or_default();
+        // (a folder holding the project: the project's own were named by `look_with` — not walked again)
+        let skip = caps.root.starts_with(&at).then_some(caps.root.as_path());
+        match grep_keys(&caps.root, &at, &look.filter, kind, Some(keys_walk_max()), skip) {
+            Some(keys) => look.keys.extend(keys),
+            None => look.cut = true,
+        }
+        crate::sorting::sort(&mut look.keys);
+        look.keys.dedup();
+    }
+    // (named like one, closed where runs close it — one answer)
+    look.keys.retain(|k| key_closed(caps, k));
     let covered = covered(&look, caps, made);
     // (the card names those still closed)
     look.keys.retain(|k| !caps.opens_key(k));
     let class = class_of(&look, caps);
     (look, covered, class)
+}
+
+/// Whether `real`, named like a key (`sandbox::key_named`), stays closed to Claude's reads until it's opened —
+/// in home where runs close it (frictions29 round 3: one answer): in the project by its rule there, and outside it
+/// by the runs' rule as `caps` would give a run now (`Caps.key_rules`, `with_key_rules`): closed where another
+/// program or session could have put it (a granted folder, another checkout), read where runs read it (a
+/// toolchain's folders, an install). Outside home always (cardauto D3: what's read there by default is never a
+/// name like a key) — runs read one there that isn't in a place they close (threat model §1.3 "not kept"); the
+/// temp folders, a write grant there, close it for both. Unknown (None): closed by its name alone.
+pub fn key_closed(caps: &crate::caps::Caps, real: &Path) -> bool {
+    if !crate::sandbox::key_named(&caps.root, real) {
+        return false;
+    }
+    let outside_home = caps.home.as_ref().is_none_or(|h| !real.starts_with(h));
+    // (a setting runs read from a copy: the file itself is a key's to Claude)
+    real.starts_with(&caps.root)
+        || outside_home
+        || caps.key_rules.as_ref().is_none_or(|r| r.closes(real) || r.copied(real))
+}
+
+/// Whether a folder `at` outside the project may hold a file `key_closed` closes: outside home any; in home only
+/// where the runs' rule may close one below it (`KeyRules::may_close_below` — not a toolchain's folder, where a
+/// big walk would only cut the search short: review). Not known: any.
+fn may_hold_closed(caps: &crate::caps::Caps, at: &Path) -> bool {
+    let outside_home = caps.home.as_ref().is_none_or(|h| !at.starts_with(h));
+    outside_home || caps.key_rules.as_ref().is_none_or(|r| r.may_close_below(at))
+}
+
+/// `caps` for deciding `tool` reading `input` — with the runs' key rule (`with_key_rules`) when the call may open a
+/// file named like a key outside the project (`may_open_key`): the chat's reads and the reviewer's go by it.
+pub(crate) fn caps_for(
+    tool: &str,
+    input: &Value,
+    caps: crate::caps::Caps,
+    llm: &crate::llm::LlmConfig,
+    here: impl FnOnce() -> crate::sandbox::Here,
+) -> crate::caps::Caps {
+    match may_open_key(tool, input, &caps.root) {
+        true => with_key_rules(caps, llm, &here()),
+        false => caps,
+    }
+}
+
+/// `caps` with the runs' rule for the files named like keys a run would have now (`sandbox::key_rules_for`), as
+/// macOS's profile has it on every system — Linux's runs don't close them outside the project yet (Landlock only
+/// grants), the rule Claude's reads go by is the one designed. A worker's: it looks at the toolchains' folders.
+pub fn with_key_rules(
+    mut caps: crate::caps::Caps,
+    llm: &crate::llm::LlmConfig,
+    here: &crate::sandbox::Here,
+) -> crate::caps::Caps {
+    let w = crate::tools::with_allowed(llm, &caps, None);
+    let rules = crate::sandbox::key_rules_for(&caps.root, w, here).designed();
+    caps.key_rules = Some(std::sync::Arc::new(rules));
+    caps
+}
+
+/// Whether `tool` reading `input` (from `root`) may open a file named like a key outside the project — a Read of
+/// one by its name, a Grep of a place outside the project or holding it — so its decision needs the runs' rule
+/// (`with_key_rules`): looked for only then (in the project `key_closed` never reads it — review).
+fn may_open_key(tool: &str, input: &Value, root: &Path) -> bool {
+    let at = |k: &str| crate::paths::real(&root.join(input[k].as_str().unwrap_or_default()));
+    match tool {
+        "Read" => {
+            at("file_path").is_some_and(|p| !p.starts_with(root) && crate::sandbox::key_named(root, &p))
+        }
+        "Grep" => at("path").is_some_and(|p| !p.starts_with(root)),
+        _ => false,
+    }
 }
 
 /// Whether the capability model reads a place of `class` without asking (`cards::decide` — the one rule, by
@@ -940,8 +1102,9 @@ pub fn by_default(class: crate::cards::Class, caps: &crate::caps::Caps) -> bool 
 /// closed (`Look.keys`), or the place itself, wherever (there or not) — is `Secret`; else its place's class
 /// (`cards::class`).
 fn class_of(look: &Look, caps: &crate::caps::Caps) -> crate::cards::Class {
-    let named_key = look.at.as_deref().is_some_and(crate::secretnames::named_secret);
-    match look.keys.is_empty() && !named_key {
+    // (a file is in `Look.keys` where it's closed — by its name alone only a folder)
+    let named_key = !look.file && look.at.as_deref().is_some_and(crate::secretnames::named_secret);
+    match look.keys.is_empty() && !named_key && !look.cut {
         true => caps.class(look.at.as_deref()),
         false => crate::cards::Class::Secret,
     }
@@ -996,8 +1159,8 @@ fn folder_for(
     home: Option<&Path>,
 ) -> Option<(PathBuf, crate::tokens::Found)> {
     let at = p.look.at.as_ref().filter(|_| p.look.keys.is_empty())?;
-    // (never for a read that's itself a key's or named like one: outside the project `look.keys` is empty —
-    // review J 5)
+    // (never for a read that's itself a key's or named like one — review J 5; `look.keys` names those outside
+    // the project too, frictions29)
     let secret = p.class == crate::cards::Class::Secret || crate::secretnames::named_secret(at);
     if let Some(r) = p.repository.as_ref().filter(|_| !secret) {
         let found = scanned(ed, r)?;
@@ -1086,7 +1249,7 @@ fn allow(input: &Value) -> Value {
 
 pub const TITLE: &str = "Claude wants to read — outside the project";
 
-/// A read in the project that opens files named like keys (`Look.keys`).
+/// A read that opens files named like keys (`Look.keys`) — in the project, or outside it by their names.
 pub const KEYS_TITLE: &str = "Claude wants to read — named like a key";
 
 /// The user pointed at a file named like a key (`point`).
@@ -1111,7 +1274,8 @@ pub fn next(ed: &mut Editor) {
     // (a file named like a key: once at a time — `Caps::storable`)
     let key_kept =
         |k: &PathBuf| crate::caps::Caps::storable(&crate::allow::Grant::Key(k.clone())) == Scope::Always;
-    let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(key_kept);
+    // (nor a search too big to look through for them: a longer yes would hold for nothing — it asks again)
+    let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(key_kept) && !p.look.cut;
     // (its repository, or — beside another read waiting or let through once — its folder for longer: #102;
     // once it's been looked through for tokens — till then the place alone: `refold`)
     let others = others(c);
@@ -1119,8 +1283,8 @@ pub fn next(ed: &mut Editor) {
     let (q, warning) = card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)));
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class))
         .about(&p.look.given);
-    let inside = p.look.at.as_ref().is_some_and(|at| at.starts_with(&ed.session.root));
-    let title = if inside && !p.look.keys.is_empty() { KEYS_TITLE } else { TITLE };
+    // (a file named like a key — in the project, or outside it by its name: the key card, `y` once)
+    let title = if !p.look.keys.is_empty() { KEYS_TITLE } else { TITLE };
     let what = crate::offer::What::Read { pending: Box::new(p), keep, folder: folder.map(|(f, _)| f) };
     let mut o = crate::offer::Offer::new(title.into(), &q, "", String::new(), what).asked(asked);
     o.warning = warning;
@@ -1163,6 +1327,9 @@ pub fn question(look: &Look, keep: bool, folder: Option<(&Path, bool)>) -> Strin
                 q.push_str(&format!("\n    and {} more", keys.len() - KEYS_SHOWN));
             }
         }
+    }
+    if look.cut {
+        q.push_str("\n\nIt holds too much to look through for files named like keys — a yes lets it search any there.");
     }
     q.push_str("\n\nWhat it reads goes to Claude.");
     if keep && !look.keys.is_empty() {
@@ -1422,6 +1589,7 @@ mod tests {
             given: String::new(),
             file: true,
             keys: Vec::new(),
+            cut: false,
         };
         let none = Allowed::default();
         let some = Allowed { read: vec!["/t/x".into()], ..Default::default() };
@@ -1724,7 +1892,7 @@ mod tests {
         let mut times: Vec<f64> = (0..5)
             .map(|_| {
                 let t0 = std::time::Instant::now();
-                std::hint::black_box(grep_keys(&root, &root, "", ""));
+                std::hint::black_box(grep_keys(&root, &root, "", "", None, None));
                 t0.elapsed().as_secs_f64() * 1000.0
             })
             .collect();
@@ -1732,5 +1900,167 @@ mod tests {
         let ms = times[times.len() / 2];
         let line = format!("PERF grep_keys_this_repository_ms {ms:.3} noise=5\n");
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    }
+
+    /// frictions29: a file named like a key outside the project — made in a folder kept as read after the
+    /// grant, or in a temp folder read by default — asks for itself (`Look.keys`, the key card's class: `y` once),
+    /// read or searched; the files beside it still go unasked, and tarae's own search of the folder (which leaves
+    /// it out by name: `Keys::shut`) isn't asked for it. Opened, it goes. (Before: read unasked — only the
+    /// project's were named.) Stand-in keys in the test's own folders.
+    #[test]
+    fn a_key_named_file_outside_the_project_asks_for_itself() {
+        let scratch = crate::scratch::Scratch::new("reads-outside-key");
+        let dir = scratch.to_path_buf();
+        let (project, granted) = (dir.join("project"), dir.join("reference"));
+        for d in [&project, &granted] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(granted.join("README.md"), "x\n").unwrap();
+        let store = dir.join("state/sandbox.json");
+        crate::allow::keep(&store, &project, |a| a.add_read(granted.clone())).unwrap();
+        // (made after the grant)
+        let key = granted.join("id_ed25519");
+        std::fs::write(&key, "tarae-fake-token\n").unwrap();
+        let basis =
+            crate::caps::Basis { root: project.clone(), store: Some(store.clone()), ..Default::default() };
+        let none = Made::default();
+        let read =
+            |b: &crate::caps::Basis, f: &Path| decide("Read", &json!({ "file_path": f }), &b.build(), &none);
+        assert!(read(&basis, &granted.join("README.md")).1, "the folder granted");
+        let (look, covered, class) = read(&basis, &key);
+        assert!(!covered, "a key made there after the grant");
+        assert_eq!((look.keys, class), (vec![key.clone()], crate::cards::Class::Secret));
+        let (look, covered, _) =
+            decide("Grep", &json!({ "pattern": "x", "path": granted }), &basis.build(), &none);
+        assert!(!covered && look.keys == [key.clone()], "a search of the folder: {:?}", look.keys);
+        // tarae's own search of the folder leaves it out by name: not asked for it — its own read is
+        let gate = Gate { basis: basis.clone(), made: Made::default(), granted: Vec::new() };
+        assert!(gate.judge(&granted, false).is_ok(), "the search");
+        assert!(gate.judge(&key, true).is_err(), "the read");
+        let keys = Keys {
+            root: project.clone(),
+            chat: Vec::new(),
+            store: Some(store.clone()),
+            kept: Default::default(),
+        };
+        assert!(keys.shut(&key) && !keys.shut(&granted.join("README.md")));
+        // A temp folder, read by default: the same
+        let temp = crate::scratch::Scratch::new("reads-temp-key");
+        let (notes, env) = (temp.to_path_buf().join("notes.txt"), temp.to_path_buf().join(".env"));
+        std::fs::write(&notes, "x\n").unwrap();
+        std::fs::write(&env, "TOKEN=tarae-fake-token\n").unwrap();
+        let by_default = crate::caps::Basis { temp: true, ..basis.clone() };
+        assert!(read(&by_default, &notes).1, "the temp folder: read by default");
+        assert!(!read(&by_default, &env).1, "a key there");
+        // Opened for the project (as the run's panel keeps one): it goes
+        crate::allow::keep(&store, &project, |a| a.add(&crate::allow::Grant::Key(key.clone()))).unwrap();
+        assert!(read(&basis, &key).1, "opened");
+        // A folder granted that holds the project: its keys beside the project are named too (review: only the
+        // project was walked)
+        let beside = dir.join("other/.env");
+        std::fs::create_dir_all(beside.parent().unwrap()).unwrap();
+        std::fs::write(&beside, "TOKEN=tarae-fake-token\n").unwrap();
+        crate::allow::keep(&store, &project, |a| a.add_read(dir.clone())).unwrap();
+        let (look, covered, _) =
+            decide("Grep", &json!({ "pattern": "x", "path": dir }), &basis.build(), &none);
+        assert!(!covered && look.keys.contains(&beside), "{:?}", look.keys);
+        // …and the project's own, named by its rule, aren't walked again: a big project doesn't cut it short
+        // (review: its files counted toward the cap)
+        let own = project.join(".env");
+        std::fs::write(&own, "TOKEN=tarae-fake-token\n").unwrap();
+        for i in 0..20 {
+            std::fs::write(project.join(format!("f{i}.rs")), "x\n").unwrap();
+        }
+        WALK_MAX.with(|m| m.set(12));
+        let (look, _, _) = decide("Grep", &json!({ "pattern": "x", "path": dir }), &basis.build(), &none);
+        WALK_MAX.with(|m| m.set(KEYS_WALK_MAX));
+        assert!(!look.cut && look.keys.contains(&beside) && look.keys.contains(&own), "{look:?}");
+        // A place a card would ask for isn't walked (review: every search outside walked, unbounded) — nothing
+        // sends a Grep that reaches that card: the chat has no Grep (2026-10-13), the reviewer refuses what isn't
+        // covered; were one to, the card's yes would let the keys there through unnamed
+        let unread = crate::scratch::Scratch::new("reads-unread-key");
+        std::fs::write(unread.to_path_buf().join("id_rsa"), "tarae-fake-token\n").unwrap();
+        let input = json!({ "pattern": "x", "path": unread.to_path_buf() });
+        let (look, covered, _) = decide("Grep", &input, &basis.build(), &none);
+        assert!(!covered && look.keys.is_empty() && !look.cut, "{look:?}");
+        // …and one too big to look through can't tell: it asks, and says why — as `decide` walks it (review N14:
+        // only a hand-made cut was looked at)
+        assert_eq!(grep_keys(&project, &granted, "", "", Some(1), None), None);
+        WALK_MAX.with(|m| m.set(1));
+        let input = json!({ "pattern": "x", "path": granted });
+        let (look, covered, _) = decide("Grep", &input, &basis.build(), &none);
+        WALK_MAX.with(|m| m.set(KEYS_WALK_MAX));
+        assert!(look.cut && !covered, "{look:?}");
+        let cut = Look { cut: true, ..read(&basis, &granted.join("README.md")).0 };
+        assert!(!covered_by(&cut, &basis.build()), "a walk cut short asks");
+        assert!(question(&cut, false, None).contains("too much to look through"));
+    }
+
+    /// frictions29 round 3, through the requests' own path (`caps_for` — the chat's `request`, `reviewer::read`) and
+    /// a stand-in home: a crate's test key in cargo's registry reads unasked, as runs read it; one in a granted folder
+    /// still asks; a search of the registry, bigger than the walk's cap, isn't walked (nothing there can close) nor
+    /// cut short, while one of the granted folder is (review: only the name was tested, and a big toolchain folder's
+    /// search was refused). Stand-in keys in the test's own folders.
+    #[test]
+    fn the_runs_key_rule_decides_a_read_through_the_requests_path() {
+        // (never in the shared temp folder — Linux's is `/tmp`, a key place itself: everything in it closed)
+        let tmp = std::env::temp_dir();
+        let shared = tmp.starts_with("/tmp") || tmp.starts_with("/private/tmp");
+        let tmp = if shared { PathBuf::from("/var/tmp") } else { tmp };
+        let scratch = crate::scratch::Scratch::in_dir(&tmp, "reads-key-rule-path");
+        let dir = crate::sandbox::profile_path(&scratch);
+        let (home, granted) = (dir.join("home"), dir.join("home/ref"));
+        let project = home.join("code/p");
+        let crate_key = home.join(".cargo/registry/src/x/tests/key.pem");
+        for d in [&project, &granted, &dir.join("tmp"), &crate_key.parent().unwrap().to_path_buf()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let key = granted.join("id_ed25519");
+        for f in [&key, &crate_key] {
+            std::fs::write(f, "tarae-fake-token\n").unwrap();
+        }
+        let store = dir.join("state/sandbox.json");
+        crate::allow::keep(&store, &project, |a| a.add_read(granted.clone())).unwrap();
+        let mut env = std::collections::HashMap::new();
+        env.insert("HOME".to_string(), home.clone().into_os_string());
+        let here = crate::sandbox::Here { env, tmp: Some(dir.join("tmp")), ..Default::default() };
+        let basis = crate::caps::Basis {
+            root: project.clone(),
+            store: Some(store),
+            home: Some(home.clone()),
+            ..Default::default()
+        };
+        let llm = crate::llm::LlmConfig::default();
+        let ask = |tool: &str, input: Value| {
+            let caps = caps_for(tool, &input, basis.build_in(Some(&home), &here), &llm, || here.clone());
+            assert!(caps.key_rules.is_some(), "{tool} {input}: the rule worked out");
+            decide(tool, &input, &caps, &Made::default())
+        };
+        let (look, covered, _) = ask("Read", json!({ "file_path": crate_key }));
+        assert!(covered && look.keys.is_empty(), "a crate's test key: runs read it, so does Read: {look:?}");
+        let (look, covered, _) = ask("Read", json!({ "file_path": key }));
+        assert!(!covered && look.keys == [key.clone()], "a key in a granted folder asks: {look:?}");
+        WALK_MAX.with(|m| m.set(1));
+        let (registry, searched, _) =
+            ask("Grep", json!({ "pattern": "x", "path": home.join(".cargo/registry/src") }));
+        let (reference, _, _) = ask("Grep", json!({ "pattern": "x", "path": granted }));
+        WALK_MAX.with(|m| m.set(KEYS_WALK_MAX));
+        assert!(
+            searched && !registry.cut && registry.keys.is_empty(),
+            "the registry isn't walked: {registry:?}"
+        );
+        assert!(reference.cut, "the granted folder is: {reference:?}");
+        // (in the project, nothing outside it: the rule isn't worked out)
+        let input = json!({ "pattern": "x", "path": "src" });
+        assert!(
+            caps_for("Grep", &input, basis.build_in(Some(&home), &here), &llm, || here.clone())
+                .key_rules
+                .is_none()
+        );
+    }
+
+    /// `covered`, nothing made by a run.
+    fn covered_by(look: &Look, caps: &crate::caps::Caps) -> bool {
+        covered(look, caps, &Made::default())
     }
 }

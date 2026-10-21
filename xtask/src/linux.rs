@@ -6,8 +6,10 @@
 //! The working tree is mounted **read-only**; the checks run in a clone made inside the container, with the
 //! uncommitted changes applied and the untracked files copied — nothing the container runs can write the real
 //! tree or its `.git`. A Docker on another machine (a `DOCKER_HOST` socket forwarded from a cloud VM) can't
-//! see the tree (`sees_tree`): the checkout as it is goes in on stdin instead, as a tar (`streamed`), made a
-//! repository of one commit inside. Caches live in Docker volumes, per pinned version (target, rustup; the
+//! see the tree (`sees_tree`: a value written into the checkout just now, read back through the mount — a tree
+//! at the same path there isn't enough): the checkout as it is goes in on stdin instead, as a tar
+//! (`streamed`), made a repository of one commit inside. A test run whose filter matched no test fails
+//! (`none_ran`). Caches live in Docker volumes, per pinned version (target, rustup; the
 //! registry shared).
 //!
 //! Docker not reachable: it says `skipped — …` and exits 0, so a `:preflight` step with `note = "skipped"`
@@ -490,7 +492,7 @@ pub fn run(args: &[String]) -> Result<()> {
     if !st.success() {
         return Err(failed_said(&seen.failed));
     }
-    Ok(())
+    none_ran(&seen).map_or(Ok(()), Err)
 }
 
 /// `rust-toolchain.toml`'s `channel`.
@@ -553,19 +555,105 @@ enum Tree<'a> {
     Streamed,
 }
 
-/// Whether the Docker sees the checkout at its own path — a bind `--mount` (unlike `-v`, which makes an empty
-/// folder there) refuses a source that isn't there.
+/// Whether the Docker sees *this* checkout at its own path: a value written into it now (`Probe`) read back
+/// through a bind `--mount` of the path (unlike `-v`, a bind refuses a source that isn't there). A Docker on
+/// another machine may hold a tree at the same path — frictions29 1: the VM's Oct 5 copy of the main checkout
+/// had a `Cargo.toml`, the checks ran in it and matched none of the tests asked for — so a tree being there
+/// isn't enough: it has to say what was just written here.
 fn sees_tree(root: &Path, pin: &str, platform: Option<&str>) -> bool {
-    let mut probe = Command::new("docker");
+    let probe = match Probe::write(root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("the probe that tells whether this Docker sees the checkout wasn't written ({e})");
+            return false;
+        }
+    };
+    let mut docker = Command::new("docker");
     let name = container_name(std::env::var("TARAE_CONTAINER_PREFIX").ok().as_deref(), "probe");
-    probe.args(with_name(vec!["run".into(), "--rm".into()], name));
+    docker.args(with_name(vec!["run".into(), "--rm".into()], name));
     if let Some(p) = platform {
-        probe.args(["--platform", p]);
+        docker.args(["--platform", p]);
     }
-    probe.arg("--mount").arg(format!("type=bind,source={},target=/src,readonly", root.display()));
-    probe.args([image(pin).as_str(), "test", "-f", "/src/Cargo.toml"]);
-    probe.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
-    probe.stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    docker.arg("--mount").arg(format!("type=bind,source={},target=/src,readonly", root.display()));
+    docker.args([image(pin).as_str(), "cat"]).arg(Path::new("/src").join(&probe.rel));
+    docker.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let read = docker.output().ok().filter(|o| o.status.success()).map(|o| o.stdout);
+    probe.read_back(read.as_deref())
+}
+
+/// The value `sees_tree` writes into the checkout and asks the container to read back: 16 random bytes in hex,
+/// in a file at the checkout's top (`.xtask-probe-<8 more>`, git ignores it) — two runs at once don't read each
+/// other's — removed when it's dropped. The checkout is where tarae's sandboxed runs write, and this runs outside
+/// the sandbox, so nothing a run could have put there is used (frictions29 1, review — a run that planted
+/// `target/xtask-linux/probe-<pid> -> ~/.zshrc` had the user's next run truncate it): the file is made new from
+/// the checkout's folder's descriptor (`O_EXCL`, `O_NOFOLLOW`: one already there, a link too, is an error) and
+/// removed by it (`unlinkat`). A `target` that's a link (a fast disk, a shared target) is never touched. 0644:
+/// it holds only the random value, and a container whose root is remapped reads it.
+struct Probe {
+    /// Its name at the checkout's top — what the container reads.
+    rel: PathBuf,
+    /// The checkout's folder, and the probe's name in it.
+    top: std::os::fd::OwnedFd,
+    name: std::ffi::CString,
+    value: String,
+}
+
+/// `n` random bytes in hex.
+fn random_hex(n: usize) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut bytes = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The prefix of the probe's name (`.gitignore` has it).
+const PROBE_PREFIX: &str = ".xtask-probe-";
+
+impl Probe {
+    fn write(root: &Path) -> std::io::Result<Probe> {
+        Probe::write_in(root, &format!("{PROBE_PREFIX}{}", random_hex(8)?))
+    }
+
+    /// `write`, named `name` (tests: something planted there first).
+    fn write_in(root: &Path, name: &str) -> std::io::Result<Probe> {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let value = random_hex(16)?;
+        let c = std::ffi::CString::new(name)?;
+        // (the checkout itself by its path — the user's; in it, nothing that was there is used)
+        let top: std::os::fd::OwnedFd =
+            std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY).open(root)?.into();
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: a folder's descriptor and a NUL-ended name; the descriptor returned is ours alone
+        let fd = unsafe { libc::openat(top.as_raw_fd(), c.as_ptr(), flags, 0o644 as libc::c_uint) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a descriptor openat just gave us
+        let mut out = unsafe { std::fs::File::from_raw_fd(fd) };
+        // (made now: dropped, it removes what it made — a write that fails too)
+        let probe = Probe { rel: PathBuf::from(name), top, name: c, value };
+        // (0644 whatever the umask: openat's mode is masked by it — 077 made it 0600 again, review N16)
+        out.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+        out.write_all(probe.value.as_bytes())?;
+        Ok(probe)
+    }
+
+    /// Whether what came back (None: nothing — no tree, no such file, the container failed) is the value
+    /// written: only this checkout holds it.
+    fn read_back(&self, read: Option<&[u8]>) -> bool {
+        read.is_some_and(|r| r.trim_ascii() == self.value.as_bytes())
+    }
+}
+
+impl Drop for Probe {
+    /// The file it made, from the checkout's folder it made it in — by the descriptor.
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: the folder's descriptor it holds and the NUL-ended name it made there
+        unsafe { libc::unlinkat(self.top.as_raw_fd(), self.name.as_ptr(), 0) };
+    }
 }
 
 /// The checkout as it is, as a tar for a Docker that can't see it (`Tree::Streamed`): every tracked file with
@@ -996,6 +1084,36 @@ struct Seen {
     disk: Option<Disk>,
     /// The test binaries that failed, as cargo names them (`--bin tarae`, `--test e2e`), each once, in order.
     failed: Vec<String>,
+    /// The tests libtest said it runs, all its binaries and runs told (`running 3 tests`).
+    ran: u64,
+    /// The tests a filter left out, all told (`test result: … 1216 filtered out`).
+    filtered: u64,
+}
+
+/// libtest's `running 3 tests` (`1 test`) — how many.
+fn running(line: &str) -> Option<u64> {
+    let rest = line.trim_end().strip_prefix("running ")?;
+    let (n, what) = rest.split_once(' ')?;
+    matches!(what, "test" | "tests").then(|| n.parse().ok()).flatten()
+}
+
+/// libtest's `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1216 filtered out; finished in …` —
+/// how many the filter left out.
+fn filtered_out(line: &str) -> Option<u64> {
+    let rest = line.strip_prefix("test result: ")?;
+    rest.split(';').find_map(|part| part.trim().strip_suffix(" filtered out")?.parse().ok())
+}
+
+/// A run that ran no test while a filter left some out matched nothing it was asked for — a name that isn't
+/// there, or another tree than this checkout (frictions29 1: 0 of 1216, `ok`) — and fails: the line said.
+fn none_ran(seen: &Seen) -> Option<String> {
+    (seen.ran == 0 && seen.filtered > 0).then(|| {
+        format!(
+            "the filter matched no test (0 ran, {} filtered out) — a test name that isn't there, or a tree that \
+             isn't this checkout",
+            seen.filtered
+        )
+    })
 }
 
 /// cargo's line for each test binary that failed (`--no-fail-fast` goes on past it): `error: test failed, to
@@ -1021,6 +1139,8 @@ fn forwarded(mut from: impl std::io::BufRead, to: &mut impl std::io::Write) -> S
         {
             seen.failed.push(b.to_string());
         }
+        seen.ran += text.and_then(running).unwrap_or(0);
+        seen.filtered += text.and_then(filtered_out).unwrap_or(0);
         let _ = to.write_all(&line);
         let _ = to.flush();
     }
@@ -2823,6 +2943,125 @@ mod tests {
             "the Linux checks failed — 1 test binary failed (every one ran): --test e2e"
         );
         assert_eq!(failed_said(&[]), "the Linux checks failed (above)");
+    }
+
+    /// A folder of the test's own in the temp folder, made new (a random name; never one that was there).
+    fn probe_scratch(n: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tarae-xtask-probe-{n}-{}", random_hex(8).unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    /// frictions29 1: the probe holds only for this checkout — a tree at the same path that's another one (the
+    /// VM's stale copy) gives back nothing, or a value of its own, and the checkout goes in on stdin. The value
+    /// goes when the probe does, and its folder with it.
+    #[test]
+    fn the_tree_seen_is_this_checkout_not_one_at_its_path() {
+        let (here, other) = (probe_scratch("here"), probe_scratch("other"));
+        let probe = Probe::write(&here).unwrap();
+        let through = |root: &Path| std::fs::read(root.join(&probe.rel)).ok();
+        assert!(probe.read_back(through(&here).as_deref()), "this checkout");
+        assert!(!probe.read_back(through(&other).as_deref()), "another tree at the path, no probe in it");
+        // (the other tree with a probe of its own at the same name, as a run of its own left it: a value read
+        // back, not ours — review N17: one under another name read nothing, so the value was never compared)
+        let theirs = Probe::write_in(&other, &probe.rel.display().to_string()).unwrap();
+        assert!(through(&other).is_some_and(|v| v == theirs.value.as_bytes()), "theirs is read");
+        assert!(!probe.read_back(through(&other).as_deref()), "another tree's value");
+        assert!(!probe.read_back(None), "nothing read");
+        let path = here.join(&probe.rel);
+        // (0644 under any umask: a container whose root is remapped reads it — review)
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o644);
+        drop((probe, theirs));
+        assert!(!path.exists(), "the probe goes with it");
+        for d in [here, other] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    /// frictions29 1, review: the probe uses nothing a run could have put in the checkout (where tarae's sandboxed
+    /// runs write; this runs outside the sandbox). A link at the name it once had (`target/xtask-linux/probe-<pid>`)
+    /// and what it leads to stay as they are; `target/xtask-linux` or `target` a link changes nothing — the probe
+    /// isn't there (review: a `target` link refused every probe, and the checkout was streamed for good); a
+    /// file or a link already at its name: no probe, nothing written where the link leads. Stand-ins in the
+    /// test's own folders.
+    #[test]
+    fn the_probe_writes_through_no_link() {
+        let (here, outside) = (probe_scratch("here"), probe_scratch("outside"));
+        let victim = outside.join("victim");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let listed =
+            || std::fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>();
+        // A link at the old guessable name, in its folder
+        std::fs::create_dir_all(here.join("target/xtask-linux")).unwrap();
+        let planted = here.join(format!("target/xtask-linux/probe-{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let probe = Probe::write(&here).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n", "written through the link");
+        assert_ne!(here.join(&probe.rel), planted);
+        drop(probe);
+        assert!(
+            planted.symlink_metadata().unwrap().is_symlink() && victim.exists(),
+            "the link or its target went"
+        );
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        // `target/xtask-linux`, then `target`, a link: the probe isn't there, nothing made where they lead
+        std::fs::remove_dir_all(here.join("target/xtask-linux")).unwrap();
+        std::os::unix::fs::symlink(&outside, here.join("target/xtask-linux")).unwrap();
+        let probe = Probe::write(&here).unwrap();
+        assert!(probe.rel.to_string_lossy().starts_with(PROBE_PREFIX), "{}", probe.rel.display());
+        assert_eq!(probe.rel.components().count(), 1, "at the checkout's top");
+        drop(probe);
+        std::fs::remove_file(here.join("target/xtask-linux")).unwrap();
+        std::fs::remove_dir(here.join("target")).unwrap();
+        std::os::unix::fs::symlink(&outside, here.join("target")).unwrap();
+        assert!(Probe::write(&here).is_ok(), "a link for target: the probe goes on");
+        assert_eq!(listed(), ["victim"], "made where a link leads");
+        // Its name taken — a file, or a link to one: no probe, nothing written where the link leads
+        std::fs::write(here.join(".xtask-probe-taken"), "theirs\n").unwrap();
+        assert!(Probe::write_in(&here, ".xtask-probe-taken").is_err(), "a file there");
+        assert_eq!(std::fs::read_to_string(here.join(".xtask-probe-taken")).unwrap(), "theirs\n");
+        std::os::unix::fs::symlink(&victim, here.join(".xtask-probe-linked")).unwrap();
+        assert!(Probe::write_in(&here, ".xtask-probe-linked").is_err(), "a link there");
+        assert_eq!(listed(), ["victim"]);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        for l in ["target", ".xtask-probe-linked"] {
+            std::fs::remove_file(here.join(l)).unwrap();
+        }
+        for d in [here, outside] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    /// frictions29 1: a run that ran no test while its filter left some out fails — `test --bin tarae
+    /// sandbox::refused` in a stale tree ran 0 of 1216 and said ok. A filter that matched some, or no filter at
+    /// all (clippy, a test binary with no tests), passes.
+    #[test]
+    fn a_filter_that_matched_no_test_fails() {
+        let stale = "running 0 tests\n\n\
+                     test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1216 filtered out; finished in 0.04s\n\n\
+                     running 0 tests\n\n\
+                     test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s\n";
+        let seen = forwarded(stale.as_bytes(), &mut Vec::new());
+        assert_eq!((seen.ran, seen.filtered), (0, 1247));
+        assert_eq!(
+            none_ran(&seen).as_deref(),
+            Some(
+                "the filter matched no test (0 ran, 1247 filtered out) — a test name that isn't there, or a tree \
+                 that isn't this checkout"
+            )
+        );
+        let matched = "running 1 test\ntest sandbox::refused::t ... ok\n\n\
+                       test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1215 filtered out; finished in 1.2s\n\
+                       running 0 tests\n\n\
+                       test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s\n";
+        let seen = forwarded(matched.as_bytes(), &mut Vec::new());
+        assert_eq!((seen.ran, seen.filtered, none_ran(&seen)), (1, 1246, None));
+        let unfiltered =
+            "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        assert_eq!(none_ran(&forwarded(unfiltered.as_bytes(), &mut Vec::new())), None);
+        assert_eq!(none_ran(&forwarded("Checking tarae\n".as_bytes(), &mut Vec::new())), None);
+        assert_eq!((running("running 1 test"), running("running tests")), (Some(1), None));
     }
 
     /// No Docker to talk to: said in a line a preflight note can match, not an error.

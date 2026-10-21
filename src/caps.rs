@@ -131,6 +131,10 @@ pub struct Caps {
     pub here: crate::allow::Where,
     /// The kept answers every checkout of the repository uses (the rest kept are this checkout's own).
     pub shared: Vec<Grant>,
+    /// The runs' rule for the files named like keys as these answers would give a run now, what Claude's reads
+    /// close outside the project by (`reads::key_closed`; `reads::with_key_rules` adds it on a worker when a read
+    /// may open one). None: not looked for — closed by their names alone.
+    pub key_rules: Option<std::sync::Arc<crate::sandbox::KeyRules>>,
 }
 
 impl Caps {
@@ -187,6 +191,9 @@ impl Caps {
     pub fn storable_in(g: &Grant, home: Option<&Path>) -> Scope {
         match g {
             Grant::Read(p) if !crate::allow::keepable(p, home) => Scope::Once,
+            // (a file named like a key outside the project, opened as a place where runs don't close the name —
+            // Linux: as a key is, once)
+            Grant::Read(p) if crate::sandbox::key_named_below(Path::new("/"), p) => Scope::Once,
             Grant::Key(_) => Scope::Once,
             Grant::Socket(_) if g.as_outside() => Scope::Once,
             Grant::Socket(_) => Scope::ThisChat,
@@ -706,6 +713,10 @@ mod tests {
             (Grant::Read("/h/.ssh/config".into()), Scope::Once),
             (Grant::Read("/h/.config/gh".into()), Scope::Once),
             (Grant::Key("/p/.env".into()), Scope::Once),
+            // (a file named like a key opened as a place — Linux's runs don't close the name: once, as a key; one
+            // below an install's packages isn't one — review)
+            (Grant::Read("/opt/x/.env".into()), Scope::Once),
+            (Grant::Read("/opt/x/lib/python3.12/site-packages/a.pem".into()), Scope::Always),
             (Grant::Socket("/run/docker.sock".into()), Scope::Once),
             (Grant::Socket("/p/.tarae/x.sock".into()), Scope::ThisChat),
             (Grant::Write("/h/w".into()), Scope::Always),

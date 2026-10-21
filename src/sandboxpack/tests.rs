@@ -617,6 +617,23 @@ fn places_for_a_home() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions29 A review: an install's packages are anchored in its layout — two parts or more, a part's `*` one
+/// at most and never the whole part: a lone `gems` or `site-packages` is any project's folder too (a monorepo's
+/// private gems, their `.env`s with them), so it's left out and said.
+#[test]
+fn packages_are_anchored_in_an_installs_layout() {
+    let pack = r#"
+[sandbox]
+packages = ["gems", "site-packages", "lib/*", "lib/python3*/site-packages", "lib/ruby/3.*"]
+"#;
+    let t = table(&[("x", pack)], &[]);
+    assert_eq!(t.packages, ["lib/python3*/site-packages", "lib/ruby/3.*"]);
+    for p in ["`gems`", "`site-packages`", "`lib/*`"] {
+        assert!(t.problems.iter().any(|w| w.contains(p)), "{p}: {:?}", t.problems);
+    }
+    assert!(ours().packages.iter().all(|p| p.contains('/')), "{:?}", ours().packages);
+}
+
 /// The words a pack says in Claude's prompt come in `rank` order, whatever the packs' names.
 #[test]
 fn the_packs_words_come_by_rank() {

@@ -465,8 +465,13 @@ fn read(ed: &mut Editor, generation: u64, request_id: &str, tool: &str, input: &
     let basis = crate::caps::Basis { root: r.root.clone(), store, temp, ..Default::default() };
     let root = r.root.clone();
     let (tool, input, request_id) = (tool.to_string(), input.clone(), request_id.to_string());
+    let (llm, here) = (ed.config.llm.clone(), ed.sandbox_here.clone());
     ed.events.jobs().spawn(move || {
-        let (look, ok, _) = crate::reads::decide(&tool, &input, &basis.build(), &Default::default());
+        // (the files named like keys closed where runs close them — `reads::key_closed`; the rule worked out only
+        // when the read may open one, as the chat's)
+        let here = || here.map_or_else(crate::sandbox::Here::now, |h| h());
+        let caps = crate::reads::caps_for(&tool, &input, basis.build(), &llm, here);
+        let (look, ok, _) = crate::reads::decide(&tool, &input, &caps, &Default::default());
         move |ed: &mut Editor| {
             let answer = match ok {
                 true => json!({ "behavior": "allow", "updatedInput": input }),

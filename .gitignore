@@ -1,4 +1,6 @@
 /target
+# `cargo xtask linux`'s probe of what a Docker sees, while it runs (xtask/src/linux.rs `Probe`)
+/.xtask-probe-*
 /.claude/
 CLAUDE.md
 # Your own settings and :preflight steps for this project — tarae reads it only while git ignores it

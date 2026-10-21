@@ -930,6 +930,7 @@ fn also_host(host: &str, port: u16, caps: &crate::caps::Caps, net: &NetNow) -> O
 /// wider (`allow::read_place`, `allow::write_place`: never home or above, keys, what runs later …): None when it's
 /// open already (`open_port`: the settings' ports; `localhost`: every one; a host by `net`), Err when no card opens
 /// it (said to Claude). A variable by the environment of the session's last run (`env`): one passed already runs.
+/// A file named like a key by the runs' rule for them (`keys`, `Policy::key_rules` — None: the project's only).
 fn also_grant(
     ask: &AlsoAsk,
     cwd: &Path,
@@ -937,6 +938,7 @@ fn also_grant(
     (open_port, localhost): (&dyn Fn(u16) -> bool, bool),
     env: Option<&crate::sandbox::runenv::RunEnv>,
     net: &NetNow,
+    keys: Option<&crate::sandbox::KeyRules>,
 ) -> Result<Option<crate::allow::Grant>, String> {
     use crate::allow::Grant;
     let real = |p: &str| {
@@ -946,14 +948,7 @@ fn also_grant(
         };
         std::fs::canonicalize(&path).map_err(|e| format!("also {p}: {e}"))
     };
-    let never = |p: &Path| {
-        format!(
-            "{} is a place no card opens to your commands — home or above, keys and tokens, tarae's and Claude's \
-             state, what runs later (build files, folders of programs, shared caches, a toolchain's home). If the \
-             command needs it, tell the user",
-            crate::allow::tilde(p)
-        )
-    };
+    let never = never_opened;
     let home = caps.home.as_deref().unwrap_or(Path::new("/"));
     match ask {
         AlsoAsk::Port(n) => {
@@ -972,20 +967,7 @@ fn also_grant(
         AlsoAsk::Terminals => Ok(caps.terminals.is_empty().then_some(Grant::Terminals)),
         AlsoAsk::Env(n) => also_env(n, caps, env),
         AlsoAsk::Network(h, p) => Ok(also_host(h, *p, caps, net)),
-        AlsoAsk::Read(p) => {
-            let target = real(p)?;
-            // (a file named like a key in the project: that one file — the project is read anyway, what's closed
-            // is the name)
-            if crate::sandbox::key_named_in(&crate::sandbox::profile_path(&caps.root), &target) {
-                return Ok(Some(Grant::Key(target)));
-            }
-            // (read already — the project, a place read by default, one answered: it runs)
-            if caps.reads(&target) || caps.by_default(caps.class(Some(&target))) {
-                return Ok(None);
-            }
-            let place = crate::allow::read_place(&target, home, &caps.kept);
-            place.map(|p| Some(Grant::Read(p))).ok_or_else(|| never(&target))
-        }
+        AlsoAsk::Read(p) => also_read(real(p)?, caps, keys),
         AlsoAsk::Write(p) => {
             let r = real(p)?;
             // (the temp folders are written already; in the project only the protected names aren't — an edit's)
@@ -1020,6 +1002,60 @@ fn last_run_env(ed: &Editor) -> Option<crate::sandbox::runenv::RunEnv> {
         (a, b) => a.or(b).map(|t| t.1),
     };
     newest.cloned()
+}
+
+/// What no card opens, as Claude is told it.
+fn never_opened(p: &Path) -> String {
+    format!(
+        "{} is a place no card opens to your commands — home or above, keys and tokens, tarae's and Claude's \
+         state, what runs later (build files, folders of programs, shared caches, a toolchain's home). If the \
+         command needs it, tell the user",
+        crate::allow::tilde(p)
+    )
+}
+
+/// `also {read}` of `target` (real): `also_grant`'s.
+pub(crate) fn also_read(
+    target: PathBuf,
+    caps: &crate::caps::Caps,
+    keys: Option<&crate::sandbox::KeyRules>,
+) -> Result<Option<crate::allow::Grant>, String> {
+    use crate::allow::Grant;
+    // (a file the runs' rule closes by its name — in the project, or outside it on macOS where a grant or a
+    // default opened, or where opening a folder of it would close it: that one file)
+    let root = crate::sandbox::profile_path(&caps.root);
+    let closes = match keys {
+        Some(k) => k.closes(&target),
+        None => crate::sandbox::key_named_in(&root, &target),
+    };
+    if closes && !caps.opens_key(&target) {
+        return Ok(Some(Grant::Key(target)));
+    }
+    // (read already — the project, a place read by default, one answered: it runs)
+    if caps.reads(&target) || caps.by_default(caps.class(Some(&target))) {
+        return Ok(None);
+    }
+    let home = caps.home.as_deref().unwrap_or(Path::new("/"));
+    let place = crate::allow::read_place(&target, home, &caps.kept);
+    place.map(|p| Some(Grant::Read(p))).ok_or_else(|| never_opened(&target))
+}
+
+/// The rule for the files named like keys the session's last sandboxed run had (its command's or its tests', the
+/// newer: `Policy::key_rules`).
+fn last_run_keys(ed: &Editor) -> Option<crate::sandbox::KeyRules> {
+    fn of(g: Option<&Guard>) -> Option<&crate::sandbox::Policy> {
+        match g {
+            Some(Guard::In(p)) => Some(p),
+            _ => None,
+        }
+    }
+    let task = ed.session.task_run.as_ref().and_then(|r| Some((r.started, of(r.guard.as_ref())?)));
+    let test = ed.session.test_run.as_ref().and_then(|r| Some((r.started, of(r.guard.as_ref())?)));
+    let newest = match (task, test) {
+        (Some(a), Some(b)) => Some(if a.0 >= b.0 { a.1 } else { b.1 }),
+        (a, b) => a.or(b).map(|t| t.1),
+    };
+    newest.map(|p| p.key_rules())
 }
 
 /// `also`'s variable `n`: None when the session passes it already (an answer, or the last run had it), the grant
@@ -1098,11 +1134,18 @@ fn also_ask(
     let host = matches!(ask, AlsoAsk::Network(..));
     let (unseen, reach, root) = (unseen_now(ed), could_reach_out(ed, host), ed.session.root.clone());
     let env = last_run_env(ed);
+    // (the runs' rule for the files named like keys: the last run's — none yet, as one would have it now)
+    let keys = last_run_keys(ed);
+    let (llm, here) = (ed.config.llm.clone(), ed.sandbox_here.clone());
     ed.events.jobs().spawn(move || {
         let caps = basis.build();
         let open = |n: u16| localhost || ports.contains(&n);
         let net = NetNow { open: open_net, rules: hosts.rules(), session: basis.hosts.clone() };
-        let grant = also_grant(&ask, &cwd, &caps, (&open, localhost), env.as_ref(), &net);
+        let keys = keys.unwrap_or_else(|| {
+            let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
+            crate::sandbox::key_rules_for(&caps.root, with_allowed(&llm, &caps, None), &here)
+        });
+        let grant = also_grant(&ask, &cwd, &caps, (&open, localhost), env.as_ref(), &net, Some(&keys));
         // (a place to read: its card says first what looks like a token there)
         let tokens = match &grant {
             Ok(Some(crate::allow::Grant::Read(p))) => crate::tokens::found_in(p).said(p),
@@ -4022,6 +4065,10 @@ pub fn run_done(ed: &mut Editor) {
     };
     let below: Vec<&Path> = std::iter::once(ed.session.root.as_path()).chain(run_dir.as_deref()).collect();
     let candidates = said.as_ref().map(|s| also_candidates(failed, &s.open, &below)).unwrap_or_default();
+    let keys = match r.guard.as_ref() {
+        Some(Guard::In(p)) if !candidates.is_empty() => Some(p.key_rules()),
+        _ => None,
+    };
     let loopback = said.as_ref().filter(|_| failed).and_then(|s| loopback_of(&s.open));
     // (its own places — the user's list has them only when it was a check, #28)
     if let Some(head) = r.tell.take() {
@@ -4105,7 +4152,8 @@ pub fn run_done(ed: &mut Editor) {
         let basis = ed.caps_basis();
         let (localhost, ports) = (ed.config.llm.sandbox_localhost, ed.config.llm.sandbox_ports.clone());
         ed.events.jobs().spawn(move || {
-            let line = also_line(&candidates, &basis.build(), &|n| localhost || ports.contains(&n));
+            let open = |n: u16| localhost || ports.contains(&n);
+            let line = also_line(&candidates, keys.as_ref(), &basis.build(), &open);
             move |ed: &mut Editor| told(ed, format!("{line}{changed}"))
         });
     };
@@ -4149,9 +4197,11 @@ fn also_candidates(
 /// report — a grant card's choices (`blocked::choices`: never what no card opens), at most `ALSO_SAID`, but a port
 /// open already (`open_port`; Seatbelt names no address: that refusal was a host beyond this machine). A port
 /// refused to a program the packs say picks its ports as it starts (`refused-port`: Gradle's JVM) is every port
-/// here (`localhost`), not that one. Empty: nothing to ask. On a worker (the choices look at the disk).
+/// here (`localhost`), not that one. Empty: nothing to ask. On a worker (the choices look at the disk). A file
+/// named like a key by the run's rule (`keys`).
 fn also_line(
     candidates: &[crate::sandbox::Denial],
+    keys: Option<&crate::sandbox::KeyRules>,
     caps: &crate::caps::Caps,
     open_port: &dyn Fn(u16) -> bool,
 ) -> String {
@@ -4160,7 +4210,7 @@ fn also_line(
         |n: u16| !open_port(n) && !caps.ports.iter().any(|e| e.what == n) && caps.localhost.is_empty();
     let every = localhost_ports(candidates);
     let mut said: Vec<String> = Vec::new();
-    for g in crate::blocked::choices(candidates, caps).into_iter().map(|c| c.grant) {
+    for g in crate::blocked::choices_by(candidates, caps, keys).into_iter().map(|c| c.grant) {
         let one = match &g {
             Grant::Read(p) | Grant::Key(p) => format!("{{\"read\": \"{}\"}}", crate::allow::tilde(p)),
             Grant::Write(p) => format!("{{\"write\": \"{}\"}}", crate::allow::tilde(p)),
@@ -6042,7 +6092,7 @@ mod tests {
         let closed = |_: u16| false;
         let grant = |a: super::AlsoAsk| {
             let net = super::NetNow { open: false, rules: Some(Vec::new()), session: Vec::new() };
-            super::also_grant(&a, &root, &caps, (&closed, false), None, &net)
+            super::also_grant(&a, &root, &caps, (&closed, false), None, &net, None)
         };
         let at = |p: &std::path::Path| p.display().to_string();
         assert_eq!(grant(Read(at(&srt))), Ok(Some(Grant::Read(srt.clone()))), "the folder, not ~/Workspace");
@@ -6057,6 +6107,42 @@ mod tests {
         assert!(file.as_ref().is_err_and(|e| e.contains("names a folder")), "{file:?}");
         let whole = grant(Read(at(&home)));
         assert!(whole.as_ref().is_err_and(|e| e.contains("no card opens")), "{whole:?}");
+    }
+
+    /// frictions29 review: `also {read}` of a file named like a key outside the project, in a place a grant
+    /// opened, asks for that one file where runs close the name — by the rule a run would have now
+    /// (`sandbox::key_rules_for`, before the session's first run; macOS); on Linux nothing closes it there — it
+    /// runs, no card. (A made-up home in the test's temp folder, a stand-in key; `$TMPDIR` not said, which would
+    /// spare it.)
+    #[test]
+    fn also_read_of_a_key_outside_opens_that_file_where_runs_close_it() {
+        use super::AlsoAsk::Read;
+        use crate::allow::Grant;
+        let base = crate::scratch::Scratch::new("also-key");
+        for d in ["home/ref", "home/proj"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let home = std::fs::canonicalize(base.join("home")).unwrap();
+        let (root, place) = (home.join("proj"), home.join("ref"));
+        let key = place.join("id_ed25519");
+        std::fs::write(&key, "tarae-fake-token\n").unwrap();
+        let granted = crate::allow::Allowed { read: vec![place.clone()], ..Default::default() };
+        let none = crate::allow::Allowed::default();
+        let caps = crate::caps::Caps {
+            home: Some(home.clone()),
+            ..crate::caps::Caps::granted(&root, &granted, &none, &none)
+        };
+        let closed = |_: u16| false;
+        let net = super::NetNow { open: false, rules: Some(Vec::new()), session: Vec::new() };
+        let here = crate::sandbox::Here { tmp: None, ..crate::sandbox::Here::now() };
+        let w = super::with_allowed(&crate::llm::LlmConfig::default(), &caps, None);
+        let keys = crate::sandbox::key_rules_for(&root, w, &here);
+        let ask = Read(key.display().to_string());
+        let got = super::also_grant(&ask, &root, &caps, (&closed, false), None, &net, Some(&keys));
+        let want = if cfg!(target_os = "macos") { Some(Grant::Key(key.clone())) } else { None };
+        assert_eq!(got, Ok(want));
+        // (with no rule of a run's: the project's only — the place is read, it runs)
+        assert_eq!(super::also_grant(&ask, &root, &caps, (&closed, false), None, &net, None), Ok(None));
     }
 
     /// alsoread, from the chat: `also {read: folder}`'s card offers that folder, and `y` runs the command with that
@@ -6294,7 +6380,7 @@ mod tests {
         let c = super::also_candidates(true, &refused, &below);
         assert_eq!(c.len(), 2, "{c:?}");
         let caps = crate::caps::Caps::at(&root, &root);
-        let line = super::also_line(&c, &caps, &|_| false);
+        let line = super::also_line(&c, None, &caps, &|_| false);
         assert!(line.contains("{\"network\": \"pkg.example.invalid\"}"), "{line}");
         assert!(line.contains("{\"network\": \"git.example.invalid:22\"}"), "{line}");
         assert!(!line.contains("no.example.invalid"), "{line}");
@@ -6729,24 +6815,24 @@ mod tests {
         let c = super::also_candidates(true, &failed, &below);
         assert_eq!(c.len(), 2, "{c:?}");
         let caps = crate::caps::Caps::at(&home, &root);
-        let line = super::also_line(&c, &caps, &|_| false);
+        let line = super::also_line(&c, None, &caps, &|_| false);
         assert!(line.contains("/data\"}") && line.contains("{\"port\": 5432}"), "{line}");
-        let line = super::also_line(&c, &caps, &|n| n == 5432);
+        let line = super::also_line(&c, None, &caps, &|n| n == 5432);
         assert!(!line.contains("port"), "open already: {line}");
-        assert_eq!(super::also_line(&[], &caps, &|_| false), "", "nothing: no line");
+        assert_eq!(super::also_line(&[], None, &caps, &|_| false), "", "nothing: no line");
         // (piece D) a port refused to what picks its ports as it starts (the Java pack's `refused-port`) is every
         // port here, never that one port; a terminal is the terminals (macOS)
         let gradle = d("java", "network-outbound", "remote:*:52113".into());
         let tty = d("script", "file-read-data", "/dev/ttys012".into());
         let c = super::also_candidates(true, &[gradle, tty], &below);
         assert_eq!(c.len(), 2, "{c:?}");
-        let line = super::also_line(&c, &caps, &|_| false);
+        let line = super::also_line(&c, None, &caps, &|_| false);
         assert!(line.contains("{\"localhost\": true}") && !line.contains("52113"), "{line}");
         assert!(line.contains("{\"terminals\": true}"), "{line}");
         let mut open = caps.clone();
         open.localhost.push(crate::caps::Source::Grant(crate::allow::Scope::Session));
         open.terminals.push(crate::caps::Source::Grant(crate::allow::Scope::Session));
-        assert_eq!(super::also_line(&c, &open, &|_| false), "", "answered already: nothing to ask");
+        assert_eq!(super::also_line(&c, None, &open, &|_| false), "", "answered already: nothing to ask");
     }
 
     /// `also` takes every port here, a variable and the terminals (piece D): each a grant when it's closed, none
@@ -6773,7 +6859,7 @@ mod tests {
         let closed = |_: u16| false;
         let grant = |a: super::AlsoAsk, localhost: bool, env: Option<&RunEnv>| {
             let net = super::NetNow { open: false, rules: Some(Vec::new()), session: Vec::new() };
-            super::also_grant(&a, dir, &caps, (&closed, localhost), env, &net)
+            super::also_grant(&a, dir, &caps, (&closed, localhost), env, &net, None)
         };
         assert_eq!(grant(super::AlsoAsk::Localhost, false, None), Ok(Some(Grant::Localhost)));
         assert_eq!(grant(super::AlsoAsk::Localhost, true, None), Ok(None), "the setting opens them");

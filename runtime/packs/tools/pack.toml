@@ -8,6 +8,8 @@
 
 [sandbox]
 pass = ["MISE_*", "ASDF_*", "VOLTA_*", "SDKMAN_*"]
+# What the managers installed: an install's files, none closed by a name like a key's where a grant opened them
+installs = ["~/.asdf/installs", "~/.local/share/mise/installs"]
 # A connect the sandbox refused, as a program's own line says it — read as the kernel's report of it would be
 # (`Policy::said_in_output`): that report is lost when the system is busy (piece D's shots, 2026-10-17: 4 and 3 of 6 never
 # reported, the kernel's stream full of others' duplicate reports). Named groups: `process` (the program its line

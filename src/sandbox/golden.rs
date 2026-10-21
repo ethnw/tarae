@@ -206,9 +206,28 @@ fn shown(p: &Path) -> String {
 fn policy_said(f: &Fixture, p: &Policy) -> String {
     let run = p.run.as_deref();
     let mut s = String::from("profile:\n");
-    // (the names' regexes start with as many path parts as the project's path has: the machine's)
-    let depth = p.root.components().filter(|c| matches!(c, Component::Normal(_))).count();
-    let mut profile = p.profile().replace(&format!("^{}/", "/[^/]+".repeat(depth)), "^$ROOT-PARTS/");
+    // (the names' regexes start with as many path parts as the project's path has, or a key place's — the
+    // machine's: a rule of key places is named by them, review N7)
+    let parts = |at: &Path| {
+        let depth = at.components().filter(|c| matches!(c, Component::Normal(_))).count();
+        format!("^{}/", "/[^/]+".repeat(depth))
+    };
+    let mut profile: String = p
+        .profile()
+        .lines()
+        .map(|l| {
+            let of = |i: &usize| l.contains(&format!("(param \"KP{i}\")"));
+            let kps: Vec<usize> = (0..p.key_places.len()).filter(of).collect();
+            let line = match kps.first() {
+                Some(&i) => {
+                    let names: Vec<String> = kps.iter().map(|i| format!("KP{i}")).collect();
+                    l.replace(&parts(&p.key_places[i]), &format!("^${}-PARTS/", names.join(",")))
+                }
+                None => l.replace(&parts(&p.root), "^$ROOT-PARTS/"),
+            };
+            line + "\n"
+        })
+        .collect();
     // (macOS, the network open: the run's own port to tarae's proxy, a new one each time)
     if let Some(r) = &p.proxy {
         profile = profile.replace(&format!("\"localhost:{}\"", r.port), "\"localhost:$PROXY\"");
@@ -224,12 +243,13 @@ fn policy_said(f: &Fixture, p: &Policy) -> String {
         s.push_str(&format!("  {letter}:\n{}", lines(f, run, values)));
     }
     let r = &p.reads;
-    let fields: [(&str, Vec<String>); 15] = [
+    let fields: [(&str, Vec<String>); 16] = [
         ("write", p.write.iter().map(|w| shown(w)).collect()),
         ("files", p.files.iter().map(|w| shown(w)).collect()),
         ("keep", p.keep.iter().map(|w| shown(w)).collect()),
         ("caches", p.caches.iter().map(|w| shown(w)).collect()),
         ("refused", p.refused.iter().map(|(d, why)| format!("{} — {why}", shown(d))).collect()),
+        ("key places", p.key_places.iter().map(|w| shown(w)).collect()),
         ("reads.home", r.home.iter().map(|w| shown(w)).collect()),
         ("reads.allow", r.allow.iter().map(|w| shown(w)).collect()),
         ("reads.kept", r.kept.iter().map(|w| shown(w)).collect()),
