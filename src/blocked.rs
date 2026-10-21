@@ -381,8 +381,9 @@ impl Editor {
                 let Choice { grant, why, .. } =
                     n.parse::<usize>().ok().and_then(|i| list.get(i).cloned()).ok_or("no such row")?;
                 // A read: its card says first what looks like a token there — looked through on a worker
+                let closed = !self.config.llm.sandbox_network;
                 let Grant::Read(place) = &grant else {
-                    self.push_offer(grant_card(grant, &why, &cmd, run, None, then));
+                    self.push_offer(grant_card(grant, &why, &cmd, run, None, (then, closed)));
                     return Ok(());
                 };
                 let place = place.clone();
@@ -390,7 +391,7 @@ impl Editor {
                     let said = crate::tokens::found_in(&place).said(&place);
                     move |ed: &mut Editor| {
                         let then = then_said(ed, &run);
-                        ed.push_offer(grant_card(grant, &why, &cmd, run, said, then))
+                        ed.push_offer(grant_card(grant, &why, &cmd, run, said, (then, closed)))
                     }
                 });
                 return Ok(());
@@ -402,14 +403,15 @@ impl Editor {
 }
 
 /// The card that opens `grant` for what was blocked in `run` (`why`, in `cmd`) — warning what it opens
-/// (Docker's socket; a place holding a token-like line: `tokens`); `then`: how Claude hears its end (`then_said`).
+/// (Docker's socket; a place holding a token-like line: `tokens`); `then`: how Claude hears its end (`then_said`);
+/// `closed`: the network is (a host's card says what a yes opens of its pack's caches).
 fn grant_card(
     grant: Grant,
     why: &str,
     cmd: &str,
     run: Box<BlockedRun>,
     tokens: Option<String>,
-    then: &str,
+    (then, closed): (&str, bool),
 ) -> crate::offer::Offer {
     use crate::cards::{Asked, Request, Why};
     // (every port for what picks its ports: the pack's words, as on the card Claude's turn held — `loopback_card`)
@@ -418,12 +420,13 @@ fn grant_card(
         _ => format!("{why}, in `{cmd}` — which runs again now with it open, whichever you choose. {then}"),
     };
     let asked = Asked::new(Why::Blocked, Request::Grant(grant.clone())).about(cmd);
-    grant_offer(grant, said, asked, run, tokens, Vec::new())
+    grant_offer(grant, said, asked, run, tokens, Vec::new(), closed)
 }
 
 /// The card for what Claude's `also` asks (cardauto P3): `grant` for `cmd`, Claude's `reason` — its call waits on
 /// it (`run.claude`); `y` runs the command with it open. `asks`: the command's warnings that ask where the run
-/// could reach out (D4) — on this card, since any answer but `n` runs it, as the run card's `y` would.
+/// could reach out (D4) — on this card, since any answer but `n` runs it, as the run card's `y` would. `closed`:
+/// the network is (a host's card says what a yes opens of its pack's caches).
 pub fn also_card(
     grant: Grant,
     reason: &str,
@@ -431,13 +434,14 @@ pub fn also_card(
     run: Box<BlockedRun>,
     tokens: Option<String>,
     asks: Vec<crate::cardwarn::Warned>,
+    closed: bool,
 ) -> crate::offer::Offer {
     use crate::cards::{Asked, Request, Why};
     let said = format!("Claude asks, for `{cmd}`: {reason}\n\nIt runs with it open, whichever you choose.");
     let ids = asks.iter().map(|w| w.id.clone()).collect();
     let asked = Asked::new(Why::Also, Request::Grant(grant.clone())).about(cmd).warned(ids);
     let lines = asks.iter().map(|w| format!("▲ {}", w.line())).collect();
-    grant_offer(grant, said, asked, run, tokens, lines)
+    grant_offer(grant, said, asked, run, tokens, lines, closed)
 }
 
 /// Gradle's loopback (piece D2): Claude's `cmd` failed because a program the packs say picks its ports as it
@@ -448,7 +452,8 @@ pub fn loopback_card(card: &str, cmd: &str, run: Box<BlockedRun>) -> crate::offe
     use crate::cards::{Asked, Request, Why};
     let said = loopback_said(card, cmd, None);
     let asked = Asked::new(Why::Blocked, Request::Grant(Grant::Localhost)).about(cmd);
-    grant_offer(Grant::Localhost, said, asked, run, None, Vec::new())
+    // (no host: the network's state says nothing on it)
+    grant_offer(Grant::Localhost, said, asked, run, None, Vec::new(), false)
 }
 
 /// Gradle's loopback card's words, Claude's turn holding it or not: the pack's `card`, then what failed and runs
@@ -464,7 +469,8 @@ fn loopback_said(card: &str, cmd: &str, then: Option<&str>) -> String {
 }
 
 /// A grant's card: what it lets, `said` (why, and what runs), how long it lasts, what it warns of (the grant's
-/// risk, `tokens`, then the command's own: `warned`).
+/// risk, `tokens`, then the command's own: `warned`). A host's: its pack's registry and what a yes lets in with
+/// it, and what's read can go there (the caches too, the network `closed` — `hosts::grant_said`).
 fn grant_offer(
     grant: Grant,
     said: String,
@@ -472,7 +478,15 @@ fn grant_offer(
     run: Box<BlockedRun>,
     tokens: Option<String>,
     warned: Vec<String>,
+    closed: bool,
 ) -> crate::offer::Offer {
+    let (registry, host_risk) = match &grant {
+        Grant::Host(h, p) => {
+            let (line, warn) = crate::hosts::grant_said(h, *p, closed);
+            (line, Some(warn))
+        }
+        _ => (None, None),
+    };
     // (as far as it may be kept: a socket this conversation's at most, a key and Docker's socket this run's —
     // everything else stays in the sandbox)
     let lasts = match (&grant, crate::caps::Caps::storable(&grant)) {
@@ -484,11 +498,13 @@ fn grant_offer(
         }
         (_, Scope::Once) => "Everything else stays in the sandbox; it's never kept past this run.",
     };
-    let mut question = format!("Let Claude's commands {}\n\n{said} {lasts}", grant.shown());
+    let registry = registry.map(|r| format!("\n{r}")).unwrap_or_default();
+    let mut question = format!("Let Claude's commands {}{registry}\n\n{said} {lasts}", grant.shown());
     if let Some(from) = &run.from {
         question.push_str(&format!("\n\nWhat it refused was read {from}."));
     }
-    let warn: Vec<String> = grant.risk().into_iter().chain(tokens).chain(warned).collect();
+    let risk = grant.risk().into_iter().chain(host_risk);
+    let warn: Vec<String> = risk.chain(tokens).chain(warned).collect();
     let warning = (!warn.is_empty()).then(|| {
         question.push_str("\n\n");
         let at = question.split('\n').count() - 1;
@@ -556,7 +572,11 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
                 None => crate::tools::answer(ed, call, Err(no)),
             };
         };
-        crate::allow::grant(ed, &grant, scope);
+        match &grant {
+            // (C2: a host is the proxy's to let through — as the user's own choice below)
+            Grant::Host(h, p) => crate::hosts::granted(ed, h, *p, scope),
+            _ => crate::allow::grant(ed, &grant, scope),
+        }
         let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
         return crate::tools::guard_and_go(ed, For::Claude(call), run.job, false, extra);
     }
@@ -803,7 +823,8 @@ mod tests {
             ..BlockedRun::of(Job::Command("bin/gradle build".into(), PathBuf::from("/Users/u/p")))
         };
         let c = choices(&gradle.denials, &caps).remove(0);
-        let card = grant_card(c.grant, &c.why, "bin/gradle build", Box::new(gradle.clone()), None, GOES_ON);
+        let card =
+            grant_card(c.grant, &c.why, "bin/gradle build", Box::new(gradle.clone()), None, (GOES_ON, true));
         let held = loopback_card(&crate::tools::loopback_of(&gradle.denials).unwrap(), "bin/gradle build", {
             Box::new(gradle)
         });
@@ -838,7 +859,7 @@ mod tests {
             ..BlockedRun::of(Job::Command("psql".into(), PathBuf::from("/Users/u/p")))
         };
         let c = list[0].clone();
-        let card = grant_card(c.grant, &c.why, "psql", Box::new(run), None, NEXT_MESSAGE);
+        let card = grant_card(c.grant, &c.why, "psql", Box::new(run), None, (NEXT_MESSAGE, true));
         let text = card.question.clone();
         assert!(text.contains("MY_API_TOKEN") && !text.contains(value), "{text}");
         assert!(text.contains("s lasts until this session ends") && !text.contains("A until"), "{text}");
@@ -1073,7 +1094,7 @@ mod tests {
         let home = crate::allow::home().expect("a home");
         let card = |g: Grant| {
             let run = BlockedRun::of(Job::Command("true".into(), base.clone()));
-            grant_card(g, "it was refused", "true", Box::new(run), None, NEXT_MESSAGE)
+            grant_card(g, "it was refused", "true", Box::new(run), None, (NEXT_MESSAGE, true))
         };
         let all = "yasAn";
         for (g, keys) in [

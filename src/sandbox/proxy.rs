@@ -733,7 +733,7 @@ impl State {
         });
         let ran = self.run_allowed.iter().any(|(r, k)| *r == run && under(k));
         let verdict = match latest {
-            Some(Latest::Refused) => Some(Verdict::No("the user refused it for this session".into())),
+            Some(Latest::Refused) => Some(Verdict::No(USER_REFUSED.into())),
             Some(Latest::Allowed) => Some(Verdict::Go),
             _ if ran => Some(Verdict::Go),
             None if answered => Some(Verdict::Go),
@@ -1001,6 +1001,9 @@ fn decided(c: &Conn, shared: &Shared, name: &str, port: u16, default: u16) -> De
     held(shared, c.asking(key, c.rules.answered(name, port)), None, why)
 }
 
+/// Why a host wasn't let through when the user said no on its card — the one refusal `also` never names again
+/// (`tools::also_candidates`).
+pub const USER_REFUSED: &str = "the user refused it for this session";
 /// Why a host wasn't let through when the user didn't answer — its rules don't name it.
 const NOT_A_HOST: &str = "not among the hosts it may reach (llm.sandbox-hosts)";
 /// The same with the network closed (piece C): no list to be among — the user's card was the way.

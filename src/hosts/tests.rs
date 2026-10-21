@@ -90,6 +90,30 @@ fn answered(m: &ToProxy) -> Option<(u64, u64, String, u16, Scope)> {
     }
 }
 
+/// C2: `n` on a host card for Claude's command is its `also`'s no too — the same conversation asking for that host
+/// on a grant card is refused without one (the proxy holds the session's no); a no for the user's own command
+/// isn't Claude's.
+#[test]
+fn a_host_refused_on_its_card_isnt_asked_again_by_also() {
+    let (mut ed, dir, _, run, _) = two("also-refused");
+    ed.config.llm.sandbox_network = false;
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    crate::chat::open(&mut ed);
+    let front = dir.join("front");
+    asked(&mut ed, ask(&front, run, HOST));
+    settled(&mut ed);
+    key(&mut ed, 'n');
+    let refused = &ed.session.chat.as_ref().unwrap().also_refused;
+    assert_eq!(refused, &[crate::allow::Grant::Host(HOST.into(), 443)]);
+    // (the user's own command: their no, not Claude's)
+    ed.session.task_run.as_mut().unwrap().tell = Some(Default::default());
+    asked(&mut ed, ask(&front, run, "own.example.invalid"));
+    settled(&mut ed);
+    key(&mut ed, 'n');
+    assert_eq!(ed.session.chat.as_ref().unwrap().also_refused.len(), 1, "the user's own: not Claude's no");
+}
+
 /// Piece C: with `llm.sandbox-network` off every host is asked, `y` this run · `a` this chat · `s` this session ·
 /// `n` — no `A` (cards.md decision 4: always is the setting), and `A` answers nothing. A pack's registry is answered
 /// with the pack's other registries, listed on the card (Q6: the yes grants them); a pack with caches warns its yes

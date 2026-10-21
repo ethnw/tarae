@@ -472,6 +472,7 @@ Not kept:
 | a port or `llm.sandbox-localhost` | those ports (the risky ones too, with localhost) |
 | `llm.sandbox-network` | the internet through the proxy: the packs' registries unasked (`llm.sandbox-hosts`' default), others a card; every host with `"*"`, a list's hosts alone with a list |
 | `y`/`a`/`s` on a host card, the network closed | that host — and the registries the card lists with it — for the run, conversation or session; a registry's pack's caches writable from the next run under it |
+| `y`/`a`/`s` on Claude's `also: {network}` card (or `:sandbox-blocked`'s host) | the same, before the run: that host and its pack's other registries, for the run it opens, the conversation or the session; a `y` also lifts a no you gave that host this session; a registry's caches writable from that run, the network closed. Never an address, `localhost` or a cloud metadata server's name |
 | `A` on a host card, the network open (by default, or with a list) | that host, always, in this project |
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
 | `y`/`s` on a no-sandbox card | commands as you, unconfined — `s` its checks and reads unasked until the session ends, in every chat of it, never kept past a restart |

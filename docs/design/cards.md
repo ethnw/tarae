@@ -642,7 +642,11 @@ beside them:
   piece D `{localhost}` (every port here, `Grant::Localhost`: its card names the risky ports it opens too),
   `{env: NAME}` (one variable left out, passed whole — `Grant::Env`; never a name `readonly::env_allowed` keeps
   off; judged by the session's last run's environment; a token-like name this session at most) and
-  `{terminals}` (macOS). Resolved on
+  `{terminals}` (macOS); since piece C2 `{network}` (one host by name, `name:port` off 443 — never an address,
+  `localhost` or a metadata server's name; `also_host`: let through unasked when the network's open and it's
+  listed, or a session's or conversation's grant covers it; its card names the pack's registry and what a yes
+  lets in with it, `y` this run · `a` chat · `s` session · `n`, answered through `hosts::granted`; a host card's
+  `n` on Claude's command is its `also`'s no too). Resolved on
   a worker against `Caps` as a grant card for a blocked run offers it (`blocked::choices`): open already → runs;
   no card opens it (home, keys, what runs later, a risky port, a protected name in the project) → said, no card;
   else the Grant card (`blocked::also_card`, `Why::Also`, Claude's call waits on it — `BlockedRun.claude`).
@@ -650,8 +654,9 @@ beside them:
   `ALSO_MAX` (3) cards a turn (`Chat.also_asked`, new each turn).
 - **The report** (`also_candidates`, `also_line`): only a run that *failed* gets the `also` line (§8.4: a
   passing cargo test of this repository reports taplo walking up from its folder, mDNSResponder and the test
-  binary's own probes); and only for a read or write of a place, a port the settings don't open, a terminal —
-  never a look at a folder above the project or the run's own folder, a socket, a host. A port refused to a
+  binary's own probes); and only for a read or write of a place, a port the settings don't open, a terminal, a
+  host whose card went unanswered or too many waited (C2) — never a look at a folder above the project or the
+  run's own folder, a socket, a host the user refused (`proxy::USER_REFUSED`). A port refused to a
   program a pack's `refused-port` names (Gradle's JVM, which picks its ports as it starts) is `{localhost}`,
   not that port — but below `PICKED_FROM` (1024, never a picked port: Seatbelt names no address, so it's a host
   beyond this machine) neither that card nor `{localhost}`: the report says the refusal, and with the network

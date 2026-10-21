@@ -336,20 +336,9 @@ fn closed_card(a: Ask) -> Offer {
         (false, false) => ("Claude's", format!("{}, in `{}`", a.process, a.label)),
     };
     let mut lines = vec![format!("{by} · port {} · through tarae's proxy", a.port)];
-    if let Some(p) = &pack {
-        // (the pack's name starts the line: `Rust's registry` — 58 cells with its others, inside the 60 its
-        // answers make the card)
-        let mut c = p.chars();
-        let p: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
-        lines.push(match a.also.is_empty() {
-            true => format!("{p}'s registry"),
-            false => format!("{p}'s registry: a yes also lets in {}", a.also.join(", ")),
-        });
-    }
+    lines.extend(pack.as_deref().map(|p| registry_line(p, &a.also)));
     let decided = lines.len();
-    // (a cache said by its gist — `cargo's caches`, the part before ` — `; whole behind `v`)
-    let caches = pack.as_ref().map(|p| caches_of(&packs.caches, p)).unwrap_or_default();
-    let gists: Vec<&str> = caches.iter().map(|c| c.split(" — ").next().unwrap_or(c)).collect();
+    let gists = pack.as_deref().map(|p| cache_gists(&packs.caches, p)).unwrap_or_default();
     lines.push(match gists.is_empty() {
         true => "What it read can be sent there.".to_string(),
         false => format!(
@@ -365,6 +354,53 @@ fn closed_card(a: Ask) -> Offer {
         .deciding(0..decided)
         .warning(decided..decided + 1)
         .asked(asked)
+}
+
+/// The line naming pack `pack`'s registry and `also`, what a yes lets in with it — the pack's name starts it:
+/// `Rust's registry` (58 cells with its others, inside the 60 a host card's answers make it).
+fn registry_line(pack: &str, also: &[String]) -> String {
+    let mut c = pack.chars();
+    let p: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+    match also.is_empty() {
+        true => format!("{p}'s registry"),
+        false => format!("{p}'s registry: a yes also lets in {}", also.join(", ")),
+    }
+}
+
+/// Pack `pack`'s caches, each by its gist — `cargo's caches`, the part before ` — ` (whole behind `v`).
+fn cache_gists(caches: &[crate::sandboxpack::Caches], pack: &str) -> Vec<String> {
+    let whole = caches_of(caches, pack);
+    whole.iter().map(|c| c.split(" — ").next().unwrap_or(c).to_string()).collect()
+}
+
+/// `host:port` as asked and what a yes lets in with it (Q6): the pack's other registries when it's one — what
+/// every yes on it grants, a card's, `:sandbox-blocked`'s or Claude's `also` (C2).
+pub fn with_suggested(host: &str, port: u16) -> Vec<String> {
+    let packs = crate::sandboxpack::get();
+    std::iter::once(host.to_string()).chain(suggested(&packs.registries, host, port)).collect()
+}
+
+/// What a grant card for `host:port` says of it besides the host (C2: Claude's `also`, `:sandbox-blocked`'s
+/// choice): the pack's registry and what a yes lets in with it (decided), and what it risks — what's read can go
+/// there, and, the network closed (`closed`), the pack's caches its runs write from then on (the run it opens
+/// for, too: its rules are made with the grant).
+pub fn grant_said(host: &str, port: u16, closed: bool) -> (Option<String>, String) {
+    let packs = crate::sandboxpack::get();
+    let pack = registry_of(&packs.registries, host, port);
+    let also = suggested(&packs.registries, host, port);
+    let line = pack.as_deref().map(|p| registry_line(p, &also));
+    let gists = match (&pack, closed) {
+        (Some(p), true) => cache_gists(&packs.caches, p),
+        _ => Vec::new(),
+    };
+    let warn = match gists.is_empty() {
+        true => "What it read can be sent there.".to_string(),
+        false => format!(
+            "What it read can be sent there. Runs under this yes can also write {}, which your own builds run.",
+            gists.join(" and ")
+        ),
+    };
+    (line, warn)
 }
 
 /// What the closed host card leaves to `v` — after its text in the card's buffer: the wait and when an answer
@@ -410,6 +446,17 @@ pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
     // (Q6: a yes grants the registries the card listed with it; a no is for the host asked alone)
     let also = if scope == Scope::Refused { &[][..] } else { &a.also[..] };
     let scope = if scope == Scope::Project && !a.open { Scope::Session } else { scope };
+    // (C2: a no on Claude's command is its `also`'s too — that conversation asks for the host on no card again)
+    let ours = ed.session.proxy_id() == a.session;
+    if let Some(c) = ed.session.chat.as_mut().filter(|_| ours && scope == Scope::Refused)
+        && a.kind == Kind::Host
+        && !a.users
+    {
+        let g = crate::allow::Grant::Host(a.host.clone(), a.port);
+        if !c.also_refused.contains(&g) {
+            c.also_refused.push(g);
+        }
+    }
     keep(ed, a.session, a.run, a.kind, &a.host, also, a.port, scope);
 }
 
@@ -519,19 +566,20 @@ pub fn chat_ended(ed: &Editor) {
     }
 }
 
-/// A host granted from what a run was refused (`:sandbox-blocked`, the session in front), before that run goes
-/// again: `Once` lifts a refusal for the session (the run's own rules carry the host — `Extra.grant`), the others
-/// as the card's `s` and `A`.
+/// A host granted before a run goes (`:sandbox-blocked`'s choice, Claude's `also` — the session in front), with
+/// what a yes on it lets in (`with_suggested`): `Once` lifts a refusal for the session (the run's own rules carry
+/// the hosts — `Extra.grant`, `tools::with_allowed`), the others as the card's `a` and `s`.
 pub fn granted(ed: &mut Editor, host: &str, port: u16, scope: crate::allow::Scope) {
     let session = ed.session.proxy_id();
+    let also = &with_suggested(host, port)[1..];
     match scope {
         crate::allow::Scope::Once => {
             send(ToProxy::Lifted { session, kind: Kind::Host, host: host.into(), port })
         }
-        crate::allow::Scope::ThisChat => keep(ed, session, 0, Kind::Host, host, &[], port, Scope::Chat),
+        crate::allow::Scope::ThisChat => keep(ed, session, 0, Kind::Host, host, also, port, Scope::Chat),
         // (piece C: a host is never kept past a session — `Caps::storable`; always is the setting)
         crate::allow::Scope::Session | crate::allow::Scope::Always => {
-            keep(ed, session, 0, Kind::Host, host, &[], port, Scope::Session)
+            keep(ed, session, 0, Kind::Host, host, also, port, Scope::Session)
         }
     }
 }

@@ -663,10 +663,11 @@ pub(crate) fn run_schema() -> Value {
     that. For git's reads the git tool is better (no card, no process). Any command runs at once in a sandbox: \
     it reads the project, the repository's other checkouts, the temp folders{code} and outside home; writes the \
     project (but its build files and .git: change those with edit), temp and the toolchain's own folders; \
-    reaches no network but this machine's open ports. Its report says what the sandbox blocked. To run \
+    reaches this machine's open ports, and other hosts only through tarae's proxy: one it isn't let reach waits \
+    on the user's card. Its report says what the sandbox blocked. To run \
     somewhere other than the project root, give cwd rather than a cd. No stdin and no terminal: nothing \
     interactive. For one test file or test, run_tests is better (it reads each failure). When the report says \
-    the command needs a place or port it blocked, run it again with also (that one thing) and your reason — \
+    the command needs a place, port or host it blocked, run it again with also (that one thing) and your reason — \
     the user decides on a card; a no holds for the chat, don't work around it. When it needs one unix socket \
     outside the sandbox (a server's — colima's docker.sock), ask for that: unix_socket with your reason; when \
     it can't work in it otherwise, you may ask to run it outside: outside_sandbox with your reason — the user \
@@ -678,7 +679,7 @@ pub(crate) fn run_schema() -> Value {
                 "cwd": { "type": "string", "description": "The folder it runs in, inside the project (relative to its root); the root if left out" },
                 "outside_sandbox": { "type": "boolean", "description": "Ask the user to run it outside the sandbox, this once (with reason)" },
                 "unix_socket": { "type": "string", "description": "Ask the user to let it connect to this one unix socket (its path; with reason) — the rest stays sandboxed" },
-                "also": { "type": "object", "description": "One thing past the sandbox it needs, that its report said was blocked (with reason) — {\"read\": path} · {\"write\": folder} · {\"port\": n} on this machine · {\"localhost\": true} every port here · {\"env\": NAME} a variable left out · {\"terminals\": true}" },
+                "also": { "type": "object", "description": "One thing past the sandbox it needs, that its report said was blocked (with reason) — {\"read\": path} · {\"write\": folder} · {\"port\": n} on this machine · {\"localhost\": true} every port here · {\"env\": NAME} a variable left out · {\"terminals\": true} · {\"network\": host} beyond it" },
                 "reason": { "type": "string", "description": "Why it can't run in the sandbox as it is — required with also, outside_sandbox or unix_socket; the user reads it" },
                 "base": { "type": "string", "description": "A commit (HEAD, a branch, a sha): run this check on its tree instead — a copy apart from the project, removed after; to tell a failure already there from yours. Checks only, one command" }
             },
@@ -694,7 +695,8 @@ const REASON_MAX: usize = 300;
 pub const ALSO_MAX: usize = 3;
 
 /// What `also` asks for, as Claude gave it: a place to read, a folder to write in, a port on this machine, every
-/// port here, a variable left out of its environment, the terminals.
+/// port here, a variable left out of its environment, the terminals, a host beyond this machine (by name, at its
+/// port).
 #[derive(Clone, Debug)]
 enum AlsoAsk {
     Read(String),
@@ -703,13 +705,14 @@ enum AlsoAsk {
     Localhost,
     Env(String),
     Terminals,
+    Network(String, u16),
 }
 
 /// The run's `also` and its reason — None when it has none; Err says what's wrong with it (to Claude).
 fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
     let Some(also) = args.get("also").filter(|v| !v.is_null()) else { return Ok(None) };
     let one = "also names one thing: {\"read\": path} · {\"write\": folder} · {\"port\": n} · {\"localhost\": true} · \
-               {\"env\": NAME} · {\"terminals\": true}";
+               {\"env\": NAME} · {\"terminals\": true} · {\"network\": host}";
     let o = also.as_object().filter(|o| o.len() == 1).ok_or(one)?;
     let path = |v: &Value| v.as_str().map(str::trim).filter(|p| !p.is_empty()).map(String::from).ok_or(one);
     let ask = match o.iter().next() {
@@ -721,6 +724,7 @@ fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
         Some((k, v)) if k == "localhost" && v.as_bool() == Some(true) => AlsoAsk::Localhost,
         Some((k, v)) if k == "terminals" && v.as_bool() == Some(true) => AlsoAsk::Terminals,
         Some((k, v)) if k == "env" => AlsoAsk::Env(path(v)?.trim_start_matches('$').to_string()),
+        Some((k, v)) if k == "network" => also_network(v.as_str().ok_or(one)?)?,
         _ => return Err(one.into()),
     };
     if args["outside_sandbox"].as_bool() == Some(true)
@@ -740,16 +744,70 @@ fn also_of(args: &Value) -> Result<Option<(AlsoAsk, String)>, String> {
     Ok(Some((ask, reason.to_string())))
 }
 
+/// The host `also` asks for (C2), as Claude wrote it: one name, `name:port` (443 when left out) — Err said to
+/// Claude: an address (this machine's are `{"port": n}`; another is asked by the name the command reaches),
+/// a pattern, a name the proxy doesn't take, a cloud metadata server's own (never reached).
+fn also_network(s: &str) -> Result<AlsoAsk, String> {
+    let s = s.trim();
+    let here = format!("{s} is this machine — a port here is {{\"port\": n}}");
+    let address = format!("{s} is an address — ask for the host by the name the command reaches it by");
+    let (h, port) = match s.rsplit_once(':') {
+        // (an IPv6 address, bracketed or not)
+        Some((h, _)) if h.contains(':') || h.starts_with('[') => return Err(address),
+        Some((h, p)) => {
+            let port = p.parse::<u16>().ok().filter(|n| *n > 0);
+            (h, port.ok_or_else(|| format!("{s}: a port that isn't 1–65535"))?)
+        }
+        None => (s, 443),
+    };
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return Err(if ip.is_loopback() { here } else { address });
+    }
+    if h.contains('*') {
+        return Err(format!("{s}: one host by its name, not a pattern"));
+    }
+    let name = crate::sandbox::proxy::parse::name(h).map_err(|why| format!("{s}: {why}"))?;
+    if name == "localhost" || name.ends_with(".localhost") {
+        return Err(here);
+    }
+    if crate::sandbox::route::never_named(&name) {
+        return Err(format!("{s} is a cloud metadata server's own name — never reached"));
+    }
+    Ok(AlsoAsk::Network(name, port))
+}
+
+/// The network as a session's runs reach it, for `also_host`: open (`llm.sandbox-network`), the hosts they reach
+/// without asking then (`llm::Hosts::rules`; None: any), and the session's `s` hosts (`caps::Basis.hosts`: the
+/// proxy's, not in `Caps`).
+struct NetNow {
+    open: bool,
+    rules: Option<Vec<crate::sandbox::proxy::egress::Pattern>>,
+    session: Vec<(String, u16)>,
+}
+
+/// `host:port` for a run in a session that may do `caps` on network `net` (C2): None when its runs reach it
+/// unasked — the network open and the host on its list, or a grant of the session's or conversation's covering it
+/// (a registry's `*.domain` too) — else the host's grant.
+fn also_host(host: &str, port: u16, caps: &crate::caps::Caps, net: &NetNow) -> Option<crate::allow::Grant> {
+    use crate::allow::Grant;
+    let listed = net.open && net.rules.as_ref().is_none_or(|r| r.iter().any(|p| p.matches(host, port, 443)));
+    let covered = |g: &Grant| matches!(g, Grant::Host(h, p) if *p == port && crate::sandbox::proxy::egress::covers(h, host));
+    let session = net.session.iter().map(|(h, p)| Grant::Host(h.clone(), *p));
+    let granted = caps.run_grants(net.open).into_iter().chain(session).any(|g| covered(&g));
+    (!listed && !granted).then(|| Grant::Host(host.to_string(), port))
+}
+
 /// What `ask` would open for a run from `cwd` in a session that may do `caps` — as a grant card for what the
 /// sandbox blocked offers it (`blocked::choices`: never home or above, keys, what runs later …): None when it's
-/// open already (`open_port`: the settings' ports; `localhost`: every one), Err when no card opens it (said to
-/// Claude). A variable by the environment of the session's last run (`env`): one passed already runs.
+/// open already (`open_port`: the settings' ports; `localhost`: every one; a host by `net`), Err when no card opens
+/// it (said to Claude). A variable by the environment of the session's last run (`env`): one passed already runs.
 fn also_grant(
     ask: &AlsoAsk,
     cwd: &Path,
     caps: &crate::caps::Caps,
     (open_port, localhost): (&dyn Fn(u16) -> bool, bool),
     env: Option<&crate::sandbox::runenv::RunEnv>,
+    net: &NetNow,
 ) -> Result<Option<crate::allow::Grant>, String> {
     use crate::allow::Grant;
     let real = |p: &str| {
@@ -785,6 +843,7 @@ fn also_grant(
         }
         AlsoAsk::Terminals => return Ok(caps.terminals.is_empty().then_some(Grant::Terminals)),
         AlsoAsk::Env(n) => return also_env(n, caps, env),
+        AlsoAsk::Network(h, p) => return Ok(also_host(h, *p, caps, net)),
         AlsoAsk::Read(p) => ("file-read-data", real(p)?),
         AlsoAsk::Write(p) => {
             let r = real(p)?;
@@ -905,14 +964,17 @@ fn also_ask(
     };
     let basis = ed.caps_basis();
     let (localhost, ports) = (ed.config.llm.sandbox_localhost, ed.config.llm.sandbox_ports.clone());
+    let (open_net, hosts) = (ed.config.llm.sandbox_network, ed.config.llm.sandbox_hosts.clone());
     // (its card runs the command on any answer but `n`: what `in_sandbox` looks at for a run is looked at for it —
-    // D4's warnings that ask, and where a move takes an unseen file)
-    let (unseen, reach, root) = (unseen_now(ed), could_reach_out(ed, false), ed.session.root.clone());
+    // D4's warnings that ask, and where a move takes an unseen file; a host's yes lets it reach out)
+    let host = matches!(ask, AlsoAsk::Network(..));
+    let (unseen, reach, root) = (unseen_now(ed), could_reach_out(ed, host), ed.session.root.clone());
     let env = last_run_env(ed);
     ed.events.jobs().spawn(move || {
         let caps = basis.build();
         let open = |n: u16| localhost || ports.contains(&n);
-        let grant = also_grant(&ask, &cwd, &caps, (&open, localhost), env.as_ref());
+        let net = NetNow { open: open_net, rules: hosts.rules(), session: basis.hosts.clone() };
+        let grant = also_grant(&ask, &cwd, &caps, (&open, localhost), env.as_ref(), &net);
         // (a place to read: its card says first what looks like a token there)
         let tokens = match &grant {
             Ok(Some(crate::allow::Grant::Read(p))) => crate::tokens::found_in(p).said(p),
@@ -970,7 +1032,8 @@ fn also_ask(
             call.step("grant card up");
             let job = Job::Command(cmd.clone(), cwd);
             let run = crate::blocked::BlockedRun { claude: Some(call), ..crate::blocked::BlockedRun::of(job) };
-            ed.push_offer(crate::blocked::also_card(g, &reason, &cmd, Box::new(run), tokens, asks));
+            let closed = !ed.config.llm.sandbox_network;
+            ed.push_offer(crate::blocked::also_card(g, &reason, &cmd, Box::new(run), tokens, asks, closed));
         }
     });
     Ok(())
@@ -2795,7 +2858,14 @@ pub fn with_allowed(
 ) -> Widened {
     use crate::allow::Grant;
     let mut w = Widened { llm: llm.clone(), ..Widened::default() };
-    for g in caps.run_grants(llm.sandbox_network).into_iter().chain(once.cloned()) {
+    // (a host once is what a yes on it lets in: the pack's other registries with a registry — C2)
+    let once = once.into_iter().flat_map(|g| match g {
+        Grant::Host(h, p) => {
+            crate::hosts::with_suggested(h, *p).into_iter().map(|h| Grant::Host(h, *p)).collect()
+        }
+        g => vec![g.clone()],
+    });
+    for g in caps.run_grants(llm.sandbox_network).into_iter().chain(once) {
         match &g {
             Grant::Read(p) if !w.reads.contains(p) => w.reads.push(p.clone()),
             Grant::Write(p) => w.llm.sandbox_write.push(p.display().to_string()),
@@ -3801,7 +3871,8 @@ pub fn run_done(ed: &mut Editor) {
 /// passed needed none of them (a test binary's own probes, a formatter's look at `~`). A read or write of a place,
 /// a port on this machine; never a read of a folder above where it works (`below`: the project, the run's own
 /// folder — a tool walking up for its settings: taplo's `~`, `~/.cache`), a unix socket (`unix_socket`'s:
-/// mDNSResponder), a host (the proxy's own card). A terminal opened (macOS). Pure: what it opens is `also_line`'s.
+/// mDNSResponder). A terminal opened (macOS). A host the proxy refused only when its card went unanswered or too
+/// many waited (C2) — never one the user said no to (`proxy::USER_REFUSED`). Pure: what it opens is `also_line`'s.
 fn also_candidates(
     failed: bool,
     open: &[crate::sandbox::Denial],
@@ -3816,8 +3887,12 @@ fn also_candidates(
         let walk = read && !write && below.iter().any(|b| b.starts_with(&d.target));
         d.target.starts_with('/') && (read || write) && !walk
     };
+    let host = |d: &&crate::sandbox::Denial| {
+        d.op == crate::sandbox::proxy::HOST_OP
+            && d.target.split_once(": ").is_some_and(|(_, why)| why != crate::sandbox::proxy::USER_REFUSED)
+    };
     open.iter()
-        .filter(|d| place(d) || (!d.target.starts_with('/') && d.port_here().is_some()))
+        .filter(|d| place(d) || host(d) || (!d.target.starts_with('/') && d.port_here().is_some()))
         .cloned()
         .collect()
 }
@@ -3845,6 +3920,8 @@ fn also_line(
             Grant::Port(n) if closed(*n) => format!("{{\"port\": {n}}}"),
             Grant::Localhost if every.iter().any(|n| closed(*n)) => "{\"localhost\": true}".into(),
             Grant::Terminals if caps.terminals.is_empty() => "{\"terminals\": true}".into(),
+            Grant::Host(h, 443) => format!("{{\"network\": \"{h}\"}}"),
+            Grant::Host(h, p) => format!("{{\"network\": \"{h}:{p}\"}}"),
             _ => continue,
         };
         if !said.contains(&one) && said.len() < ALSO_SAID {
@@ -5574,6 +5651,218 @@ mod tests {
         ed.session.task_run = None;
     }
 
+    /// An editor whose chat is at work (`sh` reading nothing stands in for claude) in the project at `dir`, and its
+    /// chat's generation — C2's `also` tests.
+    fn also_chat(dir: &std::path::Path) -> (crate::editor::Editor, u64) {
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.to_path_buf();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        (ed, generation)
+    }
+
+    /// What `run` decided for call `n` of `generation` with `args`: a card (its question), a run (None), refused
+    /// (Err).
+    fn also_sent(
+        ed: &mut crate::editor::Editor,
+        generation: u64,
+        n: u64,
+        args: serde_json::Value,
+    ) -> Result<Option<String>, String> {
+        use serde_json::json;
+        ed.offers.clear();
+        ed.session.task_run = None;
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        let answered = || {
+            super::ANSWERED
+                .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
+        };
+        super::run(ed, super::Call::of(generation, &format!("h{n}"), json!(n)), &args)?;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(o) = ed.offers.first() {
+                return Ok(Some(o.question.clone()));
+            }
+            if super::ADMITTED.with(|a| a.borrow().len()) > before {
+                return Ok(None);
+            }
+            if let Some(Err(e)) = answered() {
+                return Err(e);
+            }
+            assert!(std::time::Instant::now() < end, "{args}: nothing decided");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    }
+
+    /// The front card answered by key `c`, drawn and settled first (a weighty card takes no key as it comes).
+    fn also_key(ed: &mut crate::editor::Editor, c: char) {
+        crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
+        let o = (ed.offers[0].id, ed.offers[0].rev);
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        assert!(ed.offer_key(crate::key::Key::plain(crate::key::Code::Char(c))), "{c} taken");
+    }
+
+    /// C2: `also` names one host by name — `name` (443) or `name:port`, lowercased — and nothing else: an address
+    /// (this machine's are `{"port": n}`), `localhost` and names under it, a pattern, a cloud metadata server's own
+    /// name, a bad port, a list; with a reason, as every `also`.
+    #[test]
+    fn claude_asks_for_a_host_with_a_reason() {
+        use serde_json::json;
+        let of = |v: serde_json::Value| super::also_of(&json!({ "command": "x", "also": v, "reason": "r" }));
+        let host = |s: &str| match of(json!({ "network": s })) {
+            Ok(Some((super::AlsoAsk::Network(h, p), r))) if r == "r" => Ok((h, p)),
+            Ok(other) => panic!("{s}: {other:?}"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(host("registry.npmjs.org"), Ok(("registry.npmjs.org".into(), 443)));
+        assert_eq!(host(" Pkg.Example.INVALID:8443 "), Ok(("pkg.example.invalid".into(), 8443)));
+        for s in ["10.0.0.1", "10.0.0.1:443", "[2001:db8::1]:443", "2001:db8::1", "169.254.169.254"] {
+            let e = host(s).unwrap_err();
+            assert!(e.contains("is an address"), "{s}: {e}");
+        }
+        for s in ["127.0.0.1", "localhost", "dev.localhost:3000", "::1"] {
+            let e = host(s).unwrap_err();
+            assert!(e.contains("this machine") || e.contains("is an address"), "{s}: {e}");
+        }
+        assert!(host("127.0.0.1").unwrap_err().contains("this machine"));
+        assert!(host("metadata.google.internal").unwrap_err().contains("metadata server"));
+        assert!(host("*.crates.io").unwrap_err().contains("not a pattern"));
+        assert!(host("pkg.example.invalid:0").unwrap_err().contains("port"));
+        assert!(host("bad_label-.example.invalid").is_err(), "a name the proxy doesn't take");
+        let one = |v: serde_json::Value| of(v).unwrap_err();
+        assert!(one(json!({ "network": ["a.example.invalid"] })).contains("{\"network\": host}"));
+        assert!(one(json!({ "network": "a.example.invalid", "port": 1 })).contains("names one thing"));
+        let r = super::also_of(&json!({ "command": "x", "also": { "network": "a.example.invalid" } }));
+        assert!(r.is_err_and(|e| e.contains("also needs a reason")));
+    }
+
+    /// C2: a host's grant card (the network closed) says the pack's registry and what a yes lets in with it, and
+    /// what it risks; `y` gives that run alone the host and its pack's other registries (`Extra.grant`, expanded by
+    /// `with_allowed`) and lifts a no for the session in the proxy, nothing kept; `a` and `s` reach the proxy and
+    /// are kept as the host card's are. (Stand-ins: `true`; the names are the Rust pack's data and
+    /// `.example.invalid` — nothing connects.)
+    #[test]
+    fn a_hosts_yes_reaches_the_runs_rules_alone() {
+        use crate::allow::Grant;
+        use crate::sandbox::proxy::{Kind, Scope, ToProxy};
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("also-host");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let (mut ed, generation) = also_chat(&dir);
+        ed.config.llm.sandbox_network = false;
+        let also =
+            |h: &str| json!({ "command": "true", "also": { "network": h }, "reason": "its dependencies" });
+        let sent = || crate::hosts::SENT.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        sent();
+        let q = also_sent(&mut ed, generation, 1, also("index.crates.io")).unwrap().expect("its card");
+        assert!(
+            q.starts_with("Let Claude's commands reach index.crates.io:443 through tarae's proxy\n"),
+            "{q}"
+        );
+        assert!(q.contains("\nRust's registry: a yes also lets in crates.io, *.crates.io\n"), "{q}");
+        assert!(q.contains("Claude asks, for `true`: its dependencies"), "{q}");
+        assert!(
+            q.contains("What it read can be sent there. Runs under this yes can also write cargo's caches"),
+            "{q}"
+        );
+        let keys: Vec<char> = ed.offers[0].answers(false).iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ['y', 'a', 's', 'n']);
+        // `y`: this run's rules alone — the host and its pack's others; a session's no lifted; nothing kept
+        also_key(&mut ed, 'y');
+        let once = super::ADMITTED.with(|a| a.borrow().last().and_then(|(_, e)| e.grant.clone()));
+        assert_eq!(once, Some(Grant::Host("index.crates.io".into(), 443)), "this run's grant");
+        let caps = ed.caps_basis().build();
+        let w = super::with_allowed(&ed.config.llm, &caps, once.as_ref());
+        let hosts: Vec<&str> = w.hosts.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hosts, ["index.crates.io", "crates.io", "*.crates.io"]);
+        let next = super::with_allowed(&ed.config.llm, &caps, None);
+        assert!(next.hosts.is_empty(), "the next run's rules: {:?}", next.hosts);
+        let lifted = |m: &ToProxy| matches!(m, ToProxy::Lifted { host, .. } if host == "index.crates.io");
+        assert!(sent().iter().any(lifted), "a session's no lifted");
+        assert!(ed.session.chat.as_ref().unwrap().allowed.hosts.is_empty() && ed.session.hosts.is_empty());
+        // `a`: this conversation's — to the proxy, kept with the chat
+        also_sent(&mut ed, generation, 2, also("chat.example.invalid")).unwrap().expect("its card");
+        also_key(&mut ed, 'a');
+        let chat = |m: &ToProxy| matches!(m, ToProxy::Answer { kind: Kind::Host, host, scope: Scope::Chat, .. } if host == "chat.example.invalid");
+        assert!(sent().iter().any(chat), "to the proxy for the conversation");
+        let kept = &ed.session.chat.as_ref().unwrap().allowed.hosts;
+        assert_eq!(kept, &[("chat.example.invalid".to_string(), 443)]);
+        // `s`: this session's
+        also_sent(&mut ed, generation, 3, also("session.example.invalid")).unwrap().expect("its card");
+        also_key(&mut ed, 's');
+        let session = |m: &ToProxy| matches!(m, ToProxy::Answer { host, scope: Scope::Session, .. } if host == "session.example.invalid");
+        assert!(sent().iter().any(session), "to the proxy for the session");
+        assert_eq!(ed.session.hosts, [(Kind::Host, "session.example.invalid".to_string(), 443)]);
+        ed.session.task_run = None;
+    }
+
+    /// C2: a host its runs reach unasked just runs, no card — the network open and the host on its list (the packs'
+    /// registries by default, any with `"*"`), or a grant of the session's covering it (a registry's `*.domain`);
+    /// another host comes to its card, open or closed.
+    #[test]
+    fn a_host_let_through_already_just_runs() {
+        use crate::sandbox::proxy::Kind;
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("also-listed");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let (mut ed, generation) = also_chat(&dir);
+        let also =
+            |h: &str| json!({ "command": "true", "also": { "network": h }, "reason": "its dependencies" });
+        ed.config.llm.sandbox_network = true;
+        ed.config.llm.sandbox_hosts = crate::llm::Hosts::Registries;
+        assert_eq!(
+            also_sent(&mut ed, generation, 1, also("index.crates.io")),
+            Ok(None),
+            "a registry: listed"
+        );
+        assert!(
+            also_sent(&mut ed, generation, 2, also("pkg.example.invalid")).unwrap().is_some(),
+            "not listed"
+        );
+        ed.config.llm.sandbox_hosts = crate::llm::Hosts::Any;
+        assert_eq!(also_sent(&mut ed, generation, 3, also("pkg.example.invalid")), Ok(None), "any host");
+        // The network closed: the session's grant, a registry's `*.domain` too
+        ed.config.llm.sandbox_network = false;
+        ed.session.hosts.push((Kind::Host, "*.crates.io".into(), 443));
+        assert_eq!(also_sent(&mut ed, generation, 4, also("static.crates.io")), Ok(None), "granted");
+        assert!(also_sent(&mut ed, generation, 5, also("crates.io")).unwrap().is_some(), "not under it");
+        ed.offers.clear();
+        ed.session.task_run = None;
+    }
+
+    /// C2: a host the proxy refused is named for `also` under a failed run's report only when its card went
+    /// unanswered (or too many waited) — at its port off 443 — never one the user said no to.
+    #[test]
+    fn also_line_names_a_host_that_waited_out_its_hold() {
+        use crate::sandbox::Denial;
+        use crate::sandbox::proxy::{HOST_OP, USER_REFUSED};
+        let scratch = crate::scratch::Scratch::new("also-line-host");
+        let root = std::fs::canonicalize(&scratch).unwrap();
+        let d = |target: String| Denial { process: "curl".into(), op: HOST_OP.into(), target };
+        let waited = "with the network closed, each host waits on the user's yes on its card; the user was asked \
+                      and didn't answer within 20 s";
+        let refused = [
+            d(format!("pkg.example.invalid:443: {waited}")),
+            d("git.example.invalid:22: 8 hosts already wait for the user's answer".into()),
+            d(format!("no.example.invalid:443: {USER_REFUSED}")),
+        ];
+        let below = [root.as_path()];
+        assert!(super::also_candidates(false, &refused, &below).is_empty(), "a run that passed: none");
+        let c = super::also_candidates(true, &refused, &below);
+        assert_eq!(c.len(), 2, "{c:?}");
+        let caps = crate::caps::Caps::at(&root, &root);
+        let line = super::also_line(&c, &caps, &|_| false);
+        assert!(line.contains("{\"network\": \"pkg.example.invalid\"}"), "{line}");
+        assert!(line.contains("{\"network\": \"git.example.invalid:22\"}"), "{line}");
+        assert!(!line.contains("no.example.invalid"), "{line}");
+    }
+
     /// Review of piece 4 (4): in the sandbox with the network open (D4: a warning that `asks` could come true), a
     /// command that publishes comes to its card — `git push` by its line, `sh deploy.sh` by what the script says,
     /// read on `in_sandbox`'s worker — its warning on it and `Why::Asks` in its card line; one that warns of nothing
@@ -5992,7 +6281,8 @@ mod tests {
         let dir = std::path::Path::new("/h/p");
         let closed = |_: u16| false;
         let grant = |a: super::AlsoAsk, localhost: bool, env: Option<&RunEnv>| {
-            super::also_grant(&a, dir, &caps, (&closed, localhost), env)
+            let net = super::NetNow { open: false, rules: Some(Vec::new()), session: Vec::new() };
+            super::also_grant(&a, dir, &caps, (&closed, localhost), env, &net)
         };
         assert_eq!(grant(super::AlsoAsk::Localhost, false, None), Ok(Some(Grant::Localhost)));
         assert_eq!(grant(super::AlsoAsk::Localhost, true, None), Ok(None), "the setting opens them");
