@@ -475,6 +475,9 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         note_card: Default::default(),
         thought_card: Default::default(),
         toast_card: Default::default(),
+        // (the card's place, decided once — kept from the frame before)
+        toast_narrow: std::cell::Cell::new(editor.screen.toast_narrow.get()),
+        toast_said: Default::default(),
         prompt_card: Default::default(),
         spots: Default::default(),
     };
@@ -4692,6 +4695,54 @@ fn review_file(editor: &Editor, doc: &crate::document::Document) -> String {
     }
 }
 
+/// The end of an edit's reason in `REASON_ROWS` rows of `w` (`rows_of` wraps): as many whole sentences, from the
+/// last back, as fit — a last sentence too long alone keeps its end — `…` before them saying what went.
+fn reason_rows(
+    reason: &str,
+    w: usize,
+    rows_of: impl Fn(&str, usize) -> Vec<Vec<crate::markdown::Span>>,
+    faint: Style,
+) -> Vec<Vec<crate::markdown::Span>> {
+    let all = rows_of(reason, w);
+    if all.len() <= REASON_ROWS {
+        return all;
+    }
+    // (each wrapped two cells narrower: the cut's `…` goes in front, pushing no row past `w`)
+    let w = w.saturating_sub(2);
+    let starts = sentence_starts(reason);
+    let mut fit = None;
+    for &s in starts.iter().rev() {
+        let rows = rows_of(&reason[s..], w);
+        if rows.len() > REASON_ROWS {
+            break;
+        }
+        fit = Some(rows);
+    }
+    let mut rows = fit.unwrap_or_else(|| {
+        let last = starts.last().map_or(reason, |&s| &reason[s..]);
+        let rows = rows_of(last, w);
+        rows[rows.len().saturating_sub(REASON_ROWS)..].to_vec()
+    });
+    if let Some(first) = rows.first_mut() {
+        first.insert(0, crate::markdown::Span { text: "… ".into(), style: faint });
+    }
+    rows
+}
+
+/// Where `text`'s sentences start (byte offsets, the first at 0): after `.` `!` `?` `:` and a space, or a line's
+/// end.
+fn sentence_starts(text: &str) -> Vec<usize> {
+    let b = text.as_bytes();
+    let mut starts = vec![0];
+    for i in 2..b.len() {
+        let after_stop = b[i - 1] == b' ' && matches!(b[i - 2], b'.' | b'!' | b'?' | b':');
+        if !b[i].is_ascii_whitespace() && (after_stop || b[i - 1] == b'\n') {
+            starts.push(i);
+        }
+    }
+    starts
+}
+
 fn draw_review(
     rev: &Review,
     rows: &[crate::codeview::Row],
@@ -4716,13 +4767,8 @@ fn draw_review(
     let reason: Vec<Vec<crate::markdown::Span>> = if rev.reason.is_empty() {
         Vec::new()
     } else {
-        let rows = thought_rows(&rev.reason, width.saturating_sub(7), dim, faint, editor);
-        let cut = rows.len() > REASON_ROWS;
-        let mut rows = rows[rows.len().saturating_sub(REASON_ROWS)..].to_vec();
-        if cut && let Some(first) = rows.first_mut() {
-            first.insert(0, crate::markdown::Span { text: "… ".into(), style: faint });
-        }
-        rows
+        let rows_of = |s: &str, w: usize| thought_rows(s, w, dim, faint, editor);
+        reason_rows(&rev.reason, width.saturating_sub(7), rows_of, faint)
     };
     // What it warns of (cardburden 4b — a file that runs later outside the sandbox): a row each, under the title,
     // in the warning color — above the reason, read first
@@ -5056,6 +5102,7 @@ fn draw_list_row(
     card: Style,
     selected: Style,
     highlight: bool,
+    others: &[&str],
 ) -> io::Result<usize> {
     let t = &editor.theme;
     let matched = Style { fg: ui.accent.fg, bold: true, ..Style::default() };
@@ -5071,7 +5118,7 @@ fn draw_list_row(
     let name = if r.selected { base.patch(t.try_get("ui.text.focus").unwrap_or_default()) } else { base };
     let name = Style { bg: base.bg, ..name };
     let (dim, faint) = (Style { fg: ui.virt.fg, ..base }, Style { fg: ui.linenr.fg, ..base });
-    // Tree rows: indented by depth, then a column for `+`/`−` (folders) or the kind glyph,
+    // Tree rows: indented by depth, then a column for `▸`/`▾` (folders) or the kind glyph,
     // so names at one depth line up
     if let Some((depth, _)) = r.tree {
         // A faint guide under each enclosing folder's fold column
@@ -5084,8 +5131,8 @@ fn draw_list_row(
         // (a note: its place, in line with the names above)
         Some((_, Kind::Note)) => Some(" "),
         Some((_, Kind::Group)) => None,
-        Some((_, Kind::Dir { open: Some(true) })) => Some("−"),
-        Some((_, Kind::Dir { open: Some(false) })) => Some("+"),
+        Some((_, Kind::Dir { open: Some(true) })) => Some("▾"),
+        Some((_, Kind::Dir { open: Some(false) })) => Some("▸"),
         Some(_) if r.glyph.is_none() => Some(" "),
         _ => None,
     };
@@ -5123,7 +5170,12 @@ fn draw_list_row(
         // (a plain row whose hint keeps its room: a place, its start and its end kept — `:granted`)
         let named =
             matches!(r.tree, Some((_, Kind::File | Kind::Dir { .. }))) || (r.hint_first && r.tree.is_none());
-        let (label, marks) = if named {
+        // (one of rows that share a start and an end — `:granted`'s paths under one folder — keeps what sets
+        // it apart from them: cut in the middle, five toolchains' read alike)
+        let keep = (named && r.marks.is_empty()).then(|| apart(&r.label, others)).flatten();
+        let (label, marks) = if let Some(keep) = keep {
+            (fit_keeping(&r.label, keep, fits), Vec::new())
+        } else if named {
             fit_middle(&r.label, &r.marks, fits)
         } else {
             (fit_ellipsis(&r.label, fits), r.marks.clone())
@@ -5258,6 +5310,81 @@ fn fit_middle(label: &str, marks: &[u32], width: usize) -> (String, Vec<u32>) {
     (text, marks)
 }
 
+/// The chars of `label` that set it apart from `others`: past the longest start it shares with one of them, up
+/// to the longest end, each taken back to a `/` — None when it shares neither, or nothing's left between
+/// (`read ~/.rustup/toolchains/` · `stable-aarch64-apple-darwin` · `/lib/rustlib/src`).
+fn apart(label: &str, others: &[&str]) -> Option<std::ops::Range<usize>> {
+    let c: Vec<char> = label.chars().collect();
+    let mut best = (0, 0);
+    for o in others.iter().filter(|o| **o != label) {
+        let oc: Vec<char> = o.chars().collect();
+        let pre = c.iter().zip(&oc).take_while(|(a, b)| a == b).count();
+        let room = c.len().min(oc.len()) - pre;
+        let suf = c.iter().rev().zip(oc.iter().rev()).take_while(|(a, b)| a == b).count().min(room);
+        // (the start ends right after a `/`, the end starts at one)
+        let pre = c[..pre].iter().rposition(|&ch| ch == '/').map_or(0, |i| i + 1);
+        let from = c.len() - suf;
+        let suf = c[from..].iter().position(|&ch| ch == '/').map_or(0, |i| c.len() - from - i);
+        if pre + suf > best.0 + best.1 {
+            best = (pre, suf);
+        }
+    }
+    let (pre, suf) = best;
+    (pre + suf > 0 && pre < c.len() - suf).then(|| pre..c.len() - suf)
+}
+
+/// `label` in `width` cells with `keep` (its chars) whole, and no fragment around it. First the start's least —
+/// its first word and `…` (`read …`: what the row does) — and `keep`; no room for both whole: `keep` cut at its
+/// end instead, `…` there. Then the end after it, in 2/5 of what's left (all of it when there's no start): whole,
+/// else `…` and its tail from a `/` that fits (`…/src`), else `…` alone; the start in the rest: whole, else its
+/// head up to a `/` or a space that fits and `…`, else its least — cuts only at those marks, so never inside a
+/// grapheme cluster.
+fn fit_keeping(label: &str, keep: std::ops::Range<usize>, width: usize) -> String {
+    if label.width() <= width {
+        return label.to_string();
+    }
+    let byte = |c: usize| label.char_indices().nth(c).map_or(label.len(), |(b, _)| b);
+    let (a, b) = (byte(keep.start), byte(keep.end));
+    let (head, mid, tail) = (&label[..a], &label[a..b], &label[b..]);
+    let least = match head.find(' ').map(|i| i + 1) {
+        _ if head.is_empty() => String::new(),
+        Some(i) if i == head.len() => head.to_string(),
+        Some(i) => format!("{}…", &head[..i]),
+        None => "…".into(),
+    };
+    if least.width() + mid.width() + usize::from(!tail.is_empty()) > width {
+        let room = width.saturating_sub(least.width());
+        if room < 4 {
+            return fit_middle(label, &[], width).0;
+        }
+        let mid = if tail.is_empty() { mid.to_string() } else { format!("{mid}…") };
+        return format!("{least}{}", fit_ellipsis(&mid, room));
+    }
+    let room = width - mid.width();
+    let avail = room - least.width();
+    let share = if head.is_empty() { avail } else { avail * 2 / 5 }.max(1);
+    let end = match tail.width() <= share {
+        true => tail.to_string(),
+        false => match tail.match_indices('/').map(|(i, _)| i).find(|&i| tail[i..].width() < share) {
+            Some(i) => format!("…{}", &tail[i..]),
+            None => "…".into(),
+        },
+    };
+    let left = room - end.width();
+    let start = match head.width() <= left {
+        true => head.to_string(),
+        false => {
+            let mut marks =
+                head.char_indices().filter(|(_, c)| matches!(c, '/' | ' ')).map(|(i, c)| i + c.len_utf8());
+            match marks.rfind(|&i| head[..i].width() < left) {
+                Some(i) => format!("{}…", &head[..i]),
+                None => least,
+            }
+        }
+    };
+    format!("{start}{mid}{end}")
+}
+
 /// Bordered box + input row + list. Returns the input row's cursor position.
 fn draw_picker(
     p: &Picker,
@@ -5381,6 +5508,12 @@ fn draw_picker(
             queue!(out, MoveTo(0, y as u16), Spaces(lay.edit_w))?;
         }
     }
+    // (plain rows' labels, for each cut one to keep what sets it apart — `draw_list_row`: the whole list's, so
+    // a row reads the same wherever it's scrolled)
+    let others: Vec<&str> = match p.hints_first {
+        true => p.items().iter().filter(|i| !i.hint.is_empty()).map(|i| i.label.as_str()).collect(),
+        false => Vec::new(),
+    };
     for row in 0..rows {
         let y = (b.y + row) as u16;
         queue!(out, MoveTo(b.x as u16, y))?;
@@ -5457,7 +5590,7 @@ fn draw_picker(
         } else {
             let mut used = 0;
             match p.view.get(row - 3 - b.head) {
-                Some(r) => used = draw_list_row(out, r, lw, editor, ui, card, selected, true)?,
+                Some(r) => used = draw_list_row(out, r, lw, editor, ui, card, selected, true, &others)?,
                 None => {
                     apply(out, card)?;
                     queue!(out, Print("  "))?;
@@ -6005,12 +6138,18 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
         left.push(Seg { text: "  ▲ changed on disk".into(), style: ui.base.patch(warn), keep: 246 });
     }
+    // (each definition's segments — separator, glyph, name — by their `keep`: they go together)
+    let mut scope: Vec<(u8, usize)> = Vec::new();
     if let Some(syn) = doc.syntax.as_ref() {
         let head = doc.selection().primary().cursor(&doc.text);
         let path = syntax::scope_path(syn, &doc.text, head);
         let n = path.len();
         for (i, (kind, name)) in path.into_iter().enumerate() {
             let keep = 100 + (i * 10 / n.max(1)) as u8; // inner definitions survive longer
+            match scope.iter_mut().find(|s| s.0 == keep) {
+                Some(s) => s.1 += 3,
+                None => scope.push((keep, 3)),
+            }
             let (glyph, scope) = match kind {
                 'f' => ("ƒ", "function"),
                 'm' => ("§", "namespace"),
@@ -6040,6 +6179,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     // (the buffers' list ends in its own two blanks — the padding on the right)
     let room = width.saturating_sub(if right.is_empty() { PAD_R } else { 0 });
     fit_segments(&mut left, &mut right, room);
+    parts_whole(&mut left, &scope);
     // (brought into sight from a link: the bar flashes)
     let lit = |s: Style| flashed(ui, editor, &pane, s);
     queue!(out, MoveTo(x0 as u16, 0))?;
@@ -6092,6 +6232,29 @@ fn header_rule_from(
     queue!(out, Print("─".repeat(line)))?;
     apply(out, base)?;
     queue!(out, Spaces(w.saturating_sub(pad + line)))
+}
+
+/// After `fit_segments`, the path bar's parts go whole: a definition's (`  ›  ` · `ƒ ` · its name, one `keep`;
+/// `scope` = each such keep and how many segments it had) that lost a piece loses the rest — not `demo.rsƒ
+/// word_counts` — and a separator left with nothing on one side goes too, not `› src › main.rs` (`left[0]` is
+/// the padding).
+fn parts_whole(left: &mut Vec<Seg>, scope: &[(u8, usize)]) {
+    for &(keep, n) in scope {
+        if left.iter().filter(|s| s.keep == keep).count() < n {
+            left.retain(|s| s.keep != keep);
+        }
+    }
+    let is_sep = |s: &Seg| s.text == "  ›  ";
+    let mut k = 1;
+    while k < left.len() {
+        let alone = is_sep(&left[k])
+            && (left[1..k].last().is_none_or(is_sep) || left[k + 1..].first().is_none_or(is_sep));
+        if alone {
+            left.remove(k);
+        } else {
+            k += 1;
+        }
+    }
 }
 
 /// A statusline segment. Lowest `keep` is dropped first (when width runs short).
@@ -6290,14 +6453,21 @@ fn draw_statusline(
     let mut waiting_at = None;
     if let Some(toast) = folded {
         let bar = Style { fg: toast_color(editor, ui, toast.kind), ..ui.status };
-        let text = toast.text.lines().next().unwrap_or_default();
-        let ranked = toast.waiting() && editor.picker.is_some();
-        let keep = if ranked { FOLDED } else { 90 };
+        let text = toast.text.lines().next().unwrap_or_default().to_string();
+        // (a routine message folded for narrow code: it's said here — `SAID`, with the card's others counted)
+        let said = editor.screen.toast_said.get();
+        let more = if said { editor.toasts.len().saturating_sub(1) } else { 0 };
+        let text = if more > 0 { format!("{text} · +{more} earlier") } else { text };
+        let rank = match toast.waiting() && editor.picker.is_some() {
+            true => Some(FOLDED),
+            false => said.then_some(SAID),
+        };
+        let keep = rank.unwrap_or(90);
         left.push(Seg { text: "   ▎ ".into(), style: bar, keep });
-        if ranked {
-            waiting_at = Some((left.len(), text));
+        if let Some(rank) = rank {
+            waiting_at = Some((left.len(), text.clone(), rank));
         }
-        left.push(Seg { text: fit_ellipsis(text, 56), style: ui.status, keep });
+        left.push(Seg { text: fit_ellipsis(&text, 56), style: ui.status, keep });
     }
     // Language server work, on the left: it changes with every report, and only here does its length
     // move nothing else
@@ -6432,13 +6602,18 @@ fn draw_statusline(
             keep: 250,
         },
     });
-    if let Some((i, text)) = waiting_at {
-        let others: usize = (left.iter().chain(&right))
-            .filter(|s| s.keep > HINTS || s.keep == INBOX)
+    // (cut to the room what outranks it leaves: an error under a picker before the list's keys are laid in — it
+    // outranks them — a routine message after, beside them and all else above it)
+    let cut_to_room = |left: &mut Vec<Seg>, right: &Vec<Seg>, i: usize, text: &str, rank: u8| {
+        let others: usize = (left.iter().chain(right))
+            .filter(|s| s.keep >= rank || s.keep == INBOX)
             .map(|s| s.text.width())
             .sum();
         let room = lay.width.saturating_sub(others - left[i].text.width() + 2);
         left[i].text = fit_ellipsis(text, room.min(56));
+    };
+    if let Some((i, text, FOLDED)) = &waiting_at {
+        cut_to_room(&mut left, &right, *i, text, FOLDED);
     }
     // What a floating list or the docs take as keys (`enter open  esc close`): after the pill, before all but
     // the pill, the position, an error waiting and the inbox's `▲N waiting` — whole pairs, as many as fit beside
@@ -6462,7 +6637,16 @@ fn draw_statusline(
             segs.push(Seg { text: format!("  {k}"), style: key, keep: HINTS });
             segs.push(Seg { text: format!(" {d}"), style: what, keep: HINTS });
         }
+        let n = segs.len();
         left.splice(hints_at..hints_at, segs);
+        if let Some((i, ..)) = &mut waiting_at
+            && *i >= hints_at
+        {
+            *i += n;
+        }
+    }
+    if let Some((i, text, SAID)) = &waiting_at {
+        cut_to_room(&mut left, &right, *i, text, SAID);
     }
 
     fit_segments(&mut left, &mut right, lay.width);
@@ -6520,6 +6704,11 @@ const HINTS: u8 = 249;
 /// first wherever the keys left too little, it was nowhere on screen). Only under a picker: folded for want of a
 /// free corner it keeps its low rank.
 const FOLDED: u8 = 250;
+
+/// The status line's `keep` for a routine message said there because the code was too narrow for its card
+/// (`draw_toasts`, 글타래 P1): it outlasts the language server's progress, the branch and the hunks, and gives way
+/// to the rest — the diagnostics, the chip, a list's keys — cut to the room they leave.
+const SAID: u8 = 150;
 
 /// Completion list — below the word so the name column lines up with the typed word (above if no room).
 ///
@@ -6910,8 +7099,9 @@ const TOAST_OLDER: usize = 2;
 /// The notification card: what came together is one card — the newest message on top (its kind's bar,
 /// wrapped up to three rows), the ones before it under it, dimmer, a row each, the rest counted. It fades
 /// in with its first message and out with its last. It keeps out of the other cards' way (`taken`: the
-/// note, the minimized chat, the thought card, a grammar offer): the top right of the editing area, else its
-/// bottom right. No free place → false (the status line carries the newest message).
+/// note, the minimized chat, the thought card, a grammar offer): the top right of the editing area or its
+/// bottom right. No free place, or code too narrow to keep off for a routine message → false (the status line
+/// carries the newest message).
 ///
 /// ```text
 ///  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
@@ -6928,7 +7118,12 @@ fn draw_toasts(
     out: &mut impl Write,
 ) -> io::Result<bool> {
     use crate::editor::ToastKind;
-    let Some(newest) = editor.toasts.last() else { return Ok(true) };
+    editor.screen.toast_said.set(false);
+    let Some(newest) = editor.toasts.last() else {
+        // (no card: the next one decides afresh where it goes)
+        editor.screen.toast_narrow.set(None);
+        return Ok(true);
+    };
     // A picker covers the code: the message goes to the status line under it, not unseen
     if editor.picker.is_some() {
         return Ok(false);
@@ -6987,6 +7182,23 @@ fn draw_toasts(
     let h = rows.len() + 2 * pad;
     let x0 = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
     let rows_at = (lay.text_top as usize, lay.text_top as usize + lay.text_rows);
+    // Code too narrow to keep off (the card over half its width — beside the chat at 80 columns): a routine
+    // message is said on the status line instead (`SAID`, what joins it counted there); an error or a warning
+    // keeps its card (`Toast::waiting`). Decided once for the card, as it first shows — while it's up it doesn't
+    // jump between the two — and only for one message alone: messages said together (a disk-watch round's
+    // reloads) keep their card, where each is read (folded, only the newest showed)
+    let narrow = match editor.screen.toast_narrow.get() {
+        Some(narrow) => narrow,
+        None => {
+            let narrow = editor.toasts.len() == 1 && 2 * width > lay.edit_w.saturating_sub(lay.rail_w);
+            editor.screen.toast_narrow.set(Some(narrow));
+            narrow
+        }
+    };
+    if narrow && editor.toasts.iter().all(|t| matches!(t.kind, ToastKind::Info | ToastKind::Success)) {
+        editor.screen.toast_said.set(true);
+        return Ok(false);
+    }
     let Some(y0) = toast_place((x0, width, h), rows_at, taken) else { return Ok(false) };
     editor.screen.toast_card.set(Some((x0, y0, width, h)));
     let edge_card = Style { bg, ..card };
@@ -7214,6 +7426,12 @@ impl OfferCard {
             true => format!("{} · {}", editor.session.label(), o.title),
             false => o.title.clone(),
         };
+        // Its title whole, and the count that shares its row, where the code has the room — at 80 columns the
+        // run-outside card's was cut at its key word (`outside the sandb…`), alone or with a card behind it
+        // (its count's shortest form: the card widens only as far as the title needs — a longer form where it fits)
+        let shortest = card_badge(editor.cards_waiting(), title.width(), 0);
+        let badge_w = if shortest.is_empty() { 0 } else { shortest.width() + 2 };
+        max_inner = max_inner.max((title.width() + badge_w).min(widest));
         // (what waits behind it too — queued calls here, and other sessions' cards apart, #7/#91)
         let badge = card_badge(editor.cards_waiting(), title.width(), max_inner);
         // A paragraph wrapped to the card, up to `n` lines (a command to run is shown whole)
@@ -8297,13 +8515,22 @@ fn draw_follow_card(
     };
     let room = gap_end - gap_top;
     let body_max = BODY.min((ph / 2).saturating_sub(fixed)).min(room - fixed).max(1);
-    // The newest rows; cut mid-way → `…` in front, and no blank row on top
-    let from = log_cut(&body, body_max);
+    // The newest rows, no blank row on top; cut mid-way → a row of its own says so (`…`) — put in front of a
+    // row already as wide as the card, it pushed that row's end out (`in the same cal`)
+    let mut from = log_cut(&body, body_max);
+    if from > 0 && body_max > 1 {
+        from = log_cut(&body, body_max - 1);
+    }
     let mut body = body[from..].to_vec();
-    if from > 0
-        && let Some(first) = body.first_mut()
+    if from > 0 && body_max > 1 {
+        body.insert(0, vec![Span { text: "…".into(), style: faint }]);
+    } else if from > 0
+        && let Some(row) = body.first_mut()
     {
-        first.insert(0, Span { text: "… ".into(), style: faint });
+        // (one row only: `…` in front of its end, the row cut on its left so the two fit)
+        let mut cut = spans_left(row, inner.saturating_sub(2));
+        cut.insert(0, Span { text: "… ".into(), style: faint });
+        *row = cut;
     }
     let link = if compact { gaze.and_then(|g| g.look.link.clone()) } else { None };
     let mut rows: Vec<(Vec<Span>, Option<crate::chat::Link>)> = top.into_iter().map(|r| (r, None)).collect();
@@ -8340,6 +8567,61 @@ fn draw_follow_card(
     Ok(Some(rect))
 }
 
+/// The side panel's row saying a code review is behind it, `w` cells: `review behind  space g back to it` — the
+/// way back as whole a pair as fits beside the words (`back` when short; none at all past that, never a key
+/// without its meaning).
+fn behind_row(w: usize, says: Style, key: Style, faint: Style, card: Style) -> Vec<crate::markdown::Span> {
+    use crate::markdown::Span;
+    const LEAD: &str = "review behind  ";
+    let back = if w >= LEAD.width() + "space g back to it".width() { "back to it" } else { "back" };
+    let pairs = [("space g", back)];
+    let mut row =
+        vec![Span { text: "review behind".into(), style: says }, Span { text: "  ".into(), style: card }];
+    row.extend(hint_spans(whole_pairs(&pairs, w.saturating_sub(LEAD.width())), key, faint));
+    row
+}
+
+/// `row` in `w` cells: its trailing padding first, then cut on its left between grapheme clusters (a log's
+/// newest row: its end matters).
+fn spans_left(row: &[crate::markdown::Span], w: usize) -> Vec<crate::markdown::Span> {
+    let mut drop = row.iter().map(|s| s.text.width()).sum::<usize>().saturating_sub(w);
+    // (its trailing padding first: a code row washed to the card's width keeps its text — `… et x =`)
+    let mut row = row.to_vec();
+    while drop > 0
+        && let Some(last) = row.last_mut()
+    {
+        let pad = last.text.len() - last.text.trim_end_matches(' ').len();
+        if pad == 0 {
+            break;
+        }
+        let take = pad.min(drop);
+        last.text.truncate(last.text.len() - take);
+        drop -= take;
+        if last.text.is_empty() {
+            row.pop();
+        }
+    }
+    let mut out = Vec::new();
+    for s in &row {
+        if drop == 0 {
+            out.push(s.clone());
+            continue;
+        }
+        let mut at = s.text.len();
+        for c in crate::graphemes::cells(&s.text, 0, 4) {
+            if drop == 0 {
+                at = c.bytes.start;
+                break;
+            }
+            drop = drop.saturating_sub(c.width);
+        }
+        if at < s.text.len() {
+            out.push(crate::markdown::Span { text: s.text[at..].to_string(), style: s.style });
+        }
+    }
+    out
+}
+
 /// List rows of the side panel: all but the header (its title and rule), a row saying a review is behind
 /// it, and the gap and two key rows at the bottom.
 fn sidebar_list_rows(lay: &Layout, behind: bool) -> usize {
@@ -8354,10 +8636,10 @@ fn sidebar_list_rows(lay: &Layout, behind: bool) -> usize {
 /// ```text
 ///   files  outline  git     tarae
 ///   ───────────────────────────
-///   − src/
+///   ▾ src/
 /// ▎ │ editor.rs
 ///   │ filetree.rs
-///   + tests/                  1
+///   ▸ tests/                  1
 ///
 ///   enter open  tab outline
 ///   esc code  q close
@@ -8421,7 +8703,8 @@ fn draw_sidebar(
         SMode::Git if side.is_some() => " plugin",
         SMode::Git | SMode::Plugin => " files",
     };
-    let h = |pairs: &[(&str, &str)]| hint_spans(pairs, key, faint);
+    // (as many pairs as fit whole — cut, a row ended in a key without its meaning)
+    let h = |pairs: &[(&str, &str)]| hint_spans(whole_pairs(pairs, w), key, faint);
     let hints: [Vec<Span>; 2] = if sb.focus && sb.mode == SMode::Git {
         // The selected row's keys: a hunk's, a conflict's, else the tab's
         match lines.get(sb.selected).map(|l| &l.target) {
@@ -8432,7 +8715,7 @@ fn draw_sidebar(
                 [h(&[("o t a", "ours theirs both")]), h(&[("enter", "there"), ("?", "all keys")])]
             }
             _ => [
-                h(&[("s u", "stage"), ("d", "discard"), ("?", "")]),
+                h(&[("s u", "stage"), ("d", "discard"), ("?", "keys")]),
                 h(&[("c", "commit"), ("C", "Claude drafts")]),
             ],
         }
@@ -8451,11 +8734,7 @@ fn draw_sidebar(
     // In front of a review's rail (drawn here = the rail gave the column): it's still open, and how back
     // (under the tabs, in the accent — that it's still open is what went unseen, #19)
     let behind = match editor.session.code_review.is_some() {
-        true => {
-            let back = if w >= "review behind  space g back to it".len() { "back to it" } else { "back" };
-            let says = Style { fg: ui.accent.fg, ..card };
-            [vec![sp("review behind", says), sp("  ", card)], h(&[("space g", back)])].concat()
-        }
+        true => behind_row(w, Style { fg: ui.accent.fg, ..card }, key, faint, card),
         false => Vec::new(),
     };
     let list_rows = sidebar_list_rows(lay, !behind.is_empty());
@@ -8550,7 +8829,8 @@ fn draw_sidebar(
                         id.as_deref().map_or(selected, |id| flashed_selected(ui, editor, id, selected));
                     given = id.as_deref().and_then(|id| ui_mark(ui, editor, id, card));
                     // The row's own background runs on to the padding (its bar in the padding before it)
-                    let used = draw_list_row(out, &row, w + PAD - 2, editor, ui, base, selected, sb.focus)?;
+                    let used =
+                        draw_list_row(out, &row, w + PAD - 2, editor, ui, base, selected, sb.focus, &[])?;
                     queue!(out, Spaces((w + PAD - 2).saturating_sub(used)))?;
                     w
                 }
@@ -8578,7 +8858,7 @@ fn draw_sidebar(
         && whole < lay.edit_w
     {
         queue!(out, MoveTo(0, y as u16))?;
-        draw_list_row(out, &row, whole + 1, editor, ui, card, selected, true)?;
+        draw_list_row(out, &row, whole + 1, editor, ui, card, selected, true, &[])?;
         apply(out, Style { fg: selected.bg, bg: ui.base.bg, ..Style::default() })?;
         queue!(out, Print("▌"))?;
     }
@@ -10642,6 +10922,22 @@ fn chat_spans(
     Ok(used)
 }
 
+/// The first of `pairs` that fit `w` cells whole, as `hint_spans` writes them.
+fn whole_pairs<'a, 'b>(pairs: &'a [(&'b str, &'b str)], w: usize) -> &'a [(&'b str, &'b str)] {
+    let mut used = 0;
+    let n = pairs
+        .iter()
+        .take_while(|(k, v)| {
+            let one = k.width() + if v.is_empty() { 0 } else { 1 + v.width() };
+            let gap = if used == 0 { 0 } else { 2 };
+            let fits = used + gap + one <= w;
+            used += if fits { gap + one } else { 0 };
+            fits
+        })
+        .count();
+    &pairs[..n]
+}
+
 /// Key hints the one way they're written everywhere: `enter open  esc close` — the key in `key` (bold
 /// dim), what it does in `faint`, two cells between pairs. An empty description leaves the key alone.
 fn hint_spans(pairs: &[(&str, &str)], key: Style, faint: Style) -> Vec<crate::markdown::Span> {
@@ -12016,6 +12312,131 @@ mod tests {
         let mini = (58, 20, 36, 8);
         assert_eq!(toast_place(card, rows, &[thought, mini]), None, "no room left");
         assert_eq!(toast_place(card, rows, &[(0, 2, 20, 8)]), Some(1), "a card elsewhere doesn't matter");
+    }
+
+    /// The path bar's parts go whole when room runs short: a definition (`  ›  ` · `ƒ ` · its name) never loses
+    /// its separator alone (`demo.rsƒ word_counts`), and no separator is left with nothing on one side — at
+    /// every width.
+    #[test]
+    fn the_path_bars_parts_go_whole() {
+        let seg = |text: &str, keep: u8| Seg { text: text.into(), style: Style::default(), keep };
+        let sep = "  ›  ";
+        for room in 6..60 {
+            let mut left = vec![
+                seg(" ", 255),
+                seg("tarae", 20),
+                seg(sep, 20),
+                seg("src", 30),
+                seg(sep, 30),
+                seg("demo.rs", 250),
+                seg(sep, 100),
+                seg("τ ", 100),
+                seg("Editor", 100),
+                seg(sep, 105),
+                seg("ƒ ", 105),
+                seg("word_counts", 105),
+            ];
+            fit_segments(&mut left, &mut Vec::new(), room);
+            parts_whole(&mut left, &[(100, 3), (105, 3)]);
+            let bar: String = left.iter().map(|s| s.text.as_str()).collect();
+            for (i, s) in left.iter().enumerate().skip(1) {
+                if matches!(s.text.as_str(), "τ " | "ƒ ") {
+                    assert!(left[i - 1].text == sep && i + 1 < left.len(), "{room}: {bar:?}");
+                }
+            }
+            let words = bar.trim();
+            assert!(
+                !words.starts_with('›') && !words.ends_with('›') && !words.contains("›  ›"),
+                "{room}: {bar:?}"
+            );
+            assert!(
+                !bar.contains("demo.rsƒ") && !bar.contains("demo.rsτ") && !bar.contains("demo.rsE"),
+                "{room}: {bar:?}"
+            );
+        }
+    }
+
+    /// The side panel's row for a review behind it ends on a whole pair or none — never `space` without what it
+    /// does — at every width the panel can be.
+    #[test]
+    fn the_review_behind_row_keeps_its_pair_whole() {
+        let s = Style::default();
+        for w in 14..40 {
+            let row: String = behind_row(w, s, s, s, s).into_iter().map(|s| s.text).collect();
+            assert!(row.width() <= w || !row.contains("space"), "{w}: {row:?} past the panel");
+            assert!(
+                !row.contains("space") || row.trim_end().ends_with("back") || row.ends_with("back to it"),
+                "{w}: {row:?}"
+            );
+        }
+    }
+
+    /// `spans_left` cuts a row's trailing padding before its text: a code row washed to the card's width keeps
+    /// its first letters (`… et x =` lost the `l`).
+    #[test]
+    fn spans_left_takes_the_padding_first() {
+        use crate::markdown::Span;
+        let sp = |t: &str| Span { text: t.into(), style: Style::default() };
+        let row = vec![sp("let x = 1;"), sp("      ")];
+        let cut: String = spans_left(&row, 12).into_iter().map(|s| s.text).collect();
+        assert_eq!(cut, "let x = 1;  ");
+        let cut: String = spans_left(&row, 8).into_iter().map(|s| s.text).collect();
+        assert_eq!(cut, "t x = 1;", "text cut from the left once the padding is gone");
+    }
+
+    /// `fit_keeping` keeps the row's verb (`read`, `write in`) before what sets it apart — cutting that instead
+    /// of the verb — and gives the end all the room a missing start leaves.
+    #[test]
+    fn fit_keeping_keeps_the_verb() {
+        let label = "read ~/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src";
+        for w in 20..label.len() {
+            let cut = fit_keeping(label, 26..53, w);
+            assert!(cut.starts_with("read ") && cut.width() <= w, "{w}: {cut:?}");
+            assert!(cut.contains("stable-aarch"), "{w}: {cut:?}");
+        }
+        // (nothing shared at the start: the end takes what's left)
+        let label = "read /Users/wq/Library/Caches/npm-cache";
+        let cut = fit_keeping(label, 0..5, 24);
+        assert!(cut.starts_with("read ") && cut.ends_with("/npm-cache") && cut.width() <= 24, "{cut:?}");
+    }
+
+    /// `fit_keeping` keeps what sets a row apart whole and leaves no fragment around it: the end from a `/` that
+    /// fits, else a bare `…`; the start back to a `/` or a space, else `…` alone — and it cuts between grapheme
+    /// clusters, never before a combining mark.
+    #[test]
+    fn fit_keeping_leaves_no_fragments() {
+        let label = "read ~/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src";
+        let keep = 26..53;
+        assert_eq!(
+            &label.chars().collect::<Vec<_>>()[keep.clone()].iter().collect::<String>(),
+            "stable-aarch64-apple-darwin"
+        );
+        // (from 34 cells: `read …` and the toolchain whole, `…` after)
+        for w in 34..label.len() {
+            let cut = fit_keeping(label, keep.clone(), w);
+            assert!(cut.width() <= w && cut.contains("stable-aarch64-apple-darwin"), "{w}: {cut}");
+            let (start, end) = cut.split_once("stable-aarch64-apple-darwin").unwrap();
+            // (the start: whole, cut after a `/` or a space, or `…` alone; the end: whole, from a `/`, or `…`)
+            assert!(
+                label.starts_with(start)
+                    || start == "…"
+                    || start.strip_suffix('…').is_some_and(|s| s.ends_with(['/', ' '])),
+                "{w}: start {start:?}"
+            );
+            assert!(label.ends_with(end) || end == "…" || end.starts_with("…/"), "{w}: end {end:?}");
+        }
+    }
+
+    /// A combining mark stays with its letter: `fit_keeping`'s end never starts on one — here a cut by characters
+    /// from the end would land just after the `e`.
+    #[test]
+    fn fit_keeping_never_starts_on_a_combining_mark() {
+        // (at 21 cells the end's share is 5: `́xyzw` is the first tail under it, by characters)
+        let label = "read /aaaaaaaa/bb/c-e\u{301}xyzw";
+        for w in 6..label.width() {
+            let cut = fit_keeping(label, 15..17, w);
+            assert!(!cut.contains("…\u{301}") && !cut.starts_with('\u{301}'), "{w}: {cut:?}");
+        }
     }
 
     /// No command row: the status line is the screen's last row, and a prompt is a card standing on it — its

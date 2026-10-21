@@ -572,10 +572,7 @@ impl Editor {
         }
         match self.session.sidebar.as_mut() {
             Some(s) if s.mode == mode => {}
-            Some(s) => {
-                s.mode = mode;
-                s.shown = None;
-            }
+            Some(s) => s.switch_to(mode),
             None => {
                 let mut s = crate::sidebar::Sidebar::new(mode, self.session.root.clone());
                 s.focus = false;

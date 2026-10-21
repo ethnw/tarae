@@ -3621,6 +3621,33 @@ mod tests {
         sent_until(log, &[want]).contains(want)
     }
 
+    /// 글타래 P1 (its review, 9): a routine toast folded for narrow code — beside the chat at 80 columns — is
+    /// said on the status line while the server's progress wants the room too (folded, it was the first to go
+    /// there, and showed nowhere).
+    #[test]
+    fn a_narrow_codes_toast_outlasts_the_servers_progress() {
+        let (mut ed, _file, _log) =
+            setup("toast-narrow", &"let some_value = compute(1, 2, 3, 4);\n".repeat(40));
+        let cid = ready(&mut ed);
+        let progress = json!({ "method": "$/progress", "params": { "token": "t",
+            "value": { "kind": "begin", "title": "cargo check", "message": "12/340 tarae-demo" } } });
+        ed.on_lsp_message(cid, progress);
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        ed.session.chat.as_mut().unwrap().focused = false;
+        // (alone: messages said together keep their card)
+        ed.toasts.clear();
+        ed.set_success("Saved src/sidebar.rs · 1204 lines");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 80, 24).unwrap();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(&bytes);
+        let status = parser.screen().contents_between(23, 0, 23, 80);
+        assert!(ed.screen.toast_card.get().is_none(), "folded: {status:?}");
+        assert!(status.contains("Saved src/sidebar.rs"), "said on the status line: {status:?}");
+    }
+
     fn ready(ed: &mut Editor) -> ClientId {
         let cid = ed.doc().lsp.client.expect("attached");
         let init = json!({ "jsonrpc": "2.0", "id": 0, "result": { "capabilities": { "positionEncoding": "utf-8" } } });

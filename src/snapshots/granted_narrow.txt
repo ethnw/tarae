@@ -5,11 +5,11 @@
 02      what you've let through               granted  20/20
 03    ──────────────────────────────────────────────────────
 04     by default
-05     ◦ read /private/tmp…shot-granted/tarae  this checkout
-06     ◦ read /private/tmp/ta…tarae-review  another checkout
+05     ◦ read /private/tmp/…tarae              this checkout
+06     ◦ read /private/tmp/…tarae-review    another checkout
 07     ◦ read /private/tmp                  the temp folders
-08     ◦ read /private/tmp/t…registry/src  a toolchain's own
-09     ◦ read /private/…0/lib/rustlib/src  a toolchain's own
+08     ◦ read /…cargo/registry/src         a toolchain's own
+09     ◦ read …rustup/toolchains/1.99.0/…  a toolchain's own
 10     ◦ read outside home        not others' homes, volumes
 11
 12     always · this checkout

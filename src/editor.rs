@@ -363,6 +363,12 @@ pub struct Screen {
     /// The notification card (x, y, width, height) — None when there's none, or it's folded into the status
     /// line.
     pub toast_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// For the notification card up: whether it's said on the status line, the code too narrow for it —
+    /// decided once, as it first shows; None with no card (`draw_toasts`).
+    pub toast_narrow: std::cell::Cell<Option<bool>>,
+    /// This frame's routine message folded into the status line for narrow code — said there, outranking the
+    /// rest (`draw_statusline`).
+    pub toast_said: std::cell::Cell<bool>,
     /// The elements Claude can be told about, where they're drawn (a card's title row, a toast's, a panel
     /// row, the path bar, a slot tab) — pointing labels them (`uistate/point.rs`).
     pub spots: std::cell::RefCell<Vec<crate::uistate::point::Spot>>,

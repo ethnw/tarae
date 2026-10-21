@@ -120,6 +120,22 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
+    /// To another tab (`sidebar_show`, a link of Claude's): its rows read again — into the git tab, its selection
+    /// from their top (the current file, else the first, `sidebar_sync`), not the other tab's row kept.
+    pub fn switch_to(&mut self, mode: Mode) {
+        if mode == self.mode {
+            return;
+        }
+        if mode == Mode::Git {
+            self.selected = 0;
+            self.list = Default::default();
+        }
+        self.mode = mode;
+        self.shown = None;
+        self.list_of = None;
+        self.git_of = None;
+    }
+
     /// Showing `mode`, focused; files under `root` (listed by `sidebar_list_files`).
     pub fn new(mode: Mode, root: PathBuf) -> Self {
         Sidebar {
@@ -564,7 +580,7 @@ fn plugin_lines(
         if at_cursor && here.is_none_or(|(_, d)| r.depth >= d) {
             here = Some((out.len(), r.depth));
         }
-        // Its tone's glyph on every row (a folder's `+`/`−` would take its place): the top rows are
+        // Its tone's glyph on every row (a folder's `▸`/`▾` would take its place): the top rows are
         // headings, and a row folded says so
         // (a note: text in its tone's color, nothing to select)
         out.push(Line {
@@ -617,7 +633,7 @@ impl Editor {
                 return;
             }
             Some(s) => {
-                s.mode = mode;
+                s.switch_to(mode);
                 s.focus = true;
                 s.shown = None;
                 s.list_of = None; // another view may have used the rows
@@ -737,9 +753,14 @@ impl Editor {
                         }
                         None => (Default::default(), None),
                     };
-                    // The status just arrived (the tab opens before it's read): start on the current file
-                    if first && s.focus {
-                        s.selected = s.list_here.unwrap_or(0);
+                    // The status just arrived (the tab opens before it's read, or another tab was up): start on
+                    // the current file, else the first one — not on the heading over it (`s` there is the whole
+                    // section's); with the keys or not (a tab built without them, `:restart`, a link, has none
+                    // to start from when they come)
+                    if first {
+                        let file =
+                            s.list.iter().position(|l| matches!(l.target, Target::Change { file: true, .. }));
+                        s.selected = s.list_here.or(file).unwrap_or(0);
                     }
                     s.git_of = Some(now);
                     s.list_of = None; // the list's rows need building again

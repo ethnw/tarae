@@ -2,12 +2,12 @@
 ## text
 00   files  outline  git  tarae   ▌ tarae  ›  src  ›  demo.rs
 01   ──────────────────────────── ▌ ──────────────────────────────────────────────────────────────────────────────
-02   + docs/                   2  ▌  1 use std::collections::HashMap;
-03   − src/                       ▌  2
-04   │ + ui/                   2  ▌  1 ▎ Counts how often each word appears.
+02   ▸ docs/                   2  ▌  1 use std::collections::HashMap;
+03   ▾ src/                       ▌  2
+04   │ ▸ ui/                   2  ▌  1 ▎ Counts how often each word appears.
 05 ▎ │   demo.rs                  ▌    ▎
 06   │   lib.rs                   ▌    ▎ Words are split on whitespace; case is kept.
-07   + tests/                  1  ▌  4 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   ▸ tests/                  1  ▌  4 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08     Cargo.toml                 ▌  5     let mut counts = HashMap::new();
 09     README.md                  ▌  6     for word in text.split_whitespace() {
 10                                ▌  7     │   *counts.entry(word).or_insert(0) += 1;

@@ -21,7 +21,7 @@
 18                                ▌ 16     println!("{} distinct words", counts.len()); // 타래
 19                                ▌ 17 }
 20                                ▌
-21   s u stage  d discard  ?      ▌
+21   s u stage  d discard  ? keys ▌
 22   c commit  C Claude drafts    ▌
 23  ▐ GIT ▌                                                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
@@ -71,7 +71,7 @@
 18                                  ff              ggg gggggggg gggggg
 19                                  ff
 20
-21   D D fffff  D fffffff  D
+21   D D fffff  D fffffff  D ffff
 22   D ffffff  D ffffff ffffff
 23  a BBB a                                                                                 dddd   ddddd dd   TTT
 ## legend

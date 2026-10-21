@@ -5401,3 +5401,436 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
     assert!(s.ed.bottom_focus, "the keys stayed in the slot");
     s.ed.session.terminal = None; // hangs it up
 }
+
+// ── 글타래 P1: what the scenes showed cut, covered or misplaced ──────────────────────────────────
+
+/// The frame's rows as text, `(x, y, w, h)` of it (cells past the screen's edge aren't asked).
+fn rows_of(s: &mut Shot, (x, y, w, h): (usize, usize, usize, usize)) -> Vec<String> {
+    let bytes = s.frame();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&bytes);
+    let end = (x + w).min(s.w as usize) as u16;
+    (y..y + h).map(|r| parser.screen().contents_between(r as u16, x as u16, r as u16, end)).collect()
+}
+
+/// The follow card's log cut to its newest rows says so on a row of its own (`…`): put in front of a row
+/// already as wide as the card, it pushed that row's end out of it (`in the same cal`, `l.` gone).
+#[test]
+fn a_cut_follow_log_loses_no_words() {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(112, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" lwhy does insert clone the name?<ret>");
+    let said = "The name is cloned because insert takes the key by value, and first moves into the map in the \
+                same call. Keying by the name alone means a second strand with the same name replaces the \
+                first, so the entry API keeps the strand that came first and drops the one that repeats it.";
+    let c = s.ed.session.chat.as_mut().unwrap();
+    c.follow.on = true;
+    c.msgs.push(Msg::new(Role::Assistant, said, ""));
+    s.frame();
+    let card = s.ed.screen.thought_card.get().expect("the card shows");
+    let rows: Vec<String> = rows_of(&mut s, card).iter().map(|r| r.trim().to_string()).collect();
+    let from = rows.iter().position(|r| r.starts_with('…')).unwrap_or_else(|| panic!("cut: {rows:#?}"));
+    let shown: Vec<&str> = rows[from..]
+        .iter()
+        .take_while(|r| !r.is_empty() && !r.starts_with('▀'))
+        .flat_map(|r| r.trim_start_matches('…').split_whitespace())
+        .collect();
+    let words: Vec<&str> = said.split_whitespace().collect();
+    assert!(!shown.is_empty() && words.ends_with(&shown), "the answer's last words, whole: {rows:#?}");
+}
+
+/// A card's title is whole when the code has the room: at 80 columns the run-outside card's was cut at its key
+/// word (`outside the sandb…`) — the card takes the width its title needs, up to the code's.
+#[test]
+fn a_cards_title_is_whole_at_80_columns() {
+    let mut s = Shot::new(80, 24);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let args =
+        json!({"command": "cargo test --quiet", "outside_sandbox": true, "reason": "it needs the registry"});
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "run", "arguments": args}});
+    assert!(crate::tools::mcp(&mut s.ed, 0, "c1", &msg).is_none(), "it waits for the user");
+    let screen = rows_of(&mut s, (0, 0, 80, 24)).join("\n");
+    assert!(screen.contains(crate::tools::OUTSIDE_RUN_TITLE), "{screen}");
+    // (and with a second card waiting: its count shares the title's row — the card widens for both)
+    let msg = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "run", "arguments": args}});
+    assert!(crate::tools::mcp(&mut s.ed, 0, "c2", &msg).is_none(), "it waits for the user");
+    let screen = rows_of(&mut s, (0, 0, 80, 24)).join("\n");
+    assert!(screen.contains(crate::tools::OUTSIDE_RUN_TITLE) && screen.contains("1/2"), "{screen}");
+}
+
+/// Only one row of the follow card's log fits (a short pane): its cut is still said — `…` in front of the
+/// newest row's end, the row cut on its left so nothing runs past the card.
+#[test]
+fn a_one_row_follow_log_still_says_its_cut() {
+    use crate::chat::{Msg, Role};
+    use unicode_width::UnicodeWidthStr;
+    let mut s = Shot::new(112, 14);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" lwhy does insert clone the name?<ret>");
+    let said = "The name is cloned because insert takes the key by value, and first moves into the map in the \
+                same call. Keying by the name alone means a second strand with the same name replaces it.";
+    let c = s.ed.session.chat.as_mut().unwrap();
+    c.follow.on = true;
+    c.msgs.push(Msg::new(Role::Assistant, said, ""));
+    s.frame();
+    let card = s.ed.screen.thought_card.get().expect("the card shows");
+    let rows: Vec<String> = rows_of(&mut s, card).iter().map(|r| r.trim().to_string()).collect();
+    let at =
+        rows.iter().position(|r| r.starts_with('…')).unwrap_or_else(|| panic!("its cut said: {rows:#?}"));
+    let shown: Vec<&str> = rows[at].trim_start_matches('…').split_whitespace().collect();
+    let tail = said.split_whitespace().last().unwrap();
+    assert!(shown.last() == Some(&tail), "the newest row's end, whole: {rows:#?}");
+    let inner = card.2 - 4;
+    let text = rows.iter().filter(|r| !r.starts_with(['▄', '▀']));
+    assert!(text.clone().all(|r| r.width() <= inner), "nothing past the card: {rows:#?}");
+}
+
+/// The path bar never starts or ends on a `›`, nor shows two together: a part dropped for room takes its
+/// separator with it (beside the chat at 80 columns: `› src › main.rs`).
+#[test]
+fn the_path_bar_has_no_separator_alone() {
+    for w in 24..64 {
+        let mut s = Shot::new(w, 10);
+        s.file("src/demo.rs", DEMO_RS);
+        let bar = rows_of(&mut s, (0, 0, w as usize, 1)).remove(0);
+        let bar = bar.trim();
+        assert!(!bar.starts_with('›') && !bar.ends_with('›') && !bar.contains("›  ›"), "{w} cols: {bar:?}");
+    }
+}
+
+/// An edit review's reason is whole sentences — the last ones that fit its two rows — not a cut that starts
+/// mid-sentence behind a `…` and runs past the code's width.
+#[test]
+fn an_edit_reviews_reason_is_whole_sentences() {
+    use unicode_width::UnicodeWidthStr;
+    let mut s = Shot::new(100, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let reply = "<r i=\"1\">    println!(\"{} distinct words in {:?}\", counts.len(), text);\n</r>";
+    let json = json!({"type": "result", "is_error": false, "result": reply}).to_string();
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), format!("read -r line; printf '%s\\n' '{json}'")];
+    s.keys("17ggx i");
+    s.keys("show the text too<ret>");
+    s.until("review", |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
+    s.ed.toasts.clear();
+    let reason = "Keying by the name alone means a second strand with the same name replaces the first one in \
+                  the map. The entry API keeps the one that came first. I will switch it so a repeat keeps the \
+                  first strand, and since nothing else reads the map, no other line has to change.";
+    s.ed.session.review.as_mut().unwrap().reason = reason.into();
+    let top = s.ed.screen.review_rows.borrow().first().map_or(4, |r| r.0);
+    // (the title's row, then the reason's: up to the first change's head)
+    let rows = rows_of(&mut s, (0, 3, 100, top.saturating_sub(3)));
+    let shown: Vec<&str> = rows
+        .iter()
+        .take_while(|r| !r.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .flat_map(|r| r.split_whitespace())
+        .collect();
+    let words: Vec<&str> = reason.split_whitespace().collect();
+    // (`…` says sentences went before them)
+    assert_eq!(shown.first(), Some(&"…"), "the cut said: {rows:#?}");
+    let shown = &shown[1..];
+    assert!(!shown.is_empty() && words.ends_with(shown), "whole words, the reason's last: {rows:#?}");
+    assert!(words[words.len() - shown.len() - 1].ends_with('.'), "a sentence's start: {rows:#?}");
+    // A last sentence longer than the two rows alone: its end, `…` in front, no row past the code's width (one-
+    // letter words: wrapped at the full width, its first row fills it — the mark would push it past)
+    let long = format!("Short one. {}word end.", "a ".repeat(200));
+    s.ed.session.review.as_mut().unwrap().reason = long.clone();
+    let top = s.ed.screen.review_rows.borrow().first().map_or(4, |r| r.0);
+    let rows = rows_of(&mut s, (0, 3, 100, top.saturating_sub(3)));
+    let reason_rows: Vec<&String> = rows
+        .iter()
+        .take_while(|r| !r.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .filter(|r| r.contains(" a a ") || r.contains("word end."))
+        .collect();
+    assert!(reason_rows.first().is_some_and(|r| r.trim_start().starts_with('…')), "{rows:#?}");
+    assert!(reason_rows.last().is_some_and(|r| r.trim_end().ends_with("end.")), "{rows:#?}");
+    assert!(reason_rows.iter().all(|r| r.trim_end().width() <= 100 - 4), "{rows:#?}");
+}
+
+/// The git tab opens on its first file, not on the `Changes` heading over it (the heading still takes `s` for
+/// the whole section, a `k` away) — when the file in front isn't among the changes.
+#[test]
+fn the_git_tab_opens_on_a_file() {
+    use crate::sidebar::{Mode, Sidebar, Target};
+    let mut s = Shot::new(112, 24);
+    // (rooted in the snapshots' own folder: a sync that reads the status again runs git there — never in tarae's)
+    let root = s.in_project();
+    s.file("src/demo.rs", DEMO_RS);
+    let mut st = crate::gitpanel::parse_v2(
+        "# branch.head main\0 1 .M N... 100644 100644 100644 0 0 src/thread.rs\0? src/knot.rs\0",
+    );
+    st.top = root.clone();
+    st.generation = 1;
+    s.ed.session.git_status = Some(st.with_rows());
+    s.ed.session.sidebar = Some(Sidebar::new(Mode::Git, root));
+    s.ed.sidebar_sync();
+    s.frame();
+    let sb = s.ed.session.sidebar.as_ref().unwrap();
+    let on = &sb.lines()[sb.selected].target;
+    assert!(matches!(on, Target::Change { file: true, .. }), "on {on:?}");
+}
+
+/// The git tab, shown again: back from another tab it starts on its first file again; refocused (`space g`
+/// after `esc`) it keeps the row you were on — the `Changes` heading too, when that's what you picked.
+#[test]
+fn the_git_tab_reopened_starts_fresh_or_keeps_your_row() {
+    use crate::sidebar::{Mode, Target};
+    let mut s = Shot::new(112, 24);
+    // (rooted in the snapshots' own folder: the files tab looks for its repository — never tarae's)
+    let root = s.in_project();
+    s.file("src/demo.rs", DEMO_RS);
+    // (row 4, the `Staged` heading: a kept index lands off the files)
+    let mut st = crate::gitpanel::parse_v2(
+        "# branch.head main\0 1 .M N... 100644 100644 100644 0 0 src/thread.rs\0? src/knot.rs\0\
+         1 M. N... 100644 100644 100644 0 0 docs/a.md\0 1 M. N... 100644 100644 100644 0 0 docs/b.md\0",
+    );
+    st.top = root;
+    st.generation = 1;
+    s.ed.session.git_status = Some(st.with_rows());
+    let on = |s: &Shot| {
+        let sb = s.ed.session.sidebar.as_ref().unwrap();
+        sb.lines()[sb.selected].target.clone()
+    };
+    s.ed.sidebar_show(Mode::Git);
+    s.frame();
+    assert!(matches!(on(&s), Target::Change { file: true, .. }), "opened: {:?}", on(&s));
+    // (up to the heading, the keys back to the code, the tab again: your row)
+    s.keys("gg<esc>");
+    assert!(matches!(on(&s), Target::Change { file: false, .. }), "on the heading: {:?}", on(&s));
+    s.ed.sidebar_show(Mode::Git);
+    s.frame();
+    assert!(matches!(on(&s), Target::Change { file: false, .. }), "kept: {:?}", on(&s));
+    // (the files tab, a row far down, then git again: its first file)
+    s.ed.sidebar_show(Mode::Files);
+    s.frame();
+    s.ed.session.sidebar.as_mut().unwrap().selected = 4;
+    s.ed.sidebar_show(Mode::Git);
+    s.frame();
+    assert!(matches!(on(&s), Target::Change { file: true, .. }), "back from files: {:?}", on(&s));
+    // (Claude's link into the git tab from the files tab: its rows read again, not the files' row kept)
+    s.ed.sidebar_show(Mode::Files);
+    s.frame();
+    s.ed.session.sidebar.as_mut().unwrap().selected = 4;
+    s.ed.ui_jump("git:src/knot.rs");
+    s.frame();
+    assert!(matches!(on(&s), Target::Change { file: true, .. }), "a link in: {:?}", on(&s));
+    // A tab built while it hadn't the keys (`:restart`, a link) and never had them: on a file too
+    s.ed.session.sidebar = None;
+    let mut sb = crate::sidebar::Sidebar::new(Mode::Git, s.root.clone());
+    sb.focus = false;
+    s.ed.session.sidebar = Some(sb);
+    s.ed.sidebar_sync();
+    s.ed.sidebar_show(Mode::Git);
+    s.frame();
+    assert!(matches!(on(&s), Target::Change { file: true, .. }), "built unfocused: {:?}", on(&s));
+}
+
+/// `:granted`'s cut rows read the same wherever the list is scrolled: what sets a row apart is worked out
+/// against the whole list, not the rows on screen.
+#[cfg(target_os = "macos")]
+#[test]
+fn granted_rows_cut_the_same_when_scrolled() {
+    use crate::allow::Allowed;
+    use crate::caps::{Caps, Entry, Source, Why};
+    let at = |p: &str| PathBuf::from(format!("/private/tmp/tarae-shot-granted/{p}"));
+    let names =
+        ["stable-aarch64-apple-darwin", "nightly-aarch64-apple-darwin", "1.90-aarch64-apple-darwin", "esp"];
+    let none = Allowed::default();
+    let made = || {
+        let mut caps = Caps::granted(&at("tarae"), &none, &none, &none);
+        caps.read.extend(names.iter().map(|n| Entry {
+            what: at(&format!("rustup/toolchains/{n}/lib/rustlib/src")),
+            source: Source::Default(Why::Toolchain),
+        }));
+        caps.read.push(Entry { what: at("cargo/registry/src"), source: Source::Default(Why::Toolchain) });
+        caps
+    };
+    let caps = made();
+    let more = crate::granted::More {
+        no_sandbox: false,
+        repository: false,
+        trusted: Vec::new(),
+        plugins: Vec::new(),
+        preflight: Vec::new(),
+        elsewhere: 0,
+    };
+    let bare = |r: &String| r.trim_start_matches(['▎', ' ']).to_string();
+    let mut compared = 0;
+    // (screens short enough that the list scrolls, each showing a different few of its rows)
+    for h in 8..=12u16 {
+        let mut s = Shot::new(80, h);
+        s.file("src/demo.rs", DEMO_RS);
+        s.ed.session.caps = Some((1, std::sync::Arc::new(made())));
+        s.ed.granted_open(
+            crate::granted::items(&caps, [&none, &none, &none], &[], &more, 1_792_000_000),
+            false,
+        );
+        let shown = |s: &mut Shot| -> Vec<String> {
+            let rows = rows_of(s, (0, 0, 80, h as usize));
+            rows.into_iter().filter(|r| r.contains("rustlib")).map(|r| r.trim().to_string()).collect()
+        };
+        let mut frames = vec![shown(&mut s)];
+        for _ in 0..8 {
+            s.keys("j");
+            frames.push(shown(&mut s));
+        }
+        // (alone on screen beside the other places, a toolchain's row lost its name: `…apple-darwin/lib/…`)
+        for row in frames.iter().flatten() {
+            assert!(names.iter().any(|n| row.contains(n)), "{h} rows: {row:?} names its toolchain");
+            compared += 1;
+        }
+        for n in names {
+            let seen: Vec<String> =
+                frames.iter().filter_map(|f| f.iter().find(|r| r.contains(n)).map(bare)).collect();
+            assert!(seen.windows(2).all(|p| p[0] == p[1]), "{h} rows, {n}: {seen:#?}");
+        }
+    }
+    assert!(compared > 0, "rows on screen");
+}
+
+/// Where a toast goes is decided once for its card: a routine one shown as a card stays a card when a longer one
+/// joins it and makes it too wide for the narrow code — it doesn't jump to the status line mid-read.
+#[test]
+fn a_toasts_place_is_kept_for_its_card() {
+    let mut s = Shot::new(80, 16);
+    let long: String = (1..=30).map(|i| format!("let line_{i} = {};\n", "x".repeat(40))).collect();
+    s.file("src/demo.rs", &long);
+    s.keys("8gg");
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    s.ed.set_success("Saved a.rs");
+    s.frame();
+    assert!(s.ed.screen.toast_card.get().is_some(), "short: a card");
+    s.ed.set_success("Saved src/sidebar.rs · 1204 lines, and its server told");
+    s.frame();
+    assert!(s.ed.screen.toast_card.get().is_some(), "the same card, where it was");
+    // (its first message said again: a new id in its place — still the same card)
+    s.ed.set_success("Saved a.rs");
+    s.frame();
+    assert!(s.ed.screen.toast_card.get().is_some(), "said again: still the card");
+}
+
+/// The chat beside the code at 80 columns, the code 48 wide.
+fn narrow_code() -> Shot {
+    let mut s = Shot::new(80, 16);
+    let long: String = (1..=30).map(|i| format!("let line_{i} = {};\n", "x".repeat(40))).collect();
+    s.file("src/demo.rs", &long);
+    s.keys("8gg");
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    s
+}
+
+/// Routine messages said together over narrow code (a disk-watch round's two reloads) keep their card: folded,
+/// the status line had room for the last one only, and the first showed nowhere. One that joins a message
+/// already folded is counted there (`+1 earlier`).
+#[test]
+fn routine_messages_said_together_keep_their_card() {
+    let mut s = narrow_code();
+    s.ed.set_status("a.rs reloaded from disk");
+    s.ed.set_status("b.rs reloaded from disk");
+    s.frame();
+    assert!(s.ed.screen.toast_card.get().is_some(), "both on a card");
+    let screen = rows_of(&mut s, (0, 0, 80, 16)).join("\n");
+    assert!(screen.contains("a.rs reloaded") && screen.contains("b.rs reloaded"), "{screen}");
+    // (one alone folds; another joining it is counted)
+    let mut s = narrow_code();
+    s.ed.set_success("Saved main.rs · Claude's change");
+    s.frame();
+    assert_eq!(s.ed.screen.toast_card.get(), None, "folded");
+    s.ed.set_status("b.rs reloaded from disk");
+    let status = rows_of(&mut s, (0, 15, 80, 1)).remove(0);
+    assert!(status.contains("b.rs reloaded") && status.contains("+1 earlier"), "{status:?}");
+}
+
+/// A routine message folded to the status line gives way to what the status line already says there — the
+/// diagnostics' count, the mode, the position — cut to the room they leave (it took everything but the mode
+/// and the position for its whole life).
+#[test]
+fn a_folded_routine_message_gives_way_to_the_diagnostics_count() {
+    let mut s = narrow_code();
+    s.ed.doc_mut().lsp.diagnostics = vec![crate::lsp::Diagnostic {
+        from: 0,
+        to: 3,
+        severity: 1,
+        message: "mismatched types".into(),
+        raw: json!({ "source": "rustc" }),
+        source: 0,
+    }];
+    let before = rows_of(&mut s, (0, 15, 80, 1)).remove(0);
+    let sign =
+        before.chars().find(|c| "▲●■✖".contains(*c)).unwrap_or_else(|| panic!("its count: {before:?}"));
+    s.ed.set_success("Saved src/sidebar.rs · 1204 lines, its server told and its tests queued to run");
+    let after = rows_of(&mut s, (0, 15, 80, 1)).remove(0);
+    assert!(after.contains(sign) && after.contains("Saved src"), "{before:?} → {after:?}");
+}
+
+/// Code too narrow for a toast to keep off it (the card over half its width, code under both its places — 40
+/// columns beside the chat): a routine message is said on the status line instead; an error keeps its card.
+#[test]
+fn a_narrow_codes_routine_toast_goes_to_the_status_line() {
+    let mut s = Shot::new(80, 16);
+    let long: String = (1..=30).map(|i| format!("let line_{i} = {};\n", "x".repeat(40))).collect();
+    s.file("src/demo.rs", &long);
+    s.keys("8gg");
+    // (the chat beside it: the code keeps 48 columns)
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    s.ed.set_success("Saved main.rs · Claude's change");
+    s.frame();
+    assert_eq!(s.ed.screen.toast_card.get(), None, "no card over the code");
+    let status = rows_of(&mut s, (0, 15, 80, 1)).remove(0);
+    assert!(status.contains("Saved main.rs"), "said on the status line: {status:?}");
+    s.ed.set_error("no such command: 'frobnicate'");
+    s.frame();
+    assert!(s.ed.screen.toast_card.get().is_some(), "an error keeps its card");
+}
+
+/// `:granted`'s paths under one folder keep what sets each apart when cut: five toolchains' sources read
+/// `~/.rustup/toolchai…apple-darwin/lib/rustlib/src` alike, the toolchain's name cut out of every one.
+#[cfg(target_os = "macos")]
+#[test]
+fn granted_rows_cut_keep_what_differs() {
+    use crate::allow::Allowed;
+    use crate::caps::{Caps, Entry, Source, Why};
+    let at = |p: &str| PathBuf::from(format!("/private/tmp/tarae-shot-granted/{p}"));
+    let names =
+        ["stable-aarch64-apple-darwin", "nightly-aarch64-apple-darwin", "1.90-aarch64-apple-darwin", "esp"];
+    let none = Allowed::default();
+    let made = || {
+        let mut caps = Caps::granted(&at("tarae"), &none, &none, &none);
+        caps.read.extend(names.iter().map(|n| Entry {
+            what: at(&format!("rustup/toolchains/{n}/lib/rustlib/src")),
+            source: Source::Default(Why::Toolchain),
+        }));
+        caps
+    };
+    let caps = made();
+    let mut s = Shot::new(80, 24);
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.session.caps = Some((1, std::sync::Arc::new(made())));
+    let more = crate::granted::More {
+        no_sandbox: false,
+        repository: false,
+        trusted: Vec::new(),
+        plugins: Vec::new(),
+        preflight: Vec::new(),
+        elsewhere: 0,
+    };
+    s.ed.granted_open(crate::granted::items(&caps, [&none, &none, &none], &[], &more, 1_792_000_000), false);
+    let rows: Vec<String> =
+        rows_of(&mut s, (0, 0, 80, 24)).into_iter().filter(|r| r.contains("toolchain")).collect();
+    assert_eq!(rows.len(), names.len(), "{rows:#?}");
+    for n in names {
+        assert!(rows.iter().any(|r| r.contains(n)), "{n} in {rows:#?}");
+    }
+}

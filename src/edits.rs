@@ -246,12 +246,31 @@ pub fn reason(c: &crate::chat::Chat) -> String {
         .iter()
         .take_while(|m| m.role != Role::Tool)
         .find(|m| matches!(m.role, Role::Thought | Role::Assistant))
-        .map(|m| crate::chat::displayed(&m.text).split_whitespace().collect::<Vec<_>>().join(" "));
+        .map(|m| prose(&crate::chat::displayed(&m.text)));
     let step = c.plan.as_ref().and_then(|p| {
         let i = p.current()?;
         Some(format!("step {}/{}: {}", i + 1, p.steps.len(), p.steps[i].text))
     });
     words.filter(|w| !w.is_empty()).or(step).unwrap_or_default()
+}
+
+/// Claude's words without its code, on one line: a fenced block (```` ``` ```` or `~~~`, its language word and its
+/// lines) left out — the review's reason is prose (`…replaces the first: rust let mut threads: …` ran the
+/// code into it).
+fn prose(text: &str) -> String {
+    let mut fence: Option<&str> = None;
+    let mut words = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        match fence {
+            Some(f) if t.starts_with(f) => fence = None,
+            Some(_) => {}
+            None if t.starts_with("```") => fence = Some("```"),
+            None if t.starts_with("~~~") => fence = Some("~~~"),
+            None => words.extend(line.split_whitespace()),
+        }
+    }
+    words.join(" ")
 }
 
 /// Review at the end: whether the edit goes in unasked is worked out on a worker — where its path really
@@ -767,6 +786,20 @@ mod tests {
         ed.config.llm.args = vec!["-c".into(), format!("cat > '{}'", log.display())];
         crate::chat::open(&mut ed);
         ed
+    }
+
+    /// The reason an edit's review shows is Claude's words without its code: a fenced block — its language
+    /// word and its lines — left out, the words around it kept, on one line.
+    #[test]
+    fn an_edits_reason_is_its_words_without_code() {
+        use crate::chat::{Msg, Role};
+        let dir = crate::scratch::Scratch::new("edits-reason");
+        let mut ed = chat_for(&dir, &dir.join("log"));
+        let c = ed.session.chat.as_mut().unwrap();
+        c.msgs.push(Msg::new(Role::User, "why?", ""));
+        let said = "Keying by the name replaces the first:\n\n```rust\nlet x = 1;\n```\n\nI will switch it to `entry`.\n\n~~~\nmore\n~~~";
+        c.msgs.push(Msg::new(Role::Assistant, said, ""));
+        assert_eq!(reason(c), "Keying by the name replaces the first: I will switch it to `entry`.");
     }
 
     fn ask(ed: &mut Editor, id: &str, file: PathBuf, old: &str, new: &str) {

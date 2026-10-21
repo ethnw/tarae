@@ -5,11 +5,11 @@
 02      what you've let through                 granted  6/6
 03    ──────────────────────────────────────────────────────
 04     by default
-05   ▎ ◦ read /private/tmp…shot-granted/tarae  this checkout
-06     ◦ read /private/tmp/ta…tarae-review  another checkout
+05   ▎ ◦ read /private/tmp/…tarae              this checkout
+06     ◦ read /private/tmp/…tarae-review    another checkout
 07     ◦ read /private/tmp                  the temp folders
-08     ◦ read /private/tmp/t…registry/src  a toolchain's own      ▎ Ask Claude
-09     ◦ read /private/…0/lib/rustlib/src  a toolchain's own
+08     ◦ read /…cargo/registry/src         a toolchain's own      ▎ Ask Claude
+09     ◦ read …rustup/toolchains/1.99.0/…  a toolchain's own
 10     ◦ read outside home        not others' homes, volumes      It reads the whole project,
 11                                                                starting from demo.rs.
 12     nothing let through past the defaults yet
@@ -67,7 +67,7 @@
 02      ffff ffffff fff fffffff                 fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
 04     ff fffffff
-05   a f TTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT  dddd dddddddd
+05   a f TTTT TTTTTTTTTTTTTTTTTTT              dddd dddddddd
 06     f                                    ddddddd dddddddd
 07     f                                    ddd dddd ddddddd
 08     f                                   d ddddddddddd ddd      a TTT TTTTTT
