@@ -93,7 +93,6 @@ mod tests {
         let mut ed = Editor::with_root(crate::config::Config::default(), root.to_path_buf());
         ed.claude_env =
             Some(crate::llm::Env::from([("ANTHROPIC_API_KEY".into(), "tarae-fake-key-zq7".into())]));
-        ed.config.llm.claude_sandbox = false;
         let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi"}"#;
         ed.config.llm.command = "sh".into();

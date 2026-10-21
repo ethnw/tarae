@@ -448,20 +448,6 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.llm.card_record = b(v),
     },
     Setting {
-        path: "llm.claude-sandbox",
-        kind: Kind::Bool,
-        doc: "Chat: the claude program itself runs in a sandbox of its own (macOS: Seatbelt; Linux: Landlock, ABI 3 or later) — it reads no keys (macOS: but its login in the keychain) and writes only its own folders and temp, the project only with llm.edit-tools \"both\" or \"native\" (not .git nor the protected names); its network as it is. What it's refused is said in the chat. Linux: it makes no unix socket, and it writes all of ~/.claude — your login is refreshed there — so what your own Claude Code runs later in it (settings, hooks, CLAUDE.md) isn't kept from it as on macOS. Where it can't be confined it runs as you, said (llm.claude-sandbox-required: not at all). A new chat process starts with it. Only your own config sets it",
-        get: |c| Value::from(c.llm.claude_sandbox),
-        set: |c, v| c.llm.claude_sandbox = b(v),
-    },
-    Setting {
-        path: "llm.claude-sandbox-required",
-        kind: Kind::Bool,
-        doc: "Chat and reviewer: a claude that can't be confined (llm.claude-sandbox off, no Seatbelt here, no Landlock or an old one, its rules refused) doesn't start, said — off: it runs as you, said once. Only your own config sets it",
-        get: |c| Value::from(c.llm.claude_sandbox_required),
-        set: |c, v| c.llm.claude_sandbox_required = b(v),
-    },
-    Setting {
         path: "llm.environment-key",
         kind: Kind::Enum(&["drop", "keep"]),
         doc: "Claude: an ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in tarae's environment — \"drop\": Claude runs on your Claude Code login; \"keep\": passed on, for a login by key alone or a gateway (ANTHROPIC_BASE_URL with its token). When Claude isn't logged in and a key was dropped, a card offers it for the session, or A writes \"keep\" here. Inside a Claude Code session always dropped (the host's). Only your own config sets it",
@@ -830,22 +816,9 @@ pub(crate) fn md_code(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The defaults on `os` — `EditorConfig::default`'s but those that differ by system.
-    fn defaults_on(os: crate::sandbox::Os) -> EditorConfig {
-        let mut c = EditorConfig::default();
-        c.llm.claude_sandbox = crate::sandbox::claude::on_by_default(os);
-        c
-    }
-
     /// `docs/reference/settings.md` — one table per config section, straight from `SETTINGS`.
     fn reference() -> String {
-        use crate::sandbox::Os;
-        let (mac, linux) = (defaults_on(Os::Mac), defaults_on(Os::Linux));
-        // (this system's are the real defaults)
-        let (here, real) = (defaults_on(Os::HOST), EditorConfig::default());
-        for s in SETTINGS {
-            assert_eq!((s.get)(&here).to_string(), (s.get)(&real).to_string(), "{}", s.path);
-        }
+        let real = EditorConfig::default();
         let mut out = String::from(
             "<!-- Generated from src/settings.rs — do not edit; regenerate with \
              `TARAE_BLESS=1 cargo test settings_reference`. -->\n\
@@ -876,11 +849,7 @@ mod tests {
                 Kind::Ports { max } => format!("list of ports (at most {max})"),
                 Kind::Hosts => md_code("\"registries\"") + " · " + &md_code("\"*\"") + " or a list of hosts",
             };
-            let (on_mac, on_linux) = ((s.get)(&mac).to_string(), (s.get)(&linux).to_string());
-            let default = match on_mac == on_linux {
-                true => md_code(&on_mac),
-                false => format!("{} macOS · {} Linux", md_code(&on_mac), md_code(&on_linux)),
-            };
+            let default = md_code(&(s.get)(&real).to_string());
             out.push_str(&format!("| {} | {kind} | {default} | {} |\n", md_code(s.path), md_cell(s.doc)));
         }
         out.push_str(

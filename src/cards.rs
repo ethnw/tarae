@@ -1177,18 +1177,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The record lives in tarae's state, which no run and no claude reads: a new file there needs no rule of
-    /// its own — the runs' `kept_reads` keep the whole state folder, and claude's profile (Seatbelt's and
-    /// Landlock's, made from the same `Profile`) keeps what they keep.
+    /// The record lives in tarae's state, which no run reads: a new file there needs no rule of its own — the
+    /// runs' `kept_reads` keep the whole state folder.
     #[test]
-    fn the_record_is_kept_from_runs_and_claude() {
+    fn the_record_is_kept_from_runs() {
         let (Some(state), Some(home)) = (crate::config::state_dir(), crate::allow::home()) else { return };
         let here = crate::sandbox::Here::now();
         let record = crate::sandbox::profile_path(&state.join(DIR).join("2026-10.jsonl"));
         let runs = crate::sandbox::kept_reads(&home, &crate::sandbox::vars_in(&home, &here));
         assert!(runs.iter().any(|k| record.starts_with(k)), "{record:?} in none of {runs:?}");
-        let claude = crate::sandbox::claude::Profile::new(&home.join("p"), &home, true, &here, "t").kept;
-        assert!(claude.iter().any(|k| record.starts_with(k)), "{record:?} in none of {claude:?}");
     }
 
     /// cardburden 5: tarae's own cards were never in the log — a preflight's, a stuck run's, notes gone stale,

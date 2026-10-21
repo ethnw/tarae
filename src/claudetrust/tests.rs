@@ -13,17 +13,14 @@ fn keys(scan: &Scan) -> Vec<(Kind, &str)> {
     scan.items.iter().map(|i| (i.kind, i.key.as_str())).collect()
 }
 
-/// Your own Claude settings are a hold-back's baseline: every claude tarae starts loads them, confined or not, on
-/// either system (claude's folder is always yours).
+/// Your own Claude settings are a hold-back's baseline: every claude tarae starts loads them, on either system
+/// (claude's folder is always yours).
 #[test]
 fn your_claude_settings_are_the_baseline_where_claude_loads_them() {
     let mut ed = Editor::new(crate::config::Config::default());
     let yours = std::path::PathBuf::from("/home/stand-in/.claude/settings.json");
     ed.claude_user_settings = Some(yours.clone());
-    for confined in [false, true] {
-        ed.config.llm.claude_sandbox = confined;
-        assert_eq!(Places::of(&ed).user, Some(yours.clone()), "confined: {confined}");
-    }
+    assert_eq!(Places::of(&ed).user, Some(yours));
 }
 
 /// A repository's file can run a command as you (`apiKeyHelper` and its kin), set claude's environment and
@@ -568,8 +565,9 @@ fn a_chat_starts_held_back_while_its_card_waits() {
     // (not on `RESTORED`: empty, whatever tarae's environment holds — the test gives one that has it)
     assert_eq!(settings["env"]["ANTHROPIC_BASE_URL"], "");
     assert_eq!(settings["disableAllHooks"], true);
-    // (f22 i: claude's transcript cleanup kept off where it loads the user source — on either system)
-    assert_eq!(settings["cleanupPeriodDays"].as_u64(), Some(36_500));
+    // (claude cleans its conversations by your own `cleanupPeriodDays`, as your own Claude Code does: it runs as
+    // you — 2026-10-17)
+    assert!(settings.get("cleanupPeriodDays").is_none(), "{settings}");
     let argv = std::fs::read_to_string(root.join("argv")).unwrap();
     let theirs: Vec<&str> = argv.lines().filter(|l| l.contains("theirs-zq7")).collect();
     assert!(theirs.is_empty(), "names only, no value of theirs: {theirs:?}");

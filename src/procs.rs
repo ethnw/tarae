@@ -1730,14 +1730,9 @@ impl Editor {
             }
             if let Some(c) = &l.chat {
                 add(c.pid(), Kind::Chat, "claude", "the chat".into(), session);
-                // (claude's own sandbox's `log stream`, watching what it refuses claude — `sandbox::claude`)
-                let what = "what claude's own sandbox refuses it".to_string();
-                add(c.confined_watch(), Kind::Helper, "sandbox watch", what, session);
             }
             if let Some(r) = &l.reviewer {
                 add(r.pid(), Kind::Reviewer, "claude", format!("the reviewer · {}", r.label), session);
-                let what = "what the reviewer's claude's own sandbox refuses it".to_string();
-                add(r.watch_pid(), Kind::Helper, "sandbox watch", what, session);
             }
         }
         // (a watch held elsewhere — its run gone, not yet started, or never to: still tarae's, still known)

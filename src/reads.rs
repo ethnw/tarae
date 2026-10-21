@@ -865,21 +865,12 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
     let (generation, made) = (c.generation(), Made::of(&c.ran));
     let input = req["input"].clone();
     let request_id = request_id.to_string();
-    // (what claude's own profile keeps from it, a yes can't open — `kept_from_claude`)
-    let confined = c.confined();
     // (the root, a real path, is where claude runs — its relative paths are from there)
     let basis = ed.caps_basis();
     ed.events.jobs().spawn(move || {
         let caps = basis.build();
         let (look, covered, class) = decide(&tool, &input, &caps, &made);
         let ok = covered || by_default(class, &caps);
-        if let Some(said) = confined.and_then(|p| kept_from_claude(&p, &look)) {
-            return Box::new(move |ed: &mut Editor| {
-                if ed.session.chat.as_ref().is_some_and(|c| c.generation() == generation) {
-                    crate::chat::respond(ed, &request_id, json!({ "behavior": "deny", "message": said }));
-                }
-            }) as Box<dyn FnOnce(&mut Editor) + Send>;
-        }
         // (asked: its card says first what looks like a token there — a folder in the project too: its yes
         // reads more than the keys it names)
         let found = match (ok, &look.at) {
@@ -909,19 +900,6 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         })
     });
     None
-}
-
-/// What a Read (`look`) would open that claude's own profile keeps from it (`sandbox::claude`) — a key folder, a
-/// file named like a key, tarae's state: no card (a yes couldn't open it), the model told why and what the user
-/// can do instead. None: nothing kept.
-pub(crate) fn kept_from_claude(p: &crate::sandbox::claude::Profile, look: &Look) -> Option<String> {
-    let kept = look.at.iter().chain(&look.keys).find(|at| !p.reads_allow(at))?;
-    let shown = crate::sandbox::home_shown(&kept.to_string_lossy());
-    Some(format!(
-        "{shown} is kept from claude itself — its own sandbox (llm.claude-sandbox) refuses reading key folders, \
-         files named like keys and tarae's state, whatever is answered. If you need what's in it, ask the user to \
-         send it (they can point at it: C-o)"
-    ))
 }
 
 /// What `tool` reading `input` (from `caps.root`, where claude runs) reads, and whether it may go without

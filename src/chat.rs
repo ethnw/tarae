@@ -163,30 +163,6 @@ mcp__tarae__ui,mcp__tarae__edit,mcp__tarae__git";
 pub(crate) const CHAT_SETTINGS: &str =
     r#"{"permissions":{"ask":["Edit","Write"],"deny":["Skill"]},"disableAllHooks":true}"#;
 
-/// How long claude keeps a conversation before its own cleanup deletes it, in the chat's `--settings` where it
-/// loads your user settings (`keep_transcripts`). Measured (f22 i, claude 2.1.296): at its start, logged out
-/// too, claude deletes every project's transcripts older than `cleanupPeriodDays` (30 by default) — other
-/// projects' with their session folders, and old shell snapshots — which its profile refuses (4,622 refusals a
-/// day); with this, it tries none. Never `0` (all, or no persistence); at least 1, "a large number". Your own
-/// Claude Code, unconfined, still cleans as your settings say.
-const KEEP_TRANSCRIPTS_DAYS: u64 = 36_500;
-
-/// `settings` (the chat's `--settings`) with `cleanupPeriodDays` = `KEEP_TRANSCRIPTS_DAYS` where claude loads
-/// the user source (`sources`) — on either system: with `~/.claude` claude's to write on Linux, its cleanup would
-/// really delete other projects' conversations there. Without the source claude skips its cleanup (it says so) —
-/// a value given there would turn it on.
-fn keep_transcripts(settings: &str, sources: &str) -> String {
-    let user = sources.split(',').any(|s| s.trim() == "user");
-    let Ok(serde_json::Value::Object(mut json)) = serde_json::from_str(settings) else {
-        return settings.into();
-    };
-    if !user {
-        return settings.into();
-    }
-    json.insert("cleanupPeriodDays".into(), KEEP_TRANSCRIPTS_DAYS.into());
-    serde_json::Value::Object(json).to_string()
-}
-
 /// Example questions filled in with Tab in an empty chat.
 pub const SUGGESTIONS: [&str; 3] = [
     "Explain what this file does",
@@ -311,27 +287,7 @@ struct Proc {
     /// Its stdin, written off the main loop (`llm::Lines`)
     stdin: llm::Lines,
     pid: u32,
-    /// The profile it runs under (`sandbox::claude`) and what watches its refusals — None: unconfined.
-    confined:
-        Option<(std::sync::Arc<crate::sandbox::claude::Profile>, std::sync::Arc<crate::sandbox::Watch>)>,
-    /// What its profile refused it, each said once (`refused`).
-    refused: Vec<String>,
-    /// Of those, its own cleanup's — logged once, never said in the chat (`refused`).
-    cleanups: usize,
 }
-
-/// The chat's claude's own sandbox (`sandbox::claude`), made on a worker before its process starts.
-#[derive(Default)]
-pub struct Confine {
-    /// For (root, project writable): the profile, or why claude runs unconfined.
-    made: Option<((PathBuf, bool), Result<crate::sandbox::claude::Profile, String>)>,
-    making: bool,
-    /// That it runs unconfined was said (once a chat).
-    said: bool,
-}
-
-/// The refusals of one claude process said in the chat; the rest only in tarae's log.
-const REFUSALS_SAID: usize = 3;
 
 pub struct Chat {
     pub msgs: Vec<Msg>,
@@ -439,8 +395,6 @@ pub struct Chat {
     /// The project's Claude settings, read before its claude starts and answered on a card when they run
     /// commands or set its environment (`claudetrust.rs`).
     pub settings: crate::claudetrust::Gate,
-    /// Its claude's own sandbox (`sandbox::claude`).
-    pub confine: Confine,
     /// Who pays for its claude — what the last one was started on (`billing.rs`), what its `apiKeySource` is
     /// checked against (the session's may have changed since: a restart's list coming back). None: none started.
     pub billing: Option<crate::billing::Billing>,
@@ -633,7 +587,6 @@ impl Chat {
             reruns: Vec::new(),
             rules_said: (None, Default::default()),
             settings: Default::default(),
-            confine: Default::default(),
             billing: None,
             edit_tools: crate::edittool::Arm::Tarae,
             switched: None,
@@ -644,16 +597,6 @@ impl Chat {
     /// Its claude is running.
     pub(crate) fn running(&self) -> bool {
         self.proc.is_some()
-    }
-
-    /// The `log stream` watching what its claude's profile refuses it (`:procs`).
-    pub(crate) fn confined_watch(&self) -> Option<u32> {
-        self.proc.as_ref()?.confined.as_ref()?.1.pid()
-    }
-
-    /// The profile its claude runs under (`sandbox::claude`) — None: none running, or unconfined.
-    pub(crate) fn confined(&self) -> Option<std::sync::Arc<crate::sandbox::claude::Profile>> {
-        self.proc.as_ref()?.confined.as_ref().map(|(p, _)| p.clone())
     }
 
     /// A line to its claude — whether it went (not running: no).
@@ -1165,9 +1108,6 @@ fn ensure_proc(ed: &mut Editor) {
         },
         false => None,
     };
-    // claude itself under its own profile — made on a worker first (it starts once it is)
-    let writes = cfg.edit_tools != crate::edittool::Arm::Tarae;
-    let Some(profile) = confine_ready(ed, writes) else { return };
     let Some(c) = &mut ed.session.chat else { return };
     // (the edit tools are this process's for its life: `tools/list` reads them here — `Chat.edit_tools`)
     let arm = cfg.edit_tools;
@@ -1187,7 +1127,6 @@ fn ensure_proc(ed: &mut Editor) {
         // CLAUDE.md files and settings as `claude` loads them — but hooks don't run, and edits always come
         // here as a review (an `ask` rule and the default mode outrank any allow rule or accept-edits mode)
         args = llm::with_flag(&args, "--setting-sources", &sources);
-        let settings = keep_transcripts(&settings, &sources);
         args = llm::with_flag(&args, "--settings", &settings);
         args = llm::with_flag(&args, "--permission-mode", "default");
     }
@@ -1199,12 +1138,11 @@ fn ensure_proc(ed: &mut Editor) {
     }
     // Who pays (`billing.rs`): an API session's key helper goes into the `--settings` above, merged
     let started = ed.credential(ed.session.billing, crate::billing::Role::Chat).and_then(|cred| {
-        let child =
-            llm::spawn_as(&cfg, &extra, &ed.session.root, ed.claude_env.as_ref(), &cred, profile.as_ref());
-        child.map(|(child, why)| (child, why, cred.billing())).map_err(|e| e.said(&cfg.command, true))
+        let child = llm::spawn(&cfg, &extra, &ed.session.root, ed.claude_env.as_ref(), &cred);
+        child.map(|child| (child, cred.billing())).map_err(|e| e.said(&cfg.command, true))
     });
     let Some(c) = &mut ed.session.chat else { return };
-    let (mut child, unconfined, billing) = match started {
+    let (mut child, billing) = match started {
         Ok(started) => started,
         Err(said) => {
             // (once: opening the chat tries, and so does sending)
@@ -1213,14 +1151,6 @@ fn ensure_proc(ed: &mut Editor) {
         }
     };
     c.billing = Some(billing);
-    // (Linux: its rules didn't go on — started as you, from tarae's own thread: `sandbox::claude::spawn`)
-    let profile = match unconfined {
-        Some(why) => {
-            unconfined_said(c, &why);
-            None
-        }
-        None => profile,
-    };
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     // tarae's MCP server (the note tool) — registered before anything else is said
     let _ = stdin.send(llm::initialize_message(&["tarae"]));
@@ -1231,27 +1161,7 @@ fn ensure_proc(ed: &mut Editor) {
     static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     c.generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let generation = c.generation;
-    // What its profile refuses it: said in the chat and the log as it comes
-    let confined = profile.map(|p| {
-        let tx = tx.clone();
-        let watch = crate::sandbox::claude::watch(&p, move |d| {
-            let d = d.clone();
-            let _ = tx
-                .send(crate::event::Event::Job(Box::new(move |ed: &mut Editor| refused(ed, generation, d))));
-        });
-        watch.run_started(child.id());
-        (std::sync::Arc::new(p), watch)
-    });
-    // On Linux what its rules can't hold, once since tarae started — and their Edit and Write part to the first chat
-    // that has them (`sandbox::claude::linux`)
-    #[cfg(target_os = "linux")]
-    if confined.is_some() {
-        static SAID: std::sync::Mutex<(bool, bool)> = std::sync::Mutex::new((false, false));
-        if let Some(note) = limits_note(arm, &mut SAID.lock().unwrap_or_else(|e| e.into_inner())) {
-            c.note(&note);
-        }
-    }
-    c.proc = Some(Proc { stdin, pid: child.id(), confined, refused: Vec::new(), cleanups: 0 });
+    c.proc = Some(Proc { stdin, pid: child.id() });
     llm::pump(child, false, tx, move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
     });
@@ -1263,131 +1173,6 @@ fn ensure_proc(ed: &mut Editor) {
     }
     // Where the plan's limits stand, unless a claude said it lately (`limits.rs`)
     crate::limits::ask_chat(ed);
-}
-
-/// What the chat says of claude's Landlock rules as a confined claude starts in `arm` (Linux), given what's been said
-/// since tarae started (`said`: the limits; their Edit and Write part): the limits once, and the Edit and Write part
-/// once, to the first chat in an arm with Claude Code's Edit and Write — whichever chat came first. None: all said.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn limits_note(arm: crate::edittool::Arm, said: &mut (bool, bool)) -> Option<String> {
-    use crate::sandbox::claude::linux::{LIMITS, LIMITS_EDIT};
-    let edit = arm != crate::edittool::Arm::Tarae && !said.1;
-    let note = match (said.0, edit) {
-        (false, _) => format!("{LIMITS}{}.", if edit { LIMITS_EDIT } else { "" }),
-        (true, true) => format!("claude itself runs under Landlock{LIMITS_EDIT}."),
-        (true, false) => return None,
-    };
-    *said = (true, said.1 || edit);
-    Some(note)
-}
-
-/// The profile the chat's next claude runs under, for a project it `writes` or not (the arm), as
-/// `sandbox::claude::start_as` decides: Some(Some) — confined; Some(None) — as you (`llm.claude-sandbox` off, no
-/// Seatbelt here, no Landlock or one below `claude::linux::MIN_ABI`, its rules not made: said once a chat; tests and
-/// other systems quietly); None while it's made on a worker — the chat starts once it is (`gate_opened`) — or when
-/// it doesn't start at all (`llm.claude-sandbox-required`, and it would run as you: said each time it's tried). Each
-/// process gets a tag of its own, and on Linux rules of its own, made for its start.
-fn confine_ready(ed: &mut Editor, writes: bool) -> Option<Option<crate::sandbox::claude::Profile>> {
-    use crate::sandbox::claude::{Profile, Start, linux, start_as, tag};
-    let wanted = ed.claude_confine && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
-    let (setting, required) = (ed.config.llm.claude_sandbox, ed.config.llm.claude_sandbox_required);
-    let root = ed.session.root.clone();
-    let command = ed.config.llm.command.clone();
-    let c = ed.session.chat.as_mut()?;
-    if !wanted {
-        return Some(None);
-    }
-    let key = (root.clone(), writes);
-    let made = c.confine.made.as_ref().filter(|(k, _)| *k == key).map(|(_, made)| made.clone());
-    if setting && made.is_none() {
-        if !c.confine.making {
-            c.confine.making = true;
-            ed.events.jobs().spawn(move || {
-                let made = crate::sandbox::claude::for_chat(&root, writes, &command);
-                move |ed: &mut Editor| {
-                    let Some(c) = ed.session.chat.as_mut() else { return };
-                    (c.confine.made, c.confine.making) = (Some((key, made)), false);
-                    gate_opened(ed);
-                }
-            });
-        }
-        return None;
-    }
-    match start_as(setting, required, || made.unwrap_or_else(|| Err(String::new()))) {
-        Start::Confined(p) => {
-            // (Linux's holds rules made from what was there: home's entries, the project's protected names and
-            // keys. Each claude gets its own, made on a worker as it starts, never the last one's; macOS's regexes
-            // serve every claude of the chat)
-            if p.os == crate::sandbox::Os::Linux && linux::broken() != "cache" {
-                c.confine.made = None;
-            }
-            Some(Some(Profile { tag: tag(), ..p }))
-        }
-        Start::Unconfined(why) => {
-            unconfined_said(c, &why);
-            Some(None)
-        }
-        Start::Refused(why) => {
-            c.note(&why);
-            None
-        }
-    }
-}
-
-/// That the chat's claude runs as you, and why — once a chat.
-fn unconfined_said(c: &mut Chat, why: &str) {
-    if !c.confine.said {
-        c.confine.said = true;
-        c.note(&format!("claude itself runs unconfined, as you: {why}"));
-    }
-}
-
-/// What claude's own profile refused it (`sandbox::claude::watch`): tarae's log, each once a process; the chat,
-/// the first `REFUSALS_SAID` — a claude update that needs a new place shows the same day, not as a mystery.
-fn refused(ed: &mut Editor, generation: u64, d: crate::sandbox::Denial) {
-    let Some(c) = ed.session.chat.as_ref().filter(|c| c.generation == generation) else { return };
-    let cleanup = c.confined().is_some_and(|p| p.cleanup(&d));
-    refused_as(ed, generation, d, cleanup);
-}
-
-/// `refused`, told whether it's claude's own cleanup (`Profile::cleanup`: deleting another project's
-/// conversations or an old shell snapshot — `KEEP_TRANSCRIPTS_DAYS` keeps it from trying; this, should a claude
-/// try all the same): logged once a process, never said in the chat — nothing of the chat's failed.
-fn refused_as(ed: &mut Editor, generation: u64, d: crate::sandbox::Denial, cleanup: bool) {
-    let log = ed.session.log();
-    let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation == generation) else { return };
-    let Some(p) = c.proc.as_mut() else { return };
-    if cleanup {
-        p.cleanups += 1;
-        if p.cleanups == 1 {
-            log.line(
-                "claude",
-                "warn",
-                &format!(
-                    "claude's own sandbox refused its cleanup deleting {} — other projects' conversations and old \
-                     shell snapshots are your Claude Code's to clean (cleanupPeriodDays); the rest of this process's \
-                     not logged",
-                    d.shown()
-                ),
-            );
-        }
-        return;
-    }
-    let what = d.plain();
-    if p.refused.contains(&what) {
-        return;
-    }
-    p.refused.push(what.clone());
-    log.line("claude", "warn", &format!("claude's own sandbox refused it {what} ({})", d.shown()));
-    match p.refused.len() {
-        n if n <= REFUSALS_SAID => c.note(&format!(
-            "claude itself was refused {what} — its own sandbox keeps it (llm.claude-sandbox)"
-        )),
-        n if n == REFUSALS_SAID + 1 => {
-            c.note("claude itself was refused more — tarae's log has each (:log-open)")
-        }
-        _ => {}
-    }
 }
 
 fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
@@ -1543,22 +1328,6 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
         }
         StreamEv::ToolResult { id, text, error } => {
             c.calls.retain(|k| k.id != id);
-            // What claude's own profile refused its tool, as the tool says it — the kernel's report doesn't
-            // always come (V1d's live check: the Edit's refused write never reached `log stream`); said as one
-            // (on a worker: the path is made real — a few `stat`s)
-            if error
-                && crate::sandbox::claude::REFUSED.iter().any(|r| text.contains(r))
-                && let Some(p) = c.confined()
-            {
-                let text = text.clone();
-                ed.events.jobs().spawn(move || {
-                    let d = p.said_in_result(&text);
-                    move |ed: &mut Editor| match d {
-                        Some(d) => refused(ed, generation, d),
-                        None => ed.unchanged = true,
-                    }
-                });
-            }
             ed.session.usage.tally.answered(&id, error, crate::usage::now_ms());
             // What it did on disk (an edit, a write, a command): the git tab reads the status again (#29 — it
             // said "the tree is clean" over files Claude had changed, until reopened)
@@ -1892,9 +1661,8 @@ pub fn send(ed: &mut Editor) {
     let question = c.input.trim().to_string();
     // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
     // one joins it. So it does while the project's settings are read (`claudetrust.rs` — their card doesn't
-    // hold it: claude runs held back meanwhile) or its own profile is made (`confine_ready`, on a worker): sent
-    // once it starts
-    if (c.busy() || c.settings.waiting() || c.confine.making) && !question.is_empty() {
+    // hold it: claude runs held back meanwhile): sent once it starts
+    if (c.busy() || c.settings.waiting()) && !question.is_empty() {
         c.queued = Some(match c.queued.take() {
             Some(q) => format!("{q}\n\n{question}"),
             None => question,
@@ -3192,355 +2960,6 @@ mod tests {
         ed.config.llm.args = vec!["-c".into(), script];
         ed.open(&env).unwrap();
         (dir, env, plain, log, ed)
-    }
-
-    /// What claude's own profile refused it (`sandbox::claude::watch`) is said in the chat: each refusal once, the
-    /// first `REFUSALS_SAID`, then one line saying tarae's log has the rest; another process's refusal (an
-    /// earlier claude's) isn't this one's.
-    #[test]
-    fn a_claude_refusal_is_said_once() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        let generation = ed.session.chat.as_ref().unwrap().generation;
-        let d = |t: &str| crate::sandbox::Denial {
-            process: "2.1.296(7)".into(),
-            op: "file-write-create".into(),
-            target: t.into(),
-        };
-        let said = |ed: &Editor| -> Vec<String> {
-            let msgs = &ed.session.chat.as_ref().unwrap().msgs;
-            let notes = msgs
-                .iter()
-                .filter(|m| m.role == Role::Note && m.text.starts_with("claude itself was refused"));
-            notes.map(|m| m.text.clone()).collect()
-        };
-        refused(&mut ed, generation, d("/x/a"));
-        refused(&mut ed, generation, d("/x/a"));
-        assert_eq!(said(&ed).len(), 1, "once: {:?}", said(&ed));
-        assert!(
-            said(&ed)[0].contains("/x/a") && said(&ed)[0].contains("llm.claude-sandbox"),
-            "{:?}",
-            said(&ed)
-        );
-        refused(&mut ed, generation + 1, d("/x/b"));
-        assert_eq!(said(&ed).len(), 1, "another process's");
-        for t in ["/x/b", "/x/c", "/x/d", "/x/e"] {
-            refused(&mut ed, generation, d(t));
-        }
-        let all = said(&ed);
-        assert_eq!(all.len(), REFUSALS_SAID + 1, "the first few, then the log: {all:?}");
-        assert!(all.last().unwrap().contains("log"), "{all:?}");
-    }
-
-    /// f22 i: claude's own cleanup refused (`Profile::cleanup`) is counted, never said in the chat — its first
-    /// in tarae's log; a refusal of anything else is still said. Through `refused`, as the profile's watch hands
-    /// a denial over: the chat's claude confined, its home a stand-in.
-    #[test]
-    fn claudes_own_cleanup_refused_isnt_said_in_the_chat() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        let dir = crate::scratch::Scratch::new("chat-cleanup");
-        let (root, home) = (dir.join("proj"), dir.join("home"));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
-        let p = crate::sandbox::claude::Profile {
-            root: root.clone(),
-            home: home.clone(),
-            writes_project: false,
-            temps: Vec::new(),
-            kept: Vec::new(),
-            log: None,
-            agent: None,
-            tag: "tarae-claude.test.".into(),
-            os: crate::sandbox::Os::Mac,
-            locks: Vec::new(),
-            rules: None,
-        };
-        let c = ed.session.chat.as_mut().unwrap();
-        let watch = crate::sandbox::Watch::quiet(&p.tag);
-        c.proc.as_mut().unwrap().confined = Some((std::sync::Arc::new(p), watch));
-        let generation = c.generation;
-        let d = |op: &str, t: &std::path::Path| crate::sandbox::Denial {
-            process: "2.1.296(7)".into(),
-            op: op.into(),
-            target: t.display().to_string(),
-        };
-        let said = |ed: &Editor| {
-            let msgs = &ed.session.chat.as_ref().unwrap().msgs;
-            msgs.iter()
-                .filter(|m| m.role == Role::Note && m.text.starts_with("claude itself was refused"))
-                .count()
-        };
-        for t in [".claude/projects/-a/1.jsonl", ".claude/projects/-a", ".claude/shell-snapshots/s.sh"] {
-            refused(&mut ed, generation, d("file-write-unlink", &home.join(t)));
-        }
-        let cleanups = ed.session.chat.as_ref().unwrap().proc.as_ref().map(|p| p.cleanups);
-        assert_eq!(
-            (said(&ed), cleanups),
-            (0, Some(3)),
-            "another project's, a snapshot: kept out of the chat"
-        );
-        refused(&mut ed, generation, d("file-write-create", &root.join("a.rs")));
-        assert_eq!(said(&ed), 1, "a write of the project's: said");
-        refused(&mut ed, generation, d("file-write-unlink", &home.join(".claude/skills/a/SKILL.md")));
-        assert_eq!(said(&ed), 2, "anything else: said");
-    }
-
-    /// f22 i: where claude loads your user settings, the chat's `--settings` keeps every conversation from its
-    /// cleanup (`cleanupPeriodDays`, never 0); the rest of them as they were — on both systems: on Linux, with
-    /// `~/.claude` claude's to write, its cleanup would really delete other projects' conversations. Without the user
-    /// source nothing is added: claude skips its cleanup there, and a value would turn it on.
-    #[test]
-    fn the_chat_keeps_claude_from_cleaning_up_transcripts() {
-        let base = CHAT_SETTINGS;
-        let yours: serde_json::Value =
-            serde_json::from_str(&keep_transcripts(base, crate::claudetrust::SOURCES)).unwrap();
-        assert_eq!(yours["cleanupPeriodDays"], 36_500);
-        assert_eq!(yours["disableAllHooks"], true);
-        assert_eq!(yours["permissions"]["ask"], serde_json::json!(["Edit", "Write"]));
-        assert_eq!(keep_transcripts(base, "project,local"), base);
-        assert_eq!(keep_transcripts("not json", "user"), "not json");
-    }
-
-    /// A message sent while claude's own profile is made (on a worker, before claude starts) waits and goes once
-    /// it starts — never left in the input, unsent (V1d's e2e: the first message sat there). macOS makes one;
-    /// elsewhere claude starts at once and it goes straight.
-    #[test]
-    fn a_message_sent_while_claudes_profile_is_made_goes_once_it_starts() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
-        open(&mut ed);
-        ed.session.chat.as_mut().unwrap().input = "hi there".into();
-        send(&mut ed);
-        assert_eq!(ed.session.chat.as_ref().unwrap().input, "", "taken from the input");
-        settle_until(&mut ed, |ed| {
-            ed.session.chat.as_ref().is_some_and(|c| c.running() && c.queued.is_none())
-        });
-        let c = ed.session.chat.as_ref().unwrap();
-        assert!(c.msgs.iter().any(|m| m.role == Role::User && m.text.contains("hi there")), "sent");
-    }
-
-    /// claude's tool saying its profile refused it (`EPERM: operation not permitted, open '…'` — the only way such a
-    /// refusal showed live: the kernel reported none) is said in the chat as the profile's, worked out on a worker;
-    /// another error isn't.
-    #[test]
-    fn a_refusal_claudes_tool_result_says_is_said_in_the_chat() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        let dir = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("tarae-chat-eperm-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("proj")).unwrap();
-        std::fs::create_dir_all(dir.join("home")).unwrap();
-        let p = crate::sandbox::claude::Profile {
-            root: dir.join("proj"),
-            home: dir.join("home"),
-            writes_project: false,
-            temps: Vec::new(),
-            kept: Vec::new(),
-            log: None,
-            agent: None,
-            tag: "tarae-claude.test.".into(),
-            os: crate::sandbox::Os::Mac,
-            locks: Vec::new(),
-            rules: None,
-        };
-        let c = ed.session.chat.as_mut().unwrap();
-        let watch = crate::sandbox::Watch::quiet(&p.tag);
-        c.proc.as_mut().unwrap().confined = Some((std::sync::Arc::new(p), watch));
-        let generation = c.generation;
-        let result = |text: String| StreamEv::ToolResult { id: "t1".into(), text, error: true };
-        let said = |ed: &Editor| {
-            let msgs = &ed.session.chat.as_ref().unwrap().msgs;
-            msgs.iter()
-                .filter(|m| m.role == Role::Note && m.text.starts_with("claude itself was refused"))
-                .count()
-        };
-        on_event(&mut ed, generation, result("ENOENT: no such file or directory, open '/x'".into()));
-        let edit = format!("EPERM: operation not permitted, open '{}/proj/a.rs.tmp.1'", dir.display());
-        on_event(&mut ed, generation, result(edit));
-        settle_until(&mut ed, |ed| said(ed) == 1);
-        let msgs = &ed.session.chat.as_ref().unwrap().msgs;
-        let note = msgs.iter().rev().find(|m| m.role == Role::Note).unwrap();
-        assert!(note.text.contains("writing") && note.text.contains("a.rs.tmp.1"), "{}", note.text);
-        // (Landlock's words too: run C's refused Write)
-        let write = format!("EACCES: permission denied, open '{}/proj/b.rs.tmp.2'", dir.display());
-        on_event(&mut ed, generation, result(write));
-        settle_until(&mut ed, |ed| said(ed) == 2);
-        let msgs = &ed.session.chat.as_ref().unwrap().msgs;
-        let note = msgs.iter().rev().find(|m| m.role == Role::Note).unwrap();
-        assert!(note.text.contains("b.rs.tmp.2"), "{}", note.text);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The chat's claude unconfined by your setting says so, once a chat (confined by default on both systems). No
-    /// profile, no rules.
-    #[test]
-    fn claude_unconfined_by_the_setting_is_said() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, false);
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        let c = ed.session.chat.as_ref().unwrap();
-        let said =
-            c.msgs.iter().filter(|m| m.role == Role::Note && m.text.contains("llm.claude-sandbox is off"));
-        assert_eq!(said.count(), 1);
-        assert!(c.confined().is_none() && c.confine.made.is_none(), "no profile made");
-    }
-
-    /// The chat's claude where its rules can't be made (`for_chat`'s Err: no Seatbelt here, no Landlock or an old
-    /// one, the kernel's refusal), `required` or not: what `confine_ready` gives two claudes in a row, and the notes
-    /// naming why.
-    fn rules_not_made(required: bool) -> (Vec<Option<bool>>, Vec<String>) {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
-        ed.config.llm.claude_sandbox_required = required;
-        let root = ed.session.root.clone();
-        let mut got = Vec::new();
-        for _ in 0..2 {
-            let made = Some(((root.clone(), false), Err("no Landlock here".to_string())));
-            ed.session.chat.as_mut().unwrap().confine.made = made;
-            got.push(confine_ready(&mut ed, false).map(|p| p.is_some()));
-        }
-        let c = ed.session.chat.as_ref().unwrap();
-        let notes = c.msgs.iter().filter(|m| m.role == Role::Note && m.text.contains("no Landlock here"));
-        (got, notes.map(|m| m.text.clone()).collect())
-    }
-
-    /// Never a chat that won't open for a sandbox it can't have: claude runs as you, said once a chat.
-    #[test]
-    fn a_claude_whose_rules_cant_be_made_starts_unconfined_and_says_why_once() {
-        let (got, notes) = rules_not_made(false);
-        assert_eq!(got, [Some(false), Some(false)], "both start, as you");
-        assert_eq!(notes, ["claude itself runs unconfined, as you: no Landlock here"]);
-    }
-
-    /// …but with `llm.claude-sandbox-required` neither starts, said (the same note again isn't added twice in a
-    /// row).
-    #[test]
-    fn a_claude_whose_rules_cant_be_made_starts_unconfined_and_says_why_once_required() {
-        let (got, notes) = rules_not_made(true);
-        assert_eq!(got, [None, None], "neither starts");
-        assert_eq!(notes, ["claude doesn't start: no Landlock here, and llm.claude-sandbox-required is on"]);
-    }
-
-    /// Linux's profile (claude's folder tarae's) holds rules made from what was there — home's entries, the
-    /// project's protected names and keys — so each claude of a chat gets one made as it starts, never the last
-    /// one's; macOS's (regexes) serves them all.
-    #[test]
-    fn claudes_linux_rules_are_made_again_for_each_claude() {
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        let root = ed.session.root.clone();
-        for (os, kept) in [(crate::sandbox::Os::Linux, false), (crate::sandbox::Os::Mac, true)] {
-            let p = crate::sandbox::claude::Profile {
-                root: root.clone(),
-                home: "/home/stand-in".into(),
-                writes_project: false,
-                temps: Vec::new(),
-                kept: Vec::new(),
-                log: None,
-                agent: None,
-                tag: "tarae-claude.test.".into(),
-                os,
-                locks: Vec::new(),
-                rules: None,
-            };
-            ed.session.chat.as_mut().unwrap().confine.made = Some(((root.clone(), false), Ok(p)));
-            assert!(matches!(confine_ready(&mut ed, false), Some(Some(_))));
-            let made = ed.session.chat.as_ref().unwrap().confine.made.is_some();
-            assert_eq!(made, kept, "kept for the next claude: {kept}");
-        }
-    }
-
-    /// A protected name made in the project after a claude started is in the next claude's rules: each start's are
-    /// made for it, on a worker (Linux; break-once `TARAE_TEST_CLAUDE_BREAK=cache` keeps the first's).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_protected_name_made_after_a_start_is_in_the_next_starts_rules() {
-        let min = crate::sandbox::claude::linux::MIN_ABI;
-        if crate::landlock::abi().map_or(true, |a| a < min) {
-            return;
-        }
-        // (a folder made new for the test, 0700, never one that was there — a name taken goes to the next)
-        use std::os::unix::fs::DirBuilderExt;
-        let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let dir = (0..)
-            .map(|n| tmp.join(format!("tarae-chat-rules-{}-{n}", std::process::id())))
-            .find(|at| match std::fs::DirBuilder::new().mode(0o700).create(at) {
-                Ok(()) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-                Err(e) => panic!("{}: {e}", at.display()),
-            })
-            .unwrap();
-        std::fs::create_dir(dir.join("sub")).unwrap();
-        let mut ed = editor("");
-        ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        (ed.claude_confine, ed.config.llm.claude_sandbox) = (true, true);
-        ed.session.root = dir.clone();
-        open(&mut ed);
-        settle_until(&mut ed, |ed| ed.session.chat.as_ref().is_some_and(Chat::running));
-        assert!(ed.session.chat.as_ref().unwrap().confined().is_some(), "the first claude confined");
-        // (the next start: made on a worker for it, not the first's kept)
-        let next = |ed: &mut Editor| {
-            assert!(confine_ready(ed, false).is_none(), "made again, not the last claude's");
-            settle_until(ed, |ed| ed.session.chat.as_ref().is_some_and(|c| c.confine.made.is_some()));
-            match confine_ready(ed, false) {
-                Some(Some(p)) => p,
-                _ => panic!("no profile for the next claude"),
-            }
-        };
-        let protected = |p: &crate::sandbox::claude::Profile| p.rules.as_ref().unwrap().protected.clone();
-        let makefile = dir.join("sub/Makefile");
-        let first = next(&mut ed);
-        assert!(!protected(&first).contains(&makefile), "{:?}", protected(&first));
-        std::fs::write(&makefile, "").unwrap();
-        let second = next(&mut ed);
-        assert!(protected(&second).contains(&makefile), "{:?}", protected(&second));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// What Landlock can't hold is said once since tarae started, and its Edit and Write part reaches the first chat
-    /// that has them, whichever arm the first confined chat was in.
-    #[test]
-    fn the_landlock_note_reaches_the_first_chat_with_edit_and_write_too() {
-        use crate::edittool::Arm;
-        use crate::sandbox::claude::linux::{LIMITS, LIMITS_EDIT};
-        let mut said = (false, false);
-        let first = limits_note(Arm::Tarae, &mut said).unwrap();
-        assert!(first.starts_with(LIMITS) && !first.contains(LIMITS_EDIT), "{first}");
-        assert_eq!(limits_note(Arm::Tarae, &mut said), None);
-        let edit = limits_note(Arm::Native, &mut said).unwrap();
-        assert!(edit.contains(LIMITS_EDIT) && !edit.contains(LIMITS), "{edit}");
-        assert_eq!(limits_note(Arm::Both, &mut said), None);
-        // (an Edit and Write chat first: both at once, then nothing)
-        let mut said = (false, false);
-        let both = limits_note(Arm::Both, &mut said).unwrap();
-        assert!(both.starts_with(LIMITS) && both.contains(LIMITS_EDIT), "{both}");
-        assert_eq!(limits_note(Arm::Tarae, &mut said), None);
-        assert_eq!(limits_note(Arm::Native, &mut said), None);
     }
 
     /// The messages the fake claude was sent, one a line.

@@ -613,9 +613,6 @@ pub struct Editor {
     /// The chat's claude starts once the project's Claude settings are read and, if they need it, answered
     /// (`claudetrust.rs`) — off in tests but their own: a worker's read before every chat test's claude.
     pub claude_settings_gate: bool,
-    /// The chat's claude runs under its own profile (`sandbox::claude`, `llm.claude-sandbox`) — off in tests but
-    /// their own: a stand-in claude writing its log in the project would be refused.
-    pub claude_confine: bool,
     /// How old the claude it runs is, said once (`claudeupdate.rs`) — not looked at in tests but their own.
     pub claude_update: crate::claudeupdate::Told,
     /// Your own Claude settings file, read for what a held-back key goes back to (`claudetrust::Baseline`) —
@@ -847,7 +844,6 @@ impl Editor {
             },
             base_trees: cfg!(test).then(|| std::env::temp_dir().join("tarae-test-base")),
             claude_settings_gate: !cfg!(test),
-            claude_confine: !cfg!(test),
             claude_update: if cfg!(test) { Default::default() } else { crate::claudeupdate::Told::new() },
             claude_user_settings: match cfg!(test) {
                 true => None,

@@ -92,16 +92,9 @@ pub struct Reviewer {
     pub unseen: bool,
     /// Who pays for its claude — what its `apiKeySource` is checked against (`billing.rs`).
     pub billing: crate::billing::Billing,
-    /// What watches its claude's own profile's refusals (`sandbox::claude`) — None: unconfined.
-    watch: Option<std::sync::Arc<crate::sandbox::Watch>>,
 }
 
 impl Reviewer {
-    /// The `log stream` watching what its claude's profile refuses it (`:procs`).
-    pub fn watch_pid(&self) -> Option<u32> {
-        self.watch.as_ref()?.pid()
-    }
-
     /// A reviewer of review `of` (`CodeReview.started`) in `state`, with these findings (tests, snapshots —
     /// no process).
     #[cfg(test)]
@@ -122,7 +115,6 @@ impl Reviewer {
             cost: None,
             unseen: false,
             billing: Default::default(),
-            watch: None,
         }
     }
 
@@ -160,40 +152,21 @@ pub fn start(ed: &mut Editor) {
     let (root, label, of, n) = (r.root.clone(), r.base.label(), r.started, r.files.len());
     let Some(diff) = crate::codereview::diff_work(ed) else { return };
     let at = root.clone();
-    // Its claude under its own profile, the project read-only (it reads, it never writes) — as the chat's, made
-    // here on the worker (`sandbox::claude::for_chat`)
-    let (setting, required) = (ed.config.llm.claude_sandbox, ed.config.llm.claude_sandbox_required);
-    let wanted = ed.claude_confine && (cfg!(target_os = "macos") || cfg!(target_os = "linux"));
-    let command = ed.config.llm.command.clone();
     let work = move || {
         let head = crate::gitrepo::git(&at, &["rev-parse", "HEAD"], None).unwrap_or_default();
-        let start = wanted.then(|| {
-            crate::sandbox::claude::start_as(setting, required, || {
-                crate::sandbox::claude::for_chat(&at, false, &command)
-            })
-        });
-        (diff(), head.trim().to_string(), start)
+        (diff(), head.trim().to_string())
     };
     ed.step(
         ed.events.jobs(),
         "reviewer",
         "the reviewer gathers the changes…",
         work,
-        move |ed, (diff, head, start)| {
+        move |ed, (diff, head)| {
             // (the review it was for may have ended meanwhile)
             if ed.session.code_review.as_ref().is_none_or(|r| r.started != of) {
                 return;
             }
-            use crate::sandbox::claude::Start;
-            let profile = match start {
-                // (off is yours to know: the chat says it, the reviewer doesn't again)
-                None => None,
-                Some(Start::Unconfined(_)) if !setting => None,
-                Some(Start::Confined(p)) => Some(Ok(p)),
-                Some(Start::Unconfined(why)) => Some(Err(why)),
-                Some(Start::Refused(why)) => return ed.set_error(format!("the reviewer: {why}")),
-            };
-            spawn(ed, Gathered { root, label, of, n, head, diff, profile });
+            spawn(ed, Gathered { root, label, of, n, head, diff });
         },
     );
 }
@@ -206,9 +179,6 @@ struct Gathered {
     n: usize,
     head: String,
     diff: String,
-    /// Its claude's own profile (`sandbox::claude`), or why it's unconfined (`start_as`) — None: not asked for
-    /// (tests, neither macOS nor Linux).
-    profile: Option<Result<crate::sandbox::claude::Profile, String>>,
 }
 
 /// The reviewer's claude: its arguments from `args` (llm.args), the speed flags kept — never a conversation
@@ -275,36 +245,19 @@ pub fn ask(label: &str, files: usize, diff: &str, nonce: &str) -> String {
 static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Its claude started in the review's checkout, sent the diff — events come back to this session.
-/// That the reviewer's claude runs as you, and why: the log each time, and one warning since tarae started (it has
-/// no chat to say it in).
-fn unconfined_said(ed: &mut Editor, why: &str) {
-    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let said = format!("the reviewer's claude runs unconfined, as you: {why}");
-    crate::log::line("claude", "info", &said);
-    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        ed.set_warning(said);
-    }
-}
-
 fn spawn(ed: &mut Editor, g: Gathered) {
     let cfg = ed.config.llm.clone();
     let cfg = llm::LlmConfig { args: args(&cfg.args), ..cfg };
     let extra = ["--append-system-prompt", SYSTEM, "--permission-prompt-tool", "stdio"];
     // Who pays: `llm.reviewer-billing`, else its session's (`billing.rs`)
     let started = ed.credential(ed.reviewer_billing(), crate::billing::Role::Reviewer).and_then(|cred| {
-        let confined = g.profile.as_ref().and_then(|p| p.as_ref().ok());
-        let child = llm::spawn_as(&cfg, &extra, &g.root, ed.claude_env.as_ref(), &cred, confined);
-        child.map(|(child, why)| (child, why, cred.billing())).map_err(|e| e.said(&cfg.command, false))
+        let child = llm::spawn(&cfg, &extra, &g.root, ed.claude_env.as_ref(), &cred);
+        child.map(|child| (child, cred.billing())).map_err(|e| e.said(&cfg.command, false))
     });
-    let (mut child, unconfined, billing) = match started {
+    let (mut child, billing) = match started {
         Ok(started) => started,
         Err(e) => return ed.set_error(format!("the reviewer: {e}")),
     };
-    // (Linux: its rules didn't go on — started as you: `sandbox::claude::spawn`)
-    let mut g = g;
-    if let Some(why) = unconfined {
-        g.profile = Some(Err(why));
-    }
     let Some(stdin) = child.stdin.take().map(llm::Lines::new) else { return };
     let content = ask(&g.label, g.n, &g.diff, &nonce(&g.diff));
     // (tarae's MCP server first — its `note`)
@@ -315,19 +268,6 @@ fn spawn(ed: &mut Editor, g: Gathered) {
         return ed.set_error(format!("the reviewer: claude: {e}"));
     }
     let generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // What its profile refuses it: tarae's log (it has no chat to say it in)
-    let watch = g.profile.as_ref().and_then(|p| p.as_ref().ok()).map(|p| {
-        let w = crate::sandbox::claude::watch(p, |d| {
-            let said =
-                format!("the reviewer's claude was refused {} by its own sandbox ({})", d.plain(), d.shown());
-            crate::log::line("claude", "warn", &said);
-        });
-        w.run_started(child.id());
-        w
-    });
-    if let Some(Err(why)) = &g.profile {
-        unconfined_said(ed, why);
-    }
     ed.session.reviewer = Some(Reviewer {
         proc: Some((child.id(), stdin)),
         generation,
@@ -344,7 +284,6 @@ fn spawn(ed: &mut Editor, g: Gathered) {
         cost: None,
         unseen: false,
         billing,
-        watch,
     });
     llm::pump(child, true, ed.events.sender(), move |ev| {
         Some(Box::new(move |ed: &mut Editor| on_event(ed, generation, ev)))
@@ -1363,42 +1302,6 @@ mod tests {
             assert!(!got.contains(&gone.as_str()), "{gone} reached the reviewer's claude");
         }
         assert!(got.contains(&"CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "yours stays: {got:?}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The reviewer's claude runs under claude's own profile (`sandbox::claude`), the project read-only: its
-    /// stand-in can't write the checkout it reviews (it writes its logs in the test's temp folder). Broken in the
-    /// test itself: with `llm.claude-sandbox` off, the same stand-in writes it.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn the_reviewers_claude_runs_under_its_own_profile() {
-        if crate::sandbox::skipped_inside("reviewer::tests::the_reviewers_claude_runs_under_its_own_profile")
-        {
-            return;
-        }
-        let (dir, repo) = place("profile");
-        let mut ed = Editor::new(crate::config::Config::default());
-        ed.claude_confine = true;
-        fake(&mut ed, &dir, &[result("No findings.")]);
-        let (probe, out) = (repo.join("probe"), dir.join("probe.out"));
-        ed.config.llm.args[1] = format!(
-            "if : > '{}' 2>/dev/null; then echo wrote; else echo refused; fi > '{}'; {}",
-            probe.display(),
-            out.display(),
-            ed.config.llm.args[1]
-        );
-        reviewed(&mut ed, &repo);
-        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "refused");
-        assert!(!probe.exists());
-        // (unconfined: the write goes — waited for by the second stand-in's own answer: the first reviewer, done,
-        // is "not reading" before the second replaces it)
-        std::fs::remove_file(&out).unwrap();
-        ed.config.llm.claude_sandbox = false;
-        crate::reviewer::start(&mut ed);
-        settle_until(&mut ed, |ed| {
-            out.exists() && ed.session.reviewer.as_ref().is_some_and(|r| !r.reading())
-        });
-        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "wrote");
         std::fs::remove_dir_all(&dir).ok();
     }
 

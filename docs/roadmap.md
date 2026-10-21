@@ -121,11 +121,10 @@ After it, the rest goes on in this order.
 The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document** — done: [threat-model.md](threat-model.md), what is kept from a run and what
-   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined by default on
-   both OSes (macOS: Seatbelt, V1d; Linux: Landlock on the user's own `~/.claude` and login, granted whole — G25
-   —, and a seccomp filter that refuses unix sockets, G24; claudeown, user decision 2026-10-16 (B)). tarae's own
-   claude folder and second login are gone; where the rules can't be made claude starts as the user and says why
-   (`llm.claude-sandbox-required`: not at all).
+   isn't, per tier and per OS, each claim with its test. Confining the `claude` process itself was tried (macOS:
+   Seatbelt, V1d; Linux: Landlock and seccomp, claudeown) and removed (user decision 2026-10-17): no other tool
+   confines the CLI, what a steered claude does goes through tarae's tools, and its cost was large (a login broken
+   every few hours on macOS, `~/.claude` granted whole on Linux anyway, the rules measured again each update).
 2. **Fuzzing the parsers that read what a run sends** — the supervisor's reading of system-call arguments, and
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the

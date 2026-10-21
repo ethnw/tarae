@@ -36,7 +36,6 @@ pub mod cgroup;
 #[cfg(target_os = "linux")]
 pub mod channel;
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-pub mod claude;
 // (a keeper's scope from the user's manager: the wire built everywhere — its tests run on macOS too —, asked on Linux)
 pub mod dbus;
 #[cfg(test)]
@@ -2724,8 +2723,7 @@ fn outputs_regex() -> String {
 }
 
 /// What's kept from writes in the project at `root` (the profile's `ROOT`), as a Seatbelt filter: the protected
-/// names (`name_regexes`) below it however deep, but below a folder of tools' output — runs' profile's rule and
-/// claude's own (`claude::Profile`), one rule.
+/// names (`name_regexes`) below it however deep, but below a folder of tools' output — runs' profile's rule.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub(crate) fn protected_writes(root: &Path) -> String {
     let (below, outputs) = (below(root), outputs_regex());
@@ -2741,7 +2739,7 @@ pub(crate) fn protected_writes(root: &Path) -> String {
 
 /// The files named like keys (`key_regexes`) right after `at` (a regex's start: `below` a project's root, `/`
 /// anywhere) — but templates and public keys (`key_exception_regexes`) and what's below tools' output: two
-/// filters for a `require-all`. Runs' profile's rule and claude's own (`claude::Profile`).
+/// filters for a `require-all`. Runs' profile's rule.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 pub(crate) fn key_files(at: &str) -> String {
     let outputs = outputs_regex();

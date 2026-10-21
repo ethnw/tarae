@@ -199,13 +199,6 @@ impl Ruleset {
         Ruleset::handling(abi, handled(abi), 0)
     }
 
-    /// Files only (the claude process's own rules, `sandbox::claude::linux` — decision 17): `new` without the
-    /// network rights and without unix sockets by path (`RESOLVE_UNIX`, ABI 9) — its connects are its own. The
-    /// scopes stay (ABI 6).
-    pub fn files(abi: u32) -> io::Result<Ruleset> {
-        Ruleset::handling(abi, handled(abi) & !RESOLVE_UNIX, 0)
-    }
-
     /// `new`, handling `fs` and `net`. A kernel refusing them as unknown (`EINVAL`) while they hold
     /// `NEWEST_FS`/`NEWEST_NET` gets a ruleset without those, said once in the log — not every run refused.
     fn handling(abi: u32, fs: u64, net: u64) -> io::Result<Ruleset> {

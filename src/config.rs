@@ -827,8 +827,8 @@ Z = ["move_line_down", ":sh touch marker"]
 
     /// Whose credentials Claude uses, who pays for it, and what its chat edits with are yours to say
     /// (`trust::YOURS_ONLY`): a project's `.tarae.toml` — trusted or not — and its `.tarae.local.toml` are refused
-    /// `llm.environment-key`, `llm.billing`, `llm.reviewer-billing`, `llm.edit-tools` and `llm.claude-sandbox`
-    /// (claude itself unconfined), and say so at each line; your own config sets them.
+    /// `llm.environment-key`, `llm.billing`, `llm.reviewer-billing` and `llm.edit-tools`, and say so at each
+    /// line; your own config sets them.
     #[test]
     fn a_setting_only_yours_sets_is_refused_from_both_project_files() {
         use crate::billing::Billing;
@@ -839,12 +839,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert!(ok.status.success());
         let (user, project, local) =
             (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
-        // (`claude-sandbox` set the other way from this OS's default: on on macOS, off on Linux)
-        let default = crate::sandbox::claude::on_by_default(crate::sandbox::Os::HOST);
-        let yours_only = format!(
-            "environment-key = \"keep\"\nbilling = \"api\"\nreviewer-billing = \"api\"\nedit-tools = \"native\"\nclaude-sandbox = {}\n",
-            !default
-        );
+        let yours_only = "environment-key = \"keep\"\nbilling = \"api\"\nreviewer-billing = \"api\"\nedit-tools = \"native\"\n";
         // (a risky setting beside them, so the project has a trust card to answer)
         fs::write(&project, format!("[llm]\nrun-allow = [\"make\"]\n{yours_only}")).unwrap();
         fs::write(&local, format!("[llm]\n{yours_only}")).unwrap();
@@ -858,14 +853,12 @@ Z = ["move_line_down", ":sh touch marker"]
                 && l.billing == Billing::Subscription
                 && l.reviewer_billing.is_none()
                 && l.edit_tools == crate::edittool::Arm::Tarae
-                && l.claude_sandbox == default
         };
         let (c, w) = load(None, &Store::default());
         assert!(none_set(&c), "neither project file sets them");
         for (file, first) in [(".tarae.toml", 3), (".tarae.local.toml", 2)] {
-            for (i, key) in ["environment-key", "billing", "reviewer-billing", "edit-tools", "claude-sandbox"]
-                .into_iter()
-                .enumerate()
+            for (i, key) in
+                ["environment-key", "billing", "reviewer-billing", "edit-tools"].into_iter().enumerate()
             {
                 let said = format!(
                     "{file}:{}: llm.{key} is set only in your own config — not a project's file",
@@ -885,8 +878,7 @@ Z = ["move_line_down", ":sh touch marker"]
             l.keep_env_key
                 && l.billing == Billing::Api
                 && l.reviewer_billing == Some(Billing::Api)
-                && l.edit_tools == crate::edittool::Arm::Native
-                && l.claude_sandbox != default,
+                && l.edit_tools == crate::edittool::Arm::Native,
             "{w:?}"
         );
     }
