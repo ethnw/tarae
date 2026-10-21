@@ -527,9 +527,11 @@ git tab, search, a short Kubernetes one.
   were — pickers, prompts, the rail's rows, the bottom panels' way in (`62491cdf`). Landed too (`8f453a08`): pieces 4 and
   6 — scrolling alike (one `list_move` table for every list and output panel, `C-e`/`C-y`, the selection following
   into sight, `S-PageUp` over the terminal's history) and Helix's picker keys (`C-v`/`C-s` split, `C-t` preview,
-  `A-ret`). Under way: 5, the first hour
-  (the tutor, which-key and the palette as a first-timer meets them — what was the first-use check), and 7, keys
-  inside zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
+  `A-ret`). Landed (`129906f1`): 5, the first
+  hour — the tutor drawn as text with its keys in colour and sections for the panels, the terminal's round, cards,
+  the review, sessions and the inbox; the palette opening on what you ran and a first hour's commands, word starts
+  first; the session list saying its letters are keys (what was the first-use check). Next: 7, keys inside
+  zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
   grants, viewed marks lost on a review's re-open, moved-brace re-flags, the reviewer re-reading whole, ten keys
   to commit — and tier-own tests only runnable outside) for the next frictions batch.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
