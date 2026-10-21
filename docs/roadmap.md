@@ -411,15 +411,20 @@ main that has what it waits for, and the user says go:
   and as Helix's (`C-w h/j/k/l`); sizes by key and by drag. Inside zellij its `Alt` keys are zellij's, so a twin is
   settled in the plan. After view mode and the measurement (both touch the terminal panel). It brings tarae's own terminal engine (a workspace
   crate, in place of `vt100`, measured against a baseline taken first) and a terminal that understands the shell
-  while the shell stays yours. Order (the user, 2026-10-21, after using the publish
-  branch at work — a view mode's search reached the editor's, selecting felt loose: the base before the terminal
-  line): focus as one value, with one search scope and one selection per pane → view P3 → surfaces as leaves →
-  panes of their own → several terminals → the engine → reflow → the shell understood → `tarae` verbs → output for
-  Claude → another session beside → the floating terminal → shells across `:restart`. P2a done (2026-10-21, `e002ceb1`): focus as one value —
-  `Session.at` names where the keys are, the six flags gone; each pane its own search and selection (a view mode's
-  `/` never reaches the code's register — the user's friction 84, replayed as a test); `C-w h/j/k/l` from every
-  surface, said where nothing is that way; the `C-w`-inside-a-terminal decision in the plan's §2.6 for P2b. Next:
-  view P3, then P2b. After its own terminal engine, then images at full
+  while the shell stays yours. **The skeleton first** (the user, 2026-10-21: design / session / tab / pane before anything else;
+  the plan's §2.1b–d): **linked panes** (a master–detail pair is one group — one header, one `q`, the list drives the
+  detail), **everything is a pane** (cards, pickers, which-key, prompts are floating panes under the one focus; a
+  card is a pane that asks; a group lays its members side by side or as tabs under one header, `tab`/`S-tab`
+  between them, never `]`/`[`), **session → tabs → panes as zellij's** (a tab is one of a session's named layouts;
+  the tab bar top-left only with two or more), **a session is Claude's task on its own checkout** (the session list
+  is the task list, the main checkout the home session, the chat the spine). Done: P2a (`e002ceb1`: focus as one
+  value — `Session.at`, the six flags gone; one search and selection per pane — the user's friction 84 replayed as a
+  test; `C-w h/j/k/l` from every surface, said where nothing is that way; the `C-w`-inside-a-terminal decision in
+  the plan's §2.6), view P3 (`1b988324`). Order from here: design pass 2's D2/D3 (under way) → **P2b** surfaces as
+  leaves (+ `C-w` tarae's inside a terminal, `C-w C-w` to the program) → **P3** panes of their own (the tests panel
+  the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
+  reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
+  terminal → shells across `:restart`. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
   elsewhere (user, 2026-10-20).
 - **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`): a session's Claude starts
