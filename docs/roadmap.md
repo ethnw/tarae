@@ -34,7 +34,7 @@ For how tarae is built and why, see [architecture.md](architecture.md). For what
 | **M6** | Plugins in Rust, compiled to WebAssembly, sandboxed on tarae's own runtime ([plugins.md](plugins.md)) |
 | **Sessions** | Several branches of work at once, each in its own checkout with its own panes, chat, terminal, tests and tasks. A session is brought into its base by fast-forward, or by a rebase whose conflicts its own Claude resolves ([claude-integration.md](claude-integration.md#rebasing-a-session)) |
 | **Review mode** | A pull-request-style review over the real buffers, comments sent in one go. Claude's turn is reviewed at its end and can be undone as a whole, a run's file changes included. A second Claude can review the changes, and risk grades mark what a person must look at ([code review](claude-integration.md#code-review)) |
-| **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0, P1, P2 and P5 of the card model are built ([design/cards.md](design/cards.md)) |
+| **Cards and the inbox** | Questions come as cards, one calm stack. The inbox lists every card and edit waiting, in every session. Phases P0–P5 of the card model are built, and `:granted` lists what Claude may do without asking ([design/cards.md](design/cards.md)) |
 | **Sandbox, macOS** | Claude's commands run under Seatbelt: writes only in the project, never to files that run later outside the sandbox; reads in home confined, keys and tokens never readable; the network closed unless opened ([the sandbox](claude-integration.md#the-sandbox)) |
 | **Sandbox, Linux** | The same policy, enforced by Landlock for files and seccomp for sockets, with tarae deciding each address. Each session's runs are forked by a keeper of its own, in namespaces of their own where the system allows it. Sessions are kept apart as far as the system allows, and each run says its tier ([on Linux](claude-integration.md#on-linux), [the keeper](#the-linux-sandbox-keeper) below) |
 | **Repository trust** | A project's risky settings, and a repository's own git config and hooks, wait for a yes before anything of theirs runs |
@@ -121,19 +121,33 @@ After it, the rest goes on in this order.
 The aim is to state what the sandbox guarantees and show that it holds.
 
 1. **One threat-model document** — done: [threat-model.md](threat-model.md), what is kept from a run and what
-   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined on both OSes,
-   files only (macOS: Seatbelt, V1d; Linux: its own folder and Landlock, V1 parts 1–2). Its unix sockets on
-   Linux (G24) wait for V3 and a 7.2+ kernel.
+   isn't, per tier and per OS, each claim with its test; and the `claude` process itself confined, files only
+   (macOS: Seatbelt, V1d; Linux: Landlock, V1 parts 1–2). On Linux that meant tarae's own claude folder and a
+   second login; since `882af6bc` claude runs there on the user's own folder and login, confined only with
+   `llm.claude-sandbox = true`.
+   User decision 2026-10-16 (B), under way in session claudeown: on Linux claude is confined by default again, on
+   the user's own `~/.claude` and login, as Claude Code's documented recipe for running claude under its sandbox
+   runtime does. tarae's own claude folder and second login go. Where the rules can't be made, claude starts
+   unconfined and says why. What it gives up — claude can change its own settings, hooks and CLAUDE.md under
+   `~/.claude` — is written in G25. Its unix sockets (G24): a seccomp refusal of `socket(AF_UNIX)` (socketpair
+   allowed), as Claude Code's optional seccomp filter does, if claude works with it — measured first; else the
+   gap stays as it is (V3, on a 7.2+ kernel).
 2. **Fuzzing the parsers that read what a run sends** — the supervisor's reading of system-call arguments, and
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
    supervisor reads of a run's memory is `wire.rs`, built and tested on every OS; `sendmmsg`'s offsets can't
-   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 wait for
-   the Cyber Verification Program's answer (§1). Q1
-   done (2026-10-16): of the control messages it forwards only descriptors go (`SCM_RIGHTS`, at most 253), every
-   other type refused and named in the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing
-   that forwarding further waits for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped
-   that work twice); a run's own `setsockopt` is unchanged (its own rights).
+   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–5 done
+   (`c38b1938`): the readers checked against the kernel's own answers and by seeded loops; three findings, two
+   fixed (a preflight step can no longer say a step ended, V2-1; a thread named past ASCII no longer makes the
+   supervisor refuse its every call, V2-3). Step 6 done (`6200c01c`): each reader's properties are one function,
+   `check`, called by its loop in every `cargo test` and by its fuzz target in `fuzz/parsers`. Step 7 under way
+   (2026-10-16): an hour per target on a 16-core Linux VM. Two findings so far: V2-4, a control length with a null
+   pointer, which tarae sent on without control where the kernel answers EFAULT (fixed; a Linux test pins the
+   kernel's answer), and V2-5, in the tests' fake memory, not the reader. Q1 done (2026-10-16): of the control
+   messages it forwards only descriptors go (`SCM_RIGHTS`, at most 253), every other type refused and named in
+   the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing that forwarding further waits
+   for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped that work twice); a run's own
+   `setsockopt` is unchanged (its own rights).
 3. **A "must be refused" property suite**, run on several kernels on a schedule. With the transparent proxy:
    nothing a run does changes the session's rules, and nothing is reached but through tarae's sockets.
 4. **Yama ptrace scope 2**: today tarae can't serve a run's sockets there and falls back to plain mode.
@@ -144,11 +158,61 @@ The aim is to state what the sandbox guarantees and show that it holds.
 Done so far, under way, and the order after it (2026-10-16):
 
 - **The compatibility suite** (below): pieces 0–3 done, up to the first macOS table and its findings B1–B7.
-  Under way: piece 4 (the Linux images) and piece 6's first round (B1–B4). B3 is decided: uv gets a run home per
-  project for `UV_CACHE_DIR`; the user's cache is never opened to runs.
-- **The card model**: P3 done (cardauto pieces 1–4). Under way: P4 (pieces 6–7, scopes and the grant list). Piece 5
-  is §9.3's.
-- Then, in this order, after P4 (decided 2026-10-15):
+  Piece 4 done (`8993751a`): an image per toolchain, a volume per stack, and the first Linux tables, A+ and C
+  (Ubuntu 24.04, kernel 7.0). Piece 6's first fixes done (`ca5b79bc`, B1–B4 and B8): Python's bytecode,
+  golangci-lint's cache and uv's cache are the project's own run homes, never the user's. The rest of piece 6
+  next.
+- **The card model**: P3 done (cardauto pieces 1–4). P4 done: scopes (piece 6, `30a38311`: `s`, this session, on
+  every card whose grant may outlive the conversation) and the grant list (piece 7, `951dcdb4`: `:granted`).
+  Piece 5 is §9.3's.
+- **The sandbox UX pass** (user direction 2026-10-16): tarae builds its own sandbox runtime, so every restriction
+  it adds — a login, a card, a held setting — is tarae's to make pleasant, held against what other tools ask
+  (`target/sb/sandbox-ux-*.md`: the inventory, the comparison of six tools, the proposal, the user's decisions).
+  One conversation a piece, in this order:
+  - **A** — done (`f80f38f6`): the chat no longer waits for the project's Claude settings card. claude starts at
+    once with them held back, and `y` gives them to it.
+  - **B** — under way: no sandbox, or a partial one, asks once a session (`y` ask each time · `s` run unasked this
+    session · `n` don't run them), never kept across a restart. And the API-key card when claude isn't logged in
+    and a key is held back: `y` this session · `A` writes `llm.environment-key = "keep"` to the user's own config.
+  - **C** — under way, parts C1, C2, C3: the network for Claude's commands. With the network closed, the first
+    connection to a new host waits on a card: `y` this run · `a` this chat · `s` this session · `n`. "Always"
+    stays the setting, `llm.sandbox-network`. The card suggests the pack's registries; a suggestion is never a
+    grant, the user's `y` is. For Rust and Go, tarae's own fetch as well (`cargo fetch`, `go mod download` with
+    `GOTOOLCHAIN=local`): it runs outside the sandbox and runs no project code, so the toolchain caches stay
+    closed to Claude's commands. Pack data; the core names no tool.
+  - **D**: every refusal Claude can ask for has its `also`. Gradle's loopback gets a card at or before the first
+    refusal, with `s`/`A` (no pack default). A rerun from `space m s` sends its end to Claude by itself, only with
+    the chat idle, in the same conversation, for the last turn's failed run; the card says so.
+  - **F**: words and memory — a hook's yes remembered (a rewritten hook asks again), one vocabulary for the
+    answer rows, manifest tools (`cargo add`) said before they run, the docs.
+  - **H**: Claude's `commit {message, paths}` tool. The card shows the message and the diff; `y` commits through
+    tarae's own git with no hooks, `n` does nothing; it never pushes.
+  - **E**: one list — settings and trust answers join `:granted`, each taken back with `d`.
+  - **I**: one trust card when tarae's, Claude's and git's wait together as the repository opens; a later change
+    asks only about its own part.
+  - **G**, manifest tools run in a copy (`cargo add` → a change set of `Cargo.toml` and `Cargo.lock`): only after
+    C, and only if `cargo xtask cards` shows manifest refusals often.
+
+  Review at the end stays off by default.
+- **After the sandbox UX pass**, from reading agent-security papers (2026-10-16: Progent, CaMeL, a
+  prompt-injection SoK, AgentBound, Scaffold Effect, Meta-Harness):
+  - **Injection that travels between agents.** Another checkout of the repository is read unasked, and the
+    reviewer's notes reach the author's Claude. A row in the threat model (how it's delivered, how it travels),
+    and a mark of where text came from on what's read from another checkout or a reviewer's note.
+  - **A property loop in `caps.rs`**: no change made without a card ever widens what a session may do. Changes
+    that narrow apply at once; widening always asks. Progent's split, without a solver: tarae's grants are sets
+    of paths, ports and hosts.
+  - **A question for the user after C1's numbers**: with `llm.sandbox-network` on, `llm.sandbox-hosts` defaulting
+    to the packs' registries (others asked) rather than any host. It narrows G4.
+  - Later: `cargo xtask compat --propose`, a pack-data draft from the refusals a stack met, for a person to
+    review, never applied by itself. At Plugin API 0.3 (§7), a plugin's WebAssembly imports checked against the
+    permissions it declares.
+  - Not taken:
+    - micro-VMs — another threat model, and no Firecracker on macOS;
+    - a proxy that injects credentials — it needs TLS interception, and tarae's proxy never decrypts;
+    - warming a run before the call arrives — not until `timing` shows hundreds of milliseconds;
+    - applying a policy draft without review.
+- Then, in this order (decided 2026-10-15):
   1. **Code mode**: fewer round trips a turn. Each tool call reads the whole conversation again, which is most of a
      turn's cost (measured 2026-10-14). Research: `target/sb/research-auto-code-mode.md`; a plan first.
   2. **The review lens** (below).
@@ -172,7 +236,7 @@ Small fixes found while using tarae every day:
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
 cards and marks grouped; fewer wrong cards. This includes the card model's last two phases: **P3**, deciding by
 what the session may do rather than by what a command looks like (done), and **P4**, scopes and a list of grants
-(under way — [design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
+(done — [design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
 evidence panel, "explain this hunk".
 
 **A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §2's items 3–5 in priority. The sandbox
