@@ -236,7 +236,8 @@ impl Editor {
                     .into_iter()
                     .map(|(i, at)| format!("{}:{}", r.files[i].rel, at + 1))
                     .collect(),
-                reviewer: self.session.reviewer.as_ref().filter(|v| v.of == r.started).map(|v| {
+                // (the session's last run, whatever review is open: it reads a snapshot of its own — bgreview)
+                reviewer: self.session.reviewer.as_ref().map(|v| {
                     let state = match v.state {
                         crate::reviewer::State::Waiting | crate::reviewer::State::Reading
                             if crate::reviewer::waits(self, &self.session) =>

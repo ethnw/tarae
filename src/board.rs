@@ -240,30 +240,28 @@ fn holds(a: &Angle, files: &[Changed], screen: &[String]) -> bool {
             .any(|f| crate::risk::lang_of(&f.rel).is_some_and(|l| a.languages.iter().any(|x| x == l)))
 }
 
-/// `space v C` (the review open): the angles the changes call for — by their grades, paths and languages —
-/// then the changes gathered and the board made (`reviewer::gather`).
-pub fn start(ed: &mut crate::editor::Editor) {
-    let Some(r) = ed.session.code_review.as_ref() else {
-        return ed.set_status("no review here — space v v starts one");
-    };
-    if ed.session.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading) {
-        return ed.set_status("the reviewer is still reading — :reviewer-stop stops it");
-    }
-    let files: Vec<Changed> = r
-        .files
-        .iter()
-        .map(|f| Changed { rel: f.rel.clone(), grade: r.graded(ed, f).iter().map(|g| g.grade).max() })
-        .collect();
+/// The angles snapshot `t`'s changes call for — by their grades, paths and languages.
+fn angles_for(ed: &crate::editor::Editor, t: &crate::codereview::Taken) -> Vec<Angle> {
+    let grade =
+        |f: &crate::codereview::File| t.grades.get(&f.path).and_then(|g| g.iter().map(|g| g.grade).max());
+    let files: Vec<Changed> =
+        t.files.iter().map(|f| Changed { rel: f.rel.clone(), grade: grade(f) }).collect();
     let angles = ed.config.review_angles.clone().unwrap_or_else(built_in);
-    let chosen = chosen(&angles, &files, &ed.config.review_screen);
+    chosen(&angles, &files, &ed.config.review_screen)
+}
+
+/// `space v C`, its snapshot `t` taken (`reviewer::ask_in`) and what the last boards cost read: the angles its
+/// changes call for, then the card — or, said yes to already in this work, the board started on it.
+pub fn start(ed: &mut crate::editor::Editor, t: crate::codereview::Taken, estimate: Option<(f64, usize)>) {
+    let chosen = angles_for(ed, &t);
     if chosen.is_empty() {
         return ed.set_status("no angle's `when` holds for these changes — space v c reads them in one pass");
     }
     // (asked once for this session and its conversation — a second board in the same work starts unasked)
     if ed.session.board_yes.as_ref() == Some(&conversation(ed)) {
-        return crate::reviewer::gather(ed, Some(Board::new(chosen)));
+        return crate::reviewer::begin(ed, t, Some(Board { estimate, ..Board::new(chosen) }));
     }
-    ask(ed, chosen, r.started);
+    ask(ed, chosen, t, estimate);
 }
 
 /// A board asks before it starts — the one key that spends money (frictions29 32, the user's choice 2026-10-19: a
@@ -278,8 +276,8 @@ pub struct Ask {
     pub name: String,
     /// The chat's conversation it was asked in (None: no chat, or none begun).
     pub conversation: Option<String>,
-    /// The review it's for (`CodeReview.started`): one ended meanwhile starts no board.
-    pub review: std::time::Instant,
+    /// The snapshot it reads (bgreview: no review needed) — taken again at `y` if the tree moved since.
+    pub taken: Box<crate::codereview::Taken>,
     pub angles: Vec<Angle>,
     /// What the last boards cost (`estimate`), read before the card.
     pub estimate: Option<(f64, usize)>,
@@ -290,37 +288,24 @@ fn conversation(ed: &crate::editor::Editor) -> Option<String> {
     ed.session.chat.as_ref().and_then(|c| c.conversation.clone())
 }
 
-/// What the last boards cost read on a worker (the call-order record), then the card — one a session.
-fn ask(ed: &mut crate::editor::Editor, angles: Vec<Angle>, review: std::time::Instant) {
-    let up = |ed: &crate::editor::Editor| {
-        ed.offers.iter().any(|o| matches!(&o.what, crate::offer::What::Board(_)))
-    };
-    if up(ed) {
+/// The card — one a session (the snapshot taken and what the last boards cost read already, `reviewer::ask_in`).
+fn ask(
+    ed: &mut crate::editor::Editor,
+    angles: Vec<Angle>,
+    t: crate::codereview::Taken,
+    estimate: Option<(f64, usize)>,
+) {
+    if ed.offers.iter().any(|o| matches!(&o.what, crate::offer::What::Board(_))) {
         return ed.set_status("the board's card is up — y starts it, n doesn't");
     }
-    let a = Ask {
+    ed.push_offer(card(Ask {
         session: ed.session.id,
         name: ed.session.name.clone(),
         conversation: conversation(ed),
-        review,
+        taken: Box::new(t),
         angles,
-        estimate: None,
-    };
-    let record = ed.calls_dir.clone();
-    ed.events.jobs().spawn(move || {
-        let estimate = record.and_then(|d| estimate(&d, crate::clock::system()));
-        // (applied in its own session — `jobs()`: a switch meanwhile leaves the card there, as it goes with its
-        // session; the review may have ended meanwhile, or another card come for it — said, never dropped in silence)
-        move |ed: &mut crate::editor::Editor| {
-            if ed.session.code_review.as_ref().is_none_or(|r| r.started != a.review) {
-                return ed.set_status("the review ended before the board's card came — no board");
-            }
-            if up(ed) {
-                return ed.set_status("the board's card is up — y starts it, n doesn't");
-            }
-            ed.push_offer(card(Ask { estimate, ..a }));
-        }
-    });
+        estimate,
+    }));
 }
 
 /// The card: the question its title (`Start a board on frictions31?`), what the last boards cost its first line
@@ -336,29 +321,76 @@ pub fn card(a: Ask) -> crate::offer::Offer {
         1 => ("One Claude reads".to_string(), "from its angle"),
         k => (format!("{k} Claudes read"), "each from its angle"),
     };
+    // (what it reads: the snapshot taken as `space v C` was pressed — in the background, no review needed)
+    let what = format!("{} · {}", a.taken.label, crate::nav::count(a.taken.files.len(), "file"));
+    // (its angles and the skeptics on a line of their own: the first to go where the card would be cut — the
+    // user's decision 2026-10-20; then, still cut (a refused key's reason under it), how long a yes holds, with the
+    // blank before it — back as soon as there's room; the cost and what it reads stay)
+    let them = format!("{}{}", them[..1].to_uppercase(), &them[1..]);
     let q = format!(
-        "{cost}\n\n{n} the changes, {them} — {} — then a skeptic checks each group of their claims.\n\nA yes \
-         holds for this session and its conversation: another board here starts without asking.",
+        "{cost}\n\n{n} the changes ({what}) in the background.\n{them} — {} — then a skeptic checks each group \
+         of their claims.\n\nA yes holds for this session and its conversation: another board here starts without \
+         asking.",
         names.join(", ")
     );
     let title = format!("Start a board on {}?", a.name);
     crate::offer::Offer::new(title, &q, "", String::new(), crate::offer::What::Board(Box::new(a)))
+        .folding(vec![3..4, 4..6])
 }
 
-/// The board's card answered: `y` starts it (its review still the one there), and holds for the session and its
-/// conversation; `n` starts none.
+/// The board's card answered: `y` starts it, and holds for the session and its conversation; `n` starts none.
+/// The changes moved since the card came (the tree taken again on a worker — user decision 2026-10-19): the
+/// snapshot taken again and the board started on what's there now, the angles those call for — said when they
+/// differ from the card's.
 pub fn answer(ed: &mut crate::editor::Editor, a: Ask, yes: bool) {
     if !yes {
         return ed.set_status("no board — space v C asks again");
     }
-    if ed.session.id != a.session || ed.session.code_review.as_ref().is_none_or(|r| r.started != a.review) {
-        return ed.set_status("that review is over — no board started");
+    if ed.session.id != a.session {
+        return ed.set_status("that session isn't in front — no board started");
     }
     if ed.session.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading) {
         return ed.set_status("the reviewer is still reading — :reviewer-stop stops it");
     }
     ed.session.board_yes = Some(a.conversation.clone());
-    crate::reviewer::gather(ed, Some(Board { estimate: a.estimate, ..Board::new(a.angles) }));
+    let (root, tree, head) = (a.taken.root.clone(), a.taken.tree.clone(), a.taken.head.clone());
+    // (of the base the card said, whatever review is open now)
+    let again = crate::codereview::retaking(ed, &a.taken);
+    // (moved: another tree, or another HEAD — a commit keeps the tree and moves the base)
+    let work = move || {
+        let head_now = crate::gitrepo::git(&root, &["rev-parse", "HEAD"], None).unwrap_or_default();
+        let same = tree.is_some() && crate::snapshot::tree(&root).ok() == tree && head_now.trim() == head;
+        (!same).then(again)
+    };
+    ed.step(ed.events.jobs(), "board", "the board checks the changes…", work, move |ed, again| {
+        if ed.session.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading) {
+            return ed.set_status("the reviewer is still reading — :reviewer-stop stops it");
+        }
+        let (t, angles) = match again {
+            None => (*a.taken, a.angles),
+            Some(Err(e)) => return ed.set_error(format!("review: {e}")),
+            Some(Ok(t)) if t.files.is_empty() => {
+                return ed
+                    .set_status(format!("no changes to review — {} (they moved since the card)", t.label));
+            }
+            Some(Ok(t)) => {
+                let angles = angles_for(ed, &t);
+                let names = |v: &[Angle]| v.iter().map(|x| x.name.clone()).collect::<Vec<_>>();
+                if names(&angles) != names(&a.angles) {
+                    ed.note(format!(
+                        "the changes moved since the card — the board reads {}",
+                        names(&angles).join(", ")
+                    ));
+                }
+                if angles.is_empty() {
+                    return ed
+                        .set_status("no angle's `when` holds for these changes now — space v c reads them");
+                }
+                (t, angles)
+            }
+        };
+        crate::reviewer::begin(ed, t, Some(Board { estimate: a.estimate, ..Board::new(angles) }));
+    });
 }
 
 /// What a skeptic made of a claim — none yet while it's open.

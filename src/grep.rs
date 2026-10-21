@@ -170,18 +170,7 @@ pub fn search(
 ) -> Result<Option<String>, String> {
     let matcher = matcher(q)?;
     let exclude = excluder(q)?;
-    let mut globs = ignore::overrides::OverrideBuilder::new(root);
-    for g in q.globs {
-        globs.add(g).map_err(|e| format!("glob {g}: {e}"))?;
-    }
-    let globs = globs.build().map_err(|e| e.to_string())?;
-    let mut types = ignore::types::TypesBuilder::new();
-    types.add_defaults();
-    for t in q.types {
-        types.select(t);
-    }
-    let types =
-        types.build().map_err(|e| format!("{e} (rg's type names: rust, py, js, ts, go, java, md …)"))?;
+    let (globs, types) = filters(root, q)?;
     let threads = std::thread::available_parallelism().map_or(THREADS, |n| n.get()).min(THREADS);
     let mut walk = WalkBuilder::new(scopes.first().map_or(root, |s| s.as_path()));
     for s in scopes.iter().skip(1) {
@@ -292,6 +281,81 @@ pub fn search(
         drop(rx);
     });
     Ok(unread.into_inner().unwrap_or_else(|p| p.into_inner()))
+}
+
+/// `q`'s globs and types as the walk takes them (rg's `--glob`, `--type`), for files under `root`.
+fn filters(root: &Path, q: &Query) -> Result<(ignore::overrides::Override, ignore::types::Types), String> {
+    let mut globs = ignore::overrides::OverrideBuilder::new(root);
+    for g in q.globs {
+        globs.add(g).map_err(|e| format!("glob {g}: {e}"))?;
+    }
+    let globs = globs.build().map_err(|e| e.to_string())?;
+    let mut types = ignore::types::TypesBuilder::new();
+    types.add_defaults();
+    for t in q.types {
+        types.select(t);
+    }
+    let types =
+        types.build().map_err(|e| format!("{e} (rg's type names: rust, py, js, ts, go, java, md …)"))?;
+    Ok((globs, types))
+}
+
+/// Which of `rels` (files' paths from `root`, `/`-separated) `q`'s globs and types take in — as the walk
+/// would: a folder a glob leaves out (`!target/`) leaves out what's in it (a snapshot's files: `search_texts`).
+pub fn chosen<'a>(
+    root: &Path,
+    q: &Query,
+    rels: impl Iterator<Item = &'a str>,
+) -> Result<Vec<&'a str>, String> {
+    let (globs, types) = filters(root, q)?;
+    let folder_out = |rel: &str| {
+        let mut at = Path::new(rel).parent();
+        while let Some(dir) = at.filter(|d| !d.as_os_str().is_empty()) {
+            if globs.matched(root.join(dir), true).is_ignore() {
+                return true;
+            }
+            at = dir.parent();
+        }
+        false
+    };
+    Ok(rels
+        .filter(|rel| {
+            let path = root.join(rel);
+            !globs.matched(&path, false).is_ignore()
+                && !types.matched(&path, false).is_ignore()
+                && !folder_out(rel)
+        })
+        .collect())
+}
+
+/// Texts handed to `each` in turn (its path from the root, its bytes; false: enough) — `search_texts`' files.
+pub type Texts<'a> = dyn FnMut(&mut dyn FnMut(&str, &[u8]) -> bool) -> Result<(), String> + 'a;
+
+/// `q` over texts in memory (a snapshot's, `snapread.rs`): each of `files` (its path from the root, its bytes)
+/// searched in turn on this thread as `search` searches a file it walked (a NUL byte = binary). Each file with a
+/// match (`Mode::Names`: each) goes to `each` (false: enough — the rest unread).
+pub fn search_texts(q: &Query, files: &mut Texts, each: &mut dyn FnMut(File) -> bool) -> Result<(), String> {
+    let matcher = matcher(q)?;
+    let exclude = excluder(q)?;
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .multi_line(q.multiline)
+        .before_context(if q.mode == Mode::Lines { q.context } else { 0 })
+        .after_context(if q.mode == Mode::Lines { q.context } else { 0 })
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .build();
+    let ended = || false;
+    files(&mut |rel, bytes| {
+        let file = File { rel: rel.to_string(), rows: Vec::new(), hits: 0 };
+        if q.mode == Mode::Names {
+            return each(file);
+        }
+        let mut sink =
+            Collect { matcher: &matcher, exclude: exclude.as_ref(), mode: q.mode, ended: &ended, file };
+        // (a slice can't fail to be read: an error here is the sink's, none)
+        let _ = searcher.search_slice(&matcher, bytes, &mut sink);
+        sink.file.hits == 0 || each(sink.file)
+    })
 }
 
 /// A file's matches (and context lines), as the searcher reports them.

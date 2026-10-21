@@ -8,7 +8,7 @@ fn the_boards_card_asks_then_says_the_cost() {
         session: 0,
         name: "frictions31".into(),
         conversation: None,
-        review: std::time::Instant::now(),
+        taken: Box::new(crate::codereview::Taken::for_test("/p".into())),
         angles: built_in(),
         estimate,
     };

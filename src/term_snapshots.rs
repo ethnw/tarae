@@ -1706,15 +1706,17 @@ fn snapshot_review_risk_and_the_reviewer() {
     let path = s.ed.doc().path.clone().unwrap();
     let r = s.ed.session.code_review.as_mut().unwrap();
     r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
-    let (of, root) = (r.started, r.root.clone());
+    let root = r.root.clone();
     let id = crate::notes::add(&mut s.ed, &path, 11..12, By::Reviewer, "unsafe without a SAFETY comment.");
-    s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
-        of,
+    let mut rv = crate::reviewer::Reviewer::for_test(
         root,
         crate::reviewer::State::Done,
         vec![id],
         "One risk: the unsafe call has no SAFETY comment.\nThe rest reads fine.",
-    ));
+    );
+    // (on a high-risk change by the snapshot it read — decided as it was pinned, `reviewer::pin_at`)
+    rv.high = vec![id];
+    s.ed.session.reviewer = Some(rv);
     s.ed.goto_line(3);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
@@ -1762,7 +1764,7 @@ fn the_reviewers_verdict_and_findings_go_to_a_driver_whole() {
     let path = s.ed.doc().path.clone().unwrap();
     let r = s.ed.session.code_review.as_mut().unwrap();
     r.set_rules(crate::risk::Rules::with(&[("rust", &["rust"], &[r"\bunsafe\b"], &[])], &[], &[]));
-    let (of, root) = (r.started, r.root.clone());
+    let root = r.root.clone();
     let high = crate::notes::add(&mut s.ed, &path, 5..6, By::Reviewer, "unsafe without a SAFETY comment.");
     // (on a line the review didn't change: no grade)
     let low =
@@ -1770,13 +1772,10 @@ fn the_reviewers_verdict_and_findings_go_to_a_driver_whole() {
     let n = s.ed.session.notes.list.iter_mut().find(|n| n.id == low).unwrap();
     n.thread.push(crate::notes::Entry { by: By::You, text: "Kept on purpose.".into(), draft: false });
     let verdict = "One risk: the unsafe call has no SAFETY comment.\nThe rest reads fine.";
-    s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
-        of,
-        root,
-        crate::reviewer::State::Done,
-        vec![high, low],
-        verdict,
-    ));
+    let mut rv =
+        crate::reviewer::Reviewer::for_test(root, crate::reviewer::State::Done, vec![high, low], verdict);
+    rv.high = vec![high];
+    s.ed.session.reviewer = Some(rv);
     let other = s.ed.session_add(std::env::temp_dir().join("tarae-review-report-other"));
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1848,7 +1847,7 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
     let (base, now) = five_and_thirty_added();
     let mut s = review_of(112, 30, &base, &now);
     let r = s.ed.session.code_review.as_ref().unwrap();
-    let mut rv = Reviewer::for_test(r.started, r.root.clone(), State::Reading, Vec::new(), "");
+    let mut rv = Reviewer::for_test(r.root.clone(), State::Reading, Vec::new(), "");
     rv.started -= Duration::from_secs(80);
     rv.reads = 14;
     s.ed.session.reviewer = Some(rv);
@@ -1881,7 +1880,7 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
     let r = s.ed.session.code_review.as_mut().unwrap();
     r.rail_need.take();
     r.rail_need.get_or_init(|| 44);
-    let mut rv = Reviewer::for_test(r.started, r.root.clone(), State::Reading, Vec::new(), "");
+    let mut rv = Reviewer::for_test(r.root.clone(), State::Reading, Vec::new(), "");
     rv.started -= Duration::from_secs(80);
     rv.reads = 14;
     s.ed.session.reviewer = Some(rv);
@@ -1898,9 +1897,8 @@ fn sessions_reviewing(w: u16) -> Shot {
     use crate::reviewer::{Reviewer, State};
     let mut s = Shot::new(w, 16);
     let root = s.in_project();
-    let reviewer = |root: &std::path::Path, state| {
-        Reviewer::for_test(Instant::now(), root.to_path_buf(), state, Vec::new(), "")
-    };
+    let reviewer =
+        |root: &std::path::Path, state| Reviewer::for_test(root.to_path_buf(), state, Vec::new(), "");
     (s.ed.session.name, s.ed.session.git_branch) = ("main".into(), None);
     s.ed.session.reviewer = Some(reviewer(&root, State::Reading));
     let mut chat = crate::chat::Chat::new();
@@ -2182,16 +2180,17 @@ fn the_chats_session_tabs_have_a_row_of_air_under_them() {
 
 /// #195: the reviewer reading, where the sessions are — its tab (`¶ reviewing`, beside the chat's `●`), its
 /// row in the list (`space W`) — and one that ended behind, not looked at (`•`, `¶ reviewer done`): news,
-/// not `▲ waiting` on the status line.
+/// not `▲ waiting` on the status line. The front session's reviewer is the status line's segment, not its
+/// tab's (bgreview, the user's decision 2026-10-20: not said twice); one behind keeps its `¶` on its tab.
 #[test]
 fn snapshot_sessions_with_the_reviewer_reading() {
     let mut s = sessions_reviewing(160);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let row = parser.screen().rows(0, s.w).find(|r| r.contains(" │ +")).unwrap_or_default();
-    assert!(row.contains("main ¶ reviewing │ fix-login ● ¶ reviewing │ docs • │ +"), "{row}");
+    assert!(row.contains("main │ fix-login ● ¶ reviewing │ docs • │ +"), "{row}");
     let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
-    assert!(!status.contains("waiting"), "{status}");
+    assert!(!status.contains("waiting") && status.contains("¶ reviewing · 0 reads"), "{status}");
     s.check("sessions_reviewing_tabs");
     s.ed.session_list();
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
@@ -2206,8 +2205,9 @@ fn snapshot_sessions_with_the_reviewer_reading() {
     s.check("sessions_reviewing_list");
 }
 
-/// #195: where the tabs don't fit — the dropdown: the front's reviewer as its `¶` beside the name, counted in
-/// the room the name leaves (a long name is cut, the `▸` stays whole), and `docs`' reviewer news in `•1`.
+/// #195: where the tabs don't fit — the dropdown: a long name is cut, the `▸` stays whole, and `docs`'
+/// reviewer news in `•1`. The front's reviewer reading is the status line's segment, not a `¶` beside the name
+/// (bgreview).
 #[test]
 fn snapshot_sessions_dropdown_with_the_reviewer_reading() {
     let mut s = sessions_reviewing(100);
@@ -2215,8 +2215,53 @@ fn snapshot_sessions_dropdown_with_the_reviewer_reading() {
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let row = parser.screen().rows(0, s.w).find(|r| r.contains(" ▾ ")).unwrap_or_default();
-    assert!(row.contains("◂ main-with-a-long") && row.contains("… ¶ ▾ 1/3 •1 ▸"), "{row}");
+    assert!(row.contains("◂ main-with-a-long") && row.contains("… ▾ 1/3 •1 ▸"), "{row}");
+    assert!(!row.contains("¶"), "{row}");
+    let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
+    assert!(status.contains("¶ reviewing"), "{status}");
     s.check("sessions_reviewing_dropdown");
+}
+
+/// The board's card at 60 columns (bgreview, the user's decision 2026-10-20): whole — no `↓ more lines`, so its
+/// `y` answers at once — its angles' line folded away first; at 160 it's there.
+#[test]
+fn the_boards_card_folds_its_angles_rather_than_be_cut() {
+    let card = || {
+        crate::board::card(crate::board::Ask {
+            session: 0,
+            name: "tarae-demo".into(),
+            conversation: None,
+            taken: Box::new(crate::codereview::Taken::for_test("/p".into())),
+            angles: crate::board::built_in(),
+            estimate: None,
+        })
+    };
+    // (`how`: as it's drawn — 0 plain, 1 its keys brought by `C-q`, 2 a key refused on it)
+    let screen_as = |w: u16, h: u16, how: u8| {
+        let mut s = Shot::new(w, h);
+        s.ed.push_offer(card());
+        match how {
+            1 => s.ed.card_keys = true,
+            2 => s.ed.offer_refused("not taken — it came as the card did"),
+            _ => {}
+        }
+        let mut parser = vt100::Parser::new(s.h, s.w, 0);
+        parser.process(&s.frame());
+        parser.screen().rows(0, s.w).collect::<Vec<String>>().join("\n")
+    };
+    let screen = |w: u16, h: u16| screen_as(w, h, 0);
+    // (the rows the card draws counted, whatever it adds: `esc goes back` after `C-q`, a refused key's reason —
+    // still whole)
+    for (how, said) in [(1, "esc goes back, unanswered"), (2, "not taken")] {
+        let at = screen_as(60, 20, how);
+        assert!(at.contains(said) && !at.contains("more lines"), "{at}");
+    }
+    let narrow = screen(60, 20);
+    assert!(narrow.contains("Start a board on tarae-demo?") && narrow.contains("y Start it"), "{narrow}");
+    assert!(!narrow.contains("more lines") && !narrow.contains("Each from its angle"), "{narrow}");
+    assert!(narrow.contains("A yes holds for this session"), "what a yes means stays: {narrow}");
+    let wide = screen(160, 30);
+    assert!(wide.contains("Each from its angle") && !wide.contains("more lines"), "{wide}");
 }
 
 /// `space v q` with a high-risk change no one has looked at: the end card names it in the warning colour, and
@@ -4135,10 +4180,9 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
         };
         r.grades.insert(dir.join(rel), std::sync::Arc::from(vec![high]));
     }
-    let (of, root) = (r.started, r.root.clone());
+    let root = r.root.clone();
     s.ed.session.code_review = Some(r);
     s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
-        of,
         root,
         crate::reviewer::State::Done,
         Vec::new(),
@@ -4283,7 +4327,7 @@ fn every_rail_row_clicks_the_file_drawn_on_it_while_its_head_grows() {
         for f in files.iter().step_by(3).take(14) {
             r.moved.insert(f.path.clone(), 123);
         }
-        let (of, root) = (r.started, r.root.clone());
+        let root = r.root.clone();
         s.ed.session.code_review = Some(r);
         // (in the middle: src/compat.rs's neighbours, hosts/ among them)
         crate::codereview::show(&mut s.ed, 21, false);
@@ -4314,7 +4358,6 @@ fn every_rail_row_clicks_the_file_drawn_on_it_while_its_head_grows() {
         check(&rows, &before, "as it opened");
         // The head grows by three rows: the reviewer done, its verdict, and a file changed since viewed
         s.ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
-            of,
             root.clone(),
             crate::reviewer::State::Done,
             Vec::new(),

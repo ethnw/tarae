@@ -46,6 +46,10 @@ pub struct Offer {
     /// The question's lines that keep their end (`read ~/…/x.patch · 515 B · 2 files`): one row, never wrapped —
     /// their first word whole, the rest cut on the left (`term::fit_left`) so a path's name and what follows stay.
     pub ends: Vec<usize>,
+    /// The question's lines it can do without, least important first — each a run of lines (a paragraph with the
+    /// blank before it): left out one by one while the card would otherwise be cut (`term::OfferCard` — bgreview:
+    /// the board's card whole at 60 columns, `y` answering at once).
+    pub folds: Vec<std::ops::Range<usize>>,
     /// When it came (`push_offer`) — `C-q` goes to the session whose card has waited longest (#90).
     pub since: Instant,
     /// When it was first drawn in front (`term::render_frame`) — its `card` line says how long it was up
@@ -555,6 +559,7 @@ impl Offer {
             warnings: Vec::new(),
             diff: None,
             ends: Vec::new(),
+            folds: Vec::new(),
             since: crate::clock::now(),
             drawn: Default::default(),
             asked: None,
@@ -632,6 +637,12 @@ impl Offer {
         caps: Option<&crate::caps::Caps>,
     ) -> serde_json::Value {
         crate::cards::said(session, self, answer, caps)
+    }
+
+    /// These lines of the question go, least important first, where the card would be cut (`folds`).
+    pub fn folding(mut self, lines: Vec<std::ops::Range<usize>>) -> Offer {
+        self.folds = lines;
+        self
     }
 
     /// What's being decided is these lines of the question, not its first paragraph.

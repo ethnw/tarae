@@ -4,11 +4,14 @@
 //! a process's reader threads aren't the simulation's; what a member says is the scenario's step) — an angle's
 //! claim, a skeptic's verdict, a member's end or failure — among the line's jobs and timers: the memory read
 //! before each start, the retry while it's critical, the other angles' stagger, the skeptics the angles' end
-//! brings in; `:reviewer-stop`, the review closed, a spell of memory pressure, time passing, a frame drawn. After every
-//! step: no more members read than may at once, none started past what the memory allowed, a later angle only
-//! after the stagger or the first one's end, a reviewer over has
-//! none waiting or reading, and every claim pinned stands (confirmed or unchecked), one failure one note — a skeptic judging any claim
-//! of its group, at times as the same failure as another.
+//! brings in; `:reviewer-stop`, a review opened, closed or replaced (bgreview: it reads a snapshot of its own),
+//! you editing the file it read, a spell of memory pressure, time passing, a
+//! frame drawn. After every step: no more members read than may at once, none started past what the memory
+//! allowed, a later angle only after the stagger or the first one's end, a reviewer over has none waiting or
+//! reading, every claim pinned stands (confirmed or unchecked), one failure one note — a skeptic judging any claim
+//! of its group, at times as the same failure as another; no review step moved a member; and a finding placed
+//! with no edit of yours between its pin and its placing sits where the snapshot's text is (its lines as read),
+//! one on lines changed since marked so — every one inside its file.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -23,12 +26,14 @@ use crate::editor::Editor;
 use crate::llm::StreamEv;
 use crate::reviewer::{Role, State};
 
-/// The seeds every `cargo test` runs, each twice — the first of `TARAE_SIM_SEEDS=60` to catch each break of
-/// `target/sb/f32-board-seeds.sh` (2026-10-19, macOS, ~1 s a run; picked again once the board asked on its card —
-/// the first ones were `reviewpanel-r8-seeds.sh`'s): 0 a board started without its card, 1 no stagger, 3 the line
-/// ignoring the memory, 4 a refuted claim pinned, 5 a stop that leaves members waiting, 47 a same failure pinned
-/// apart (its skeptic's `same_as` landing on a claim it confirmed).
-const SEEDS: &[u64] = &[0, 1, 3, 4, 5, 47];
+/// The seeds every `cargo test` runs, each twice — the first to catch each break the scenario keeps (picked again
+/// by bgreview's "tarae native", 2026-10-20, `target/sb/bgreview-seeds-all.sh`: every run reads its snapshot now,
+/// the reading copy's coin gone, so every seed's choices moved — frictions32's `f32-board-seeds.sh` and
+/// reviewpanel's before it): 0 a board started without its card · 3 a refuted claim pinned, no stagger · 6 a
+/// review closed stopping its reviewer · 7 a stop that leaves members waiting, the line ignoring the memory · 18 a
+/// finding not placed on the lines now · 169 a same failure pinned apart (its skeptic's `same_as` landing on a
+/// claim it confirmed — none of the first 168 catch it).
+const SEEDS: &[u64] = &[0, 3, 6, 7, 18, 169];
 
 /// The scenario's own steps a run (the jobs' and results' come between them).
 const INPUTS: usize = 40;
@@ -47,6 +52,17 @@ const STAGGER: Duration = Duration::from_secs(3);
 /// on the simulated clock — a spell, never for good: while it's critical the line retries for as long, and a
 /// run must go quiet after its last input.
 static PRESSURE: Mutex<Option<(crate::share::Pressure, Instant)>> = Mutex::new(None);
+
+/// What the run saw so far (`held`): the members' generations seen reading; each finding's step pinned and
+/// whether it was checked placed; the steps you edited the file at; a review step that moved a member.
+#[derive(Default)]
+struct Seen {
+    started: BTreeSet<u64>,
+    pinned: std::collections::BTreeMap<u64, (usize, bool)>,
+    edits: Vec<usize>,
+    moved: Option<String>,
+    step: usize,
+}
 
 fn room() -> crate::share::Room {
     let now = crate::clock::now();
@@ -90,9 +106,10 @@ fn run(choices: Choices) -> Vec<String> {
     ed.config.review_board_at_once = AT_ONCE;
     // (as shipped, not the tests' none: the other angles wait for the first one's prompt — a timer stepped)
     ed.reviewer_stagger = STAGGER;
-    let (shown, started) = (dir.display().to_string(), std::cell::RefCell::new(BTreeSet::new()));
-    let check = |ed: &Editor| held(ed, &mut started.borrow_mut());
-    sim.walk(&mut ed, INPUTS, input, check, |ed| print(ed, &shown));
+    let (shown, seen) = (dir.display().to_string(), std::cell::RefCell::new(Seen::default()));
+    let check = |ed: &Editor| held(ed, &repo, &mut seen.borrow_mut());
+    let step = |sim: &mut Sim, ed: &mut Editor| input(sim, ed, &repo, &mut seen.borrow_mut());
+    sim.walk(&mut ed, INPUTS, step, check, |ed| print(ed, &shown));
     let trace = sim.trace().to_vec();
     drop(sim);
     drop(ed);
@@ -100,18 +117,19 @@ fn run(choices: Choices) -> Vec<String> {
 }
 
 /// One of the scenario's steps, said.
-fn input(sim: &mut Sim, ed: &mut Editor) -> String {
+fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &mut Seen) -> String {
     let n = sim.steps;
+    seen.step = n;
     let c = &mut sim.choices;
     // (by arm: a board or its card's answer 3, the one pass 1, a member says something 12, one ends 6, one fails 1,
-    // a stop 1, the review closed 1, the memory 1, time passing 2, a frame 1 — members speak most, so claims reach
-    // skeptics; a board takes two steps since its card (frictions32), so it weighs three; with none reading, a
-    // second passes instead: the stagger and the line move on)
+    // a stop 1, a review opened, closed or replaced 2, the memory 1, time passing 2, a frame 1, you editing the file
+    // 2 — members speak most, so claims reach skeptics; a board takes two steps since its card (frictions32), so it
+    // weighs three; with none reading, a second passes instead: the stagger and the line move on)
     let none = |sim: &mut Sim| {
         sim.wait(Duration::from_secs(1));
         "(none reads) 1000 ms pass".to_string()
     };
-    match c.weighted(&[3, 1, 12, 6, 1, 1, 1, 1, 2, 1]) {
+    match c.weighted(&[3, 1, 12, 6, 1, 1, 2, 1, 2, 1, 2]) {
         // (as the keys do: the review opened first if it isn't, refused while its reviewer reads — a board's card
         // asks first, its cost read on a worker; up, it's answered: mostly yes, at times a key as the user presses it
         // — refused until the card's drawn and settled — or no)
@@ -187,9 +205,33 @@ fn input(sim: &mut Sim, ed: &mut Editor) -> String {
             crate::reviewer::stop(ed);
             ":reviewer-stop".into()
         }
+        // (bgreview: nothing a review does starts or stops a member — checked at once, the step's own part)
         6 => {
-            crate::codereview::close(ed);
-            "space v q".into()
+            let states = |ed: &Editor| {
+                ed.session
+                    .reviewer
+                    .as_ref()
+                    .map(|r| r.members.iter().map(|m| m.state.clone()).collect::<Vec<_>>())
+            };
+            let before = states(ed);
+            let said = match c.below(3) {
+                0 => {
+                    crate::codereview::close(ed);
+                    "space v q"
+                }
+                1 => {
+                    crate::codereview::start_in(ed, repo.to_path_buf(), None);
+                    "space v v"
+                }
+                _ => {
+                    crate::codereview::start_in(ed, repo.to_path_buf(), Some("main".into()));
+                    ":review main"
+                }
+            };
+            if states(ed) != before {
+                seen.moved = Some(format!("{said} moved a member: {before:?} → {:?}", states(ed)));
+            }
+            said.into()
         }
         7 => {
             use crate::share::Pressure;
@@ -208,6 +250,26 @@ fn input(sim: &mut Sim, ed: &mut Editor) -> String {
         9 => {
             crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
             "a frame".into()
+        }
+        // (you go on with the file it read: a line put in above, or one changed — never fewer lines)
+        10 => {
+            let path = repo.join("a.txt");
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let k = c.below(lines.len().max(1));
+            let (now, said) = match c.below(2) {
+                0 => (format!("zero\n{text}"), "a line put in at the top".to_string()),
+                _ => {
+                    let mut l: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+                    if let Some(x) = l.get_mut(k) {
+                        x.push('!');
+                    }
+                    (l.join("\n") + "\n", format!("line {} changed", k + 1))
+                }
+            };
+            std::fs::write(&path, now).unwrap();
+            seen.edits.push(n);
+            format!("you edit a.txt: {said}")
         }
         _ => unreachable!("one arm a weight"),
     }
@@ -228,9 +290,15 @@ fn member(ed: &Editor, i: usize) -> String {
 /// What holds after every step: no more members read than may at once — and a member that started in it
 /// started within what the memory allowed, as the line last read it (`started`: the generations seen reading
 /// so far; warn: one at a time, critical: none); a reviewer over has none waiting or reading; every claim
-/// pinned stands.
-fn held(ed: &Editor, started: &mut BTreeSet<u64>) -> Result<(), String> {
+/// pinned stands; no review step moved a member; a finding placed is inside its file, and — no edit of yours
+/// between its pin and its placing — sits on its lines as read, or is marked changed since.
+fn held(ed: &Editor, repo: &std::path::Path, seen: &mut Seen) -> Result<(), String> {
     use crate::share::Pressure;
+    if let Some(m) = seen.moved.take() {
+        return Err(m);
+    }
+    placed(ed, repo, seen)?;
+    let started = &mut seen.started;
     // (the key that spends money: no board reads without a yes on its card — frictions29 32)
     if ed.session.reviewer.as_ref().is_some_and(|r| r.board.is_some()) && ed.session.board_yes.is_none() {
         return Err("a board started with no yes on its card".into());
@@ -292,6 +360,46 @@ fn held(ed: &Editor, started: &mut BTreeSet<u64>) -> Result<(), String> {
         let apart = |i: usize| b.claims[b.root(i)].note.is_some_and(|n| b.claims[i].note != Some(n));
         if let Some(i) = (0..b.claims.len()).find(|&i| b.claims[i].note.is_some() && apart(i)) {
             return Err(format!("claim {i} pinned apart from the one it's the same failure as"));
+        }
+    }
+    Ok(())
+}
+
+/// The findings' places (`held`): each inside a.txt as it is now; one first seen placed with no edit since it
+/// was pinned sits on lines whose text is the snapshot's (its digest, `pinned`) — unless placed as changed
+/// since read.
+fn placed(ed: &Editor, repo: &std::path::Path, seen: &mut Seen) -> Result<(), String> {
+    // (the file as tarae has it: its open document's text — a review opened it — else what's on disk)
+    let path = repo.join("a.txt");
+    let text = match ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path()) && !d.loading) {
+        Some(d) => d.text.clone(),
+        None => ropey::Rope::from_str(&std::fs::read_to_string(&path).unwrap_or_default()),
+    };
+    for n in crate::reviewer::findings_in(&ed.session).unwrap_or_default() {
+        let step = seen.step;
+        let (at, checked) = *seen.pinned.entry(n.id).or_insert((step, false));
+        if n.placing || checked {
+            continue;
+        }
+        seen.pinned.insert(n.id, (at, true));
+        if n.lines.end > text.len_lines().max(1) {
+            return Err(format!("note#{} at {:?}, past a.txt's {} lines", n.id, n.lines, text.len_lines()));
+        }
+        // (an edit of yours since it was pinned: where it was read is no longer where the text is — not judged)
+        if seen.edits.iter().any(|&e| e >= at) || n.path != repo.join("a.txt") {
+            continue;
+        }
+        // (one said changed since sits in a change's region — a line of it may read as it did: not judged)
+        let same = crate::notes::lines_digest(&text, &n.lines) == n.pinned;
+        let changed = crate::notes::changed_since_read(ed, n.id);
+        if n.pinned.is_some() && !same && !changed {
+            return Err(format!(
+                "note#{} at {:?} ({:?} now): its text as read {same}, said changed since {changed} — snapshot {:?}",
+                n.id,
+                n.lines,
+                text.get_line(n.lines.start).map(|l| l.to_string()),
+                ed.session.reviewer.as_ref().map(|r| r.snap.is_some()),
+            ));
         }
     }
     Ok(())

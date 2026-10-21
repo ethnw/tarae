@@ -472,9 +472,11 @@ fn a_code_review_writes_edited_commented_looked_and_its_findings() {
         "a numbat-shaped bug",
     );
     ed.session.notes.list.iter_mut().filter(|n| n.id == id).for_each(|n| n.thread[0].draft = true);
-    let of = ed.session.code_review.as_ref().unwrap().started;
     let done = crate::reviewer::State::Done;
-    ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(of, dir.clone(), done, vec![id], "ok"));
+    let mut rv = crate::reviewer::Reviewer::for_test(dir.clone(), done, vec![id], "ok");
+    // (it read for this review: its findings go to this one's record)
+    rv.review = ed.session.code_review.as_ref().map(|r| r.started);
+    ed.session.reviewer = Some(rv);
     crate::codereview::close(&mut ed);
     let (entries, raw) = record(&dir.join("state"));
     let change = |file: &str| {

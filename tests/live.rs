@@ -2273,8 +2273,8 @@ fn chat_switches_the_model() {
 
 /// `space v c`: the reviewer — a second claude, its read-only flags as the real CLI takes them (`--tools`,
 /// `--disallowedTools`, no settings, `--max-turns`) — reviews the uncommitted change and ends its turn. Its
-/// stream (teed) says the tools it was given are exactly Read, Grep, Glob and tarae's note, and it called none
-/// other. The diff carries an order planted for it (make a file, change the code): nothing in the project is
+/// stream (teed) says the tools it was given are exactly tarae's read, search and note — none of Claude Code's —
+/// and it called none other. The diff carries an order planted for it (make a file, change the code): nothing in the project is
 /// written, the chat isn't opened, and its report says it's done.
 #[test]
 #[ignore = "live: run with `cargo live` (uses Claude)"]
@@ -2310,7 +2310,7 @@ fn the_reviewer_reviews_the_changes_read_only() {
     let init = lines.iter().find(|v| v["type"] == "system" && v["subtype"] == "init").expect("its init line");
     let mut given: Vec<&str> = init["tools"].as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
     given.sort_unstable();
-    let only = ["Glob", "Grep", "Read", "mcp__tarae__note"];
+    let only = ["mcp__tarae__note", "mcp__tarae__read", "mcp__tarae__search"];
     assert_eq!(given, only, "the tools it was given");
     let called: Vec<&str> = lines
         .iter()
@@ -2321,6 +2321,217 @@ fn the_reviewer_reviews_the_changes_read_only() {
         .collect();
     assert!(called.iter().all(|c| only.contains(c)), "it called only those: {called:?}");
     eprintln!("the reviewer called: {called:?}");
+}
+
+/// A bug the reviewer A/B plants in `TOOLS_CORPUS`: in `file`, each edit's text and what it becomes; found by a
+/// finding on one of `at`'s lines (a file's, from 1, both ends in) or one whose text holds one of `words`.
+struct AbBug {
+    name: &'static str,
+    file: &'static str,
+    edits: &'static [(&'static str, &'static str)],
+    at: &'static [(&'static str, u64, u64)],
+    words: &'static [&'static str],
+}
+
+/// One run of the reviewer A/B: its build, what it cost, its reads, the planted bugs it found, its findings.
+type AbRow<'a> = (&'a str, Measured, usize, Vec<&'static str>, usize);
+
+/// Three bugs the diff shows in term.rs, and one it doesn't: grep.rs's rows counted from 0, its doc changed to
+/// match — the bug is in the callers it leaves (`r.line - 1` in nav.rs and picker.rs: a first line's hit
+/// underflows), found only by reading past the diff.
+const AB_BUGS: [AbBug; 4] = [
+    AbBug {
+        name: "pad_left",
+        file: "src/term.rs",
+        edits: &[(
+            "format!(\"{}{s}\", \" \".repeat(width.saturating_sub(s.width())))",
+            "format!(\"{}{s}\", \" \".repeat(width - s.chars().count()))",
+        )],
+        at: &[("term.rs", 10245, 10252)],
+        words: &["pad_left"],
+    },
+    AbBug {
+        name: "scroll_thumb",
+        file: "src/term.rs",
+        edits: &[("first * (rows - len) / (n - rows)", "first * (rows - len) / n")],
+        at: &[("term.rs", 10476, 10484)],
+        words: &["scroll_thumb"],
+    },
+    AbBug {
+        name: "fit_ellipsis",
+        file: "src/term.rs",
+        edits: &[("let mut out = fit(s, width.saturating_sub(1));", "let mut out = fit(s, width);")],
+        at: &[("term.rs", 10484, 10497)],
+        words: &["fit_ellipsis"],
+    },
+    AbBug {
+        name: "rows from 0",
+        file: "src/grep.rs",
+        edits: &[
+            ("/// One line of a file: its number (from 1),", "/// One line of a file: its number (from 0),"),
+            ("Row { line: line.unwrap_or(0) as usize,", "Row { line: line.unwrap_or(1) as usize - 1,"),
+        ],
+        at: &[("grep.rs", 52, 60), ("grep.rs", 228, 238), ("nav.rs", 1, 99_999), ("picker.rs", 1, 99_999)],
+        words: &["line - 1"],
+    },
+];
+
+/// The reviewer's tools, A/B (bgreview "tarae native", 2026-10-20): two builds — `TARAE_AB_BASE` (Claude Code's
+/// Read, Grep and Glob over a reading copy) and `TARAE_AB_NEW` (tarae's read and search over the snapshot) —
+/// review the same uncommitted change of `TOOLS_CORPUS`: `AB_BUGS` planted in src/term.rs. One pass each
+/// (`space v c`), the builds alternating (A B, then B A); from claude's stream: requests, tokens, $, reads, time,
+/// and which planted bugs its findings name. `TARAE_AB_RUNS` (3), `TARAE_AB_BUDGET` ($ claude reports, 10: no run
+/// starts past it), `TARAE_AB_MODEL` ("opus"), `TARAE_AB_LABELS` ("base,new"). Rows to
+/// `target/live/reviewer-ab.tsv`, streams beside it in `target/live/reviewer-ab/`.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn reviewer_tools_ab() {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (Some(base), Some(new)) = (var("TARAE_AB_BASE"), var("TARAE_AB_NEW")) else {
+        skip("TARAE_AB_BASE and TARAE_AB_NEW name the two builds");
+        return;
+    };
+    if !have("claude") || !have("git") {
+        return;
+    }
+    let runs: usize = var("TARAE_AB_RUNS").and_then(|r| r.parse().ok()).unwrap_or(3);
+    let budget: f64 = var("TARAE_AB_BUDGET").and_then(|b| b.parse().ok()).unwrap_or(10.0);
+    let model = var("TARAE_AB_MODEL").unwrap_or_else(|| "opus".into());
+    let labels = var("TARAE_AB_LABELS").unwrap_or_else(|| "base,new".into());
+    let (first, second) = labels.split_once(',').unwrap_or(("base", "new"));
+    let builds = [(first, Path::new(&base)), (second, Path::new(&new))];
+    let tsv = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/reviewer-ab.tsv");
+    let kept = tsv.with_file_name("reviewer-ab");
+    std::fs::create_dir_all(&kept).unwrap();
+    let reading = ["Read", "Grep", "Glob", "mcp__tarae__read", "mcp__tarae__search"];
+    let mut rows: Vec<AbRow> = Vec::new();
+    let mut spent = 0.0;
+    'runs: for run in 0..runs {
+        for b in if run % 2 == 0 { [0, 1] } else { [1, 0] } {
+            if spent > budget {
+                eprintln!("REVIEWER_AB budget: ${spent:.2} spent, past ${budget} — no more runs");
+                break 'runs;
+            }
+            let (build, bin) = builds[b];
+            let sb = Sandbox::live(&format!("reviewer-ab-{build}")).with_bin(bin);
+            assert!(sb.copy_commit(TOOLS_CORPUS, &TOOLS_CORPUS_PATHS), "commit {TOOLS_CORPUS} in this clone");
+            sb.git(&["init", "-q", "-b", "main"]);
+            sb.git(&["add", "-A"]);
+            sb.git(&["commit", "-q", "-m", "base"]);
+            for bug in &AB_BUGS {
+                let file = sb.file(bug.file);
+                let mut text = std::fs::read_to_string(&file).unwrap();
+                for (was, now) in bug.edits {
+                    assert!(text.contains(was), "{} at {TOOLS_CORPUS}", bug.name);
+                    text = text.replacen(was, now, 1);
+                }
+                std::fs::write(&file, &text).unwrap();
+            }
+            let stream = teed(&sb, &format!("model = \"{model}\"\n"));
+            let mut t = sb.spawn(&["README.md"]);
+            let started = Instant::now();
+            t.send(" vc");
+            let deadline = started + Duration::from_secs(20 * 60);
+            let state = loop {
+                std::thread::sleep(Duration::from_secs(3));
+                let run = t.state_json(0)["sessions"][0]["reviewer_run"].clone();
+                if run.is_object() && run["state"] != "reading" {
+                    break run["state"].as_str().unwrap_or_default().to_string();
+                }
+                if Instant::now() > deadline {
+                    break "timed out".into();
+                }
+            };
+            let read = std::fs::read_to_string(&stream).unwrap_or_default();
+            let mut m = measure(&read, sb.work().to_str().unwrap());
+            m.wall_ms = started.elapsed().as_millis() as u64;
+            spent += m.cost;
+            let reads: usize =
+                m.tools.iter().filter(|(n, _)| reading.iter().any(|r| r.ends_with(*n))).map(|e| e.1).sum();
+            // Its findings: the note calls in its stream — a planted bug found by one on its function's lines, or
+            // naming it
+            let notes: Vec<serde_json::Value> = read
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["type"] == "assistant")
+                .flat_map(|v| v["message"]["content"].as_array().cloned().unwrap_or_default())
+                .filter(|c| c["type"] == "tool_use" && c["name"] == "mcp__tarae__note")
+                .map(|c| c["input"].clone())
+                .collect();
+            let found: Vec<&str> = AB_BUGS
+                .iter()
+                .filter(|bug| {
+                    notes.iter().any(|n| {
+                        let (path, line) =
+                            (n["path"].as_str().unwrap_or_default(), n["line"].as_u64().unwrap_or(0));
+                        let on_it =
+                            bug.at.iter().any(|(f, a, z)| path.ends_with(f) && *a <= line && line <= *z);
+                        on_it || bug.words.iter().any(|w| n["text"].as_str().is_some_and(|t| t.contains(w)))
+                    })
+                })
+                .map(|b| b.name)
+                .collect();
+            let said = format!(
+                "REVIEWER_AB {build} run {}: {state}, {} requests, {} tokens, ${:.3}, {reads} reads {:?}, {} ms, \
+                 {} findings, found {found:?}\n  notes: {}\n  verdict: {}",
+                run + 1,
+                m.requests,
+                m.tokens,
+                m.cost,
+                m.tools,
+                m.wall_ms,
+                notes.len(),
+                notes
+                    .iter()
+                    .map(|n| format!("{}:{} {}", n["path"], n["line"], n["text"]))
+                    .collect::<Vec<_>>()
+                    .join(" ⏎ "),
+                m.answer.replace('\n', " ⏎ "),
+            );
+            eprintln!("{said}");
+            let name = format!("{build}-{}-{}", run + 1, std::process::id());
+            let _ = std::fs::copy(&stream, kept.join(format!("{name}.jsonl")));
+            std::fs::write(kept.join(format!("{name}.txt")), &said).unwrap();
+            let row = format!(
+                "{TOOLS_CORPUS}\t{build}\t{}\t{state}\t{}\t{}\t{:.4}\t{reads}\t{}\t{}\t{}\n",
+                run + 1,
+                m.requests,
+                m.tokens,
+                m.cost,
+                m.wall_ms,
+                notes.len(),
+                found.join(","),
+            );
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&tsv).unwrap();
+            f.write_all(row.as_bytes()).unwrap();
+            rows.push((build, m, reads, found, notes.len()));
+        }
+    }
+    eprintln!(
+        "REVIEWER_AB median (min–max) — build n: requests · tokens · $ · reads · s · findings · planted found"
+    );
+    for (build, _) in builds {
+        let of: Vec<_> = rows.iter().filter(|r| r.0 == build).collect();
+        let at = |f: &dyn Fn(&AbRow) -> f64, p: usize| {
+            let v: Vec<f64> = of.iter().map(|r| f(r)).collect();
+            let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+            format!("{:.p$} ({lo:.p$}–{hi:.p$})", median(v))
+        };
+        eprintln!(
+            "REVIEWER_AB {build} {}: {} · {} · {} · {} · {} · {} · {}",
+            of.len(),
+            at(&|r| r.1.requests as f64, 0),
+            at(&|r| r.1.tokens as f64, 0),
+            at(&|r| r.1.cost, 3),
+            at(&|r| r.2 as f64, 0),
+            at(&|r| r.1.wall_ms as f64 / 1000.0, 0),
+            at(&|r| r.4 as f64, 0),
+            at(&|r| r.3.len() as f64, 1),
+        );
+    }
+    eprintln!("REVIEWER_AB spent ${spent:.2}");
+    assert!(!rows.is_empty(), "no run");
 }
 
 /// `space v C`: one real board over a ~4k-token diff (`security` too: `src/` is high-risk here). Its members

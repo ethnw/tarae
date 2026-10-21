@@ -479,6 +479,8 @@ fn as_a_terminal<'c>(cmd: &'c mut Command, config: &std::ffi::OsStr, state: &Pat
         .env("TARAE_SHOT_NO_DISK", "1")
         .env("XDG_CONFIG_HOME", config)
         .env("XDG_STATE_HOME", state)
+        // (tarae's cache — runs' folders, the reviewer's reading copies — the shot's own, never yours)
+        .env("XDG_CACHE_HOME", state.join("cache"))
         .env_remove("NO_COLOR")
 }
 

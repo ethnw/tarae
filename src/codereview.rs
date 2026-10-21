@@ -1793,12 +1793,6 @@ pub fn base_reached(ed: &mut Editor) {
     });
 }
 
-/// The working tree's patch against `rev`. (`diff-index`, not `diff`: over a file whose stat changed, `diff`
-/// refreshes the index — taking its lock whatever `GIT_OPTIONAL_LOCKS` says; the output is the same)
-fn diff_text(root: &Path, rev: &str) -> String {
-    git(root, &["diff-index", "-p", "--no-color", "--no-ext-diff", rev]).unwrap_or_default()
-}
-
 // ── Starting and ending ───────────────────────────────────────────────────────
 
 /// `space v v` / `:review [branch]`: the changes against HEAD, or since `branch` (fetched first if remote).
@@ -1820,32 +1814,13 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
     let asked = asked_of(ed);
     let work = move || -> Result<Gathered, String> {
         let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
-        let base = match branch {
-            None => Base::Head,
-            Some(name) => {
-                // origin/main → bring origin's main up to date (offline: the last fetch will do)
-                let remotes = git(&root, &["remote"]).unwrap_or_default();
-                if let Some((remote, rest)) = name.split_once('/')
-                    && remotes.lines().any(|r| r == remote)
-                {
-                    // (tarae's own step: no hooks — `gitrepo::NO_HOOKS`)
-                    let _ = crate::gitrepo::git_no_hooks(&root, &["fetch", "--quiet", remote, rest]);
-                }
-                let commit = git(&root, &["merge-base", "HEAD", &name])
-                    .map_err(|e| format!("{name}: {e}"))?
-                    .trim()
-                    .to_string();
-                Base::Branch { name, commit }
-            }
-        };
+        let base = base_of(&root, branch)?;
         let files = changed(&root, &base)?;
         let grades = grade_files(&root, base.rev(), &files, &[], &rules, &asked)?;
         Ok((root, base, files, grades))
     };
     ed.step(ed.events.jobs(), "review", said, work, |ed, found| match found {
         Err(e) => {
-            // (what `space v c`/`C` asked of it goes with it: never a reviewer the next review didn't ask for)
-            (ed.session.review_ask, ed.session.review_board) = (false, false);
             ed.set_error(format!("review: {e}"));
             // (a card's `h` opened it: its changes as the bring takes them instead — no review needed)
             if let Some((card, left)) = ed.session.review_high.take() {
@@ -1854,6 +1829,29 @@ pub fn start_in(ed: &mut Editor, cwd: PathBuf, branch: Option<String>) {
         }
         Ok((root, base, files, grades)) => open(ed, root, base, files, grades),
     });
+}
+
+/// The base a review (or the reviewer) of `root` is against: HEAD, or where this branch left `branch` (their
+/// merge base) — a remote one's branch fetched first (offline: the last fetch will do). Runs git (a worker's).
+fn base_of(root: &Path, branch: Option<String>) -> Result<Base, String> {
+    Ok(match branch {
+        None => Base::Head,
+        Some(name) => {
+            // origin/main → bring origin's main up to date
+            let remotes = git(root, &["remote"]).unwrap_or_default();
+            if let Some((remote, rest)) = name.split_once('/')
+                && remotes.lines().any(|r| r == remote)
+            {
+                // (tarae's own step: no hooks — `gitrepo::NO_HOOKS`)
+                let _ = crate::gitrepo::git_no_hooks(root, &["fetch", "--quiet", remote, rest]);
+            }
+            let commit = git(root, &["merge-base", "HEAD", &name])
+                .map_err(|e| format!("{name}: {e}"))?
+                .trim()
+                .to_string();
+            Base::Branch { name, commit }
+        }
+    })
 }
 
 /// A review as `:restart`'s state carries it (its session's block): its repository, its base, the file it's
@@ -2112,9 +2110,6 @@ fn open_at(
     start: Option<String>,
     say: bool,
 ) {
-    // (what `space v c`/`C` asked of this opening: taken whatever comes of it — never left for the next one)
-    let ask = std::mem::take(&mut ed.session.review_ask);
-    let board = std::mem::take(&mut ed.session.review_board);
     if files.is_empty() {
         ed.set_status(format!("review: no changes {}", base.label()));
         // (a card's `h` opened it: its changes as the bring takes them instead)
@@ -2207,12 +2202,8 @@ fn open_at(
         }
         None => show(ed, first, false),
     }
-    if ask {
-        match board {
-            true => crate::board::start(ed),
-            false => crate::reviewer::start(ed),
-        }
-    }
+    // (the session's last reviewer run: what changed since it read, for the rail's `read … at` row)
+    crate::reviewer::since_sync(ed);
 }
 
 /// The high-risk changes between commits `from` and `to` (a bring's — commit to commit: no index, no lock),
@@ -2688,9 +2679,9 @@ pub fn push_bring_card(
 pub(crate) fn reviewer_said(ed: &Editor, root: &Path, highs: &[Held], head: &str) -> Option<String> {
     use crate::reviewer::State;
     let rv = ed.session.reviewer.as_ref()?;
-    let high = |path: &Path, lines: &std::ops::Range<usize>| {
-        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
-        highs.iter().any(|h| h.rel == rel && h.at < lines.end && lines.start < h.at + h.lines)
+    let high = |n: &crate::notes::Note| {
+        let rel = n.path.strip_prefix(root).unwrap_or(&n.path).to_string_lossy();
+        highs.iter().any(|h| h.rel == rel && h.at < n.lines.end && n.lines.start < h.at + h.lines)
     };
     let t = crate::reviewer::tally(ed, high)?;
     let who = if rv.board.is_some() { "board" } else { "reviewer" };
@@ -3078,37 +3069,96 @@ pub fn held_sync(ed: &mut Editor) {
 }
 
 /// `space v c` · `:review-claude [branch]` — the reviewer, a second Claude apart from the chat's, reviews the
-/// changes (`reviewer.rs`): a note on the lines of each finding, then a verdict. Opens the review first
-/// (against HEAD, or since `branch`) if it isn't.
+/// changes (`reviewer.rs`) in the background: a note on the lines of each finding, then a verdict. It never opens
+/// the review (bgreview, 2026-10-19): it reads a snapshot of the changes (`taking`).
 pub fn ask_claude(ed: &mut Editor, branch: Option<String>) {
-    if ed.session.code_review.is_none() || branch.is_some() {
-        (ed.session.review_ask, ed.session.review_board) = (true, false);
-        return start(ed, branch);
-    }
-    crate::reviewer::start(ed);
+    crate::reviewer::ask_in(ed, ed.session.root.clone(), branch, false);
 }
 
 /// `space v C` · `:review-board [branch]` — the board (`board.rs`): a Claude per angle the changes call for,
-/// then a skeptic per group of their findings. Opens the review first as `ask_claude` does.
+/// then a skeptic per group of their findings — in the background, as `ask_claude`.
 pub fn ask_board(ed: &mut Editor, branch: Option<String>) {
-    if ed.session.code_review.is_none() || branch.is_some() {
-        (ed.session.review_ask, ed.session.review_board) = (true, true);
-        return start(ed, branch);
-    }
-    crate::board::start(ed);
+    crate::reviewer::ask_in(ed, ed.session.root.clone(), branch, true);
 }
 
 /// Most bytes of the diff the reviewer is sent (it reads the rest itself).
 const REVIEW_DIFF_MAX: usize = 150_000;
 
-/// The open review's diff, worked out on a worker (the returned work): every file against the review's base
-/// (untracked files as whole additions; a turn's against its texts before the turn), cut at `REVIEW_DIFF_MAX`.
-pub(crate) fn diff_work(ed: &Editor) -> Option<impl FnOnce() -> String + Send + 'static> {
-    let r = ed.session.code_review.as_ref()?;
-    let (root, rev) = (r.root.clone(), r.base.rev().map(str::to_string));
-    let untracked: Vec<File> = r.files.iter().filter(|f| f.new && !f.binary && !f.gone).cloned().collect();
-    // A turn's: each file against its text before the turn
-    let turn: Vec<(String, PathBuf, Option<ropey::Rope>)> = match &r.base {
+/// What a review run reads (`reviewer.rs`, bgreview 2026-10-19): the changes as they were when it started —
+/// never the open review's buffers nor the tree you go on editing. Taken on a worker (`taking`).
+#[derive(Clone, Debug)]
+pub struct Taken {
+    /// The repository's root, what it's of (`Base::label`), when.
+    pub root: PathBuf,
+    pub label: String,
+    pub at: std::time::SystemTime,
+    /// The changed files, and their grades (each change's lines are the snapshot's).
+    pub files: Vec<File>,
+    pub grades: Grades,
+    /// The diff it's sent, cut at `REVIEW_DIFF_MAX`.
+    pub diff: String,
+    /// HEAD then (empty: not known).
+    pub head: String,
+    /// The snapshot's tree (None: none could be taken); its base and, a turn's, each file's text before (taken
+    /// again of the same — `retaking`).
+    pub tree: Option<String>,
+    pub base: Base,
+    pub befores: Vec<Option<ropey::Rope>>,
+    /// New files the snapshot left out (past `snapshot::NEW_MAX`: they're not read).
+    pub left_out: usize,
+    /// The snapshot its members read (`snapread.rs`, their `read` and `search`) — None only in tests' own
+    /// (`for_test`) — and what's said of it at the start (files this clone doesn't have).
+    pub snap: Option<std::sync::Arc<crate::snapread::Snap>>,
+    pub said: Option<String>,
+    /// Each changed file's text as read, a digest (None: gone, or not read) — what changed since
+    /// (`reviewer::since_sync`).
+    pub digests: Vec<(PathBuf, Option<[u8; 32]>)>,
+}
+
+#[cfg(test)]
+impl Taken {
+    /// A snapshot of one changed file `a.txt` at `root`, read as it is (tests and snapshots — nothing taken).
+    pub fn for_test(root: PathBuf) -> Taken {
+        let f = File {
+            rel: "a.txt".into(),
+            path: root.join("a.txt"),
+            added: 1,
+            removed: 0,
+            new: false,
+            gone: false,
+            binary: false,
+        };
+        Taken {
+            label: "uncommitted".into(),
+            at: std::time::SystemTime::UNIX_EPOCH,
+            files: vec![f],
+            grades: Grades::new(),
+            diff: String::new(),
+            head: String::new(),
+            tree: None,
+            base: Base::Head,
+            befores: Vec::new(),
+            left_out: 0,
+            snap: None,
+            said: None,
+            digests: Vec::new(),
+            root,
+        }
+    }
+}
+
+/// The snapshot `Taken` worked out on a worker (the returned work), for the checkout around `cwd`: against
+/// `branch` (since it left it), else the open review's base when one's open (a turn's too), else HEAD. The
+/// tree (`snapshot::snap`, listed for reading: `snapread.rs`), the files and their grades, the diff from that tree.
+pub(crate) fn taking(
+    ed: &Editor,
+    cwd: PathBuf,
+    branch: Option<String>,
+) -> impl FnOnce() -> Result<Taken, String> + Send + 'static {
+    // (a review open, no branch asked: its base — a turn's with its files and their texts before the turn)
+    let open = ed.session.code_review.as_ref().filter(|_| branch.is_none());
+    let fixed: Option<(PathBuf, Base)> = open.map(|r| (r.root.clone(), r.base.clone()));
+    let turn: Option<Vec<(File, Option<ropey::Rope>)>> = open.and_then(|r| match &r.base {
         Base::Turn { at, .. } => {
             let before = |p: &PathBuf| {
                 ed.session
@@ -3122,46 +3172,280 @@ pub(crate) fn diff_work(ed: &Editor) -> Option<impl FnOnce() -> String + Send + 
                     .before
                     .clone()
             };
-            r.files.iter().map(|f| (f.rel.clone(), f.path.clone(), before(&f.path))).collect()
+            Some(r.files.iter().map(|f| (f.clone(), before(&f.path))).collect())
         }
-        _ => Vec::new(),
-    };
-    Some(move || {
-        let mut diff = match &rev {
-            Some(rev) => diff_text(&root, rev),
-            None => turn_diff(&turn),
-        };
-        for f in untracked.iter().filter(|_| rev.is_some()) {
-            if diff.contains(&format!("b/{}\n", f.rel)) {
-                continue;
-            }
-            let text = std::fs::read_to_string(&f.path).unwrap_or_default();
-            diff.push_str(&format!("--- /dev/null\n+++ b/{}\n", f.rel));
-            for l in text.lines() {
-                diff.push('+');
-                diff.push_str(l);
-                diff.push('\n');
-            }
-        }
-        let mut cut = REVIEW_DIFF_MAX.min(diff.len());
-        while !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let more = diff.len() - cut;
-        diff.truncate(cut);
-        if more > 0 {
-            diff.push_str(&format!("\n… ({more} more bytes — read those files yourself)\n"));
-        }
-        diff
-    })
+        _ => None,
+    });
+    take_work(crate::risk::Rules::of(&ed.config), cwd, branch, fixed, turn)
 }
 
-/// A turn's files (rel, path, text before) as a unified diff against what they are on disk now.
-fn turn_diff(files: &[(String, PathBuf, Option<ropey::Rope>)]) -> String {
+/// Snapshot `t` taken again, of the same base whatever is open now (the board card's `y` once the changes moved —
+/// the review that gave the card its base may have closed since): since a branch, its merge base worked out
+/// again; a turn's, its files and texts before as `t` had them.
+pub(crate) fn retaking(ed: &Editor, t: &Taken) -> impl FnOnce() -> Result<Taken, String> + Send + 'static {
+    let (branch, fixed, turn) = match &t.base {
+        Base::Branch { name, .. } => (Some(name.clone()), None, None),
+        Base::Turn { .. } => {
+            let turn = t.files.iter().cloned().zip(t.befores.iter().cloned()).collect();
+            (None, Some((t.root.clone(), t.base.clone())), Some(turn))
+        }
+        _ => (None, Some((t.root.clone(), t.base.clone())), None),
+    };
+    take_work(crate::risk::Rules::of(&ed.config), t.root.clone(), branch, fixed, turn)
+}
+
+/// `taking`'s work: `fixed` the root and base when known (else the checkout around `cwd`, since `branch` or
+/// HEAD), `turn` a turn's files with their texts before.
+fn take_work(
+    rules: crate::risk::Rules,
+    cwd: PathBuf,
+    branch: Option<String>,
+    fixed: Option<(PathBuf, Base)>,
+    turn: Option<Vec<(File, Option<ropey::Rope>)>>,
+) -> impl FnOnce() -> Result<Taken, String> + Send + 'static {
+    move || {
+        let at = crate::clock::system();
+        let (root, base) = match fixed {
+            Some(f) => f,
+            None => {
+                let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?.trim());
+                let base = base_of(&root, branch)?;
+                (root, base)
+            }
+        };
+        let (files, befores): (Vec<File>, Vec<Option<ropey::Rope>>) = match turn {
+            Some(t) => t.into_iter().unzip(),
+            None => (changed(&root, &base)?, Vec::new()),
+        };
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap_or_default().trim().to_string();
+        let mut t = Taken {
+            root: root.clone(),
+            label: base.label(),
+            base: base.clone(),
+            befores: befores.clone(),
+            at,
+            files,
+            grades: Grades::new(),
+            diff: String::new(),
+            head,
+            tree: None,
+            left_out: 0,
+            snap: None,
+            said: None,
+            digests: Vec::new(),
+        };
+        if t.files.is_empty() {
+            return Ok(t);
+        }
+        // The snapshot first, the rest from it: what a member reads is what its diff says (none: it doesn't start
+        // — its tools read nothing else)
+        let tree = crate::snapshot::snap(&root).map_err(|e| format!("no snapshot of the changes ({e})"))?;
+        t.left_out = tree.left_out;
+        let snap = crate::snapread::Snap::list(&root, &tree.id)?;
+        t.grades = grade_files(&root, base.rev(), &t.files, &befores, &rules, &Asked::default())?.grades;
+        if snap.missing() > 0 {
+            t.said =
+                Some(format!("{} not in this clone, not read", crate::nav::count(snap.missing(), "file")));
+        }
+        // Each changed file's text as read: the snapshot's — one it leaves out (past its size, named like a key, a
+        // link) from the checkout now, as `since_work` will: else it would always count as changed since
+        let rels: Vec<&str> = t.files.iter().map(|f| f.rel.as_str()).collect();
+        let mut texts: std::collections::HashMap<String, Arc<[u8]>> = Default::default();
+        snap.each_text(&rels, &mut |rel, text| {
+            texts.insert(rel.to_string(), text);
+            true
+        })?;
+        let read = |f: &File| -> Option<Vec<u8>> {
+            texts.get(&f.rel).map(|t| t.to_vec()).or_else(|| checkout_bytes(&f.path))
+        };
+        let digest = |f: &File| texts.get(&f.rel).map(|t| sha(t)).or_else(|| checkout_digest(&f.path));
+        t.digests = t.files.iter().map(|f| (f.path.clone(), digest(f))).collect();
+        let mut diff = match base.rev() {
+            Some(rev) => tree_diff(&root, rev, &tree.id),
+            None => {
+                // (a file named like a key isn't read at all: `turn_diff` names it, never its lines)
+                let now = |f: &File| match key_kept_out(&root, &f.rel) {
+                    Some(_) => String::new(),
+                    None => read(f).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(),
+                };
+                let turn: Vec<(String, String, Option<ropey::Rope>)> =
+                    (t.files.iter().zip(befores)).map(|(f, b)| (f.rel.clone(), now(f), b)).collect();
+                turn_diff(&root, &turn)
+            }
+        };
+        cut_diff(&mut diff);
+        (t.diff, t.tree, t.snap) = (diff, Some(tree.id), Some(Arc::new(snap)));
+        Ok(t)
+    }
+}
+
+fn sha(bytes: &[u8]) -> [u8; 32] {
+    crate::sha256::digest(bytes)
+}
+
+/// What changed since a `Taken` was: its changed files whose text on disk isn't the one read (a digest each,
+/// read on a worker — the returned work).
+pub(crate) fn since_work(
+    digests: Vec<(PathBuf, Option<[u8; 32]>)>,
+) -> impl FnOnce() -> Vec<PathBuf> + Send + 'static {
+    move || {
+        let differs = |(p, d): &(PathBuf, Option<[u8; 32]>)| checkout_digest(p) != *d;
+        digests.iter().filter(|e| differs(e)).map(|e| e.0.clone()).collect()
+    }
+}
+
+/// A changed file's bytes in the checkout as git takes them: a link's its target's name (never followed — the
+/// snapshot's rule), else the file's own, opened through no link; None: gone, or not a plain file. (git lists no
+/// file below a linked folder.) Blocks.
+pub(crate) fn checkout_bytes(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let (mut f, _) = match checkout_open(path)? {
+        Ok(f) => f,
+        Err(target) => return Some(target),
+    };
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// A changed file's digest in the checkout (`checkout_bytes`'s rules) — of its bytes, but one past
+/// `snapread::FILE_MAX` by its size and time, never read whole (the snapshot holds no text of it either): what
+/// changed since is looked at on saves, turns' ends and HEAD moves, and stays bounded however big a change is.
+pub(crate) fn checkout_digest(path: &Path) -> Option<[u8; 32]> {
+    use std::io::Read;
+    let (f, m) = match checkout_open(path)? {
+        Ok(f) => f,
+        Err(target) => return Some(sha(&target)),
+    };
+    if m.len() > crate::snapread::FILE_MAX {
+        let at = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        return Some(sha(format!("past the cap: {} bytes, at {at}", m.len()).as_bytes()));
+    }
+    let mut bytes = Vec::new();
+    f.take(crate::snapread::FILE_MAX + 1).read_to_end(&mut bytes).ok()?;
+    Some(sha(&bytes))
+}
+
+/// A changed file opened as `checkout_bytes` reads it: Ok, a plain file through no link (`O_NOFOLLOW`, no wait on a
+/// FIFO) and what its descriptor says of it; Err, a link's target text. None: gone, or neither.
+fn checkout_open(path: &Path) -> Option<Result<(std::fs::File, std::fs::Metadata), Vec<u8>>> {
+    use std::os::unix::{ffi::OsStringExt, fs::OpenOptionsExt};
+    if std::fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return Some(Err(std::fs::read_link(path).ok()?.into_os_string().into_vec()));
+    }
+    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(flags).open(path).ok()?;
+    let m = f.metadata().ok()?;
+    m.is_file().then_some(Ok((f, m)))
+}
+
+/// `diff` cut at `REVIEW_DIFF_MAX`, saying how much more there was.
+fn cut_diff(diff: &mut String) {
+    let mut cut = REVIEW_DIFF_MAX.min(diff.len());
+    while !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let more = diff.len() - cut;
+    diff.truncate(cut);
+    if more > 0 {
+        diff.push_str(&format!("\n… ({more} more bytes — read those files yourself)\n"));
+    }
+}
+
+/// What the diff a reviewer is sent says in place of file `rel`'s lines when it's named like a key — the rule its
+/// `read` refuses by (`snapread`: `sandbox::key_named_in`) — so a token in a changed `.env` never goes to the
+/// model; None: its lines are shown. (A link's change stays as its target text.)
+fn key_kept_out(root: &Path, rel: &str) -> Option<String> {
+    crate::sandbox::key_named_in(root, &root.join(rel))
+        .then(|| format!("{rel} changed — named like a key, not shown\n"))
+}
+
+/// The diff from `rev` to `tree` (the snapshot's: it holds the untracked files, each a whole addition), each file
+/// named like a key left out by an excluding pathspec — git never writes its lines — and named where its own
+/// section would be (`key_kept_out`).
+fn tree_diff(root: &Path, rev: &str, tree: &str) -> String {
+    let listed: Vec<&str> =
+        ["diff-tree", "-r", "-z", "--raw"].into_iter().chain(LISTED).chain([rev, tree]).collect();
+    let raws = parse_raw(&unfetched(root, &listed, None).unwrap_or_default());
+    // (a blob a partial clone lacks: never fetched for it — `snapread`'s rule — so named, not shown)
+    let ids: String = raws
+        .iter()
+        .flat_map(|r| [(&r.old_mode, &r.old), (&r.new_mode, &r.new)])
+        .filter(|(m, id)| !none(id) && m.as_str() != "160000")
+        .map(|(_, id)| format!("{id}\n"))
+        .collect();
+    let checked = unfetched(root, &["cat-file", "--batch-check"], Some(ids.as_bytes())).unwrap_or_default();
+    let missing: std::collections::HashSet<&str> =
+        checked.lines().filter_map(|l| l.strip_suffix(" missing")).collect();
+    let lacks = |r: &Raw| missing.contains(r.old.as_str()) || missing.contains(r.new.as_str());
+    let kept: Vec<(&Raw, Option<String>)> = (raws.iter())
+        .map(|r| {
+            let not_here = || lacks(r).then(|| format!("{} changed — not in this clone, not shown\n", r.rel));
+            (r, key_kept_out(root, &r.rel).or_else(not_here))
+        })
+        .collect();
+    // (a name that isn't text can't be excluded by its words: no diff rather than its lines)
+    if kept.iter().any(|(r, k)| k.is_some() && r.rel.contains('\u{FFFD}')) {
+        return "(not shown: a file left out of the diff has a name that isn't text — read the files yourself)\n"
+            .into();
+    }
+    let excluded: Vec<String> =
+        kept.iter().filter(|k| k.1.is_some()).map(|(r, _)| format!(":(exclude,literal){}", r.rel)).collect();
+    let mut args = vec!["diff-tree", "-p", "--no-color", "--no-ext-diff", "--no-renames", rev, tree, "--"];
+    if !excluded.is_empty() {
+        args.push(":(top)");
+        args.extend(excluded.iter().map(String::as_str));
+    }
+    let patch = unfetched(root, &args, None).unwrap_or_default();
+    // (each file's section starts at a `diff --git` line — a hunk's lines start with ` `, `+`, `-` or `\` — in
+    // the listing's order; a file whose type changed (a file ↔ a link, a submodule) is two: gone, then new)
+    let mut starts: Vec<usize> = patch
+        .match_indices("diff --git ")
+        .map(|(i, _)| i)
+        .filter(|&i| i == 0 || patch.as_bytes()[i - 1] == b'\n')
+        .collect();
+    if starts.first() != Some(&0) {
+        starts.insert(0, 0);
+    }
+    starts.push(patch.len());
+    let mut sections = starts.windows(2).map(|w| &patch[w[0]..w[1]]).filter(|s| !s.is_empty());
     let mut out = String::new();
-    for (rel, path, before) in files {
+    let kind = |mode: &str| match mode {
+        "120000" => 1,
+        "160000" => 2,
+        _ => 0,
+    };
+    for (r, kept) in &kept {
+        let typechange = !none(&r.old_mode) && !none(&r.new_mode) && kind(&r.old_mode) != kind(&r.new_mode);
+        match kept {
+            Some(line) => out.push_str(line),
+            None => (0..1 + usize::from(typechange))
+                .for_each(|_| out.push_str(sections.next().unwrap_or_default())),
+        }
+    }
+    out.extend(sections);
+    out
+}
+
+/// git for what a review run is sent: never a lazy fetch — a partial clone's missing object stays missing
+/// (`gitrepo::NO_LAZY_FETCH`, as `snapread`'s). `input` on its stdin.
+fn unfetched(root: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
+    let mut cmd = crate::gitrepo::repo(root)?.command(args);
+    cmd.env(crate::gitrepo::NO_LAZY_FETCH.0, crate::gitrepo::NO_LAZY_FETCH.1);
+    crate::gitrepo::finish(&cmd, input).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// A turn's files (rel, text now, text before) as a unified diff — one named like a key only named
+/// (`key_kept_out`).
+fn turn_diff(root: &Path, files: &[(String, String, Option<ropey::Rope>)]) -> String {
+    let mut out = String::new();
+    for (rel, now, before) in files {
+        if let Some(line) = key_kept_out(root, rel) {
+            out.push_str(&line);
+            continue;
+        }
         let base = before.as_ref().map(|b| b.to_string()).unwrap_or_default();
-        let now = ropey::Rope::from_str(&std::fs::read_to_string(path).unwrap_or_default());
+        let now = ropey::Rope::from_str(now);
         for (k, h) in crate::git::hunks(&base, &now.to_string()).iter().enumerate() {
             let p = crate::gitmenu::patch(rel, &base, &now, h);
             // (the file's header once)
@@ -3204,8 +3488,6 @@ fn end(ed: &mut Editor) {
     // (the review record: each change's time, grade and what it ended as — read before the review goes)
     crate::reviews::code_ended(ed);
     let Some(r) = ed.session.code_review.take() else { return };
-    // (its reviewer's members still waiting their turn never start)
-    crate::reviewer::review_ended(ed, r.started);
     // (a binary file's buffer is the review's: it goes with it)
     if let Some(v) = &r.binary_shown {
         ed.close_doc(v.doc);
@@ -4061,8 +4343,32 @@ fn toggle_viewed_at(ed: &mut Editor, i: usize) {
 
 /// `space v q` · `:review-close`: the review ends — asked first on a card while files are left not viewed
 /// (#10: it ended without a word). High-risk changes no one has looked at hold it: the card names them and
-/// has no yes (`Offer.held`).
+/// has no yes (`Offer.held`). A board counted as having read them: what changed on disk since is looked at
+/// again first, on a worker (Claude's runs, a checkout, another editor change files no save of tarae's told
+/// it of), the card once that's in.
 pub fn close_asked(ed: &mut Editor) {
+    let Some(r) = ed.session.code_review.as_ref() else { return };
+    let looks = !r.high_unseen(ed).is_empty() && crate::reviewer::board_read_of(ed, r);
+    let Some(rv) = ed.session.reviewer.as_ref().filter(|rv| looks && !rv.digests.is_empty()) else {
+        return close_card(ed);
+    };
+    let (work, at, started) = (since_work(rv.digests.clone()), rv.at, r.started);
+    ed.events.jobs().spawn(move || {
+        let changed = work();
+        move |ed: &mut Editor| {
+            if let Some(rv) = ed.session.reviewer.as_mut().filter(|rv| rv.at == at) {
+                rv.changed = Some(changed);
+            }
+            // (still that review — one ended meanwhile isn't asked about)
+            if ed.session.code_review.as_ref().is_some_and(|r| r.started == started) {
+                close_card(ed);
+            }
+        }
+    });
+}
+
+/// `close_asked`'s card — or the end at once, nothing left to ask.
+fn close_card(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
     let left: Vec<&File> = r.files.iter().filter(|f| !r.viewed(ed, f)).collect();
     let high: Vec<String> =
@@ -4096,7 +4402,7 @@ pub fn close_asked(ed: &mut Editor) {
         ));
         warning = Some(from..q.split('\n').count());
         // (where a board pays: high-risk changes no board has read)
-        if !ed.session.reviewer.as_ref().is_some_and(|v| v.of == r.started && v.board_read()) {
+        if !crate::reviewer::board_read_of(ed, r) {
             q.push_str("\n\nNo board has read them: space v C has one read them first.");
         }
     }
@@ -4287,8 +4593,18 @@ pub fn send(ed: &mut Editor) {
 /// (`reads::ask_own`), whose answer sends it again: `lines` Some(true) with their lines, Some(false) with
 /// those files' names only (None: not asked yet).
 pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
-    let drafts: Vec<u64> =
-        ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).map(|n| n.id).collect();
+    // (a finding still being placed on the lines now waits: sent on the snapshot's lines it would never be placed —
+    // it goes with the next `space v s`, a moment later)
+    let placing = ed.session.notes.list.iter().filter(|n| n.placing).count();
+    let drafts: Vec<u64> = (ed.session.notes.list.iter())
+        .filter(|n| !n.placing && n.thread.iter().any(|e| e.draft))
+        .map(|n| n.id)
+        .collect();
+    if drafts.is_empty() && placing > 0 {
+        return ed.set_status(
+            "the reviewer's findings are still being placed on the lines — space v s in a moment",
+        );
+    }
     if drafts.is_empty() {
         return ed.set_status("no drafts — space n on a line writes one");
     }
@@ -4416,7 +4732,12 @@ pub fn send_as(ed: &mut Editor, lines: Option<bool>) {
         n.waiting = true;
     }
     ed.session.notes.turn = drafts;
-    ed.set_success(format!("review sent — {k} comment{}", if k == 1 { "" } else { "s" }));
+    // (what it held back said, never in silence: the reviewer's findings still being placed go with the next)
+    let held = match placing {
+        0 => String::new(),
+        n => format!(" · {} still being placed — space v s sends them next", crate::nav::count(n, "finding")),
+    };
+    ed.set_success(format!("review sent — {k} comment{}{held}", if k == 1 { "" } else { "s" }));
 }
 
 #[cfg(test)]
@@ -7139,6 +7460,131 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A `.env`, `a.txt` and `+t` committed on main — the token in `.env` one a review must never be sent.
+    fn key_repo(name: &str, changed: &[(&str, String)]) -> PathBuf {
+        let base = [
+            (".env", "TOKEN=tarae-fake-token-old\n".into()),
+            ("a.txt", "one\n".into()),
+            ("+t", "t\n".into()),
+        ];
+        bring_repo(name, &base, changed)
+    }
+
+    /// The diff a review is sent: `.env`'s change named where its section would be, neither token in it, `a.txt`'s
+    /// lines whole.
+    fn key_left_out_of(diff: &str) {
+        let said =
+            diff.find(".env changed — named like a key, not shown").unwrap_or_else(|| panic!("{diff}"));
+        assert!(!diff.contains("tarae-fake-token"), "{diff}");
+        assert!(diff.contains("+two"), "{diff}");
+        // (in its place: the next file's own section right after it)
+        let next = diff[said..].lines().nth(1).unwrap_or_default();
+        assert!(next.contains("a.txt"), "in its place, a.txt's section next: {diff}");
+    }
+
+    fn key_changes() -> Vec<(&'static str, String)> {
+        vec![(".env", "TOKEN=tarae-fake-token-new\n".into()), ("a.txt", "one\ntwo\n".into())]
+    }
+
+    #[test]
+    fn a_key_named_files_change_isnt_in_the_diff_since_a_branch() {
+        let dir = key_repo("keydiff-branch", &key_changes());
+        let rules = crate::risk::Rules::of(&Default::default());
+        let t = take_work(rules, dir.clone(), Some("main".into()), None, None)().unwrap();
+        key_left_out_of(&t.diff);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_key_named_files_change_isnt_in_the_uncommitted_diff() {
+        let dir = key_repo("keydiff-uncommitted", &[("b.txt", "b\n".into())]);
+        for (rel, text) in key_changes() {
+            std::fs::write(dir.join(rel), text).unwrap();
+        }
+        // (`+t` a file turned link, before `.env`: two sections for one name — the key's line still in its place)
+        std::fs::remove_file(dir.join("+t")).unwrap();
+        std::os::unix::fs::symlink("a.txt", dir.join("+t")).unwrap();
+        let rules = crate::risk::Rules::of(&Default::default());
+        let t = take_work(rules, dir.clone(), None, None, None)().unwrap();
+        assert_eq!(t.label, "uncommitted");
+        key_left_out_of(&t.diff);
+        assert!(t.diff.starts_with("diff --git a/+t b/+t") && t.diff.contains("+a.txt"), "{}", t.diff);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_key_named_files_change_isnt_in_a_turns_diff() {
+        let dir = key_repo("keydiff-turn", &[("b.txt", "b\n".into())]);
+        let mut turn = Vec::new();
+        for ((rel, text), before) in key_changes().into_iter().zip(["TOKEN=tarae-fake-token-old\n", "one\n"])
+        {
+            std::fs::write(dir.join(rel), text).unwrap();
+            let f = File {
+                rel: rel.into(),
+                path: dir.join(rel),
+                added: 1,
+                removed: 1,
+                new: false,
+                gone: false,
+                binary: false,
+            };
+            turn.push((f, Some(ropey::Rope::from_str(before))));
+        }
+        let rules = crate::risk::Rules::of(&Default::default());
+        let base = Base::Turn { at: 0, question: String::new() };
+        let t = take_work(rules, dir.clone(), None, Some((dir.clone(), base)), Some(turn))().unwrap();
+        key_left_out_of(&t.diff);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base blob a partial clone lacks: never fetched (`GIT_NO_LAZY_FETCH`) — its file named in its place, not
+    /// shown, the others' sections whole (one missing blob made the whole patch fail).
+    #[test]
+    fn a_blob_this_clone_lacks_is_named_not_fetched_in_the_diff() {
+        let s = crate::scratch::Scratch::new("review-lacks");
+        let root = s.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let git_in = |args: &[&str], input: &[u8]| crate::snapread::tests::git_in(&root, args, input);
+        git_in(&["init", "-q"], b"");
+        let blob = |text: &[u8]| git_in(&["hash-object", "-w", "--stdin"], text);
+        let (one, two, here) = (blob(b"one\n"), blob(b"one\ntwo\n"), blob(b"here now\n"));
+        let gone = "0123456789abcdef0123456789abcdef01234567";
+        let tree = |entries: String| git_in(&["mktree", "--missing"], entries.as_bytes());
+        let base = tree(format!("100644 blob {one}\ta.txt\n100644 blob {gone}\tb.txt\n"));
+        let now = tree(format!("100644 blob {two}\ta.txt\n100644 blob {here}\tb.txt\n"));
+        let diff = tree_diff(&root, &base, &now);
+        assert!(diff.contains("b.txt changed — not in this clone, not shown"), "{diff}");
+        assert!(diff.contains("+two") && !diff.contains("here now"), "{diff}");
+    }
+
+    /// A link a turn made, to a file outside the checkout: its diff is the link's target text, as git has it —
+    /// never what it points at — and its digest the same, so it isn't "changed since".
+    #[test]
+    fn a_link_in_a_turns_diff_is_its_target_text() {
+        let dir = key_repo("linkdiff-turn", &[("b.txt", "b\n".into())]);
+        let outside = crate::scratch::Scratch::new("linkdiff-outside");
+        let marker = outside.join("m.txt");
+        std::fs::write(&marker, "tarae-outside-marker\n").unwrap();
+        std::os::unix::fs::symlink(&marker, dir.join("l")).unwrap();
+        let f = File {
+            rel: "l".into(),
+            path: dir.join("l"),
+            added: 1,
+            removed: 0,
+            new: true,
+            gone: false,
+            binary: false,
+        };
+        let rules = crate::risk::Rules::of(&Default::default());
+        let base = Base::Turn { at: 0, question: String::new() };
+        let t =
+            take_work(rules, dir.clone(), None, Some((dir.clone(), base)), Some(vec![(f, None)]))().unwrap();
+        assert!(!t.diff.contains("tarae-outside-marker"), "{}", t.diff);
+        assert!(t.diff.contains(&format!("+{}", marker.display())), "{}", t.diff);
+        assert_eq!(since_work(t.digests)(), Vec::<PathBuf>::new(), "not changed since");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A repository for a bring's card: `main` with `files`, then a branch `work` with `changed` committed —
     /// the test's own git (no config of the user's or the system's). Its real path.
     fn bring_repo(name: &str, files: &[(&str, String)], changed: &[(&str, String)]) -> PathBuf {
@@ -7759,9 +8205,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Gathering a review's changes and its diff for Claude never writes the index: `git diff` over a file
-    /// whose stat changed but not its text refreshes it (lock and all — measured: `core.trustctime=false`
-    /// and `core.checkStat=minimal` don't stop it); `diff-index` leaves it and doesn't list that file.
+    /// Gathering a review's changes never writes the index: `git diff` over a file whose stat changed but not its
+    /// text refreshes it (lock and all — measured: `core.trustctime=false` and `core.checkStat=minimal` don't stop
+    /// it); `diff-index` leaves it and doesn't list that file. (The diff Claude is sent is the snapshot's, made in
+    /// tarae's own index — `snapshot.rs`.)
     #[test]
     fn a_reviews_changes_leave_the_index() {
         let scratch = crate::scratch::Scratch::new("review-index");
@@ -7784,8 +8231,6 @@ mod tests {
         let files = changed(&dir, &Base::Head).unwrap();
         let rows: Vec<_> = files.iter().map(|f| (f.rel.as_str(), f.added, f.removed)).collect();
         assert_eq!(rows, [("b.txt", 1, 0)], "only the file whose text changed");
-        let diff = diff_text(&dir, "HEAD");
-        assert!(diff.contains("+three") && !diff.contains("a.txt"), "{diff}");
         assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before, "the index was rewritten");
         std::fs::remove_dir_all(&dir).ok();
     }

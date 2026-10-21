@@ -136,6 +136,23 @@ fn parse(parser: &mut tree_sitter::Parser, real: Option<&Path>) -> (Found, usize
     (found, src.len())
 }
 
+/// The lines (from 0) test attributes stand over in Rust text `src` — a snapshot's (`nav::search_snapshot`),
+/// parsed here, nothing kept.
+pub(crate) fn rust_test_lines(src: &str) -> Vec<Range<usize>> {
+    let rust = crate::syntax::spec("rust").and_then(|s| crate::syntax::Loader::global().load(s).ok());
+    let mut parser = tree_sitter::Parser::new();
+    match rust.filter(|l| src.contains("test") && parser.set_language(&l.language).is_ok()) {
+        Some(_) => {
+            let mut lines = Vec::new();
+            if let Some(tree) = parser.parse(src, None) {
+                test_items(tree.root_node(), src, &mut lines);
+            }
+            lines
+        }
+        None => Vec::new(),
+    }
+}
+
 impl Tests {
     /// For files under `root` (the project: path names are read from there down).
     pub fn new(root: &Path) -> Tests {

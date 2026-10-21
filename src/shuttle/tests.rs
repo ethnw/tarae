@@ -1096,7 +1096,7 @@ fn every_card() -> Vec<Offer> {
             session: 0,
             name: "s".into(),
             conversation: None,
-            review: Instant::now(),
+            taken: Box::new(crate::codereview::Taken::for_test("/p".into())),
             angles: Vec::new(),
             estimate: None,
         })),

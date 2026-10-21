@@ -2508,7 +2508,8 @@ impl Editor {
             .filter(|rv| {
                 rv.reading() && !crate::reviewer::waits(self, &self.session) && self.screen.rail_w > 0
             })
-            .filter(|rv| self.session.code_review.as_ref().is_some_and(|r| r.started == rv.of))
+            // (its time is drawn on the rail only — the status line's segment has none: an idle tarae draws nothing)
+            .filter(|_| self.session.code_review.is_some())
             .map(|rv| {
                 let into = crate::clock::since(rv.started).subsec_nanos();
                 std::time::Duration::from_nanos(1_000_000_000 - u64::from(into))

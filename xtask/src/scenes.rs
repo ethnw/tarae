@@ -363,6 +363,159 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "v", "C", "@?Start a board", "@1", "y", "@30?the board is done", "@2"],
     },
+    // (bgreview: the reviewer in the background, no review open — the status line says it: reading, then what it
+    // found and the key that reads it; the board's head; then a review opened after a file changed, its rail's
+    // `read … at` row)
+    Scene {
+        name: "bgreviewing",
+        claude: "reviewing",
+        files: MAIN,
+        keys: &["@1", " ", "v", "c", "@?3 reads", "@3"],
+    },
+    Scene {
+        name: "bgreviewdone",
+        claude: "reviewdone",
+        files: MAIN,
+        keys: &["@1", " ", "v", "c", "@30?1 finding · space v r", "@3"],
+    },
+    Scene {
+        name: "bgboard",
+        claude: "boardmid",
+        files: MAIN,
+        keys: &["@1", " ", "v", "C", "@?Start a board", "@1", "y", "@?¶ board", "@3"],
+    },
+    // (two sessions, each its reviewer reading: the one in front says it on the status line, its tab without its
+    // `¶` — the user's decision 2026-10-20 — the one behind on its tab)
+    Scene {
+        name: "bgsessions",
+        claude: "reviewing",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "v",
+            "c",
+            "@?3 reads",
+            // (another checkout beside it, opened as a session — the shot's own folders, not tarae's worktrees')
+            ":",
+            "sh git worktree add -q ../fix",
+            "\r",
+            "@3",
+            ":",
+            "session-open ../fix",
+            "\r",
+            "@3",
+            ":",
+            "e notes.txt",
+            "\r",
+            "i",
+            "a note",
+            "\x1b",
+            ":",
+            "w",
+            "\r",
+            "@1",
+            " ",
+            "v",
+            "c",
+            "@?3 reads",
+            " ",
+            "W",
+            "@1",
+            "1",
+            "@1",
+            " ",
+            "l",
+            "@?¶ reviewing",
+            "@2",
+        ],
+    },
+    // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
+    // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
+    // `¶ 3 findings` goes, as decided))
+    Scene {
+        name: "bgreviewnote",
+        claude: "reviewfull",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "v",
+            "c",
+            "@30?3 findings · space v r",
+            ":",
+            "e src/thread.rs",
+            "\r",
+            "@?Ties a knot",
+            ":",
+            "vsplit",
+            "\r",
+            "@1",
+            " ",
+            "v",
+            "r",
+            "@?Verdict",
+            "\x17",
+            "h",
+            "@1",
+            ":",
+            "15",
+            "\r",
+            "@8",
+        ],
+    },
+    // (the same without the report: the findings on their lines, one's card, the status line's `¶ 3 findings ▲ ·
+    // space v r` — the docs' picture's other candidate)
+    Scene {
+        name: "bgreviewfindings",
+        claude: "reviewfull",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "v",
+            "c",
+            "@30?3 findings · space v r",
+            ":",
+            "e src/thread.rs",
+            "\r",
+            "@?Ties a knot",
+            ":",
+            "15",
+            "\r",
+            "@8",
+        ],
+    },
+    Scene {
+        name: "bgreviewrail",
+        claude: "reviewdone",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "v",
+            "c",
+            "@30?1 finding · space v r",
+            "@1",
+            "g",
+            "g",
+            "O",
+            "/",
+            "/",
+            " ",
+            "x",
+            "\x1b",
+            ":",
+            "w",
+            "\r",
+            "@1",
+            " ",
+            "v",
+            "v",
+            "@?changed since",
+            "@1",
+        ],
+    },
     // (shuttle keys, `shuttle.rs`: a program started from the terminal panel says hello — its card; `y`, and its
     // step lit on the status line's chip; then the person's key, and the chip says it's paused)
     Scene { name: "shuttlecard", claude: "idle", files: MAIN, keys: SHUTTLE_HELLO },
@@ -854,6 +1007,9 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "warmfork" => turn.warm(true)?,
             "boardmid" => turn.board(&line, false)?,
             "boarddone" => turn.board(&line, true)?,
+            "reviewing" => turn.reviewer(false)?,
+            "reviewdone" => turn.reviewer(true)?,
+            "reviewfull" => turn.reviewer_full()?,
             _ => {}
         }
     }
@@ -1002,6 +1158,55 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.lines.by_ref().try_for_each(|l| l.map(drop))
     }
 
+    /// The one pass (`space v c`, in the background — bgreview): three reads, then (`done`) a finding on
+    /// knot.rs and its verdict; else it reads on.
+    fn reviewer(&mut self, done: bool) -> io::Result<()> {
+        for (n, f) in ["src/knot.rs", "src/main.rs", "src/thread.rs"].iter().enumerate() {
+            let read = json!({"type": "tool_use", "id": format!("r{n}"), "name": "mcp__tarae__read", "input": {"files": [f]}});
+            self.line(json!({"type": "assistant", "message": {"id": format!("m{n}"), "content": [read]}}))?;
+        }
+        if !done {
+            return self.reads_on();
+        }
+        let text = "`untie` does nothing: a caller that unties a knot keeps it.";
+        self.call(1, "note", json!({"path": "src/knot.rs", "line": 1, "text": text}))?;
+        self.line(json!({"type": "result", "result": "One finding: untie keeps the knot."}))
+    }
+
+    /// The one pass as the docs show it (`claude-reviews.png`): its reads, three findings on `thread.rs`'s
+    /// change, and a verdict that weighs them.
+    fn reviewer_full(&mut self) -> io::Result<()> {
+        for (n, f) in ["src/thread.rs", "src/main.rs", "src/knot.rs"].iter().enumerate() {
+            let read = json!({"type": "tool_use", "id": format!("r{n}"), "name": "mcp__tarae__read", "input": {"files": [f]}});
+            self.line(json!({"type": "assistant", "message": {"id": format!("m{n}"), "content": [read]}}))?;
+        }
+        let note = |line: u64, text: &str| json!({"path": "src/thread.rs", "line": line, "text": text});
+        let findings = [
+            (
+                10,
+                "`length` sums `u32` gaps: a long strand overflows — a panic in debug builds, a wrong length in release.",
+            ),
+            (
+                14,
+                "The doc says the knot goes at the strand's end, but `at` is a gap: `tie(5)` makes the strand 5 longer.",
+            ),
+            (
+                15,
+                "No test ties a knot: nothing holds the doc's claim, or catches `tie(0)` adding a knot with no length.",
+            ),
+        ];
+        for (n, (line, text)) in findings.iter().enumerate() {
+            self.call(n as u64 + 1, "note", note(*line, text))?;
+        }
+        let verdict = "Three findings, all in thread.rs — none blocks, the first matters most.\n\n\
+            - `length` can overflow on a long strand (a panic in debug builds).\n\
+            - `tie`'s doc and its argument disagree: `at` is a gap, not a place.\n\
+            - No test covers `tie`.\n\n\
+            knot.rs's new `untie` is empty and unused; main.rs only reads the strand.";
+        // (how long its turn took, as claude says it — the report's "Done in": fixed, so retakes compare the same)
+        self.line(json!({"type": "result", "result": verdict, "duration_ms": 112_400}))
+    }
+
     /// A board's member, by what its message (`msg`) asks: an angle notes its claims on the demo's changes
     /// (`done`: every angle ends; else security reads on, three reads made, and the others after correctness
     /// read on too); a skeptic confirms `knot.rs`'s claims (the second the same failure) and, on `thread.rs`,
@@ -1023,7 +1228,7 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         if msg.contains("(angle: security)") {
             if !done {
                 for (n, f) in ["src/knot.rs", "src/main.rs", "src/thread.rs"].iter().enumerate() {
-                    let read = json!({"type": "tool_use", "id": format!("r{n}"), "name": "Read", "input": {"file_path": f}});
+                    let read = json!({"type": "tool_use", "id": format!("r{n}"), "name": "mcp__tarae__read", "input": {"files": [f]}});
                     self.line(
                         json!({"type": "assistant", "message": {"id": format!("m{n}"), "content": [read]}}),
                     )?;

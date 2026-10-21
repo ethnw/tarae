@@ -6430,6 +6430,24 @@ fn draw_statusline(
             left.push(Seg { text: format!(" {}", r.said()), style, keep: CHIP });
         }
     }
+    // The session's reviewer in the background (bgreview): reading, waiting its turn, or what it found not read
+    // yet — in its colour, the counts dim, then the key — while no review rail says it. A click reads its report
+    if let Some((head, counts, key)) =
+        crate::reviewer::status_said(editor).filter(|_| crate::reviewer::status_shows(editor, lay.rail_w))
+    {
+        let mine = ui.status.patch(reviewer_style(editor, ui));
+        left.push(Seg { text: format!("  {head}"), style: mine, keep: REVIEWER });
+        if !counts.is_empty() {
+            left.push(Seg { text: counts, style: dim, keep: REVIEWER - 1 });
+        }
+        if let Some(key) = key {
+            left.push(Seg {
+                text: format!(" · {key}"),
+                style: Style { bold: true, ..dim },
+                keep: REVIEWER - 2,
+            });
+        }
+    }
     // What waits for you, every session's — the inbox's count of what asks for an answer; a click lists them
     // (`inbox.rs`). Not for the one card (or edit review) up here when that's all: it's in sight, and says so
     // itself
@@ -6741,6 +6759,7 @@ fn draw_statusline(
     let mut used = 0;
     let mut chip_at: Option<(usize, usize)> = None;
     let mut shuttle_at: Option<(usize, usize)> = None;
+    let mut reviewer_at: Option<(usize, usize)> = None;
     for s in &left {
         apply(out, s.style)?;
         queue!(out, Print(&s.text))?;
@@ -6752,6 +6771,9 @@ fn draw_statusline(
         }
         if s.keep == SHUTTLE {
             shuttle_at = Some(shuttle_at.map_or((a, b), |(a0, _)| (a0, b)));
+        }
+        if (REVIEWER - 2..=REVIEWER).contains(&s.keep) {
+            reviewer_at = Some(reviewer_at.map_or((a, b), |(a0, _)| (a0, b)));
         }
         if s.keep == INBOX {
             let spot = (lay.status_y as usize, a, b, crate::session::Spot::Inbox);
@@ -6769,6 +6791,10 @@ fn draw_statusline(
     }
     if let Some((a, b)) = shuttle_at {
         let spot = (lay.status_y as usize, a, b, crate::session::Spot::Shuttle);
+        editor.screen.session_spots.borrow_mut().push(spot);
+    }
+    if let Some((a, b)) = reviewer_at {
+        let spot = (lay.status_y as usize, a, b, crate::session::Spot::Reviewer);
         editor.screen.session_spots.borrow_mut().push(spot);
     }
     let right_w: usize = right.iter().map(|s| s.text.width()).sum();
@@ -6795,6 +6821,11 @@ const SHUTTLE: u8 = 238;
 
 /// …and its step lit a moment after each: as long-lived on the line, apart from the chip (not its click).
 const SHUTTLE_LIT: u8 = 237;
+
+/// The status line's `¶ reviewing` (bgreview, `reviewer::status_said`): below the session chip (a typing
+/// program and the session's name outlast it); its counts one below, its key two — the key folds first, the
+/// head last.
+const REVIEWER: u8 = 234;
 
 /// The status line's `keep` for a floating list's keys (`key_hints`): only the mode, the position and an error
 /// or warning waiting there (`FOLDED`) outlast them — and they're cut to fit beside those and the inbox's count,
@@ -7579,77 +7610,110 @@ impl OfferCard {
                 // One that runs something is shown whole — cut to the room below if it must be, with `v`
                 // to see all of it (and `y` waits for that)
                 let most = if o.weighty() { usize::MAX } else { 4 };
-                let mut v = vec![(title, false)];
                 // What's being decided at full strength (the path, the command, the settings) — the rest faint
                 let decided = o.decided_lines();
                 let warning = o.warning.clone().unwrap_or(0..0);
                 let diffs = o.diff.clone().unwrap_or(0..0);
-                for (k, part) in o.question.split('\n').enumerate() {
-                    // (a diff's line is code: cut to the card, never wrapped — only prose wraps)
-                    let mut rows = match (diffs.contains(&k), o.ends.contains(&k)) {
-                        (true, _) => vec![(crate::cut::fit(part, max_inner), true)],
-                        // (a path's line: its first word, then the rest with its end kept)
-                        (_, true) => {
-                            let (head, rest) = part.split_once(' ').map_or(("", part), |(h, r)| (h, r));
-                            let head = if head.is_empty() { String::new() } else { format!("{head} ") };
-                            let room = max_inner.saturating_sub(head.width());
-                            vec![(format!("{head}{}", fit_path_left(rest, room)), true)]
-                        }
-                        _ => wrapped(part, most),
-                    };
-                    if decided.contains(&k) {
-                        rows.iter_mut().for_each(|r| r.1 = false);
-                    }
-                    if warning.contains(&k) || o.warnings.iter().any(|w| w.contains(&k)) {
-                        warn.extend(v.len()..v.len() + rows.len());
-                    }
-                    // (a wrapped line's rows keep its sign's colour; `f` a file's path)
-                    if diffs.contains(&k) {
-                        let sign =
-                            part.chars().next().filter(|c| matches!(c, '+' | '-' | '@' | ' ')).unwrap_or('f');
-                        diff.extend((v.len()..v.len() + rows.len()).map(|r| (r, sign)));
-                    }
-                    v.extend(rows);
-                }
-                // Claude's calls held back behind it (#87 — claude makes them one after another, so its
-                // reads waited here unseen): which, faint
-                if let crate::offer::What::Run(r) = &o.what {
-                    let behind = crate::chat::behind_run(editor, &r.cmd);
-                    if !behind.is_empty() {
-                        let n = behind.len();
-                        let calls = if n == 1 { "call waits" } else { "calls wait" };
-                        v.push((String::new(), true));
-                        v.extend(wrapped(&format!("{n} more {calls} on this: {}", behind.join(" · ")), 2));
-                    }
-                }
-                // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
-                // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
-                let whose = if editor.card_keys {
-                    Some("esc goes back, unanswered")
-                } else if !editor.card_has_keys() {
-                    Some("C-q to answer it — what you're typing stays")
-                } else {
-                    None
+                // Where the card would be cut: the lines it can do without go, least important first (`Offer.folds`
+                // — bgreview: the board's card whole at 60 columns, its `y` answering at once). Measured by the rows
+                // it draws — built, counted against the room the cut uses (its answers, a refused key's reason),
+                // built again with one more line left out — never a second count beside them
+                let said_rows = match editor.offer_said_now() {
+                    Some(s) => 1 + card_rows(s, max_inner).len().min(2),
+                    None => 0,
                 };
-                // What waits behind it, and where (frictions15 #5: `C-q` takes the oldest here — the rest
-                // were a queue the card didn't name)
-                let behind = editor.cards_behind_said();
-                if behind.is_some() || whose.is_some() {
-                    v.push((String::new(), true));
-                }
-                // (too long for a row: where they are, then the key — not the key's words cut off alone)
-                if let Some(behind) = &behind {
-                    match behind.split_once(" · ").filter(|_| behind.width() > max_inner) {
-                        Some((wheres, key)) => {
-                            v.extend(wrapped(wheres, 2));
-                            v.extend(wrapped(key, 1));
+                let room =
+                    lay.text_rows.saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows);
+                // (the card's rows with the question's lines `skip` left out — their warning and diff rows marked)
+                let build = |skip: &[usize], warn: &mut Vec<usize>, diff: &mut Vec<(usize, char)>| {
+                    let mut v = vec![(title.clone(), false)];
+                    for (k, part) in o.question.split('\n').enumerate() {
+                        if skip.contains(&k) {
+                            continue;
                         }
-                        None => v.extend(wrapped(behind, 2)),
+                        // (a diff's line is code: cut to the card, never wrapped — only prose wraps)
+                        let mut rows = match (diffs.contains(&k), o.ends.contains(&k)) {
+                            (true, _) => vec![(crate::cut::fit(part, max_inner), true)],
+                            // (a path's line: its first word, then the rest with its end kept)
+                            (_, true) => {
+                                let (head, rest) = part.split_once(' ').map_or(("", part), |(h, r)| (h, r));
+                                let head = if head.is_empty() { String::new() } else { format!("{head} ") };
+                                let room = max_inner.saturating_sub(head.width());
+                                vec![(format!("{head}{}", fit_path_left(rest, room)), true)]
+                            }
+                            _ => wrapped(part, most),
+                        };
+                        if decided.contains(&k) {
+                            rows.iter_mut().for_each(|r| r.1 = false);
+                        }
+                        if warning.contains(&k) || o.warnings.iter().any(|w| w.contains(&k)) {
+                            warn.extend(v.len()..v.len() + rows.len());
+                        }
+                        // (a wrapped line's rows keep its sign's colour; `f` a file's path)
+                        if diffs.contains(&k) {
+                            let sign = part
+                                .chars()
+                                .next()
+                                .filter(|c| matches!(c, '+' | '-' | '@' | ' '))
+                                .unwrap_or('f');
+                            diff.extend((v.len()..v.len() + rows.len()).map(|r| (r, sign)));
+                        }
+                        v.extend(rows);
                     }
-                }
-                if let Some(whose) = whose {
-                    v.extend(wrapped(whose, 2));
-                }
+                    // Claude's calls held back behind it (#87 — claude makes them one after another, so its
+                    // reads waited here unseen): which, faint
+                    if let crate::offer::What::Run(r) = &o.what {
+                        let behind = crate::chat::behind_run(editor, &r.cmd);
+                        if !behind.is_empty() {
+                            let n = behind.len();
+                            let calls = if n == 1 { "call waits" } else { "calls wait" };
+                            v.push((String::new(), true));
+                            v.extend(wrapped(
+                                &format!("{n} more {calls} on this: {}", behind.join(" · ")),
+                                2,
+                            ));
+                        }
+                    }
+                    // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
+                    // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
+                    let whose = if editor.card_keys {
+                        Some("esc goes back, unanswered")
+                    } else if !editor.card_has_keys() {
+                        Some("C-q to answer it — what you're typing stays")
+                    } else {
+                        None
+                    };
+                    // What waits behind it, and where (frictions15 #5: `C-q` takes the oldest here — the rest
+                    // were a queue the card didn't name)
+                    let behind = editor.cards_behind_said();
+                    if behind.is_some() || whose.is_some() {
+                        v.push((String::new(), true));
+                    }
+                    // (too long for a row: where they are, then the key — not the key's words cut off alone)
+                    if let Some(behind) = &behind {
+                        match behind.split_once(" · ").filter(|_| behind.width() > max_inner) {
+                            Some((wheres, key)) => {
+                                v.extend(wrapped(wheres, 2));
+                                v.extend(wrapped(key, 1));
+                            }
+                            None => v.extend(wrapped(behind, 2)),
+                        }
+                    }
+                    if let Some(whose) = whose {
+                        v.extend(wrapped(whose, 2));
+                    }
+                    v
+                };
+                let mut skip: Vec<usize> = Vec::new();
+                let v = loop {
+                    (warn, diff) = (Vec::new(), Vec::new());
+                    let v = build(&skip, &mut warn, &mut diff);
+                    let next = o.folds.iter().find(|f| !(f.start..f.end).all(|k| skip.contains(&k)));
+                    match next.filter(|_| v.len() > room) {
+                        Some(f) => skip.extend(f.clone()),
+                        None => break v,
+                    }
+                };
                 (v, Some(b))
             }
             OfferState::Installing(_) => {
@@ -9498,9 +9562,10 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
             n => vec![(Tone::High, format!("▲ {n} high to look at"))],
         });
     }
-    let this = editor.session.reviewer.as_ref().filter(|rv| rv.of == r.started);
+    // (the session's last run, whatever review is open — it reads a snapshot of its own: bgreview)
+    let this = editor.session.reviewer.as_ref();
     // High-risk changes no board has read: where it pays, the key for it
-    if any_high && !this.is_some_and(crate::reviewer::Reviewer::board_read) {
+    if any_high && !crate::reviewer::board_read_of(editor, r) {
         let key = "space v C";
         let said = ["  a board reads the ▲", "  a board"].into_iter().find(|s| key.width() + s.width() <= w);
         rows.push(vec![(Tone::Key, key.to_string()), (Tone::Faint, said.unwrap_or_default().to_string())]);
@@ -9508,6 +9573,7 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
     let Some(rv) = this else { return rows };
     if rv.board.is_some() {
         rows.extend(rail_board(editor, rv, w));
+        rows.extend(rail_read_at(rv, r, w));
         return rows;
     }
     let mut row = vec![(Tone::Reviewer, "reviewer".to_string())];
@@ -9559,7 +9625,35 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
     if let Some(first) = rv.verdict.lines().map(str::trim).find(|l| !l.is_empty()) {
         rows.push(vec![(Tone::Dim, format!("“{first}”"))]);
     }
+    rows.extend(rail_read_at(rv, r, w));
     rows
+}
+
+/// The rail's `read uncommitted at 14:02 · 2 files changed since` (bgreview): faint, under the reviewer's rows,
+/// when what it read isn't this review's — another base, or files changed since its snapshot (on disk, or changed
+/// only since: not among the files it read). The changes go on the row under where both don't fit.
+fn rail_read_at(
+    rv: &crate::reviewer::Reviewer,
+    r: &crate::codereview::CodeReview,
+    w: usize,
+) -> Vec<Vec<(Tone, String)>> {
+    // (its files changed on disk since its snapshot, and this review's files it didn't have changed then)
+    // (none known — no snapshot's digests: nothing said of them)
+    let read = |p: &std::path::Path| rv.digests.is_empty() || rv.digests.iter().any(|(q, _)| q == p);
+    let changed = rv.changed.as_ref().map_or(0, Vec::len) + r.files.iter().filter(|f| !read(&f.path)).count();
+    let other = rv.label != r.base.label();
+    if !other && changed == 0 {
+        return Vec::new();
+    }
+    let stamp = crate::log::stamp(rv.at);
+    let when = stamp.get(11..16).unwrap_or(&stamp);
+    let read = format!("read {} at {when}", rv.label);
+    let since = format!("{} changed since", crate::nav::count(changed, "file"));
+    match changed {
+        0 => vec![vec![(Tone::Faint, fit_ellipsis(&read, w))]],
+        _ if read.width() + 3 + since.width() <= w => vec![vec![(Tone::Faint, format!("{read} · {since}"))]],
+        _ => vec![vec![(Tone::Faint, fit_ellipsis(&read, w))], vec![(Tone::Faint, fit_ellipsis(&since, w))]],
+    }
 }
 
 /// The board's rows on the rail (`board.rs`): while it reads, its head (how long, what it cost so far — or
@@ -10051,6 +10145,7 @@ fn sessions_counted(editor: &Editor) -> [String; 2] {
 fn session_tabs(
     editor: &Editor,
     w: usize,
+    rail_w: usize,
     [strong, dim, faint, accent, warn, reviewer]: [Style; 6],
 ) -> (Vec<crate::markdown::Span>, Vec<(usize, usize, crate::session::Spot)>) {
     use crate::markdown::Span;
@@ -10096,8 +10191,10 @@ fn session_tabs(
         if let Some(m) = mark(l) {
             end = put(&mut spans, m.text, m.style);
         }
-        // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195)
-        if let Some(said) = crate::reviewer::session_said(editor, l) {
+        // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195; the front session's
+        // left to the status line's segment while that shows — bgreview)
+        let front = l.id == editor.session.id && crate::reviewer::status_shows(editor, rail_w);
+        if let Some(said) = crate::reviewer::session_said(editor, l).filter(|_| !front) {
             let said = if said == "reviewing" { " ¶ reviewing" } else { " ¶ waits" };
             end = put(&mut spans, said.into(), reviewer);
         }
@@ -10129,7 +10226,8 @@ fn session_tabs(
         Some(glyph) if glyph.starts_with(" ▲") => Span { text: glyph.to_string(), ..m },
         _ => m,
     });
-    let reviewing = editor.session.reviewing().then(|| Span { text: " ¶".into(), style: reviewer });
+    let reviewing = (editor.session.reviewing() && !crate::reviewer::status_shows(editor, rail_w))
+        .then(|| Span { text: " ¶".into(), style: reviewer });
     let rebasing = rebasing(&editor.session);
     let marks_w = [&mark, &reviewing, &rebasing]
         .iter()
@@ -10677,7 +10775,8 @@ fn draw_chat(
         let warn =
             t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
         let reviewer = Style { fg: reviewer_style(editor, ui).fg, ..card };
-        let (spans, spots) = session_tabs(editor, w, [strong, dim, faint, accent, warn, reviewer]);
+        let (spans, spots) =
+            session_tabs(editor, w, lay.rail_w, [strong, dim, faint, accent, warn, reviewer]);
         chat_row_start(out, x0, y, edge(y), card)?;
         let used = chat_spans(out, &spans, card, w)?;
         chat_row_end(out, card, lay.chat_w, used)?;
@@ -13781,6 +13880,7 @@ mod tests {
                 held: None,
                 gate: Vec::new(),
                 held_changes: Vec::new(),
+                folds: Vec::new(),
                 aside: false,
                 like: Vec::new(),
                 came: 0,

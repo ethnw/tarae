@@ -62,10 +62,6 @@ pub struct Session {
     /// Its edit review and code review as the review record follows them — time on each change, what each
     /// ended as (`reviews.rs`).
     pub reviews: crate::reviews::Watches,
-    /// The review being opened is for the reviewer (`space v c`) — asked once it's open; for the board
-    /// (`space v C`) when `review_board` too.
-    pub review_ask: bool,
-    pub review_board: bool,
     /// A yes on the board's card (`board::Ask`), and the chat's conversation it was given in: another board in this
     /// session starts unasked while that conversation goes on. Not kept past a restart.
     pub board_yes: Option<Option<String>>,
@@ -305,8 +301,6 @@ impl Session {
             review: None,
             applying: None,
             code_review: None,
-            review_ask: false,
-            review_board: false,
             board_yes: None,
             review_high: None,
             held_view: None,
@@ -480,6 +474,8 @@ pub enum Spot {
     Next,
     /// The status line's `▲3 waiting`: the inbox.
     Inbox,
+    /// The status line's `¶ reviewing` (bgreview): the reviewer's report (`space v r`).
+    Reviewer,
 }
 
 /// What a session's Claude is doing, as its tab and its row in the session list say it.
@@ -1237,6 +1233,7 @@ impl Editor {
             Spot::Inbox => self.inbox_open(),
             Spot::Granted => self.granted(),
             Spot::Shuttle => crate::shuttle::end(self),
+            Spot::Reviewer => crate::reviewer::verdict(self),
         }
     }
 

@@ -2150,7 +2150,25 @@ fn run_search_traced(
 ) -> Result<String, String> {
     let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
     let shut = |f: &crate::grep::File| keys.shut(&root.join(&f.rel));
-    let query = crate::grep::Query {
+    let query = grep_query(q, true);
+    let mut search = |each: &mut dyn FnMut(crate::grep::File) -> bool| {
+        crate::grep::search(&root, scopes, &query, &|| false, &mut |f| shut(&f) || each(f))
+    };
+    let unsaved: Vec<String> =
+        unsaved.iter().filter(|p| scopes.iter().any(|s| p.starts_with(s))).map(|p| rel(&root, p)).collect();
+    let note = match unsaved.is_empty() {
+        true => String::new(),
+        false => {
+            format!("\n(unsaved edits in {} aren't searched — what's here is from disk)", unsaved.join(", "))
+        }
+    };
+    let mut told = OnDisk { t: crate::testcode::Tests::new(&root), root: root.clone() };
+    Ok(answer_of(q, &mut search, &mut told, trace)? + &note)
+}
+
+/// `q` as grep.rs takes it — `judged`: each file read only where it really is in its scope (`grep::Query`).
+fn grep_query(q: &Query, judged: bool) -> crate::grep::Query<'_> {
+    crate::grep::Query {
         pattern: &q.pattern,
         literal: q.literal,
         case: q.case,
@@ -2166,28 +2184,112 @@ fn run_search_traced(
         },
         multiline: q.multiline,
         exclude: &q.exclude,
-        // (its scopes judged — each file read only where it really is in one: `grep::Query::judged`)
-        judged: true,
-    };
-    let search = |each: &mut dyn FnMut(crate::grep::File) -> bool| {
-        crate::grep::search(&root, scopes, &query, &|| false, each)
-    };
-    let unsaved: Vec<String> =
-        unsaved.iter().filter(|p| scopes.iter().any(|s| p.starts_with(s))).map(|p| rel(&root, p)).collect();
-    let note = match unsaved.is_empty() {
-        true => String::new(),
-        false => {
-            format!("\n(unsaved edits in {} aren't searched — what's here is from disk)", unsaved.join(", "))
+        judged,
+    }
+}
+
+/// What tells a search's hits in test code from the rest and names the symbol each is in: the checkout's files
+/// (`OnDisk`) or a snapshot's texts (`InSnapshot`). Paths are from the root.
+trait Told {
+    /// Makes ready what the hits in `rels` will ask.
+    fn prefetch(&mut self, rels: &[&str]);
+    /// Line `line` (from 0) of `rel` is test code.
+    fn test_at(&mut self, rel: &str, line: usize) -> bool;
+    /// All of `rel` is.
+    fn test_whole(&mut self, rel: &str) -> bool;
+    fn outline(&mut self, rel: &str) -> Option<std::sync::Arc<Vec<Sym>>>;
+    /// What it parsed, for the trace.
+    fn parsed(&self) -> String;
+}
+
+struct OnDisk {
+    root: PathBuf,
+    t: crate::testcode::Tests,
+}
+
+impl Told for OnDisk {
+    fn prefetch(&mut self, rels: &[&str]) {
+        self.t.prefetch(&rels.iter().map(|f| self.root.join(f)).collect::<Vec<_>>());
+    }
+    fn test_at(&mut self, rel: &str, line: usize) -> bool {
+        self.t.at(&self.root.join(rel), line)
+    }
+    fn test_whole(&mut self, rel: &str) -> bool {
+        self.t.whole(&self.root.join(rel))
+    }
+    fn outline(&mut self, rel: &str) -> Option<std::sync::Arc<Vec<Sym>>> {
+        crate::outlines::of(&self.root.join(rel)).ok()
+    }
+    fn parsed(&self) -> String {
+        format!("{} parsed, {} KB", self.t.parsed, self.t.parsed_bytes / 1024)
+    }
+}
+
+/// A snapshot's texts tell it (`snapread.rs`): test code by the file's name, and in Rust by the test attributes
+/// in its own text — a file taken in by another's `#[cfg(test)] mod x;` isn't followed (no file system to look
+/// through).
+struct InSnapshot<'a> {
+    snap: &'a crate::snapread::Snap,
+    texts: HashMap<String, std::sync::Arc<[u8]>>,
+    tests: HashMap<String, Vec<std::ops::Range<usize>>>,
+}
+
+impl InSnapshot<'_> {
+    fn text(&self, rel: &str) -> Option<String> {
+        self.texts.get(rel).map(|t| String::from_utf8_lossy(t).into_owned())
+    }
+}
+
+impl Told for InSnapshot<'_> {
+    fn prefetch(&mut self, rels: &[&str]) {
+        let texts = &mut self.texts;
+        let _ = self.snap.each_text(rels, &mut |rel, t| {
+            texts.insert(rel.to_string(), t);
+            true
+        });
+    }
+    fn test_at(&mut self, rel: &str, line: usize) -> bool {
+        if crate::testcode::by_name(Path::new(rel)) {
+            return true;
         }
-    };
-    let text = match q.output {
+        if !rel.ends_with(".rs") {
+            return false;
+        }
+        if !self.tests.contains_key(rel) {
+            let lines = self.text(rel).map(|t| crate::testcode::rust_test_lines(&t)).unwrap_or_default();
+            self.tests.insert(rel.to_string(), lines);
+        }
+        self.tests[rel].iter().any(|r| r.contains(&line))
+    }
+    fn test_whole(&mut self, rel: &str) -> bool {
+        crate::testcode::by_name(Path::new(rel))
+    }
+    fn outline(&mut self, rel: &str) -> Option<std::sync::Arc<Vec<Sym>>> {
+        let text = self.text(rel)?;
+        self.snap.outline(rel, &text).ok()
+    }
+    fn parsed(&self) -> String {
+        format!("{} of the snapshot's Rust files parsed", self.tests.len())
+    }
+}
+
+/// A search handing each file it finds to `each` (false: enough) — Ok: the first thing it couldn't read, if any.
+type Searched<'a> =
+    dyn FnMut(&mut dyn FnMut(crate::grep::File) -> bool) -> Result<Option<String>, String> + 'a;
+
+/// The answer to `q` from what `search` finds (Ok: the first thing it couldn't read, if any), told apart and
+/// enclosed by `told`, its steps said in `trace`.
+fn answer_of(
+    q: &Query,
+    search: &mut Searched,
+    told: &mut dyn Told,
+    trace: &mut crate::trace::Trace,
+) -> Result<String, String> {
+    Ok(match q.output {
         Output::Lines => {
             let mut files: BTreeMap<String, Vec<Row>> = BTreeMap::new();
             let mut hits = 0;
             let warn = search(&mut |f| {
-                if shut(&f) {
-                    return true;
-                }
                 hits += f.hits;
                 let rows = f.rows.into_iter().map(|r| Row {
                     line: r.line,
@@ -2201,11 +2303,10 @@ fn run_search_traced(
             if files.is_empty() {
                 return no_hits(warn, q);
             }
-            let mut t = crate::testcode::Tests::new(&root);
-            t.prefetch(&files.keys().map(|f| root.join(f)).collect::<Vec<_>>());
-            let mut entries = entries(files, &mut |path, line| t.at(&root.join(path), line - 1));
-            trace.step(format!("test code told ({} parsed, {} KB)", t.parsed, t.parsed_bytes / 1024));
-            let outlined = enclose(&mut entries, &root, q.tests, q.offset, q.limit);
+            told.prefetch(&files.keys().map(String::as_str).collect::<Vec<_>>());
+            let mut entries = entries(files, &mut |path, line| told.test_at(path, line - 1));
+            trace.step(format!("test code told ({})", told.parsed()));
+            let outlined = enclose(&mut entries, told, q.tests, q.offset, q.limit);
             trace.step(format!("symbols ({outlined} outlines)"));
             lines_text(entries, q.tests, hits >= HITS_MAX, q.offset, q.limit) + &warned(warn)
         }
@@ -2213,9 +2314,7 @@ fn run_search_traced(
             let mut rows: Vec<String> = Vec::new();
             let counts = q.output == Output::Count;
             let warn = search(&mut |f| {
-                if !shut(&f) {
-                    rows.push(if counts { format!("{}:{}", f.rel, f.hits) } else { f.rel });
-                }
+                rows.push(if counts { format!("{}:{}", f.rel, f.hits) } else { f.rel });
                 true
             })?;
             trace.step(format!("walked ({} files hit)", rows.len()));
@@ -2223,21 +2322,62 @@ fn run_search_traced(
                 return no_hits(warn, q);
             }
             // A file all test code goes last (one with some tests in it is counted with the rest)
-            let mut t = crate::testcode::Tests::new(&root);
             let mut rows: Vec<(String, bool)> = rows
                 .into_iter()
                 .map(|r| {
                     let path = if counts { r.rsplit_once(':').map_or(r.as_str(), |(p, _)| p) } else { &r };
-                    let test = t.whole(&root.join(path));
+                    let test = told.test_whole(path);
                     (r, test)
                 })
                 .collect();
-            trace.step(format!("test code told ({} parsed, {} KB)", t.parsed, t.parsed_bytes / 1024));
+            trace.step(format!("test code told ({})", told.parsed()));
             crate::sorting::by(&mut rows, |a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
             files_text(rows, q.tests, q.output, q.offset, q.limit) + &warned(warn)
         }
+    })
+}
+
+/// The reviewer's `search` (bgreview): `args` as the chat's search takes them, over snapshot `snap`
+/// (`snapread.rs`) — its files' texts as it was taken, whatever the checkout holds now; the answer in the chat's
+/// form. `path` outside the checkout, a file it leaves out or nothing there is an error saying so; files named
+/// like a key are never in it. A worker's (it reads git).
+pub fn search_snapshot(snap: &crate::snapread::Snap, args: &Value) -> Result<String, String> {
+    use crate::snapread::Found;
+    let q = query_of(args)?;
+    let mut scopes: Vec<String> = Vec::new();
+    for p in &q.paths {
+        let rel = snap.rel_of(p).ok_or_else(|| {
+            format!("{p} is outside the checkout — the reviewer searches only its snapshot")
+        })?;
+        match snap.found(&rel) {
+            Found::File | Found::Folder => scopes.push(rel),
+            Found::Left(why) => return Err(format!("{rel}: {}", why.said())),
+            Found::Nothing => return Err(format!("{p}: no such file or folder in the snapshot")),
+        }
+    }
+    if scopes.is_empty() {
+        scopes.push(String::new());
+    }
+    let mut rels: Vec<&str> = scopes.iter().flat_map(|s| snap.files_in(s)).collect();
+    crate::sorting::sort(&mut rels);
+    rels.dedup();
+    let query = grep_query(&q, false);
+    let rels = crate::grep::chosen(&snap.root, &query, rels.into_iter())?;
+    let mut search = |each: &mut dyn FnMut(crate::grep::File) -> bool| {
+        let mut texts =
+            |f: &mut dyn FnMut(&str, &[u8]) -> bool| snap.each_text(&rels, &mut |rel, t| f(rel, &t));
+        match query.mode {
+            // (the names alone: no text read)
+            crate::grep::Mode::Names => {
+                rels.iter()
+                    .all(|r| each(crate::grep::File { rel: r.to_string(), rows: Vec::new(), hits: 0 }));
+            }
+            _ => crate::grep::search_texts(&query, &mut texts, each)?,
+        }
+        Ok(None)
     };
-    Ok(text + &note)
+    let mut told = InSnapshot { snap, texts: HashMap::new(), tests: HashMap::new() };
+    answer_of(&q, &mut search, &mut told, &mut crate::trace::Trace::new(""))
 }
 
 fn no_hits(warn: Option<String>, q: &Query) -> Result<String, String> {
@@ -2306,7 +2446,7 @@ fn entries(files: BTreeMap<String, Vec<Row>>, is_test: &mut dyn FnMut(&str, usiz
 /// The symbol each hit `lines_text` will show is in (`Entry.within`), from the files' outlines
 /// (`outlines.rs`, kept while unchanged) — the entries up to hit `offset + limit` (the shown ones; a few
 /// past, test code being listed last). The files whose outline was read.
-fn enclose(entries: &mut [Entry], root: &Path, tests: bool, offset: usize, limit: usize) -> usize {
+fn enclose(entries: &mut [Entry], told: &mut dyn Told, tests: bool, offset: usize, limit: usize) -> usize {
     let mut seen = 0;
     let mut read = 0;
     for e in entries.iter_mut().filter(|e| tests || !e.test) {
@@ -2314,7 +2454,7 @@ fn enclose(entries: &mut [Entry], root: &Path, tests: bool, offset: usize, limit
             break;
         }
         seen += e.hits();
-        let Ok(syms) = crate::outlines::of(&root.join(&e.path)) else { continue };
+        let Some(syms) = told.outline(&e.path) else { continue };
         read += 1;
         let of = |r: &Row| {
             let s = crate::outlines::holding(&syms, r.line.saturating_sub(1)).filter(|_| r.hit)?;

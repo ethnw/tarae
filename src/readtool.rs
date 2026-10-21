@@ -266,16 +266,30 @@ fn section(mut o: crate::paths::Opened, shown: &str, it: &Item, left: &mut usize
         return format!("== {shown}: {e}\n");
     }
     let (real, stamp) = (o.real.as_path(), crate::testcode::stamp_of(&o.meta));
+    section_of(&bytes, &|text| crate::outlines::of_text(real, stamp, text), shown, it, left)
+}
+
+/// A file's outline, or why there's none.
+type Outline = Result<std::sync::Arc<Vec<crate::nav::Sym>>, String>;
+
+/// `section` of a file's `bytes`, its outline from `outline_of` (given its text).
+fn section_of(
+    bytes: &[u8],
+    outline_of: &dyn Fn(&str) -> Outline,
+    shown: &str,
+    it: &Item,
+    left: &mut usize,
+) -> String {
     if bytes.contains(&0) {
         return format!("== {shown}: binary — not read\n");
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().collect();
     let n = lines.len();
     let of = format!("of {n} line{}", if n == 1 { "" } else { "s" });
     let ranges: Vec<(usize, usize, String)> = match &it.want {
         Want::Whole if bytes.len() > WHOLE_MAX => {
-            return outline(crate::outlines::of_text(real, stamp, &text), shown, &lines, bytes.len(), left);
+            return outline(outline_of(&text), shown, &lines, bytes.len(), left);
         }
         Want::Whole => vec![(1, n, format!("== {shown} ({of})"))],
         Want::Tail(k) => {
@@ -285,7 +299,7 @@ fn section(mut o: crate::paths::Opened, shown: &str, it: &Item, left: &mut usize
         Want::Lines(rs) => {
             rs.iter().map(|&(a, b)| (a, b.min(n), format!("== {shown}:{a}-{} ({of})", b.min(n)))).collect()
         }
-        Want::Symbol(name) => match crate::outlines::of_text(real, stamp, &text) {
+        Want::Symbol(name) => match outline_of(&text) {
             Err(e) => return format!("== {shown}:{name}: no symbols — {e}; ask for line ranges\n"),
             Ok(syms) => {
                 let found = crate::outlines::named(&syms, name);
@@ -326,6 +340,68 @@ fn section(mut o: crate::paths::Opened, shown: &str, it: &Item, left: &mut usize
         }
     }
     out
+}
+
+/// The reviewer's `read` (bgreview): the items of `args` read from snapshot `snap` (`snapread.rs`) — the texts as
+/// it was taken, whatever the files hold now, in the chat's form. A path outside the checkout, a file it leaves
+/// out (named like a key, a link, …) or none there is said in its item's place; Err: nothing could be read. A
+/// worker's (it reads git).
+pub fn read_snapshot(snap: &crate::snapread::Snap, args: &Value) -> Result<String, String> {
+    use crate::snapread::Found;
+    let items = items_of(args)?;
+    let rels: Vec<Option<String>> = items.iter().map(|it| snap.rel_of(&it.path)).collect();
+    let wanted: Vec<&str> = rels.iter().flatten().map(String::as_str).collect();
+    let mut texts: std::collections::HashMap<String, std::sync::Arc<[u8]>> = Default::default();
+    snap.each_text(&wanted, &mut |rel, t| {
+        texts.insert(rel.to_string(), t);
+        true
+    })?;
+    let (mut out, mut left, mut read) = (String::new(), LINES_MAX, 0);
+    for (it, rel) in items.iter().zip(&rels) {
+        let Some(rel) = rel else {
+            out.push_str(&format!(
+                "== {}: outside the checkout — the reviewer reads only its snapshot\n",
+                it.given
+            ));
+            continue;
+        };
+        // (an instruction file git ignores: the checkout's, said so in each header)
+        if let Some(got) = snap.instruction(rel) {
+            match got {
+                Ok(bytes) => {
+                    read += 1;
+                    let none = |_: &str| Err(String::new());
+                    for l in section_of(&bytes, &none, rel, it, &mut left).lines() {
+                        let from = if l.starts_with("== ") {
+                            " — from the checkout: not in the snapshot"
+                        } else {
+                            ""
+                        };
+                        out.push_str(&format!("{l}{from}\n"));
+                    }
+                }
+                Err(why) => out.push_str(&format!("== {rel}: {why}\n")),
+            }
+            continue;
+        }
+        match (snap.found(rel), texts.get(rel)) {
+            (Found::File, Some(bytes)) => {
+                read += 1;
+                let outline = |text: &str| snap.outline(rel, text);
+                out.push_str(&section_of(bytes, &outline, rel, it, &mut left));
+            }
+            (Found::Folder, _) => {
+                out.push_str(&format!("== {}: a folder — search with output files lists it\n", it.given))
+            }
+            (Found::Left(why), _) => out.push_str(&format!("== {rel}: {}\n", why.said())),
+            _ => out.push_str(&format!("== {}: no such file in the snapshot\n", it.given)),
+        }
+    }
+    let out = out.trim_end().to_string();
+    match read {
+        0 => Err(out),
+        _ => Ok(out),
+    }
 }
 
 /// A big file asked whole: its outline with line numbers and how to ask for the text — or, with no outline

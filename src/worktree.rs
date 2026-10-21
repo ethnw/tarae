@@ -5403,10 +5403,9 @@ mod tests {
             crate::notes::By::Reviewer,
             "unsafe, unsaid why",
         );
-        let of = std::time::Instant::now();
         let done = crate::reviewer::State::Done;
         ed.session.reviewer =
-            Some(crate::reviewer::Reviewer::for_test(of, wt.clone(), done, vec![id], "One risk."));
+            Some(crate::reviewer::Reviewer::for_test(wt.clone(), done, vec![id], "One risk."));
         let title = "Bring risky into main";
         feed(&mut ed, ":session-bring<ret>");
         settle_until(&mut ed, |ed| card(ed, title).is_some() || says(ed, "bring risky:"));

@@ -518,7 +518,7 @@ const DOCS: &[DocShot] = &[
     row("notes.png", None, S),
     row("commit-draft.png", None, S),
     row("review.png", Some("codereview"), S),
-    row("claude-reviews.png", None, S),
+    row("claude-reviews.png", Some("bgreviewnote"), S),
     row("review-risk.png", Some("risk"), S),
     row("review-end-held.png", Some("riskend"), S).light(),
     // docs/features.md

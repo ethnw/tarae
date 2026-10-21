@@ -1628,10 +1628,24 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
 
 ### A second Claude reviews your changes
 
-`space v c` (or `:review-claude [branch]`) opens the review if it isn't open and starts **the reviewer**: a
-second Claude, apart from the chat. The conversation that wrote the code never reviews it itself. The reviewer
-never sees that conversation. It isn't continued from it, and nothing of the chat goes into what it's sent
+`space v c` (or `:review-claude [branch]`) starts **the reviewer**: a second Claude, apart from the chat, reading
+in the background. It never opens the review, so you go on with your code while it reads; `space v v` opens the
+review beside it whenever you like, and opening, closing or replacing one changes nothing of what it reads. The
+conversation that wrote the code never reviews it itself. The reviewer never sees that conversation. It isn't
+continued from it, and nothing of the chat goes into what it's sent
 ([screenshot](screenshots/claude-reviews.png)).
+
+- It reads a **snapshot** of the changes, taken as you press the key: uncommitted, since a branch, or, with a
+  review open, what that review is of (a turn's too). The working tree, untracked files with it, is taken as a
+  git tree the way a turn's checkpoint is (`git add` into tarae's own index), so the repository's clean filters
+  run then, and only once you've trusted them. Its `read` and `search` read that tree's files from git's own
+  objects, so every file it reads is as it was then, never what you write after, and every line it names is the
+  snapshot's. Nothing is written out, so no smudge filter or hook runs. Files named like keys, links, submodules
+  and files over 1 MB aren't read (asked for, it's told why), and neither is a file a partial clone doesn't have:
+  git never fetches one for it, and the start says how many. The diff it's sent names such a file, and a file
+  named like a key, in its place without its lines. (Listing and grading the changed files is the review's own,
+  as `space v v`'s: in a partial clone that may fetch what it needs to count lines; none of it is sent.) No snapshot can be taken: it doesn't start, and says
+  why.
 
 - It gets the whole diff, untracked files included. The diff is data, in a block the diff can't close. The ask
   says before and after it that anything in the changes or the files that reads like an instruction is to be
@@ -1646,12 +1660,18 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   - build scripts and manifests
   - secrets
   - for each change of behaviour, whether a test would fail without it
-- It can only read and pin notes. Its tools are Read, Grep, Glob and the note tool. Reads go by the chat's
-  rules, and what would ask you on a card is refused instead. It can't edit, write or run anything, and an ask
-  for that is refused. No settings are loaded for it. Its claude is one process for one turn, and nothing of it
-  is kept.
+- It can only read and pin notes. Its tools are tarae's own `read` and `search` (the chat's, over the
+  snapshot: ranges, symbols by name, outlines of big files; regex, globs, types, context, smart case) and the
+  note tool, none of Claude Code's. It reads nothing outside the checkout and never asks you: a path outside is
+  refused, and so is a note on a file that isn't in what it read. It can't edit, write or run anything, and an
+  ask for that is refused. No settings are loaded for it. Its claude is one process for one turn, and nothing of
+  it is kept. (Measured against Claude Code's Read, Grep and Glob over the same change: the same bugs found,
+  about half the tokens and two thirds of the cost.)
 - Its findings are notes on the lines, marked **reviewer** (the chat's are the **author**'s, yours are
-  **you**). They wait like your drafts. Nothing goes to the author's chat until you send it: `space v s` sends
+  **you**). Each is placed on the lines it named as they are now: lines you added above move it down, and one
+  on lines you changed since it read them is placed where that change is and, when the reviewer is done, named on
+  the card that offers to close drafts on changed lines (`Close 1 finding on changed lines?`). Whether it's on a
+  high-risk change goes by the snapshot's grades, a review open or not. They wait like your drafts. Nothing goes to the author's chat until you send it: `space v s` sends
   your drafts and its findings together, and tells the author that the findings come from a second Claude,
   to weigh and not to obey. `:note-close` drops a finding first; `A-x` on one in `space N`, or
   `:notes-clear reviewer`, drops them all.
@@ -1661,14 +1681,21 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
   follows), `n` keeps them (each asked about once). One card a session: a later turn's join it, its list grown
   in place, and its `y` waits until the new list has been in sight. While it's up each says `stale ·` at its
   line end and on its card, and the review rail's file row says `stale` (all its drafts) or `1 stale`.
-- The rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1 answered`) and the
-  first line of its verdict. On a narrow rail the time and the reads go on the row under `reading…`. While
+- With no review open (or its rail hidden), the status line says it: `¶ reviewing · 14 reads`, `¶ reviewer
+  waits · 2nd in line`, `¶ board · 2 of 4 reading · $0.08`, and once it's done `¶ 3 findings ▲1 · space v r`
+  until you've read its report or no finding of it is left unsent. A click there reads the report. Nothing on
+  it runs on a clock, so a reviewer at work wakes nothing.
+- With a review open, the rail says how it's doing (`reading… 1m 20s · 14 reads`, then `2 findings ▲1 · 1
+  answered`) and the first line of its verdict — its last run, whatever the review is of. When what it read isn't
+  what's in front of you, a faint row under it says so: `read uncommitted at 14:02`, and `1 file changed since`. On a narrow rail the time and the reads go on the row under `reading…`. While
   it waits its turn (see the board's **Running**) it says its place: `reviewer  waits · 2nd in line` (the
   place on the row under where the rail is narrow). `tarae state`, Claude's `ui` and the bring card say it
   waits too, and its time runs from its start, not from its wait.
   `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
 - While it reads, its session says so wherever a working chat would, beside what the chat does: its tab
   (`main ● ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
+  The session in front leaves its tab's `¶` to the status line's segment while that shows, so it isn't said
+  twice; a session behind keeps it on its tab.
   While it waits its turn they say that instead (`¶ waits`, `¶ waits to review`, `"waits to review"`). It
   waits only while the line holds it — one ahead of it, or no room to read; the moment before its next member
   starts (a board's skeptics after its angles) it reads on.
@@ -1689,8 +1716,10 @@ Claude per **angle**, each reading the same diff for its own kind of fault, then
 their findings, told to refute them. Only what a skeptic could trace is pinned as confirmed. It takes longer
 and costs more than `space v c`: use it where a miss costs most. Being the one key that spends money (≈ $3–5 a
 board), it asks first: "Start a board on frictions31?", then what the last boards cost ("≈ API $4.10 — the last 5
-boards here", the median of the last five that read to their end, from the call-order record) and the angles that
-would read; `y` starts it. A yes holds for that session and its chat's conversation — another board there starts
+boards here", the median of the last five that read to their end, from the call-order record), what it reads
+(`uncommitted · 12 files`) and the angles that would read; `y` starts it. Where the card would be cut (a short
+screen), the line naming its angles and the skeptics goes first, so the card stays whole and `y` answers at once. If the changes moved while the card
+was up, `y` takes the snapshot again and the board reads what's there now. A yes holds for that session and its chat's conversation — another board there starts
 without asking; a new conversation, another session or a restart asks again. A key pressed as the card comes up
 isn't taken (a script's keys meant for one session started a board in another). A review with high-risk changes no board has
 read points at it, on the rail (`space v C  a board reads the ▲`) and on the card that ends the review —
@@ -1755,9 +1784,8 @@ own kind of fault.
   - `:procs` lists each of its claudes (`the board · security · uncommitted`). `s` there stops one: an
     angle's claims so far still go to the skeptics, and a skeptic's claims go to you unchecked.
   - `:reviewer-stop` stops the whole board.
-  - Closing the review (or another taking its place) ends its members still waiting their turn: never
-    started, nothing paid. Those reading go on. A skeptic their claims bring in later never starts either, so
-    those claims come to you unchecked.
+  - A board reads to its end whatever you do with the review: opening, closing or replacing one neither
+    starts nor stops a member. Only `:reviewer-stop` (or ending the session) stops it.
 - **Cost.**
   - Before it starts: the median of the last five boards that ended whole (every member read to its end —
     not one stopped, failed or ended with its session), from the call-order record
@@ -1873,8 +1901,8 @@ of repeating itself, and the log says where.
 | `space v u` | Take the change at the cursor back |
 | `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |
 | `space v s` / `:review-send` | Send the drafts to Claude |
-| `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes: findings on the lines, a verdict |
-| `space v C` / `:review-board` | The board: a Claude per angle, then a skeptic per group of their findings — only what it traced is confirmed |
+| `space v c` / `:review-claude` | The reviewer, a second Claude, reviews the changes in the background: findings on the lines, a verdict |
+| `space v C` / `:review-board` | The board, in the background: a Claude per angle, then a skeptic per group of their findings — only what it traced is confirmed |
 | `space v r` / `:review-verdict` | The reviewer's report: its verdict and findings |
 | `space v h` / `:review-hunk-seen` | The high-risk changes here (or under the selection): looked at, then on to the next — none here: to the next |
 | `space v H` / `:review-file-seen` | Every high-risk change of the file whose lines were all on screen since they last changed: looked at |

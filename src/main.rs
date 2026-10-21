@@ -158,6 +158,7 @@ mod signature;
 mod sim;
 mod sinceyes;
 mod sizes;
+mod snapread;
 mod snapshot;
 mod sorting;
 mod spawn;

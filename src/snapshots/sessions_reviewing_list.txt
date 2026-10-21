@@ -2,7 +2,7 @@
 ## text
 00 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄   claude                                                 ready
 01    1–3 switch to that row                                                         sessions  3/3    ────────────────────────────────────────────────────────────
-02  ──────────────────────────────────────────────────────────────────────────────────────────────    main ¶ reviewing │ fix-login ● ¶ reviewing │ docs • │ +
+02  ──────────────────────────────────────────────────────────────────────────────────────────────    main │ fix-login ● ¶ reviewing │ docs • │ +
 03 ▎   main                                                               here     ¶ reviewing
 04   ● fix-login                                                          working  ¶ reviewing        ▎ Ask Claude
 05     docs                                                                        ¶ reviewer done
@@ -15,7 +15,7 @@
 12                                                                                                    ────────────────────────────────────────────────────────────
 13                                                                                                    › Ask about [scratch]…
 14 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   space l focus  space L close
-15  ● picker   enter switch  n new  w keep warm  $ billing  esc close                                                                              utf-8 LF   1:1
+15  ● picker   enter switch  n new  w keep warm  $ billing  esc close  ¶ reviewing · 0 reads                                                       utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00                                                                                                  ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 01 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -36,7 +36,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                                                    dddddd                                                 fffff
 01    fff ffffff ff ffff fff                                                         ffffffff  fff    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    TTTT             f ddddddddd a             f dddd d f d
+02  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    TTTT f ddddddddd a             f dddd d f d
 03 a   TTTT                                                               dddd     d ddddddddd
 04   a                                                                    ddddddd  d ddddddddd        a TTT TTTTTT
 05                                                                                 d dddddddd dddd
@@ -49,7 +49,7 @@
 12                                                                                                    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 13                                                                                                    f fff fffff ffffffffff
 14                                                                                                    DDDDD D fffff  DDDDD D fffff
-15  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff                                                                              ddddd dd   TTT
+15  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff              d d ddddd                                                       ddddd dd   TTT
 ## legend
 bg: p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr

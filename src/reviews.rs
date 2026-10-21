@@ -1161,8 +1161,9 @@ fn outcomes(ed: &Editor, r: &crate::codereview::CodeReview, w: &mut Watch) {
         }
     }
     w.total = Some(total);
-    // (each finding of its reviewer's — when the reviewer read this review)
-    if ed.session.reviewer.as_ref().is_some_and(|x| Of::Code(x.of) == w.of) {
+    // (each finding of its reviewer's — when the reviewer read for this review: of its base, begun while it was
+    // open or this one opened while it read; never an earlier run's into a later review)
+    if ed.session.reviewer.as_ref().is_some_and(|x| x.review == Some(r.started)) {
         for n in crate::reviewer::findings_in(&ed.session).unwrap_or_default() {
             let file = match r.files.iter().find(|f| f.path == n.path) {
                 Some(f) => f.rel.clone(),
@@ -1227,10 +1228,10 @@ fn say(ed: &mut Editor, mut ev: Value) {
     ed.ui_said(ev);
 }
 
-/// The reviewer's findings and those not sent yet — when its review is this one.
+/// The reviewer's findings and those not sent yet — when it read for this review (`Reviewer.review`).
 fn review_findings(ed: &Editor, w: &Watch) -> Option<(usize, usize)> {
-    let of = ed.session.reviewer.as_ref()?.of;
-    (w.of == Of::Code(of))
+    let review = ed.session.reviewer.as_ref()?.review?;
+    (w.of == Of::Code(review))
         .then(|| crate::reviewer::review_tally(ed))
         .flatten()
         .map(|t| (t.findings, t.unsent))

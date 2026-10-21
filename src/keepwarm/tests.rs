@@ -255,13 +255,8 @@ fn what_waits_is_read_from_the_session() {
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
     assert_eq!(back(&ed.session), None);
     let root = ed.session.root.clone();
-    ed.session.reviewer = Some(crate::reviewer::Reviewer::for_test(
-        Instant::now(),
-        root,
-        crate::reviewer::State::Reading,
-        Vec::new(),
-        "",
-    ));
+    ed.session.reviewer =
+        Some(crate::reviewer::Reviewer::for_test(root, crate::reviewer::State::Reading, Vec::new(), ""));
     assert_eq!(back(&ed.session), Some(Back::UnderReview));
     ed.session.reviewer.as_mut().unwrap().state = crate::reviewer::State::Done;
     assert_eq!(back(&ed.session), None, "done reading: nothing waits on it");

@@ -204,6 +204,16 @@ const SCENES: &[Scene] = &[
         ed.messages_picker();
     }),
     ("hover text", |ed| ed.popup = Some(Vec::new())),
+    // (bgreview: the reviewer reads in the background, no review open — its segment on the status line takes no key)
+    ("the reviewer reading, no review open", |ed| {
+        let rv = crate::reviewer::Reviewer::for_test(
+            ed.session.root.clone(),
+            crate::reviewer::State::Reading,
+            Vec::new(),
+            "",
+        );
+        ed.session.reviewer = Some(rv);
+    }),
     ("the chat, empty", |ed| chat(ed, "")),
     ("the chat, a draft", |ed| chat(ed, "hello")),
     ("the chat minimized while Claude works", chat_minimized),

@@ -270,7 +270,17 @@ impl Editor {
         let done = self.saver.take_done();
         let mut quiet = done.is_empty();
         if !done.is_empty() {
+            // (a file the session's reviewer read, saved: what changed since is looked at again — the rail's
+            // `read … at`, whether a board read a review's ▲ changes)
+            let read = self
+                .session
+                .reviewer
+                .as_ref()
+                .is_some_and(|r| done.iter().any(|d| r.digests.iter().any(|(p, _)| d.path == *p)));
             self.saves_finish(done);
+            if read {
+                crate::reviewer::since_sync_shown(self);
+            }
         }
         let (_, written) = self.saver.counts();
         let (ready, waiting) =

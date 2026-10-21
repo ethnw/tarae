@@ -638,6 +638,8 @@ pub fn turn_over(ed: &mut Editor) -> Vec<Left> {
     crate::seeing::turn_over(ed);
     crate::committool::turn_over(ed);
     crate::refactor::turn_over(ed);
+    // (its edits and runs may have changed what the session's reviewer read)
+    crate::reviewer::since_sync_shown(ed);
     left
 }
 

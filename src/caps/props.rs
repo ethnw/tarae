@@ -2448,21 +2448,6 @@ fn a_reload_read_before_an_untrust_doesnt_trust_it_again() {
     assert!(!ports.contains(&5432), "trusted again by a reload read before");
 }
 
-/// The reviewer reads what the project keeps less what's being taken back: a kept read place whose take-back
-/// failed ("until you quit") isn't read unasked by it either (`reviewer::basis`).
-#[test]
-fn the_reviewer_leaves_out_a_take_back_whose_write_failed() {
-    let w = World::new("caps-reviewer-taking");
-    let mut ed = w.editor();
-    let place = w.at.join("out/b");
-    answer(&mut ed, &Grant::Read(place.clone()), Scope::Always, true, "kept");
-    let reads =
-        |ed: &Editor| crate::reviewer::basis(ed, &w.root).build().read.iter().any(|e| e.what == place);
-    assert!(reads(&ed), "the kept place");
-    take_back(&w, &mut ed, &place.display().to_string(), Failing::Store, "failing");
-    assert!(!reads(&ed), "the reviewer reads what's taken back");
-}
-
 /// `:restart`'s state — made after the loop has ended — carries no take-back an `A`'s write ended meanwhile (its
 /// result never applied): the answer just given isn't taken back again until you quit.
 #[test]

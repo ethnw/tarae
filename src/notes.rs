@@ -90,6 +90,9 @@ pub struct Note {
     pub pinned: Option<[u8; 32]>,
     /// A finding of the board's (`board.rs`): the angles that found it, what its skeptic made of it, its trace.
     pub board: Option<Mark>,
+    /// A finding still being placed on the lines now from the snapshot its reviewer read (`pin_finding`): no
+    /// mark yet.
+    pub placing: bool,
 }
 
 /// What a finding of the board's carries beside its text: the angles that found it (the first pinned it),
@@ -141,6 +144,8 @@ pub struct Notes {
     pub focus: Option<u64>,
     /// Drafts the stale card asked about (`stale_card`) — not asked again.
     stale_asked: Vec<u64>,
+    /// Findings placed on lines changed since their reviewer read them (`pin_finding`) — the stale card says so.
+    since_read: Vec<u64>,
 }
 
 /// The `note` tool as the MCP server lists it.
@@ -187,6 +192,7 @@ pub fn add(ed: &mut Editor, path: &Path, lines: Range<usize>, by: By, text: &str
         anchor: None,
         pinned: None,
         board: None,
+        placing: false,
     });
     ed.session.notes.focus = Some(id);
     attach(ed);
@@ -239,7 +245,7 @@ pub fn attach(ed: &mut Editor) {
 
 /// `attach` for one session's notes.
 fn attach_in(notes: &mut Notes, docs: &mut [crate::document::Document]) {
-    for n in &mut notes.list {
+    for n in notes.list.iter_mut().filter(|n| !n.placing) {
         match n
             .at
             .and_then(|(d, m)| docs.iter().find(|doc| doc.id == d).and_then(|doc| Some((doc, doc.mark(m)?))))
@@ -301,6 +307,9 @@ pub fn to_json(notes: &Notes, docs: &[crate::document::Document]) -> Vec<Value> 
     notes
         .list
         .iter()
+        // (a finding still being placed has the snapshot's lines and a copy that won't outlive a restart: not
+        // kept on the wrong lines — its placing lands within the moment)
+        .filter(|n| !n.placing)
         .map(|n| {
             let anchor = n.anchor.clone().or_else(|| {
                 let doc = docs.iter().find(|d| d.path.as_deref() == Some(n.path.as_path()))?;
@@ -376,6 +385,7 @@ fn restore_from(notes: &mut Notes, docs: &mut [crate::document::Document], saved
             anchor: v["anchor"].as_str().map(str::to_string),
             pinned: v["pinned"].as_str().and_then(of_hex),
             board: Mark::of(&v["board"]),
+            placing: false,
         });
     }
     attach_in(notes, docs);
@@ -438,50 +448,224 @@ fn placed(root: &Path, args: &Value) -> Result<(PathBuf, Range<usize>), String> 
     if !path.is_file() {
         return Err(format!("{} isn't a file", path.display()));
     }
+    Ok((path, lines_of(args)?))
+}
+
+/// The lines a note's `line` and `end_line` name (from 0, the end out).
+fn lines_of(args: &Value) -> Result<Range<usize>, String> {
     let line = args["line"].as_u64().ok_or("path and line are required for a new note")?.max(1) as usize - 1;
     let end = args["end_line"].as_u64().map_or(line, |e| (e.max(1) as usize - 1).max(line));
-    Ok((path, line..end + 1))
+    Ok(line..end + 1)
 }
 
 /// The most a finding of the reviewer's says (it's read by you, then maybe sent to the author).
 const FINDING_MAX: usize = 1_000;
 
-/// The reviewer's `note` (`reviewer.rs`) → the new note's id and what it's told. A finding only: a file
-/// inside `root` (the checkout it reviews), no `reply_to` (it sees no thread). It waits like your drafts —
-/// for `space v s` to take it to the author with them, or `:note-close` to drop it.
-pub fn finding(ed: &mut Editor, root: &Path, args: &Value) -> Result<(u64, String), String> {
-    let (path, lines, text) = finding_of(root, args)?;
-    let (shown, line) = (crate::chat::shown(root, &path), lines.start);
-    let id = pin_finding(ed, &path, lines, &text, None);
-    Ok((id, format!("finding #{id} pinned at {shown}:{}", line + 1)))
-}
-
 /// A finding's place and text as the reviewer's `note` gives them, checked — a file inside `root`, no
 /// `reply_to`, the text cut at `FINDING_MAX` — not pinned (the board's angles record it as a claim first).
 pub fn finding_of(root: &Path, args: &Value) -> Result<(PathBuf, Range<usize>, String), String> {
-    if args.get("reply_to").is_some_and(|r| !r.is_null()) {
-        return Err("the reviewer pins new findings only — reply_to isn't one of its arguments".into());
-    }
-    let text = args["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
-    let text: String = match text.char_indices().nth(FINDING_MAX) {
-        Some((cut, _)) => format!("{}…", &text[..cut]),
-        None => text.to_string(),
-    };
+    let text = finding_text(args)?;
     let (path, lines) = placed(root, args)?;
     let shown = crate::chat::shown(root, &path);
     crate::paths::existing_inside(root, &path, &shown, "the reviewer pins findings in the checkout only")?;
     Ok((path, lines, text))
 }
 
-/// A finding of the reviewer's pinned on `lines` of `path` (checked by `finding_of`), a draft — the board's
-/// with its `mark`.
-pub fn pin_finding(ed: &mut Editor, path: &Path, lines: Range<usize>, text: &str, mark: Option<Mark>) -> u64 {
-    let id = add(ed, path, lines, By::Reviewer, text);
-    if let Some(n) = find_mut(ed, id) {
-        n.thread[0].draft = true;
-        n.board = mark;
+/// `finding_of` in snapshot `snap` (a review run's, bgreview): the place a file of the snapshot (its path from
+/// the root — one it left out too: its change is in the diff), its lines the snapshot's. Never one named like a
+/// key or a link: placing reads the file in the checkout (`place`), and that would read a key, or follow the link
+/// wherever it goes.
+pub fn finding_in(
+    snap: &crate::snapread::Snap,
+    args: &Value,
+) -> Result<(String, Range<usize>, String), String> {
+    use crate::snapread::{Found, Left};
+    let text = finding_text(args)?;
+    let given =
+        args["path"].as_str().filter(|p| !p.is_empty()).ok_or("path and line are required for a new note")?;
+    let rel =
+        snap.rel_of(given).ok_or("outside the checkout — the reviewer pins findings in the checkout only")?;
+    match snap.found(&rel) {
+        Found::Left(why @ (Left::Key | Left::Link)) => {
+            Err(format!("{rel}: {} — no finding on it: say it in the verdict", why.said()))
+        }
+        Found::File | Found::Left(_) => Ok((rel, lines_of(args)?, text)),
+        Found::Folder => Err(format!("{rel} is a folder — a finding goes on a file's lines")),
+        Found::Nothing => Err(format!("{given}: no such file in what the reviewer reads")),
     }
+}
+
+/// A finding's text, checked: no `reply_to`, cut at `FINDING_MAX`.
+fn finding_text(args: &Value) -> Result<String, String> {
+    if args.get("reply_to").is_some_and(|r| !r.is_null()) {
+        return Err("the reviewer pins new findings only — reply_to isn't one of its arguments".into());
+    }
+    let text = args["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
+    Ok(match text.char_indices().nth(FINDING_MAX) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    })
+}
+
+/// A finding of the reviewer's pinned on `lines` of `path` (checked by `finding_of`/`finding_in`), a draft — the
+/// board's with its `mark`. `from`: the file as its reviewer read it (bgreview: its path in the snapshot and the
+/// snapshot), `lines` that text's — placed on the lines now on a worker (`place`), unmarked until then; None:
+/// `lines` are the file's now.
+pub fn pin_finding(
+    ed: &mut Editor,
+    path: &Path,
+    lines: Range<usize>,
+    text: &str,
+    mark: Option<Mark>,
+    from: Option<(String, std::sync::Arc<crate::snapread::Snap>)>,
+) -> u64 {
+    let Some((from, snap)) = from else {
+        let id = add(ed, path, lines, By::Reviewer, text);
+        if let Some(n) = find_mut(ed, id) {
+            n.thread[0].draft = true;
+            n.board = mark;
+        }
+        return id;
+    };
+    ed.session.notes.next += 1;
+    let id = ed.session.notes.next;
+    ed.session.notes.list.push(Note {
+        id,
+        path: path.to_path_buf(),
+        at: None,
+        lines: lines.clone(),
+        thread: vec![Entry { by: By::Reviewer, text: text.trim().to_string(), draft: true }],
+        waiting: false,
+        anchor: None,
+        pinned: None,
+        board: mark,
+        placing: true,
+    });
+    place(ed, id, from, snap, lines);
     id
+}
+
+/// Finding `id`, `lines` of the text its reviewer read (file `from` of `snap`), placed on its file's lines now —
+/// the open document's text, else the file on disk — on a worker (`placed_lines`); `pinned` the lines as read, so
+/// a finding on lines changed since is a stale draft (`stale_check`) and its reviewer says so at its end
+/// (`reviewer::placed`). The document edited meanwhile: placed again on its text then.
+fn place(
+    ed: &mut Editor,
+    id: u64,
+    from: String,
+    snap: std::sync::Arc<crate::snapread::Snap>,
+    lines: Range<usize>,
+) {
+    let Some(path) = find(ed, id).map(|n| n.path.clone()) else { return };
+    let seen = open_text(ed, &path);
+    let (at, read) = (seen.as_ref().map(|s| (s.0, s.1)), seen.map(|s| s.2));
+    let file = path.clone();
+    ed.events.jobs().spawn(move || {
+        // (one it left out — past its size, a link — has no text of its own here: the checkout's as it is)
+        // (never through a link, nor waiting on a FIFO a run put there since: `checkout_bytes`)
+        let checkout =
+            || crate::codereview::checkout_bytes(&file).map(|b| String::from_utf8_lossy(&b).into_owned());
+        let then = match snap.text(&from) {
+            Some(t) => Some(String::from_utf8_lossy(&t).into_owned()),
+            None => checkout(),
+        };
+        let then = then.map(|t| ropey::Rope::from_str(&t));
+        let now = read.or_else(|| checkout().map(|t| ropey::Rope::from_str(&t)));
+        let (to, changed) = match (&then, &now) {
+            (Some(then), Some(now)) => placed_lines(&then.to_string(), &now.to_string(), &lines),
+            // (the file gone since: on its path, changed)
+            _ => (lines.clone(), true),
+        };
+        let pinned = then.as_ref().and_then(|t| lines_digest(t, &lines));
+        move |ed: &mut Editor| {
+            // (its file opened or edited since it was read: placed again on what's there now)
+            if find(ed, id).is_some() && open_text(ed, &path).map(|o| (o.0, o.1)) != at {
+                return place(ed, id, from, snap, lines);
+            }
+            // (the last hold on its texts may be this one: freed on a worker)
+            crate::event::drop_later(snap);
+            // (closed meanwhile: nothing to place, but its reviewer counts it placed)
+            if find(ed, id).is_none() {
+                return crate::reviewer::placed(ed, id, false);
+            }
+            if let Some(n) = find_mut(ed, id) {
+                (n.lines, n.pinned, n.placing) = (to, pinned, false);
+            }
+            if changed {
+                ed.session.notes.since_read.push(id);
+            }
+            attach(ed);
+            crate::reviewer::placed(ed, id, changed);
+        }
+    });
+}
+
+/// Whether finding `id` was placed on lines changed since its reviewer read them (`place`).
+#[cfg(test)]
+pub fn changed_since_read(ed: &Editor, id: u64) -> bool {
+    ed.session.notes.since_read.contains(&id)
+}
+
+/// The open document of `path` (loaded): its id, version and text.
+fn open_text(ed: &Editor, path: &Path) -> Option<(DocId, u64, ropey::Rope)> {
+    let doc = ed.docs.iter().find(|d| !d.loading && d.path.as_deref() == Some(path))?;
+    Some((doc.id, doc.version(), doc.text.clone()))
+}
+
+#[cfg(test)]
+#[test]
+fn a_finding_is_placed_on_the_lines_now() {
+    let then = "a\nb\nc\nd\ne\n";
+    // (two lines put in above: moved down by two)
+    assert_eq!(placed_lines(then, "x\ny\na\nb\nc\nd\ne\n", &(2..3)), (4..5, false));
+    // (a line taken out above: up by one)
+    assert_eq!(placed_lines(then, "b\nc\nd\ne\n", &(3..5)), (2..4, false));
+    // (its own line changed: placed there, changed)
+    assert_eq!(placed_lines(then, "a\nb\nC\nd\ne\n", &(2..3)), (2..3, true));
+    // (a line put in between its lines: changed)
+    assert_eq!(placed_lines(then, "a\nb\nc\nnew\nd\ne\n", &(2..4)), (2..5, true));
+    // (a change below it: nothing)
+    assert_eq!(placed_lines(then, "a\nb\nc\nd\nE\n", &(1..2)), (1..2, false));
+    // (its lines taken out: where they were, changed)
+    assert_eq!(placed_lines(then, "a\nd\ne\n", &(1..3)), (1..2, true));
+}
+
+/// The reviewer's `note` as tests send it: a finding of the checkout at `root` pinned there (`reviewer::note`
+/// does it for a review run, in what it reads).
+#[cfg(test)]
+pub fn finding(ed: &mut Editor, root: &Path, args: &Value) -> Result<(u64, String), String> {
+    let (path, lines, text) = finding_of(root, args)?;
+    let (shown, line) = (crate::chat::shown(root, &path), lines.start);
+    let id = pin_finding(ed, &path, lines, &text, None, None);
+    Ok((id, format!("finding #{id} pinned at {shown}:{}", line + 1)))
+}
+
+/// Lines `lines` of text `then` placed in text `now` (tarae's own diff, `git::hunks`): moved by what was added or
+/// taken out above them; one in a change since — `changed` — placed where that change is now.
+pub fn placed_lines(then: &str, now: &str, lines: &Range<usize>) -> (Range<usize>, bool) {
+    let hunks = crate::git::hunks(then, now);
+    let at = |x: usize| {
+        let mut delta: isize = 0;
+        for h in &hunks {
+            // (in order: one after it moves nothing; lines put in at its place push it down)
+            if x < h.base.start {
+                break;
+            }
+            if x < h.base.end {
+                return h.lines.start;
+            }
+            delta += h.lines.len() as isize - h.base.len() as isize;
+        }
+        x.saturating_add_signed(delta)
+    };
+    let (a, b) = (lines.start, lines.end.max(lines.start + 1));
+    // (a change over its lines, or lines put in between them)
+    let changed = hunks.iter().any(|h| match h.base.is_empty() {
+        true => a < h.base.start && h.base.start < b,
+        false => h.base.start < b && a < h.base.end,
+    });
+    let (first, last) = (at(a), at(b - 1));
+    (first..last.max(first) + 1, changed)
 }
 
 /// The chat turn ended: notes still waiting stop waiting — a single one gets Claude's plain answer (it didn't
@@ -563,7 +747,7 @@ const STALE_SHOWN: usize = 6;
 /// The card for drafts `ids` whose lines changed since they were pinned: `y` closes them, `r` lists them one
 /// by one, `n` keeps them. One card a session (cardburden 6 — a card each turn's end, before): a later turn's
 /// drafts join the card up, its list grown in place — read again before its `y` counts (`rev`).
-fn stale_card(ed: &mut Editor, ids: Vec<u64>) {
+pub(crate) fn stale_card(ed: &mut Editor, ids: Vec<u64>) {
     let notes = &ed.session.notes;
     let new: Vec<u64> = notes
         .list
@@ -603,7 +787,13 @@ fn is_draft(n: &Note) -> bool {
 fn stale_text(ed: &Editor, ids: &[u64]) -> (String, String, Range<usize>) {
     let stale: Vec<&Note> = ids.iter().filter_map(|&id| find(ed, id)).collect();
     let k = stale.len();
-    let mut q = String::from("Their lines changed since they were pinned — fixed in the chat, maybe:\n");
+    // (findings placed on lines changed since their reviewer read them — bgreview — or drafts since pinned)
+    let read = stale.iter().filter(|n| ed.session.notes.since_read.contains(&n.id)).count();
+    let mut q = String::from(match read {
+        0 => "Their lines changed since they were pinned — fixed in the chat, maybe:\n",
+        r if r == k => "Their lines changed since the reviewer read them:\n",
+        _ => "Their lines changed since they were pinned, or since the reviewer read them:\n",
+    });
     for n in stale.iter().take(STALE_SHOWN) {
         let by = n.thread.first().map_or(By::Author, |e| e.by).label();
         let at = format!("{}:{}", crate::chat::shown(&ed.session.root, &n.path), n.lines.start + 1);
@@ -614,7 +804,8 @@ fn stale_text(ed: &Editor, ids: &[u64]) -> (String, String, Range<usize>) {
     }
     let listed = q.split('\n').count();
     q.push_str("\n\nKept, space v s still sends them.");
-    (format!("Close {} on changed lines?", crate::nav::count(k, "draft")), q, 0..listed)
+    let what = if read == k { "finding" } else { "draft" };
+    (format!("Close {} on changed lines?", crate::nav::count(k, what)), q, 0..listed)
 }
 
 /// Where this session's stale card is: up in front (`offers`), or parked while the session is behind.
@@ -868,7 +1059,12 @@ pub fn submit(ed: &mut Editor, target: Option<u64>, text: &str) {
     };
     if draft {
         let k = ed.session.notes.list.iter().filter(|n| n.thread.iter().any(|e| e.draft)).count();
-        return ed.note(format!("draft saved — {k} in this review · space v s sends them"));
+        // (outside a review too, while drafts wait — a background reviewer's findings among them: bgreview)
+        // (in a review the rail counts them; outside one it's said where you look, the user's decision 2026-10-19)
+        return match ed.session.code_review.is_some() {
+            true => ed.note(format!("draft saved — {k} in this review · space v s sends them")),
+            false => ed.set_status(format!("draft saved — {k} waiting · space v s sends them")),
+        };
     }
     let why = stop.map(|(_, _, why)| why.to_string());
     if busy && let Some(c) = ed.session.chat.as_mut() {

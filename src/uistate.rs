@@ -23,7 +23,9 @@ use crate::sizes::Slot;
 /// (2026-10-17).
 /// 5: a reviewer's and the review panel's `reviewer` `state` is `waiting` while its turn in the line comes —
 /// `reading` before.
-pub const V: u64 = 5;
+/// 6: `reviewer_run.high` is always a number — by the grades of the snapshot the reviewer read (bgreview), not None
+/// while its review isn't open; since added: `taken`, `files`, `changed_since`. A finding's `high` is a bool.
+pub const V: u64 = 6;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -875,17 +877,20 @@ pub struct ReviewerState {
     pub findings: usize,
     pub answered: usize,
     pub unsent: usize,
-    /// Those on a high-risk change — None when its review isn't the one open (the grades are the open
-    /// review's).
-    pub high: Option<usize>,
+    /// Those on a high-risk change, by the grades of the snapshot it read.
+    pub high: usize,
     /// Its verdict's first line (empty while it reads, or none came).
     pub verdict: String,
     /// Why it stopped (`stopped` only, not by you).
     pub why: Option<String>,
     /// You stopped it (`:reviewer-stop`, `:procs`).
     pub by_you: bool,
-    /// What its review was of (`Base::label`: `uncommitted`, `since main` …).
+    /// What it read (`Base::label`: `uncommitted`, `since main` …), when its snapshot was taken (a log stamp) and
+    /// how many files changed in it — and how many of those differ on disk since (None: not looked at yet).
     pub of: String,
+    pub taken: String,
+    pub files: usize,
+    pub changed_since: Option<usize>,
     /// It ended while its session was behind, and that session hasn't been in front since (its inbox item).
     pub news: bool,
     /// The board's members and claims (`reviewer::board_state`) — None: the one pass.
@@ -897,8 +902,7 @@ impl ReviewerState {
     pub fn of(ed: &Editor, l: &crate::session::Session) -> Option<ReviewerState> {
         use crate::reviewer::State;
         let r = l.reviewer.as_ref()?;
-        let t = crate::reviewer::review_tally_in(ed, l).unwrap_or_default();
-        let open = l.code_review.as_ref().is_some_and(|c| c.started == r.of);
+        let t = crate::reviewer::review_tally_in(l).unwrap_or_default();
         let (state, why) = match &r.state {
             State::Waiting | State::Reading if crate::reviewer::waits(ed, l) => ("waiting", None),
             State::Waiting | State::Reading => ("reading", None),
@@ -913,11 +917,14 @@ impl ReviewerState {
             findings: t.findings,
             answered: t.answered,
             unsent: t.unsent,
-            high: open.then_some(t.high),
+            high: t.high,
             verdict: r.verdict.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string(),
             why,
             by_you: r.state == State::Stopped,
             of: r.label.clone(),
+            taken: crate::log::stamp(r.at),
+            files: r.files,
+            changed_since: r.changed.as_ref().map(Vec::len),
             news: r.unseen,
             board: crate::reviewer::board_state(ed, l),
         })
@@ -928,7 +935,8 @@ impl ReviewerState {
             "state": self.state, "ms": self.ms, "reads": self.reads, "findings": self.findings,
             "answered": self.answered, "unsent": self.unsent, "high": self.high, "verdict": self.verdict,
             "why": self.why,
-            "by_you": self.by_you, "of": self.of, "news": self.news, "board": self.board,
+            "by_you": self.by_you, "of": self.of, "taken": self.taken, "files": self.files,
+            "changed_since": self.changed_since, "news": self.news, "board": self.board,
         })
     }
 
@@ -943,7 +951,10 @@ impl ReviewerState {
             ("stopped", None) => format!("stopped after {took}"),
             _ => format!("done in {took}"),
         };
-        let high = self.high.filter(|&h| h > 0).map(|h| format!(" ▲{h}")).unwrap_or_default();
+        let high = match self.high {
+            0 => String::new(),
+            h => format!(" ▲{h}"),
+        };
         let unsent = match self.unsent {
             0 => String::new(),
             n => format!(" · {n} not sent"),
@@ -1783,7 +1794,7 @@ impl Editor {
                 .map(|n| Finding {
                     path: crate::chat::shown(root, &n.path).to_string(),
                     lines: n.lines.start + 1..n.lines.end.max(n.lines.start + 1) + 1,
-                    high: crate::reviewer::on_high_in(self, l, &n.path, &n.lines),
+                    high: crate::reviewer::on_high_in(l, n.id),
                     answered: crate::reviewer::answered(n),
                     thread: n.thread.iter().map(|e| (e.by.label(), e.text.clone())).collect(),
                 })
@@ -1865,8 +1876,8 @@ pub struct Finding {
     pub path: String,
     /// 1-based, its end exclusive.
     pub lines: std::ops::Range<usize>,
-    /// On a high-risk change — None when its review isn't the one open.
-    pub high: Option<bool>,
+    /// On a high-risk change, by the grades of the snapshot its reviewer read.
+    pub high: bool,
     pub answered: bool,
     /// (who, text): `reviewer` · `you` · `author`.
     pub thread: Vec<(&'static str, String)>,
@@ -1956,7 +1967,7 @@ impl ReviewReport {
                 1 => format!("{}", f.lines.start),
                 _ => format!("{}–{}", f.lines.start, f.lines.end - 1),
             };
-            let high = if f.high == Some(true) { " ▲ high" } else { "" };
+            let high = if f.high { " ▲ high" } else { "" };
             let answered = if f.answered { " · answered" } else { "" };
             out.push(format!("- {}:{lines}{high}{answered}", f.path));
             for (by, text) in &f.thread {

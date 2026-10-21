@@ -138,12 +138,13 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(
         &["review-claude"],
         Arg::Branch,
-        "A second Claude reviews the changes (uncommitted, or since a branch)",
+        "A second Claude reviews the changes (uncommitted, or since a branch), in the background",
     ),
     c(
         &["review-board"],
         Arg::Branch,
-        "A board of Claudes reviews the changes, each from its angle, a skeptic checking each finding",
+        "A board of Claudes reviews the changes in the background, each from its angle, a skeptic checking each \
+         finding",
     ),
     c(&["review-verdict"], Arg::None, "The reviewer's verdict and findings"),
     c(&["review-hunk-seen"], Arg::None, "The high-risk change here: looked at"),
