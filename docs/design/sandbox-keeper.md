@@ -3,8 +3,8 @@
 Design, 2026-10-06. Status: **built** (2026-10-14: steps 1–9 of the [roadmap](../roadmap.md), §Steps). Every Linux
 session's sandboxed runs are forked by a keeper of its own, born in the session's namespaces where user namespaces
 work (`src/sandbox/keeper.rs`, `tier.rs`, `channel.rs`). tarae decides every call that names an address (`route.rs`,
-`supervisor.rs`). What goes out goes through one proxy in tarae: taken by the session's own network where it has one
-(`redirect.rs`), else named by the proxy's variable (`proxy.rs`). Where sessions share a loopback, a run reaches no
+`supervisor.rs`). What goes out goes through one proxy in tarae, named by the run's proxy variable in every tier
+(`proxy.rs`; the supervisor hands a connect to its address over). Where sessions share a loopback, a run reaches no
 other session's sockets (`owners.rs`). Each run says what its tier keeps apart and shares (`guarantees.rs`). macOS
 keeps Seatbelt, as `src/sandbox.rs` has it; its two-session tests are `apart.rs`.
 
@@ -44,7 +44,7 @@ files and decided each address it reached. It left four things open:
 | D18 | Another session's loopback listener is refused, even with `llm.sandbox-localhost` |
 | D21 | Later, its own step: the supervisor and the proxy as one confined process per session |
 | D23 | The supervisor and the proxy talk only over a Rust channel (`mpsc`) of typed, owned messages. **Supervisor → proxy**: the traffic end (`OwnedFd`), the session's id, and the connection's rules as a read-only snapshot (an `Arc`, never mutated). **Proxy → supervisor**: `Refused` and log lines. No socketpair between them, and no shared mutable state (no `Mutex` or other cell both sides write). The run's traffic socketpair stays. **Why not a socket**: in one process a socket isolates nothing; the channel keeps the same discipline at no serialization cost. If D21 is ever done, these messages move onto the keeper channel's wire format then (`channel.rs`). The keeper's own channel stays `SOCK_SEQPACKET` + `SCM_RIGHTS`: the keeper is another process |
-| D-c | ~~With the network open, the resolvers `resolv.conf` names are reached on port 53 only~~ (2026-10-07) — superseded: through the proxy names are the proxy's (step 5c), in a TPROXY session the session's (6e); 6f took the route's last of it out |
+| D-c | ~~With the network open, the resolvers `resolv.conf` names are reached on port 53 only~~ (2026-10-07) — superseded: through the proxy names are the proxy's (step 5c); 6f took the route's last of it out |
 | D-d | Link-local addresses (the cloud metadata servers among them), multicast and broadcast, and their IPv4-mapped and carried forms, are never reached (2026-10-07; D-c's port-53 exception gone in 6f) |
 | D-e | ~~Tier host goes out by the same swap~~ (2026-10-07) — superseded: tier host goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
 | D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused without one (2026-10-07) |
@@ -306,12 +306,10 @@ addressed `sendto`, `sendmsg` and `sendmmsg` still go to the supervisor, which r
 | loopback (`127/8`, `::1`, mapped, `0.0.0.0`/`::`): a port the session listens on, or one not opened to this machine | **the session** | tarae makes the call on the run's own socket (`pidfd_getfd`); it stays in the session's netns. Not opened, nothing is read; opened, the session's listeners are read from the caller's own `/proc/<tid>/net/{tcp,udp}[6]` |
 | loopback: a port opened by `llm.sandbox-ports`/`-localhost` that nothing in the session listens on (D2) | **this machine** | egress, on a socket of tarae's bound to `lo` |
 | one of this machine's own addresses beyond loopback (its LAN's, Docker's bridge's `172.17.0.1` — every interface's, `getifaddrs` when the run's policy is made: `Policy.own_addresses`; unreadable: every address beyond loopback refused, network open or not — never opened by a port, never out; logged when the policy is made and said in the run's report) | opened port: **this machine** (`OwnAddress`); else refused: `EPERM`, `network-outbound` | egress, on a socket of tarae's bound to no device (one bound to `lo` reaches loopback's addresses only — measured: `ETIMEDOUT`). A service listening on every address isn't reached through them unless its port is opened |
-| a question to port 53, network open, in a TPROXY session (6e) | **the session's**: answered by tarae (port 53 opened by the user, or a run's own server at that address: this machine's / the session's) | `Route::Redirected`: the run's own socket, marked |
 | a resolver `resolv.conf` names, its port 53, network open, through the proxy (step 5c) | refused: `EPERM`, `network-direct`, said as a lookup | names are the proxy's to look up. Read once into `Policy.resolvers` (`route::resolvers`, glibc's three) |
 | link-local (with `169.254.169.254`), the cloud metadata servers that aren't (Alibaba Cloud's `100.100.100.200`; AWS's `fd00:ec2::254` and EKS Pod Identity's `fd00:ec2::23`, Google Cloud's `fd20:ce::254`), multicast, broadcast — and those IPv4 ones carried in NAT64's `64:ff9b::/96` or 6to4's `2002::/16` — network open (D-d) | refused: `EPERM`, `network-never` | before any connect |
-| the proxy's reserved address (`192.0.2.1:3128`), network open, not in a TPROXY session | **the proxy** (`Route::Proxy`) | the pair (§The egress proxy). In a TPROXY session it's the session's own address, a closed port there (6f) |
-| anything else beyond, network open, a TCP connect in a TPROXY session (6d) | **the session's network** (`Route::Redirected`) | the run's own socket, marked; a planted socket takes it, the proxy decides by its host |
-| anything else beyond, network open, otherwise | refused: `EPERM`, `network-direct` | only the proxy and the session's network go out (6f took `Out` — a socket of tarae's connected beyond, unreachable since step 5 — away) |
+| the proxy's reserved address (`192.0.2.1:3128`), network open | **the proxy** (`Route::Proxy`) | the pair (§The egress proxy) |
+| anything else beyond, network open | refused: `EPERM`, `network-direct` | only the proxy goes out: raw TCP, a datagram, a tool that ignores the variable fail closed, the report pointing at a run outside (6f took `Out` — a socket of tarae's connected beyond, unreachable since step 5 — away; the TPROXY way went 2026-10-17) |
 | anything else, network closed | refused: `EPERM`, `network-outbound` | as before |
 
 In tier host (`Served`, no netns) the same table without the session: loopback is this machine's where opened, else
@@ -492,31 +490,15 @@ their IPv4-mapped forms, and what the session's rules don't allow; **connects to
 second lookup); with CONNECT, the SNI must name the CONNECT host; then relays. Every refusal lands in the session's run
 report with the name and why. **No TLS interception.**
 
-**Raw TCP and a name's records, in a TPROXY session (6e+, `target/sb/step6eplus-design.md`).** A connection to an
-address of the session's names whose first bytes are neither a ClientHello nor what can start an origin-form request
-(`parse::origin`'s `may_start`: ssh's banner, a database's startup), or that sends nothing within W
-(`Limits::silent`, 1 s after M14: a server that speaks first), is raw: a rule naming that port lets it through
-(`Egress::allows_raw` — a rule without a port, or `any`, doesn't), else the user's raw answers, else the raw card
-(`What::HostRaw`), held as the host card holds a connection. Let through, it's connected by the name as a tunnel is and
-spliced, what it sent meanwhile first. Raw to an address no name was given stays refused. A run's SRV or TXT question is
-looked up by tarae itself (`records.rs`: `resolv.conf`'s nameservers, UDP then TCP where cut short; the response read
-by `dns::response`, names compressed, bounded) for the name it's about (an SRV owner's without its `_` labels): at once
-where tarae already looks that name up — the rules name it (or `any`), or the user said yes to it on a host or raw
-card (E1: its records show the DNS's operators nothing new; every host they name is still asked about at connect) —
-else held — no answer, the client asks again — while the lookup card (`What::Lookup`) asks. Through an upstream proxy
-no lookup is made. Host and raw answers are kept apart (`proxy::Kind`): a yes for a host over TLS isn't one for raw
-bytes to it, nor the other way round.
-
 **Named limits**: domain fronting (SNI and the inner `Host` can differ); Encrypted Client Hello hides the real SNI;
-through the proxy's address only TLS (CONNECT) and plain `http://` go out; raw TCP is only a TPROXY session's, and what
-passes on it isn't checked — only that it goes to the name the run looked up; to another machine by its address, raw
-or not, nothing goes (no rule names an address).
+through the proxy's address only TLS (CONNECT) and plain `http://` go out — no raw TCP, and to another machine by its
+address nothing goes (no rule names an address).
 
 ## Tiers
 
 | Tier | The keeper's namespaces | Supervisor | Beyond this machine, the network open (6f) | Leftovers owned by |
 |---|---|---|---|---|
-| **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
+| **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said | serving | the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
 | **host** | none (no unprivileged user namespaces) | serving | the proxy's variable and the pair (6f's F2) | the keeper's tree |
 | **offline** | as own, or none | plain (Yama 2/3, inside another listener, `pidfd_getfd` refused — D-g) | nothing: no socket at all but netlink | as own, or the keeper's tree |
 
@@ -541,12 +523,10 @@ truncating: a run can empty any file of the user's).
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |
 |---|---|---|---|
-| own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
-| own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| own, the project in /dev/shm | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| own, its lo without an IPv6 address | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
@@ -568,8 +548,7 @@ truncating: a run can empty any file of the user's).
 - **Shared in every tier**: reads of the repository's other checkouts, and the temp folders (D16).
 
 **The probe**, once on a worker: Landlock's ABI and the seccomp architecture as today, then a keeper made for real and
-a `true` run through it under a time limit — a timeout is no namespaces, not success — and, with a netns, whether
-the session's network lands (TPROXY). What failure says:
+a `true` run through it under a time limit — a timeout is no namespaces, not success. What failure says:
 
 | Seen | Why |
 |---|---|
@@ -668,24 +647,16 @@ the step's commit message. "Ran" is where the whole suite passed.
    - Tests: `the_connect_parser_never_panics`, `the_sni_parser_never_panics`, `it_connects_to_the_address_it_checked`,
      `sni_must_match_the_connect_host`, `the_proxy_knows_only_what_a_message_carries` (D23). The "outside" is
      always the test's own listeners on this machine.
-6. **The transparent proxy** (6c–6h). `target/sb/step6-plan.md` isn't kept in every checkout; the code's module
-   docs name each part.
-   - **The session's network** (6c, `redirect.rs`): in A+ and A, where the probe's batch lands
-     (`tier::Probed.redirect`), tarae sends the session's routes and one nf_tables table over netlink sockets the
-     keeper opened in its netns. A TCP connection or UDP datagram leaving the session is taken by tproxy rules to a
-     socket tarae planted there; anything else is dropped.
-   - **Marks** (6d, `marks.rs`): a served run's connect beyond is marked as its run's and program's; the planted
-     socket reads the mark back and hands the connection to the proxy, which decides its host as a CONNECT's.
-   - **Names** (6e, `names.rs`): tarae answers a run's lookups in the session with synthetic addresses
-     (`198.18.0.0/15`, a /64 beside the session's IPv6 one), so no proxy variable is set. Raw TCP to a looked-up name
-     and a name's SRV/TXT records each ask on a card of their own (6e+, §The egress proxy).
+6. **The transparent proxy** (6c–6h) — 6c–6e+ and 6g built, then **removed 2026-10-17** (`notproxy`):
+   in the session's netns a program that ignores the proxy variable already fails closed, so taking its connections
+   (nftables TPROXY rules, `SO_MARK` per run, tarae answering port 53 with stand-in addresses, a cgroup per run)
+   gained no security, cost about 0.5 ms a connection and tests only a cloud VM could run, and reset connections
+   where the proxy gives worded 403s; its first reason, Gradle ignoring the proxy, is the java pack's proxy file.
+   srt has no transparent proxy either. Every tier goes out by the proxy's variable and the pair (step 5).
    - **The 5.14 floor** (6f): the swap's probe and `Out` went; tier C goes out by the proxy's variable and the pair.
    - **By copies** (6f′): built, then removed (D-g) — where `pidfd_getfd` is refused the session is offline.
-   - **A cgroup per run** (6g, `cgroup.rs`): where the keeper has a delegated scope, so a rule can tell runs apart.
-     Tested with `cargo xtask linux --userns --cgroup` (CONTRIBUTING: a throwaway VM only).
    - **tarae's AppArmor profile** (6h, `apparmor.rs`, `packaging/apparmor/tarae`): lifts Ubuntu's restriction for
      tarae's binary alone; the `.deb` ships it for `/usr/bin/tarae`. tarae never writes it.
-   - Without TPROXY (no `nft_tproxy`), step 5's proxy variable stays.
 7. **Sessions kept apart** (D13, D14). Two sessions side by side, from a run of one at what the other's runs have:
    `keeper::tests::two_sessions_cant_reach_each_others_processes`, `…_sockets`, `two_sessions_cant_write_each_others_files`
    in every tier `cargo xtask linux` reaches, and `apart.rs`'s same three on macOS. What they found is fixed:

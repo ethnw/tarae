@@ -8,8 +8,8 @@
 //! (D2). Without a netns of its own (tier host) loopback is this machine's, reached only where it's opened. This
 //! machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine too, in every tier:
 //! reached only where the port's opened — a service listening on every address isn't reached through them. Beyond
-//! this machine, with the network open, only two ways go: the session's own network (TPROXY: a TCP connect and a
-//! name asked, `Redirected`) and tarae's egress proxy at its reserved address (`Proxy`); anything else beyond is
+//! this machine, with the network open, only one way goes: tarae's egress proxy at its reserved address (`Proxy`),
+//! by the run's proxy variable; anything else beyond (a tool that ignores the variable, raw TCP, a datagram) is
 //! refused as direct — and never to link-local addresses, the cloud metadata servers tarae knows of (most are
 //! link-local; `never` lists the others), multicast or broadcast (D-d). With it closed, refused. (6f took `Out` —
 //! a socket of tarae's connected beyond with no proxy — and step 4's resolvers reached as they are (D-c) out: no
@@ -31,10 +31,6 @@ pub enum Route {
     /// its own namespace, bound to no device (bound to `lo` it reaches loopback's addresses only), in place of
     /// the run's.
     OwnAddress,
-    /// Beyond this machine where the session's network takes it (6d, TPROXY): the run's own socket, marked as its
-    /// run's (`marks.rs`), the call made in the session — whose rules hand it to a planted socket, tarae's egress
-    /// proxy then deciding its host as it does a CONNECT's.
-    Redirected,
     /// The egress proxy's reserved address (`PROXY`), the network going through it: a loopback TCP pair of
     /// tarae's, one end in the run's place, the other the proxy's (`supervisor::proxied`).
     Proxy,
@@ -52,8 +48,7 @@ pub enum Refusal {
     Closed,
     /// An address never reached: link-local, the cloud metadata servers, multicast, broadcast (D-d).
     Never,
-    /// Beyond this machine by no way that goes out: only the proxy (a tool that ignores `HTTPS_PROXY` can't) and the
-    /// session's own network (TCP, names) do.
+    /// Beyond this machine by no way that goes out: only the proxy does (a tool that ignores `HTTPS_PROXY` can't).
     Direct,
     /// Where sessions share this machine's loopback, a socket of another session's is there (step 8, D18): the run
     /// gets `ECONNREFUSED`, as where its session has a loopback of its own that nothing listens on.
@@ -76,17 +71,9 @@ pub struct Reach<'a> {
     /// The resolvers `resolv.conf` names, each at its port 53 (`resolvers`): through the proxy, a lookup sent to
     /// one is refused as direct and said as a lookup (the proxy looks names up).
     pub resolvers: &'a [SocketAddr],
-    /// The network goes through the proxy at this address (`PROXY`): a connect there is `Proxy`. None where the
-    /// session's own network takes what goes beyond (6f: a TPROXY session's runs aren't told of it — 6e′).
+    /// The network goes through the proxy at this address (`PROXY`): a connect there is `Proxy`. None: the network
+    /// closed.
     pub proxy: Option<SocketAddr>,
-    /// The session's own network takes what goes beyond (6d: its keeper has a TPROXY network — `redirect.rs` — and
-    /// the call is a TCP socket's: the supervisor's to say): there, beyond this machine is `Redirected` rather than
-    /// refused as direct — every way out is the proxy's to decide. Datagrams but DNS stay as they were (refused).
-    pub redirect: bool,
-    /// The session answers names itself (6e: its keeper has a TPROXY network): a question to any address's port 53 —
-    /// UDP or TCP, a loopback resolver's too, a resolver `resolv.conf` names or not — is `Redirected`, with the
-    /// network open: the session's rules take it to a planted socket, where tarae answers it. Nothing of it leaves.
-    pub names: bool,
 }
 
 /// The port a resolver is reached on.
@@ -159,7 +146,7 @@ fn carried(v6: Ipv6Addr) -> Option<Ipv4Addr> {
 
 /// Where a call naming `to` goes, from a run whose sockets are in the session's own network namespace or
 /// not (`netns`), under `reach`. `listens`: whether the session listens at `to`'s port on its loopback —
-/// asked only where the answer turns on it (an opened port, port 53 where the session answers names). `mine`: whether an address beyond
+/// asked only where the answer turns on it (an opened port). `mine`: whether an address beyond
 /// loopback is one of this machine's own (its LAN's, a bridge's — Docker's `172.17.0.1`), where a listener on
 /// every address answers as on loopback: reached as loopback's opened ports are, never the session's — asked
 /// only where it decides; None where it can't be told (the addresses unread): refused, never opened.
@@ -173,24 +160,6 @@ pub fn route(
     let ip = plain(to.ip());
     if reach.proxy.is_some_and(|p| plain(p.ip()) == ip && p.port() == to.port()) {
         return Route::Proxy;
-    }
-    // (6e: a name asked is the session's to answer, wherever the question is addressed — but the session's own
-    // server and what the user opened come first: a server of a run's listening at that very loopback address and
-    // port 53 is the session's (`listens`, which at port 53 is the caller's word for that address alone: tarae's DNS
-    // socket is at every address); port 53 opened (`llm.sandbox-ports`, `-localhost`) is this machine's own server,
-    // on loopback or one of its own addresses, as before 6e)
-    if netns && reach.names && reach.network && to.port() == RESOLVER_PORT {
-        let opened = reach.localhost || reach.ports.contains(&to.port());
-        if this_machine(ip) && listens() {
-            return Route::Session;
-        }
-        if opened && this_machine(ip) {
-            return Route::Machine;
-        }
-        if opened && !never(ip) && mine(ip) == Some(true) {
-            return Route::OwnAddress;
-        }
-        return Route::Redirected;
     }
     let resolver = reach.resolvers.iter().any(|r| plain(r.ip()) == ip && r.port() == to.port());
     // (through the proxy names are looked up by the proxy: no tool measured that goes through it looked one up
@@ -217,8 +186,7 @@ pub fn route(
     match (reach.network, never(ip)) {
         (false, _) => Route::Refused(Refusal::Closed),
         (true, true) => Route::Refused(Refusal::Never),
-        // (beyond this machine only the session's network goes, and the proxy at its address: above)
-        (true, false) if netns && reach.redirect => Route::Redirected,
+        // (beyond this machine only the proxy at its address goes: above)
         (true, false) => Route::Refused(Refusal::Direct),
     }
 }
@@ -256,24 +224,6 @@ pub fn resolvers(conf: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// The search list `resolv.conf`'s text gives, as glibc reads it: the last `search` or `domain` line's names (each
-/// line replaces the one before), lowercase, no trailing dot, at most 6 (its `MAXDNSRCH`); `.` alone is none.
-pub fn search(conf: &str) -> Vec<String> {
-    let mut list = Vec::new();
-    for l in conf.lines() {
-        let mut words = l.split_whitespace();
-        if matches!(words.next(), Some("search" | "domain")) {
-            list = words
-                .take_while(|w| !w.starts_with('#') && !w.starts_with(';'))
-                .map(|w| w.trim_end_matches('.').to_ascii_lowercase())
-                .filter(|w| !w.is_empty())
-                .take(6)
-                .collect();
-        }
-    }
-    list
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,15 +241,8 @@ mod tests {
     #[test]
     fn the_route_table() {
         let resolvers: Vec<SocketAddr> = ["127.0.0.53:53", "169.254.169.254:53"].map(at).into();
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: false,
-            names: false,
-        };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[3000], ..closed };
         let localhost = Reach { localhost: true, ..closed };
         let open = Reach { network: true, ..closed };
@@ -404,15 +347,8 @@ mod tests {
     #[test]
     fn the_proxy_is_the_only_way_out() {
         let resolvers: Vec<SocketAddr> = ["127.0.0.53:53", "169.254.169.254:53"].map(at).into();
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: false,
-            names: false,
-        };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let proxied = Reach { network: true, proxy: Some(PROXY), ..closed };
         use Refusal::*;
         use Route::*;
@@ -438,135 +374,6 @@ mod tests {
         }
     }
 
-    /// Where the session's network takes what goes beyond (6d: a TPROXY keeper), beyond this machine is `Redirected`
-    /// — the run's own socket, marked, to the planted socket — with the proxy's variable set or not: a tool that
-    /// ignores `HTTPS_PROXY` is no longer refused as direct, its host the proxy's to decide. What isn't beyond stays as
-    /// it was: the session's loopback, opened ports, this machine's own addresses, the never-reached, a resolver's
-    /// port 53 (6e's), the network closed. Without a netns (host) there's no session's network: as before.
-    #[test]
-    fn the_sessions_network_takes_what_goes_beyond() {
-        let resolvers: Vec<SocketAddr> =
-            ["127.0.0.53:53", "169.254.169.254:53", "10.0.0.2:53"].map(at).into();
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: true,
-            names: false,
-        };
-        let proxied = Reach { network: true, proxy: Some(PROXY), ..closed };
-        let open = Reach { network: true, ..closed };
-        let own = |ip: IpAddr| Some(ip == "192.168.1.5".parse::<IpAddr>().unwrap());
-        use Refusal::*;
-        use Route::*;
-        // (to, reach, in the session's netns, without one)
-        let rows: Vec<(&str, Reach, Route, Route)> = vec![
-            ("93.184.216.34:443", proxied, Redirected, Refused(Direct)),
-            ("[2606:2800:220:1::1]:443", proxied, Redirected, Refused(Direct)),
-            ("10.0.0.5:22", proxied, Redirected, Refused(Direct)),
-            ("93.184.216.34:443", open, Redirected, Refused(Direct)),
-            ("[::ffff:93.184.216.34]:80", open, Redirected, Refused(Direct)),
-            ("192.0.2.1:3128", proxied, Proxy, Proxy),
-            ("127.0.0.1:3000", proxied, Session, Refused(Closed)),
-            ("192.168.1.5:8888", proxied, Refused(Closed), Refused(Closed)),
-            ("169.254.169.254:80", proxied, Refused(Never), Refused(Never)),
-            ("[fe80::1]:443", open, Refused(Never), Refused(Never)),
-            ("10.0.0.2:53", proxied, Refused(Direct), Refused(Direct)),
-            ("10.0.0.2:53", open, Redirected, Refused(Direct)),
-            ("93.184.216.34:443", closed, Refused(Closed), Refused(Closed)),
-        ];
-        for (to, reach, netns, c) in rows {
-            let got =
-                (route(at(to), true, &reach, || false, own), route(at(to), false, &reach, || false, own));
-            assert_eq!(got, (netns, c), "{to} under {reach:?}");
-        }
-    }
-
-    /// Where the session answers names (6e), a question to any address's port 53 is the session's — `Redirected`, to
-    /// a planted socket where tarae answers it — whoever it's addressed to: a resolver `resolv.conf` names (the
-    /// loopback stub, GCP's link-local one, a LAN's), one it doesn't, loopback's `::1`; a datagram to another port
-    /// stays refused. With the network closed it's as before (the session's own loopback: its question reaches the
-    /// planted socket unmarked, and is refused there), and without a netns (host) there's nothing to answer it.
-    #[test]
-    fn where_the_session_answers_names_every_question_is_its_own() {
-        let resolvers: Vec<SocketAddr> =
-            ["127.0.0.53:53", "169.254.169.254:53", "10.0.0.2:53"].map(at).into();
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: true,
-            names: true,
-        };
-        let open = Reach { network: true, proxy: Some(PROXY), ..closed };
-        let datagram = Reach { redirect: false, ..open };
-        // (port 53 opened by the user: this machine's own server comes first)
-        let port53 = Reach { ports: &[53], ..datagram };
-        let every_port = Reach { localhost: true, ..datagram };
-        let own = |ip: IpAddr| Some(ip == "192.168.1.5".parse::<IpAddr>().unwrap());
-        use Refusal::*;
-        use Route::*;
-        // (to, reach, in the session's netns, without one)
-        let rows: Vec<(&str, Reach, Route, Route)> = vec![
-            ("127.0.0.53:53", open, Redirected, Refused(Direct)),
-            ("169.254.169.254:53", open, Redirected, Refused(Direct)),
-            ("10.0.0.2:53", datagram, Redirected, Refused(Direct)),
-            ("8.8.8.8:53", datagram, Redirected, Refused(Direct)),
-            ("[::1]:53", datagram, Redirected, Refused(Closed)),
-            ("[2001:4860:4860::8888]:53", open, Redirected, Refused(Direct)),
-            ("93.184.216.34:443", datagram, Refused(Direct), Refused(Direct)),
-            ("93.184.216.34:443", open, Redirected, Refused(Direct)),
-            ("127.0.0.53:80", open, Session, Refused(Closed)),
-            ("127.0.0.53:53", closed, Session, Refused(Closed)),
-            ("10.0.0.2:53", closed, Refused(Closed), Refused(Closed)),
-            // (opened by the user: this machine's own server — loopback's, one of its own addresses' — not the
-            // session's answer; beyond this machine an opened port means nothing)
-            ("127.0.0.53:53", port53, Machine, Refused(Direct)),
-            ("127.0.0.1:53", port53, Machine, Machine),
-            ("[::1]:53", every_port, Machine, Machine),
-            ("192.168.1.5:53", port53, OwnAddress, OwnAddress),
-            ("192.168.1.5:53", datagram, Redirected, Refused(Closed)),
-            ("8.8.8.8:53", port53, Redirected, Refused(Direct)),
-        ];
-        for (to, reach, netns, c) in rows {
-            let got =
-                (route(at(to), true, &reach, || false, own), route(at(to), false, &reach, || false, own));
-            assert_eq!(got, (netns, c), "{to} under {reach:?}");
-        }
-        // (6f: a TPROXY session's own reach — no proxy, its runs told of none: the proxy's old address is a connect
-        // beyond like any, the session's to take; a datagram beyond still refused as direct, never let out)
-        let taken = Reach { proxy: None, ..open };
-        let taken_datagram = Reach { redirect: false, ..taken };
-        let at_old = at("192.0.2.1:3128");
-        assert_eq!(route(at_old, true, &taken, || false, own), Redirected, "the old proxy address");
-        assert_eq!(route(at_old, true, &open, || false, own), Proxy, "where there's still a proxy");
-        for to in ["93.184.216.34:443", "[2606:2800:220:1::1]:443", "192.0.2.1:3128"] {
-            assert_eq!(route(at(to), true, &taken_datagram, || false, own), Refused(Direct), "{to}");
-        }
-        // (a run's own server listening at that very loopback address comes first — before an opened port too; for
-        // an address beyond this machine whether the session listens isn't asked)
-        let asked = std::cell::Cell::new(0);
-        let listens = || {
-            asked.set(asked.get() + 1);
-            true
-        };
-        assert_eq!(route(at("127.0.0.1:53"), true, &open, listens, own), Session, "its own server");
-        assert_eq!(route(at("127.0.0.1:53"), true, &port53, listens, own), Session, "before an opened port");
-        assert_eq!(route(at("[::1]:53"), true, &datagram, listens, own), Session);
-        assert_eq!(
-            route(at("127.0.0.1:53"), false, &open, listens, own),
-            Refused(Closed),
-            "no netns: as before"
-        );
-        let asked_before = asked.get();
-        assert_eq!(route(at("10.0.0.2:53"), true, &open, listens, own), Redirected);
-        assert_eq!(asked.get(), asked_before, "beyond this machine: not asked");
-    }
-
     /// This machine's own addresses beyond loopback (its LAN's, Docker's bridge's) are this machine: reached on
     /// an opened port (from no device: `OwnAddress`), the session listening or not; else refused — never out
     /// with the network open, never the session's. A link-local one is never reached. Whether an address is its own is asked only where it
@@ -574,15 +381,8 @@ mod tests {
     #[test]
     fn this_machines_own_addresses_are_this_machine() {
         let resolvers: Vec<SocketAddr> = vec![at("192.168.1.5:53")];
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: false,
-            names: false,
-        };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[8888], ..closed };
         let open = Reach { network: true, ..closed };
         let open_port = Reach { network: true, ..port };
@@ -635,15 +435,8 @@ mod tests {
     #[test]
     fn unread_own_addresses_only_refuse() {
         let resolvers: Vec<SocketAddr> = vec![at("10.0.0.2:53")];
-        let closed = Reach {
-            localhost: false,
-            ports: &[],
-            network: false,
-            resolvers: &resolvers,
-            proxy: None,
-            redirect: false,
-            names: false,
-        };
+        let closed =
+            Reach { localhost: false, ports: &[], network: false, resolvers: &resolvers, proxy: None };
         let port = Reach { ports: &[3000], ..closed };
         let open = Reach { network: true, ..closed };
         let open_port = Reach { network: true, ..port };
@@ -699,7 +492,7 @@ mod tests {
         for r in [Machine, OwnAddress] {
             assert_eq!(kept_apart(r, true, theirs(true)), r, "{r:?} in the session's netns");
         }
-        for r in [Session, Redirected, Proxy, Refused(Refusal::Closed)] {
+        for r in [Session, Proxy, Refused(Refusal::Closed)] {
             assert_eq!(kept_apart(r, false, theirs(true)), r, "{r:?}");
         }
         assert_eq!(asked.get(), 6, "asked only where it decides");
@@ -716,19 +509,5 @@ mod tests {
         let got: Vec<String> = resolvers(conf).iter().map(|r| r.to_string()).collect();
         assert_eq!(got, ["127.0.0.53:53", "[fe80::1]:53", "8.8.8.8:53"]);
         assert!(resolvers("").is_empty());
-    }
-
-    /// The search list as glibc reads it: the last `search` or `domain` line wins whole, its names lowercase and
-    /// without their trailing dot, at most six, a comment ending the line; systemd-resolved's `search .` is none.
-    #[test]
-    fn the_search_list_is_read_as_glibc_reads_it() {
-        let gce = "nameserver 169.254.169.254\nsearch asia-northeast3-a.c.p.internal c.p.internal google.internal\n";
-        assert_eq!(search(gce), ["asia-northeast3-a.c.p.internal", "c.p.internal", "google.internal"]);
-        let replaced = "search old.example\ndomain Corp.Example.\noptions ndots:5\n";
-        assert_eq!(search(replaced), ["corp.example"]);
-        assert!(search("nameserver 127.0.0.53\nsearch .\n").is_empty(), "the stub's `.`");
-        assert_eq!(search("search a b c d e f g h # the rest\n").len(), 6);
-        assert_eq!(search("search a.example # comment\n"), ["a.example"]);
-        assert!(search("").is_empty());
     }
 }

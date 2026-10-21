@@ -1,8 +1,7 @@
 //! Step 6e′'s M5 (`target/sb/step6e-design.md`): the M4 tools — curl, cargo, npm, pip, Go, Gradle — through the
 //! real path (`sandbox::policy`, `command`, `spawn`, `after_run`), each fetching one package from a registry of the
-//! test's own. Where the session takes a run's connections (`Policy.redirected`: TPROXY, tier own) the run
-//! has no proxy URL, no proxy variable and no proxy line in its Gradle home; elsewhere (tier host) its way is the
-//! URL. Nothing leaves the machine: the registries are the test's own servers on this machine's own address, under
+//! test's own. In every tier the run's way is its proxy URL: the proxy variables, and the packs' lines (Gradle's in
+//! its Gradle home). Nothing leaves the machine: the registries are the test's own servers on this machine's own address, under
 //! `example.invalid` names (`TEST_NAMES`) — curl's and cargo's plain HTTP, served here (so they run wherever curl
 //! and cargo are: the checks' own image), the others' HTTPS (`Repo.java`, its certificate trusted by each tool's
 //! own setting: they need a JDK, and run where the tools are — `cargo xtask linux --image tarae-m5`). A test whose
@@ -377,9 +376,8 @@ fn project(tool: &str, program: PathBuf, root: &Path, base: &Path) -> Asked {
     Asked { program, args, env, served, made }
 }
 
-/// `tool` fetches its package as Claude's runs do — the network open, its registry named — by the run's way out:
-/// where the session takes its connections, no proxy URL, no proxy variable and no proxy line in its Gradle home
-/// (and on a machine said to give TPROXY, `TARAE_EXPECT_NETWORK`, that way it must be); elsewhere the URL. Skips
+/// `tool` fetches its package as Claude's runs do — the network open, its registry named — by the run's way out,
+/// its proxy URL (the proxy variables, and the packs' lines). Skips
 /// itself (said) where its tool, a JDK for the HTTPS registry, Landlock or the supervisor isn't here.
 fn fetches(tool: &str) {
     let test = format!("m5_tests::m5_{tool}");
@@ -451,17 +449,8 @@ fn fetches(tool: &str) {
     }
     let served = r.served.lock().unwrap().clone();
     let said = format!("{out}\n{err}\nreport: {report}\nserved: {served:?}");
-    let way = format!(
-        "redirected {} · URL {url} · variables {vars:?} · Gradle's lines {gradle_lines}",
-        p.redirected
-    );
-    if std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy") {
-        assert!(p.redirected, "{tool}: TPROXY expected here — {way}");
-    }
-    match p.redirected {
-        true => assert!(!url && vars.is_empty() && !gradle_lines, "{tool}: {way}"),
-        false => assert!(url && !vars.is_empty(), "{tool}: its way out is the URL — {way}"),
-    }
+    let way = format!("URL {url} · variables {vars:?} · Gradle's lines {gradle_lines}");
+    assert!(url && !vars.is_empty(), "{tool}: its way out is the URL — {way}");
     assert!(status.is_some_and(|s| s.success()), "{tool} ({way}): {status:?}\n{said}");
     assert!(served.iter().any(|s| s == asked.served), "{tool}: {} served\n{said}", asked.served);
     assert!(root.join(asked.made).exists(), "{tool}: {} made\n{said}", asked.made);

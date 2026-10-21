@@ -1,12 +1,12 @@
 # fuzz/parsers — coverage-guided fuzzing of what a sandboxed run sends
 
 libFuzzer targets (cargo-fuzz) for tarae's readers of bytes a run controls: the supervisor's `struct sockaddr`,
-netlink batches and `struct msghdr`, the egress proxy's request heads, ClientHellos and chunked bodies, the DNS
-questions it answers and the responses it reads (`target/sb/v2-fuzz-plan.md` §1, §3 "A + C").
+netlink batches and `struct msghdr`, the egress proxy's request heads, ClientHellos and chunked bodies
+(`target/sb/v2-fuzz-plan.md` §1, §3 "A + C").
 
 The readers' modules are included from tarae's tree as they are (`src/lib.rs`, `#[path]`), and each target is one
 call to the **property function** its in-tree loop calls too — the module's `check` (`wire/check.rs`,
-`proxy/parse/check.rs`, `proxy/dns/check.rs`), built for tests and under cargo-fuzz's `--cfg fuzzing`, never in
+`proxy/parse/check.rs`), built for tests and under cargo-fuzz's `--cfg fuzzing`, never in
 tarae's own build. A broken property panics, which is a crash here and a failure there. The loops run in every
 `cargo test`; this crate is optional and nothing of tarae's reads it.
 
@@ -19,17 +19,14 @@ tarae and the plugin fuzzer in `../` keep the pinned stable.
 | `netlink` | `wire::netlink_reads` | `netlink`: taken ⇒ the kernel's model finds no change | a batch |
 | `msghdr` | `wire::read_msg` | `message`: the kernel's model's memory, errno, data, descriptors | a run's memory (below) |
 | `head` | `parse::head` | `head` | what a client sends the proxy |
-| `origin` | `parse::origin` | `origin` | a request to its server (port 80) |
 | `sni` | `parse::server_name` | `sni` | a tunnel's first bytes |
 | `body` | `parse::Body` (chunked) | `body` | first byte: bytes given at a time (1 + 2n), then the body |
-| `dns_question` | `dns::question` | `question` | a run's question |
-| `dns_response` | `dns::response` | `response` | a resolver's answer to `check::asked()` |
 
 `msghdr`'s input is a run's memory (`Fake::from_input`): a byte of flags (1: a datagram), where the header is
 (8 bytes), then pieces, each an address (8 bytes), a length (2 bytes) and its bytes. Numbers are little-endian.
 
 Not here: `linux.rs`'s audit reader (`audit_value` can't be included alone), the keeper's channel (Linux-only, it
-needs the tier and redirect types), and `said_in_output`/`said_in_result` (they need a `Policy`). Their loops
+needs the tier types), and `said_in_output`/`said_in_result` (they need a `Policy`). Their loops
 are in-tree.
 
 ## Running
@@ -53,7 +50,7 @@ cargo +nightly-2026-10-14 fuzz run --fuzz-dir fuzz/parsers $t fuzz/parsers/corpu
 The first folder is the corpus libFuzzer grows (git-ignored, kept between runs). The second holds the seeds,
 which are read and never written. Builds are optimized with debug assertions and overflow checks on, as in
 tarae's test profile, so an overflow the release build would wrap is a crash here too. `-max_len` matters
-for targets whose limits are past libFuzzer's default of 4096 bytes: `head`/`origin` 12288 (past `HEAD_MAX`),
+for targets whose limits are past libFuzzer's default of 4096 bytes: `head` 12288 (past `HEAD_MAX`),
 `sni` 40000 (past `HELLO_MAX` in records), `msghdr` 20000 (a full iovec array).
 
 `hour.sh` does all of it on Linux: it builds, then runs each target for an hour (`./hour.sh [seconds]`, `JOBS`

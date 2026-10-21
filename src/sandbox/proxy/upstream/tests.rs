@@ -177,29 +177,6 @@ fn no_proxy_sends_its_hosts_direct() {
     assert_eq!(way_of(&u(""), "a.example.invalid", 443, true), "direct", "an empty no_proxy: NO_PROXY's");
 }
 
-/// Whether a name may go through an upstream at all (6e, E1: then tarae looks it up for nothing) is the name's, not
-/// one port's: an upstream for tunnels or for plain requests, the name not sent direct at every port by `NO_PROXY` —
-/// an entry for one of its ports (`d.example.invalid:8443`) leaves the others through, so the name may. No upstream,
-/// `*`, or the name (or a domain above it) without a port: never through.
-#[test]
-fn a_name_may_go_through_unless_direct_at_every_port() {
-    let with = |vars: &[(&str, &str)]| of(&env(vars), Setting::Env);
-    let tunnel = [("HTTPS_PROXY", "http://p.example.invalid:3128")];
-    let cases = [
-        (with(&tunnel), "d.example.invalid", true),
-        (with(&[("HTTP_PROXY", "http://p.example.invalid:3128")]), "d.example.invalid", true),
-        (with(&[tunnel[0], ("NO_PROXY", "d.example.invalid:443")]), "d.example.invalid", true),
-        (with(&[tunnel[0], ("NO_PROXY", "d.example.invalid:8443")]), "d.example.invalid", true),
-        (with(&[tunnel[0], ("NO_PROXY", "d.example.invalid")]), "d.example.invalid", false),
-        (with(&[tunnel[0], ("NO_PROXY", "example.invalid")]), "d.example.invalid", false),
-        (with(&[tunnel[0], ("NO_PROXY", "*")]), "d.example.invalid", false),
-        (with(&[]), "d.example.invalid", false),
-    ];
-    for (i, (u, host, want)) in cases.into_iter().enumerate() {
-        assert_eq!(u.may_go_through(host), want, "case {i}: {u:?}");
-    }
-}
-
 /// An upstream's answer is read by its status and what its 407 offers, in tarae's own names — never its words:
 /// a head over its limit, or what isn't HTTP, is refused; a challenge's parameters aren't schemes.
 #[test]

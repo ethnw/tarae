@@ -845,7 +845,6 @@ dependencies = [
  "serde_json",
  "streaming-iterator",
  "tar",
- "tarae-netlink",
  "toml",
  "toml_edit",
  "tree-sitter",
@@ -854,13 +853,6 @@ dependencies = [
  "unicode-width",
  "vt100",
  "wat",
-]
-
-[[package]]
-name = "tarae-netlink"
-version = "0.1.0"
-dependencies = [
- "libc",
 ]
 
 [[package]]

@@ -229,12 +229,6 @@ pub enum What {
     /// A host a run's rules don't name, its connection held by tarae's proxy (`hosts.rs`): `y` this run, `s`
     /// this session, `A` always in this project, `n` refused for this session. Gone with its run.
     Host(Box<crate::hosts::Ask>),
-    /// Raw TCP to a host:port no rule naming its port lets through (6e+, `hosts.rs`): `y` this run, `s` this
-    /// session, `n` refused for this session — no `A`. Gone with its run.
-    HostRaw(Box<crate::hosts::Ask>),
-    /// A name's SRV/TXT records, for a name the rules don't allow (6e+, `hosts.rs`), the run's question held: as
-    /// `HostRaw`.
-    Lookup(Box<crate::hosts::Ask>),
     /// Containers made on an engine while a stopped run of Claude's went, under names not its own
     /// (`containers.rs`): `y` stops them, by name · `n` leaves them running.
     Containers(Box<crate::containers::Ask>),
@@ -294,8 +288,6 @@ pub const KINDS: &[&str] = &[
     "recover",
     "stuck",
     "host",
-    "host-raw",
-    "lookup",
     "containers",
     "billing-switch",
     "environment-key",
@@ -365,8 +357,6 @@ impl What {
             | What::Containers(_)
             // (its run ends with the restart)
             | What::Host(_)
-            | What::HostRaw(_)
-            | What::Lookup(_)
             // (about a conversation's cache as it was — `$` asks again, a refusal comes again)
             | What::BillingSwitch { .. }
             // (the chat after a restart fails again, and asks again: the answer isn't kept)
@@ -594,8 +584,6 @@ impl Offer {
                 | What::Recover(_)
                 | What::Stuck(_)
                 | What::Host(_)
-                | What::HostRaw(_)
-                | What::Lookup(_)
                 | What::Containers(_)
                 // (one `y` closes every draft it lists — cardburden 6: answered once read, its list as it is)
                 | What::NotesStale { .. }
@@ -620,7 +608,7 @@ impl Offer {
     /// The host it asks about, if it's that card — or a raw connection's, or a lookup's (6e+).
     pub fn host(&self) -> Option<&crate::hosts::Ask> {
         match &self.what {
-            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => Some(a),
+            What::Host(a) => Some(a),
             _ => None,
         }
     }
@@ -766,7 +754,7 @@ impl Offer {
         match &self.what {
             What::Grant { .. } => self.top() >= Some(crate::allow::Scope::ThisChat),
             // (piece C: a host's `a` is this conversation's — `hosts::chat_ended`)
-            What::Host(_) | What::HostRaw(_) | What::Lookup(_) => true,
+            What::Host(_) => true,
             What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
             What::Run(r) => {
@@ -819,8 +807,6 @@ impl Offer {
                     | What::NotesClose { .. }
                     // (its session's: a key of another session's never answers it)
                     | What::Host(_)
-                    | What::HostRaw(_)
-                    | What::Lookup(_)
                     | What::Containers(_)
                     // (its session's chat waits on it — answered in another, it'd answer nothing)
                     | What::ClaudeSettings { .. }
@@ -1011,10 +997,6 @@ impl Offer {
                 ('v', "Details"),
                 ('n', "No"),
             ],
-            // (F7: no `A` — a lasting allow is the user's own line in llm.sandbox-hosts)
-            W::HostRaw(_) | W::Lookup(_) => {
-                vec![('y', "This run"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
-            }
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
             W::BillingSwitch { money: true, .. } => vec![('y', "This session"), ('n', "Stay")],
             W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
@@ -1069,8 +1051,6 @@ impl Offer {
             W::Recover(_) => "recover",
             W::Stuck(_) => "stuck",
             W::Host(_) => "host",
-            W::HostRaw(_) => "host-raw",
-            W::Lookup(_) => "lookup",
             W::Containers(_) => "containers",
             W::BillingSwitch { .. } => "billing-switch",
             W::EnvKey { .. } => "environment-key",
@@ -1497,9 +1477,7 @@ impl crate::editor::Editor {
                 self.offer_finished(id, Ok(()));
                 crate::stuck::stop(self, &s);
             }
-            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
-                crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run)
-            }
+            What::Host(a) => crate::hosts::answer(self, id, *a, crate::sandbox::proxy::Scope::Run),
             What::Containers(a) => crate::containers::answer(self, id, *a, true),
             What::BillingSwitch { session, to, .. } => self.switch_answer(id, session, to),
             What::EnvKey { session, message } => {
@@ -1548,9 +1526,7 @@ impl crate::editor::Editor {
         self.card_answered(o.id);
         let session = Some(crate::allow::Scope::Session);
         match o.what {
-            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
-                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session)
-            }
+            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, session),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, session, keep, folder)
@@ -1966,9 +1942,7 @@ impl crate::editor::Editor {
             What::Host(a) if scope == crate::allow::Scope::Always => {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Project)
             }
-            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
-                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Chat)
-            }
+            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Chat),
             What::EnvKey { session, message } if scope == crate::allow::Scope::Always => {
                 crate::envkey::answer(self, o.id, (session, message), crate::envkey::Answer::Always)
             }
@@ -2076,9 +2050,7 @@ impl crate::editor::Editor {
             What::NotesClose { by, ids } => crate::notes::close_by_answer(self, o.id, by, ids, false),
             What::Recover(f) => crate::recovery::not_now(self, *f),
             What::Stuck(s) => crate::stuck::keep_waiting(self, &s),
-            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
-                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused)
-            }
+            What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Refused),
             What::Containers(a) => crate::containers::answer(self, o.id, *a, false),
             What::BillingSwitch { session, to, .. } => {
                 let name = std::iter::once(&self.session)

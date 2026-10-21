@@ -202,10 +202,9 @@ pub struct Session {
     /// Its Claude's conversation compacted since tarae started — how often, the last one, and whether one
     /// came behind and it hasn't been in front since (`compaction.rs`).
     pub compacted: crate::compaction::Compacted,
-    /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit) — over
-    /// TLS or HTTP, raw, or a name's records looked up (6e+; a lookup's port 0) — what `:granted` lists and
-    /// takes back; the proxy holds the answers itself (`hosts.rs`).
-    pub hosts: Vec<(crate::sandbox::proxy::Kind, String, u16)>,
+    /// The hosts its commands reach through tarae's proxy by the user's `s` (this session, until you quit), at
+    /// their ports — what `:granted` lists and takes back; the proxy holds the answers itself (`hosts.rs`).
+    pub hosts: Vec<(String, u16)>,
     /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
     /// host's, `hosts`), kept with it in `$state/sessions` until it ends or `:sandbox-disallow` takes it back.
     pub allowed: crate::allow::Allowed,
@@ -350,12 +349,9 @@ impl Session {
         }
     }
 
-    /// The hosts its `s` let through over TLS or HTTP, at their ports — what its runs' rules carry (`caps::Basis`).
+    /// The hosts its `s` let through, at their ports — what its runs' rules carry (`caps::Basis`).
     pub fn granted_hosts(&self) -> Vec<(String, u16)> {
-        let host = |(k, h, p): &(crate::sandbox::proxy::Kind, String, u16)| {
-            (*k == crate::sandbox::proxy::Kind::Host).then(|| (h.clone(), *p))
-        };
-        self.hosts.iter().filter_map(host).collect()
+        self.hosts.clone()
     }
 
     /// The session as tarae's proxy names it — `proxy::session_of` its root, resolved as a run's policy resolves

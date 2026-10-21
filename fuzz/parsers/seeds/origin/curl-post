@@ -1,8 +1,0 @@
-POST /form?a=1 HTTP/1.1
-Host: example.invalid
-User-Agent: curl/8.7.1
-Accept: */*
-Content-Length: 3
-Content-Type: application/x-www-form-urlencoded
-
-x=1

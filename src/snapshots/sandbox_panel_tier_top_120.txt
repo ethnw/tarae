@@ -4,7 +4,7 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                                    what the sandbox blocked  0/0
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-04     tier own  Landlock ABI 8  loopback its own  network TPROXY  shared nothing
+04     tier own  Landlock ABI 8  loopback its own  network tarae's proxy  shared nothing
 05
 06     the sandbox blocked nothing in that run
 07
@@ -66,7 +66,7 @@
 01
 02    A                                                                                    ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD fff  DDDDDDDD fff f  DDDDDDDD fff fff  DDDDDDD ffffff  DDDDDD fffffff
+04     DDDD fff  DDDDDDDD fff f  DDDDDDDD fff fff  DDDDDDD fffffff fffff  DDDDDD fffffff
 05
 06     fff fffffff fffffff fffffff ff ffff fff
 07

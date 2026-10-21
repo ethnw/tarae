@@ -102,21 +102,10 @@ pub enum BirthStep {
     Lo,
     Caps,
     Exec,
-    // tarae's side, after `Ready`: the session's network (`redirect::make`) — never on the birth pipe
-    /// A socket the keeper handed isn't in the session's netns (P5).
-    Netns,
-    /// The keeper's sockets for it: made, handed, the planted ones made transparent.
-    Planted,
-    Routes,
-    Rules,
-    /// 6d: the session's netns keeps a connection's mark on what accepts it (`tcp_fwmark_accept`) — written by the
-    /// birth's child before its capability drop (on the birth pipe, the one network step there): without it the
-    /// planted socket can't tell whose a connection is. A read-only `/proc/sys` (a container's) refuses it.
-    Fwmark,
 }
 
 impl BirthStep {
-    const ALL: [BirthStep; 16] = [
+    const ALL: [BirthStep; 11] = [
         BirthStep::Clone,
         BirthStep::Map,
         BirthStep::Go,
@@ -128,11 +117,6 @@ impl BirthStep {
         BirthStep::Lo,
         BirthStep::Caps,
         BirthStep::Exec,
-        BirthStep::Netns,
-        BirthStep::Planted,
-        BirthStep::Routes,
-        BirthStep::Rules,
-        BirthStep::Fwmark,
     ];
 
     pub fn code(self) -> u8 {
@@ -156,20 +140,7 @@ impl BirthStep {
             BirthStep::Lo => "bringing its loopback up",
             BirthStep::Caps => "dropping every capability",
             BirthStep::Exec => "running tarae's binary",
-            BirthStep::Netns => "checking its sockets are the session's",
-            BirthStep::Planted => "making its planted sockets",
-            BirthStep::Routes => "sending its routes",
-            BirthStep::Rules => "sending its rules",
-            BirthStep::Fwmark => "keeping a connection's mark where it's accepted (tcp_fwmark_accept)",
         }
-    }
-
-    /// A step of the session's network — tarae's after `Ready`, and `Fwmark` the child's — not of its namespaces.
-    pub fn network(self) -> bool {
-        matches!(
-            self,
-            BirthStep::Netns | BirthStep::Planted | BirthStep::Routes | BirthStep::Rules | BirthStep::Fwmark
-        )
     }
 
     /// A mount of the birth's.
@@ -378,7 +349,7 @@ fn cause(s: &Seen) -> Cause {
     if refused && step == BirthStep::Map && !s.dumpable {
         return Cause::NotDumpable;
     }
-    if refused && s.restrict_userns == Some(1) && step != BirthStep::Exec && !step.network() {
+    if refused && s.restrict_userns == Some(1) && step != BirthStep::Exec {
         return Cause::Restriction;
     }
     if refused && step.mounts() && refusing(s.apparmor.as_deref()) {
@@ -459,16 +430,6 @@ pub struct Probed {
     pub brief: Option<String>,
     /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
     pub served: Result<(), String>,
-    /// Whether a keeper of this tarae is born with the session's transparent proxy (`redirect`): the probe's own
-    /// keeper got its routes and owned table, or why not (no netns; a module that can't load, a kernel without
-    /// `NFT_TPROXY` or the owner flag). Decided once (D-b): a session's own birth whose network fails after this
-    /// passed fails its runs, said — no silent fallback. Without it a session's runs go out by the proxy's variable
-    /// and the pair, their own loopback kept (6f, F3).
-    pub redirect: Result<(), String>,
-    /// 6g: whether a keeper with that network gets a scope of its own, each run a cgroup of its own below it — where
-    /// the scope comes from — or why not (`cgroup::conditions`; without `redirect`, nothing would read it). Decided
-    /// once (D-b); a keeper whose own scope fails says so with it, its runs in its cgroup.
-    pub cgroups: Result<super::cgroup::Source, String>,
     /// Ubuntu's restriction kept the namespaces from a tarae under no profile: why, and the step (`hint`).
     pub hint: Option<super::guarantees::Hint>,
 }
@@ -502,8 +463,6 @@ pub fn get() -> &'static Probed {
                 short: Some("none asked (TARAE_TEST_NO_NS)".into()),
                 brief: Some("none asked".into()),
                 served,
-                redirect: Err("no network namespace".into()),
-                cgroups: Err("no TPROXY network".into()),
                 hint: None,
             };
         }
@@ -530,24 +489,6 @@ pub fn get() -> &'static Probed {
             Err(why) => format!("{said} — not served: {why}"),
         };
         crate::log::line("sandbox", "info", &said);
-        // (Q5: the network's way and why, beside the tier)
-        let way = match &p.redirect {
-            Ok(()) => "network: TPROXY (the session's routes and owned table)".to_string(),
-            Err(why) => format!("network: the session's proxy, by its variable — no TPROXY: {why}"),
-        };
-        crate::log::line("sandbox", "info", &way);
-        // (6g, D4: said here only — nothing is lost without it but what 6d would add)
-        if p.redirect.is_ok() {
-            let runs = match &p.cgroups {
-                Ok(source) => format!(
-                    "runs: a cgroup each, in their keeper's own scope ({}) — a rule's level: a run's depth \
-                     below the root",
-                    source.said()
-                ),
-                Err(why) => format!("runs: in their keeper's cgroup — {why}"),
-            };
-            crate::log::line("sandbox", "info", &runs);
-        }
         p
     })
 }
@@ -571,20 +512,6 @@ fn ns_for(probed: &Probed, in_shm: bool) -> Ns {
     Ns { shm: probed.ns.shm && !in_shm, ..probed.ns }
 }
 
-/// Whether the keeper of a policy that opens the network takes its runs' connections in the session's network
-/// (TPROXY, tier own) — its namespaces as `for_policy` gives them such a policy, and the keeper's own rule
-/// (`keeper::network_for`). Then its runs get no proxy URL (6e′, `Policy.redirected`). Probes the first time (a
-/// worker's). Decided before there's a keeper: it must be what the keeper is born with
-/// (`the_proxy_url_is_decided_as_the_keeper_is_born`).
-pub fn redirects() -> bool {
-    redirects_in(get())
-}
-
-/// `redirects` where the probe found `probed`.
-fn redirects_in(probed: &Probed) -> bool {
-    super::keeper::network_for(ns_for(probed, false), &probed.redirect).is_some()
-}
-
 /// Whether the project, or a place or a file `p` writes, is in `/dev/shm` (real paths, as a policy has them).
 pub fn in_shm(p: &super::Policy) -> bool {
     let shm = Path::new("/dev/shm");
@@ -602,9 +529,8 @@ fn probe() -> Probed {
 }
 
 /// `probe` where serving is `served` and a keeper's birth and run is `tried` (tests stand in).
-fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>) -> Probed {
+fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns) -> Result<(), Failed>) -> Probed {
     let all = Ns::session(true, true);
-    let none = || Err("no network namespace".into());
     // (no namespaces: why, and the hint where Ubuntu's restriction is why — for the binary running)
     let without = |e: Failed| {
         let tier = Tier::of(Ns::NONE, served.is_ok());
@@ -614,46 +540,21 @@ fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns, bool) -> Res
             _ => None,
         };
         let short = e.brief();
-        (Ns::NONE, Some(e.said()), Some(short), none(), hint)
+        (Ns::NONE, Some(e.said()), Some(short), hint)
     };
-    let (ns, short, brief_said, redirect, hint) = match with_network(all, &mut tried) {
-        (Ok(()), network) => (all, None, None, network, None),
-        (Err(Failed::Birth(e)), _) if e.step == BirthStep::Proc => {
+    let (ns, short, brief_said, hint) = match tried(all) {
+        Ok(()) => (all, None, None, None),
+        Err(Failed::Birth(e)) if e.step == BirthStep::Proc => {
             let seen = Seen::now(e);
             let (no_pid, few) = (why(&seen), brief(&seen));
-            match with_network(Ns::session(true, false), &mut tried) {
-                (Ok(()), network) => (Ns::session(true, false), Some(no_pid), Some(few), network, None),
-                (Err(e), _) => without(e),
+            match tried(Ns::session(true, false)) {
+                Ok(()) => (Ns::session(true, false), Some(no_pid), Some(few), None),
+                Err(e) => without(e),
             }
         }
-        (Err(e), _) => without(e),
+        Err(e) => without(e),
     };
-    let cgroups = match &redirect {
-        Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
-        Err(_) => Err("no TPROXY network".into()),
-    };
-    Probed { ns, short, brief: brief_said, served, redirect, cgroups, hint }
-}
-
-/// A keeper born with `ns` and, where it has a netns, the session's network: whether the namespaces work, and
-/// whether the network does. One keeper where both do (measured on deb12: 47 ms with the network, 43 without —
-/// `measure_the_probe`; a second keeper for the network alone was the whole 47 more, on the first run's path).
-/// A network step failing (`BirthStep::network`), the namespaces are tried again alone: a network that can't be
-/// made doesn't cost the session its namespaces. Anything else — a namespace step, no answer in time, the run — is
-/// the namespaces' answer as it is, and the network wasn't tried. The keeper's try is `tried` (the tests pass a
-/// stand-in).
-fn with_network(
-    ns: Ns,
-    mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>,
-) -> (Result<(), Failed>, Result<(), String>) {
-    if !ns.netns() {
-        return (tried(ns, false), Err("no network namespace".into()));
-    }
-    match tried(ns, true) {
-        Ok(()) => (Ok(()), Ok(())),
-        Err(Failed::Birth(e)) if e.step.network() => (tried(ns, false), Err(Failed::Birth(e).said())),
-        Err(namespaces) => (Err(namespaces), Err("not tried: the namespaces failed first".into())),
-    }
+    Probed { ns, short, brief: brief_said, served, hint }
 }
 
 /// How a probe's keeper failed.
@@ -687,21 +588,20 @@ impl Failed {
     }
 }
 
-/// A keeper born with `ns` — with the session's network, `redirect` — and a `true` run through it, all within
-/// `PROBE_WITHIN` (on a thread: what hangs is left to it, said as late).
-fn tried(ns: Ns, redirect: bool) -> Result<(), Failed> {
+/// A keeper born with `ns` and a `true` run through it, all within `PROBE_WITHIN` (on a thread: what hangs is left
+/// to it, said as late).
+fn tried(ns: Ns) -> Result<(), Failed> {
     let (tx, rx) = std::sync::mpsc::channel();
     crate::event::thread("tarae-nsprobe", move || {
-        let _ = tx.send(true_through(ns, redirect));
+        let _ = tx.send(true_through(ns));
     });
     rx.recv_timeout(PROBE_WITHIN).unwrap_or(Err(Failed::Late))
 }
 
-/// `true` run by a keeper born with `ns` (and the session's network, `redirect`) for a root no session has, which
-/// ends after.
-fn true_through(ns: Ns, redirect: bool) -> Result<(), Failed> {
+/// `true` run by a keeper born with `ns` for a root no session has, which ends after.
+fn true_through(ns: Ns) -> Result<(), Failed> {
     let root = std::env::temp_dir().join(format!("tarae-nsprobe-{}", std::process::id()));
-    let k = super::keeper::born_for_probe(&root, ns, redirect).map_err(|e| match BirthError::of(&e) {
+    let k = super::keeper::born_for_probe(&root, ns).map_err(|e| match BirthError::of(&e) {
         Some(b) => Failed::Birth(b),
         None => Failed::Run(e.to_string()),
     })?;
@@ -746,72 +646,6 @@ mod tests {
         }
     }
 
-    /// 6e′: a run's proxy URL is decided before its keeper is born (`redirects`, through `Here.redirects`), and it
-    /// must be what the keeper is born with — else a run has neither the variable nor the session's network, and
-    /// its report says the proxy takes its connections. For every outcome of the probe (namespaces: the session's
-    /// with or without `pid`, without `net`, none; served or not; the session's network landed or not) and every
-    /// policy that matters (the network closed or open, a port, this machine's
-    /// ports, both), the policy as computed (`policy_in`) has no proxy URL exactly where its network is open and
-    /// its keeper gets the session's network (`keeper::network_for` over `for_policy`'s namespaces).
-    #[test]
-    fn the_proxy_url_is_decided_as_the_keeper_is_born() {
-        let t = std::env::temp_dir().join(format!("tarae-tier-6e2-{}", std::process::id()));
-        std::fs::create_dir_all(t.join("p")).unwrap();
-        let t = std::fs::canonicalize(&t).unwrap();
-        let llm = |network: bool, ports: Vec<u16>, localhost: bool| crate::llm::LlmConfig {
-            sandbox_network: network,
-            sandbox_ports: ports,
-            sandbox_localhost: localhost,
-            ..Default::default()
-        };
-        let llms = [
-            llm(false, vec![], false),
-            llm(true, vec![], false),
-            llm(true, vec![8080], false),
-            llm(true, vec![], true),
-            llm(false, vec![8080], true),
-        ];
-        let nses = [Ns::session(true, true), Ns::session(true, false), Ns::NONE];
-        let ok = |yes: bool| if yes { Ok(()) } else { Err("not here".to_string()) };
-        let (mut taken, mut cases) = (0, 0);
-        for ns in nses {
-            for (served, redirect) in [(false, false), (false, true), (true, false), (true, true)] {
-                let probed = Probed {
-                    ns,
-                    short: None,
-                    brief: None,
-                    served: ok(served),
-                    redirect: ok(redirect),
-                    cgroups: Err("not asked".into()),
-                    hint: None,
-                };
-                let here = super::super::Here {
-                    tmp: Some(t.clone()),
-                    uid: 501,
-                    os: super::super::Os::Linux,
-                    redirects: redirects_in(&probed),
-                    ..Default::default()
-                };
-                for l in &llms {
-                    let p = super::super::policy_in(&t.join("p"), l, &[], &here);
-                    let born =
-                        super::super::keeper::network_for(for_policy_in(&probed, &p), &probed.redirect);
-                    let keepers = p.network && born.is_some();
-                    let case = format!(
-                        "{probed:?} network={} ports={:?} localhost={}",
-                        p.network, p.ports, p.localhost
-                    );
-                    assert_eq!(p.redirected, keepers, "{case}");
-                    assert_eq!(p.proxy_url().is_none(), !p.network || keepers, "{case}");
-                    (taken, cases) = (taken + usize::from(keepers), cases + 1);
-                }
-            }
-        }
-        // (both answers seen, or the table proves nothing)
-        assert!(taken > 0 && taken < cases, "{taken} of {cases}");
-        std::fs::remove_dir_all(&t).ok();
-    }
-
     /// A refused mount is blamed on the AppArmor profile tarae runs under only where that profile's mode refuses —
     /// `enforce`, `kill`, `prompt` (and a mode a later AppArmor adds) — never `complain` (it only logs) nor
     /// `unconfined` (tarae's own profile: then the reason is another, here a masked `/proc`); a label with no mode
@@ -846,32 +680,24 @@ mod tests {
         assert_eq!(Ns::NONE.run_net(false), RunNet::Plain);
     }
 
-    /// The probe asks its first keeper with the session's netns and its network; the network's step refused, it
-    /// asks again without the network — never without the netns — and the session keeps it. Not served, the same
-    /// namespaces: tier offline. (Keepers stood in for: what each was asked.)
+    /// The probe asks one keeper, with the session's netns — never without it — and the session keeps it. Not
+    /// served, the same namespaces: tier offline. (Keepers stood in for: what each was asked.)
     #[test]
     fn the_probe_always_asks_the_sessions_network_namespace() {
         let asked = |served: Result<(), String>| {
             let mut asked = Vec::new();
-            let p = probe_with(served, |ns: Ns, redirect| {
-                asked.push((ns.netns(), redirect));
-                match redirect {
-                    true => Err(Failed::Birth(BirthError { step: BirthStep::Netns, errno: libc::EPERM })),
-                    false => Ok(()),
-                }
+            let p = probe_with(served, |ns: Ns| {
+                asked.push(ns.netns());
+                Ok(())
             });
             (asked, p)
         };
         let (taken, p) = asked(Ok(()));
-        assert_eq!(
-            taken,
-            [(true, true), (true, false)],
-            "a netns and its network first, then the netns alone"
-        );
-        assert!(p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
+        assert_eq!(taken, [true], "one keeper, in a netns");
+        assert!(p.ns.netns(), "{:?}", p.ns);
         assert_eq!(p.tier(), Tier::Own);
         let (taken, p) = asked(Err(super::super::guarantees::PIDFD_REFUSED.into()));
-        assert_eq!(taken, [(true, true), (true, false)]);
+        assert_eq!(taken, [true]);
         assert_eq!(p.tier(), Tier::Offline);
     }
 
@@ -903,7 +729,7 @@ mod tests {
     }
 
     /// 9e: the panel's few words for each cause `why` tells apart — the cause named (AppArmor, seccomp, WSL, a masked
-    /// /proc), short enough for a 60-column panel's row with the next reason after it (`… · no TPROXY`), never its whole
+    /// /proc), short enough for a 60-column panel's row with the next reason after it (`… · Landlock ABI 2: partial`), never its whole
     /// reason.
     #[test]
     fn the_panel_says_why_in_a_few_words() {
@@ -945,7 +771,7 @@ mod tests {
     /// other's place); a run that failed or a keeper that didn't answer in their own few words. (Keepers stood in for.)
     #[test]
     fn the_probe_says_in_a_few_words_what_it_says_whole() {
-        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), |ns, _| fail(ns));
+        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), fail);
         let p = probe(&|_| Ok(()));
         assert_eq!((p.short, p.brief), (None, None), "every namespace: nothing to say");
         let proc = BirthError { step: BirthStep::Proc, errno: libc::EPERM };
@@ -1010,9 +836,6 @@ mod tests {
             let said = why(&s);
             assert!(said.contains(words), "{:?} {} → {said}", s.failed.step, s.failed.errno);
         }
-        // (the session's network is tarae's own sends, past the namespaces: the restriction isn't why it failed)
-        let rules = why(&Seen { restrict_userns: Some(1), ..seen(BirthStep::Rules, libc::EPERM) });
-        assert_eq!(rules, "sending its rules: Operation not permitted (os error 1)");
         // (the restriction's remedy: a profile for tarae first, the setting second)
         let ubuntu = why(&Seen { restrict_userns: Some(1), ..seen(BirthStep::Devpts, libc::EPERM) });
         assert!(ubuntu.find("AppArmor profile") < ubuntu.find("that setting at 0"), "{ubuntu}");
@@ -1020,8 +843,7 @@ mod tests {
 
     /// The hint speaks only where Ubuntu's restriction is why a keeper got nothing and tarae runs under no profile
     /// — that's what the profile would change. Not where the restriction is off or something else failed first
-    /// (Docker's filter refuses the clone before the restriction is reached), not for a failure of the session's
-    /// network (tarae's own sends, past the namespaces), and not under a profile already: one that didn't help
+    /// (Docker's filter refuses the clone before the restriction is reached), and not under a profile already: one that didn't help
     /// isn't tarae's to replace. It says the tier the runs are in.
     #[test]
     fn the_hint_comes_only_where_the_restriction_is_why() {
@@ -1055,7 +877,6 @@ mod tests {
                 Seen { seccomp: true, ..restricted(BirthStep::Clone, Some("unconfined")) },
                 "Docker's filter first",
             ),
-            (restricted(BirthStep::Rules, Some("unconfined")), "the session's network"),
             (
                 Seen { failed: BirthError { step: BirthStep::Map, errno: libc::EINVAL }, ..unconfined },
                 "not refused",
@@ -1091,7 +912,6 @@ mod tests {
                 served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
                 abi: 4,
                 ptys: Some(4),
-                tproxy: Err("no network namespace of its own".into()),
                 lo_missing: Vec::new(),
                 short: Some(why(s)),
                 brief: Some(brief(s)),
@@ -1172,17 +992,15 @@ mod tests {
     /// What the probe finds on this system, said on stderr (each machine's tier, in the test output): no
     /// namespaces always with a reason; the PID namespace only with the rest; the reason for no PID namespace
     /// is D12's own. A machine's expected tier, when said (`TARAE_EXPECT_TIER`, `cargo xtask linux --env …`), is
-    /// the one found; its expected network the same (`TARAE_EXPECT_NETWORK=tproxy`) — else no TPROXY is said, not
-    /// failed.
+    /// the one found.
     #[test]
     fn the_probe_here() {
         let p = get();
         let line = format!(
-            "tier here: {} ({}){}; network: {}\n",
+            "tier here: {} ({}){}\n",
             p.tier().said(),
             p.ns.said(),
             p.short.as_deref().map(|w| format!(" — {w}")).unwrap_or_default(),
-            p.redirect.as_ref().map_or_else(|why| format!("no TPROXY — {why}"), |()| "TPROXY".into())
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         // (6h: the label tarae runs under, whether its runs lose user namespaces, the hint — the profile's run on a
@@ -1202,85 +1020,11 @@ mod tests {
         if let Ok(want) = std::env::var("TARAE_EXPECT_TIER") {
             assert_eq!(p.tier().said(), want, "{line}");
         }
-        // (the network's way is an expectation of its own — `TARAE_EXPECT_NETWORK=tproxy`, set by the VM runs: a
-        // container without `nft_tproxy` gives the tier and not the redirect, and says why)
-        match (std::env::var("TARAE_EXPECT_NETWORK").as_deref(), &p.redirect) {
-            (Ok("tproxy"), r) => assert!(r.is_ok(), "TARAE_EXPECT_NETWORK=tproxy: {line}"),
-            (Ok(other), _) => panic!("TARAE_EXPECT_NETWORK={other}: only `tproxy` is known"),
-            (Err(_), Err(why)) => {
-                let said = format!("the_probe_here: no TPROXY here, not expected — {why}\n");
-                let _ = io::Write::write_all(&mut io::stderr(), said.as_bytes());
-            }
-            (Err(_), Ok(())) => {}
-        }
-        assert!(p.ns.netns() || p.redirect.is_err(), "no TPROXY without a netns: {line}");
         assert_eq!(p.short.is_none(), p.ns == Ns::session(true, true), "{line}");
         assert!(p.ns.user || p.ns == Ns::NONE, "{line}");
         if p.ns.user && !p.ns.pid {
             assert!(p.short.as_deref().is_some_and(|w| w.contains("/proc")), "{line}");
         }
-    }
-
-    /// The probe's keeper is born with the network where it can be — one keeper telling both, the common case. A
-    /// network step failing doesn't cost the session its namespaces: they're tried again alone (two births). A
-    /// namespace step failing, or no answer in time, is the namespaces' answer as it is — one birth, the network said
-    /// not tried. Without a netns, no network is tried. (A stand-in for the keeper's try: the failure it gives with
-    /// the network, success alone; each birth counted.)
-    #[test]
-    fn one_keeper_probes_both_and_a_failed_network_keeps_the_namespaces() {
-        fn birth(step: BirthStep) -> Failed {
-            Failed::Birth(BirthError { step, errno: libc::ENOENT })
-        }
-        let run = |with: Option<fn() -> Failed>, ns: Ns| {
-            let mut births = Vec::new();
-            let (namespaces, network) = with_network(ns, |_, net| {
-                births.push(net);
-                match (net, with) {
-                    (true, Some(fail)) => Err(fail()),
-                    _ => Ok(()),
-                }
-            });
-            (namespaces.is_ok(), network, births)
-        };
-        assert_eq!(run(None, Ns::session(true, true)), (true, Ok(()), vec![true]), "one keeper, both told");
-        let (namespaces, network, births) = run(Some(|| birth(BirthStep::Rules)), Ns::session(true, true));
-        assert!(namespaces, "a network step: the namespaces kept");
-        assert!(network.is_err_and(|w| w.starts_with("sending its rules")), "the network's why");
-        assert_eq!(births, [true, false], "then the namespaces alone");
-        for (what, with) in
-            [("a namespace step", (|| birth(BirthStep::Proc)) as fn() -> Failed), ("late", || Failed::Late)]
-        {
-            let (namespaces, network, births) = run(Some(with), Ns::session(true, true));
-            assert!(!namespaces, "{what}: the namespaces' answer as it is");
-            assert!(network.is_err_and(|w| w.starts_with("not tried")), "{what}: the network not tried");
-            assert_eq!(births, [true], "{what}: one birth");
-        }
-        assert_eq!(run(None, Ns::NONE).2, [false], "no netns: no network tried");
-    }
-
-    /// A measurement (6c review): what the probe's network part costs — a probe keeper's birth, its `true` and its
-    /// end, without the network and with it (sockets planted, checked, routes and batch sent), alternating, 7 rounds
-    /// each: the medians and every round, in ms.
-    #[test]
-    #[ignore = "a measurement: run by hand on a VM (6c review, the probe's cost)"]
-    fn measure_the_probe() {
-        let ns = Ns::session(true, true);
-        let (mut without, mut with) = (Vec::new(), Vec::new());
-        for _ in 0..7 {
-            for network in [false, true] {
-                let t0 = std::time::Instant::now();
-                assert!(tried(ns, network).is_ok(), "the probe's keeper, network {network}");
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                if network { with.push(ms) } else { without.push(ms) }
-            }
-        }
-        let median = |v: &mut Vec<f64>| {
-            v.sort_by(f64::total_cmp);
-            v[v.len() / 2]
-        };
-        let (a, b) = (median(&mut without), median(&mut with));
-        println!("the probe's keeper: without the network {a:.1} ms, with it {b:.1} ms (medians of 7)");
-        println!("  without: {without:.1?}\n  with:    {with:.1?}");
     }
 
     /// A step goes through its code and back; the flags are each namespace's, and none without a user one.

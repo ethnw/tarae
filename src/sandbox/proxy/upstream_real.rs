@@ -169,8 +169,7 @@ fn run_through(
     // (as tarae's environment names it — a test's own `Here` keeps no proxy variable: `Here::now`)
     let vars = named(at).into_iter().map(|(k, v)| (k.to_string(), v.into())).collect();
     p.egress.upstream = upstream::of(&vars, upstream::Setting::Env);
-    // (a proxy URL — or, 6e′, the session's network takes its connections, curl's own going there)
-    assert!(p.proxy_url().is_some() || p.redirected, "the run has a way to the proxy");
+    assert!(p.proxy_url().is_some(), "the run has a way to the proxy");
     let script = format!(
         "curl -s --max-time 10 http://{NAME}/through; echo; \
          curl -s --max-time 10 -o /dev/null https://{NAME}/tls; echo \"tls=$?\"; \

@@ -19,7 +19,9 @@ use crate::sizes::Slot;
 /// 2: `panels.edit_review.by` went (an edit's review is always Claude's); since added: `sessions[].sandbox`, what
 /// its runs' sandbox keeps apart and shares (keeper 9d: `Guarantees::json`; null before its first sandboxed run).
 /// 3: `sessions[].sandbox.tier` is `own`, `host` or `offline` (the tiers folded, 2026-10-17).
-pub const V: u64 = 3;
+/// 4: `sessions[].sandbox.network.way` is `proxy` or `no-socket` — `tproxy` went with the transparent proxy
+/// (2026-10-17).
+pub const V: u64 = 4;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;

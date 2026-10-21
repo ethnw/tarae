@@ -17,8 +17,8 @@ use super::tier::RunNet;
 
 /// The longest record.
 pub const MSG_MAX: usize = 1 << 20;
-/// The most descriptors a record carries (6e: the session's network in one `Planted` — two netlink, two planted and
-/// a DNS socket a family, the raw ICMP one: 9).
+/// The most descriptors a record carries (a `Run`'s: its rules, stdio and handoff socket — 5; `Ready`'s device
+/// places — 4), with room to spare.
 pub const FDS_MAX: usize = 10;
 /// The most items a list holds.
 pub const LIST_MAX: usize = 4096;
@@ -36,15 +36,13 @@ pub enum Step {
     Seccomp,
     Handoff,
     Exec,
-    /// Its own cgroup's folder (6g: `mkdirat` in the keeper's scope) — a run starts without one then, never fails.
-    Cgroup,
     /// Hiding the files named like keys (7d): its own user and mount namespace, the mounts, its capabilities dropped
     /// — or a key moved or swapped since tarae found it.
     Covers,
 }
 
 impl Step {
-    const ALL: [Step; 9] = [
+    const ALL: [Step; 8] = [
         Step::Request,
         Step::Fork,
         Step::Chdir,
@@ -52,7 +50,6 @@ impl Step {
         Step::Seccomp,
         Step::Handoff,
         Step::Exec,
-        Step::Cgroup,
         Step::Covers,
     ];
 
@@ -75,7 +72,6 @@ impl Step {
             Step::Seccomp => "its socket filter",
             Step::Handoff => "handing its calls to tarae",
             Step::Exec => "running the program",
-            Step::Cgroup => "its own cgroup",
             Step::Covers => "hiding the files named like keys (one moved since? run it again)",
         }
     }
@@ -161,15 +157,6 @@ pub enum Msg {
     AskUsage,
     /// End every run and what they left, then exit (as EOF does).
     End,
-    /// Make the sockets the session's network is made with (`redirect::Kind::wanted`): its `lo` carries `v4`'s
-    /// and `v6`'s addresses. Asked once, by the birth, before any run.
-    Plant {
-        v4: bool,
-        v6: bool,
-    },
-    /// 6g: the folder of the delegated cgroup the keeper was moved into, its descriptor with it — each run starts in
-    /// a cgroup of its own made there (`clone3(CLONE_INTO_CGROUP)`). Sent once, by the birth, before any run.
-    Cgroup,
     // keeper → tarae
     /// It's there; with an `O_PATH` handle of each device place it has (`places`, the names — the fds in their
     /// order), opened in its own mount namespace before any run (`keeper::DEVICE_HANDLES`).
@@ -178,13 +165,10 @@ pub enum Msg {
         places: Vec<Vec<u8>>,
     },
     /// The run's process is there; its pidfd comes with it. `pid` is the keeper's number for it — in a PID
-    /// namespace not tarae's (tarae reads its own from the pidfd). `cgroup`: the id of the cgroup it started in,
-    /// its own (6g) — 0: the keeper's, where `missed` says why when the keeper has a scope (what failed, errno).
+    /// namespace not tarae's (tarae reads its own from the pidfd).
     Started {
         id: u64,
         pid: u32,
-        cgroup: u64,
-        missed: Option<(Step, i32)>,
     },
     Failed {
         id: u64,
@@ -204,12 +188,6 @@ pub enum Msg {
         rss_kb: u64,
         pss_kb: u64,
     },
-    /// `Plant`'s answer: the sockets made, each its kind (`redirect::Kind::code`; each once) and its descriptor in
-    /// that order — and `errno`, 0 or what failed the next one (then those made so far).
-    Planted {
-        kinds: Vec<u8>,
-        errno: i32,
-    },
 }
 
 impl Msg {
@@ -219,15 +197,12 @@ impl Msg {
             Msg::Signal { .. } => 2,
             Msg::AskUsage => 3,
             Msg::End => 4,
-            Msg::Plant { .. } => 5,
-            Msg::Cgroup => 6,
             Msg::Ready { .. } => 64,
             Msg::Started { .. } => 65,
             Msg::Failed { .. } => 66,
             Msg::Exited { .. } => 67,
             Msg::Reaped { .. } => 68,
             Msg::Usage { .. } => 69,
-            Msg::Planted { .. } => 70,
         }
     }
 
@@ -236,8 +211,7 @@ impl Msg {
         match self {
             Msg::Run(r) => 4 + (r.served() || r.held) as usize,
             Msg::Ready { places, .. } => places.len(),
-            Msg::Started { .. } | Msg::Cgroup => 1,
-            Msg::Planted { kinds, .. } => kinds.len(),
+            Msg::Started { .. } => 1,
             _ => 0,
         }
     }
@@ -274,8 +248,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(id.to_le_bytes());
             b.extend(sig.to_le_bytes());
         }
-        Msg::AskUsage | Msg::End | Msg::Cgroup => {}
-        Msg::Plant { v4, v6 } => b.extend([*v4 as u8, *v6 as u8]),
+        Msg::AskUsage | Msg::End => {}
         Msg::Ready { pid, places } => {
             if places.len() > FDS_MAX {
                 return Err(Refused("more places than a message takes descriptors"));
@@ -283,17 +256,9 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend(pid.to_le_bytes());
             list(&mut b, places)?;
         }
-        Msg::Started { id, pid, cgroup, missed } => {
+        Msg::Started { id, pid } => {
             b.extend(id.to_le_bytes());
             b.extend(pid.to_le_bytes());
-            b.extend(cgroup.to_le_bytes());
-            match missed {
-                None => b.push(0),
-                Some((step, errno)) => {
-                    b.extend([1, step.code()]);
-                    b.extend(errno.to_le_bytes());
-                }
-            }
         }
         Msg::Failed { id, errno, step } => {
             b.extend(id.to_le_bytes());
@@ -308,11 +273,6 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
         Msg::Usage { rss_kb, pss_kb } => {
             b.extend(rss_kb.to_le_bytes());
             b.extend(pss_kb.to_le_bytes());
-        }
-        Msg::Planted { kinds, errno } => {
-            valid_kinds(kinds)?;
-            bytes(&mut b, kinds);
-            b.extend(errno.to_le_bytes());
         }
     }
     if b.len() > MSG_MAX {
@@ -333,22 +293,6 @@ fn list(b: &mut Vec<u8>, items: &[Vec<u8>]) -> Result<(), Refused> {
     b.extend((items.len() as u32).to_le_bytes());
     for s in items {
         bytes(b, s);
-    }
-    Ok(())
-}
-
-/// What makes `Planted`'s kinds ones tarae takes: at most `FDS_MAX`, each a kind (`redirect::Kind`), none twice.
-fn valid_kinds(kinds: &[u8]) -> Result<(), Refused> {
-    if kinds.len() > FDS_MAX {
-        return Err(Refused("more sockets than a message takes descriptors"));
-    }
-    for (i, k) in kinds.iter().enumerate() {
-        if super::redirect::Kind::from_code(*k).is_none() {
-            return Err(Refused("a socket kind that isn't one"));
-        }
-        if kinds[..i].contains(k) {
-            return Err(Refused("a socket kind twice"));
-        }
     }
     Ok(())
 }
@@ -486,8 +430,6 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
         2 => Msg::Signal { id: r.u64()?, sig: r.i32()? },
         3 => Msg::AskUsage,
         4 => Msg::End,
-        5 => Msg::Plant { v4: r.flag()?, v6: r.flag()? },
-        6 => Msg::Cgroup,
         64 => {
             let pid = r.u32()?;
             let places = r.list()?;
@@ -496,24 +438,11 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
             }
             Msg::Ready { pid, places }
         }
-        65 => Msg::Started {
-            id: r.u64()?,
-            pid: r.u32()?,
-            cgroup: r.u64()?,
-            missed: match r.flag()? {
-                false => None,
-                true => Some((r.step()?, r.i32()?)),
-            },
-        },
+        65 => Msg::Started { id: r.u64()?, pid: r.u32()? },
         66 => Msg::Failed { id: r.u64()?, errno: r.i32()?, step: r.step()? },
         67 => Msg::Exited { id: r.u64()?, status: r.i32()? },
         68 => Msg::Reaped { n: r.u32()? },
         69 => Msg::Usage { rss_kb: r.u64()?, pss_kb: r.u64()? },
-        70 => {
-            let kinds = r.bytes()?;
-            valid_kinds(&kinds)?;
-            Msg::Planted { kinds, errno: r.i32()? }
-        }
         _ => return Err(Refused("a kind that isn't one")),
     };
     r.done()?;
@@ -666,45 +595,12 @@ mod tests {
                 pid: 1,
                 places: vec![b"/dev/pts".to_vec(), b"/dev/pts/ptmx".to_vec(), b"/dev/shm".to_vec()],
             },
-            Msg::Started { id: 7, pid: 4243, cgroup: 0, missed: None },
-            Msg::Started { id: 8, pid: 4244, cgroup: 0x1_0000_2a3c, missed: None },
-            Msg::Started { id: 9, pid: 4245, cgroup: 0, missed: Some((Step::Cgroup, libc::EAGAIN)) },
-            Msg::Cgroup,
+            Msg::Started { id: 7, pid: 4243 },
             Msg::Failed { id: 7, errno: libc::ENOENT, step: Step::Exec },
             Msg::Exited { id: 7, status: 3 << 8 },
             Msg::Reaped { n: 2 },
             Msg::Usage { rss_kb: 3100, pss_kb: 900 },
-            Msg::Plant { v4: true, v6: false },
-            Msg::Plant { v4: true, v6: true },
-            Msg::Planted { kinds: vec![0, 1, 2, 4], errno: 0 },
-            Msg::Planted { kinds: vec![0, 1, 2, 3, 4, 5, 6], errno: 0 },
-            Msg::Planted { kinds: vec![0, 1, 2, 4, 7, 3, 5, 8, 6], errno: 0 },
-            Msg::Planted { kinds: vec![0], errno: libc::EMFILE },
         ]
-    }
-
-    /// `Planted` names each socket by a kind tarae knows, once, and carries exactly as many descriptors: a kind
-    /// that isn't one, one twice, or more than a message takes is a refusal — tarae never guesses what a descriptor
-    /// is.
-    #[test]
-    fn planted_takes_only_known_kinds_once() {
-        let record = |kinds: &[u8]| {
-            let mut b = vec![70u8];
-            b.extend((kinds.len() as u32).to_le_bytes());
-            b.extend(kinds);
-            b.extend(0i32.to_le_bytes());
-            b
-        };
-        assert_eq!(decode(&record(&[0, 1, 5]), 3), Ok(Msg::Planted { kinds: vec![0, 1, 5], errno: 0 }));
-        assert_eq!(decode(&record(&[0, 1, 5]), 2), Err(Refused("descriptors its kind doesn't take")));
-        assert_eq!(decode(&record(&[0, 9]), 2), Err(Refused("a socket kind that isn't one")));
-        assert_eq!(decode(&record(&[0, 2, 2]), 3), Err(Refused("a socket kind twice")));
-        let past = [0u8; FDS_MAX + 1];
-        assert!(decode(&record(&past), FDS_MAX + 1).is_err(), "past FDS_MAX");
-        assert!(encode(&Msg::Planted { kinds: vec![9], errno: 0 }).is_err(), "tarae's side refuses it too");
-        // (the whole session's network, both families and the raw socket: one message)
-        let whole = [0u8, 1, 2, 3, 4, 5, 6, 7, 8];
-        assert_eq!(decode(&record(&whole), 9), Ok(Msg::Planted { kinds: whole.to_vec(), errno: 0 }));
     }
 
     /// A small fixed-seed generator: the loop is the same every run.
@@ -776,7 +672,7 @@ mod tests {
     fn a_message_and_its_descriptors_cross_the_socket() {
         let (a, b) = pair();
         let (r, _w) = io::pipe().unwrap();
-        let started = Msg::Started { id: 9, pid: 77, cgroup: 4242, missed: None };
+        let started = Msg::Started { id: 9, pid: 77 };
         send(a.as_fd(), &started, &[r.as_fd()]).unwrap();
         assert!(send(a.as_fd(), &started, &[]).is_err(), "too few descriptors aren't sent");
         let mut buf = Vec::new();

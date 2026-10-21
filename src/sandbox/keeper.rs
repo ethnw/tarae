@@ -37,9 +37,6 @@ use super::tier::{BirthError, BirthStep, Ns, RunNet};
 pub const FLAG: &str = "--sandbox-keeper";
 /// The keeper's end of its channel, as the keeper has it.
 const CHANNEL_FD: RawFd = 3;
-/// Where the birth leaves the raw ICMP socket it made for the session's network (`Birth::child`), for the keeper to
-/// hand tarae with `Planted` (`birth_raw`).
-const RAW_FD: RawFd = 4;
 /// How long a new keeper has to say it's there.
 const READY_WITHIN: Duration = Duration::from_secs(2);
 /// How long a run's start may take — the main loop waits for it.
@@ -72,29 +69,10 @@ pub struct Keeper {
     pub devices: Vec<(&'static str, OwnedFd)>,
     /// The families whose address its `lo` was to carry (`Families`) but couldn't take — said with it (`said`).
     pub lo_missing: Families,
-    /// Its session's network (`redirect`), where it was born with one: let go when it's gone — the owned table
-    /// with tarae's socket (P4), and its netns with the sockets that hold it.
-    pub network: Mutex<Option<super::redirect::Made>>,
-    /// 6g: where its runs' own cgroups are, or why they have none — None: not asked (no TPROXY network, or
-    /// `tier::Probed.cgroups` says why for every keeper).
-    pub runs_in: Option<Result<RunsIn, String>>,
-    /// Tests: what its birth's read-only step came to (`read_only`).
-    #[cfg(test)]
-    cgroupfs: Result<(), String>,
     chan: OwnedFd,
     pidfd: OwnedFd,
     state: Mutex<State>,
     changed: Condvar,
-}
-
-/// A keeper's scope (6g): each of its runs starts in a cgroup of its own right below it.
-#[derive(Clone, Debug)]
-pub struct RunsIn {
-    /// The scope's cgroup, as tarae's namespace — the machine's — names it.
-    pub scope: String,
-    /// The level a `socket cgroupv2` rule names a run's cgroup at (`cgroup::run_level`).
-    pub level: u32,
-    source: super::cgroup::Source,
 }
 
 #[derive(Default)]
@@ -111,8 +89,6 @@ struct State {
     key: Option<String>,
     next: u64,
     runs: HashMap<u64, Slot>,
-    /// `Planted` as it came — its kinds, its errno, its sockets — for `plant`, which asked.
-    planted: Option<(Vec<u8>, i32, Vec<OwnedFd>)>,
     /// Tests (M3): what it said it uses.
     #[cfg(test)]
     usage: Option<(u64, u64)>,
@@ -128,8 +104,6 @@ struct State {
 struct Slot {
     /// `Started`'s pid and pidfd — or why it didn't start.
     started: Option<Result<(u32, Arc<OwnedFd>), String>>,
-    /// The id of its own cgroup (6g) — 0: it's in its keeper's.
-    cgroup: u64,
     /// Its `wait` status — or why it has none (the keeper ended first).
     exited: Option<Result<i32, String>>,
     /// A held run's end of its handoff socket: a byte on it once its pid is known, and it goes on to its exec.
@@ -210,44 +184,9 @@ pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, Stri
     Ok(k)
 }
 
-/// A keeper for the probe (`tier.rs`): born with `ns` — and the session's network, `redirect` (the probe can't ask
-/// itself whether there is one) — kept by nobody but the caller.
-pub(super) fn born_for_probe(root: &Path, ns: Ns, redirect: bool) -> io::Result<Arc<Keeper>> {
-    let network = (redirect && ns.netns()).then_some(NetworkFor::Session);
-    Keeper::born_lo(root, None, ns, Families::here(), false, network, None)
-}
-
-/// The network a keeper born with `ns` gets: the session's, where it has a netns and the probe's landed (`probed`,
-/// D-b: decided once — `tier::Probed.redirect`) — else none (until 6f its runs go out by the swap).
-pub(super) fn network_for(ns: Ns, probed: &Result<(), String>) -> Option<NetworkFor> {
-    (ns.netns() && probed.is_ok()).then_some(NetworkFor::Session)
-}
-
-/// What network a keeper's birth makes: the session's — for the families its `lo` carries, known once it's ready
-/// (`redirect::Network::session`) — or, tests, one given whole.
-pub(super) enum NetworkFor {
-    Session,
-    #[cfg(test)]
-    Given(super::redirect::Network),
-}
-
-/// What a keeper's `Planted` (`kinds`, `errno`) gives for a `Plant` of `families`: each socket's kind, exactly
-/// `redirect::Kind::wanted`'s in its order — and the raw ICMP socket besides, once, where the birth made one — else
-/// why not, as an errno: the keeper's own, or `EPROTO` (a kind missing, one extra, one twice). tarae never takes a
-/// socket for a kind it wasn't asked as.
-fn planted_kinds(families: Families, kinds: &[u8], errno: i32) -> Result<Vec<super::redirect::Kind>, i32> {
-    use super::redirect::Kind;
-    if errno != 0 {
-        return Err(errno);
-    }
-    let got: Vec<Kind> =
-        kinds.iter().map(|k| Kind::from_code(*k).ok_or(libc::EPROTO)).collect::<Result<_, _>>()?;
-    let asked: Vec<Kind> = got.iter().copied().filter(|k| *k != Kind::Icmp4).collect();
-    let raw = got.len() - asked.len();
-    if asked != Kind::wanted(families.v4, families.v6) || raw > 1 {
-        return Err(libc::EPROTO);
-    }
-    Ok(got)
+/// A keeper for the probe (`tier.rs`): born with `ns`, kept by nobody but the caller.
+pub(super) fn born_for_probe(root: &Path, ns: Ns) -> io::Result<Arc<Keeper>> {
+    Keeper::born_lo(root, None, ns, Families::here(), false)
 }
 
 /// The keepers of the session at `root` (None: every session's).
@@ -310,44 +249,29 @@ impl Keeper {
     /// (so through the exec: no thread of the new process takes it before its `signalfd` does) — then the exec
     /// of tarae's own binary, with an empty environment. Ready once it says so (`READY_WITHIN`); a step that
     /// failed before is the error (`BirthError` inside it). Its `lo` mirrors tarae's network's families
-    /// (`Families::here`). With a network namespace, where the probe's network landed (`tier::Probed.redirect`), it
-    /// gets the session's network before it's ready (`redirect`): its sockets planted, checked and sent on — any
-    /// refusal its birth's error, the keeper and its netns thrown away.
+    /// (`Families::here`).
     fn born(root: &Path, key: Option<&str>, ns: Ns) -> io::Result<Arc<Keeper>> {
         Keeper::born_with(root, key, ns, Families::here())
     }
 
-    /// `born`, its `lo` carrying `families`' addresses. With the session's network, a scope of its own where this
-    /// tarae's keepers get one (6g, `tier::Probed.cgroups`).
+    /// `born`, its `lo` carrying `families`' addresses.
     fn born_with(root: &Path, key: Option<&str>, ns: Ns, families: Families) -> io::Result<Arc<Keeper>> {
-        let probed = super::tier::get();
-        let network = network_for(ns, &probed.redirect);
-        let cgroups = network.as_ref().and(probed.cgroups.clone().ok());
-        Keeper::born_lo(root, key, ns, families, false, network, cgroups)
+        Keeper::born_lo(root, key, ns, families, false)
     }
 
-    /// `born_with` — tests: the mirrors put on a device that isn't there (`off_lo`), the network another one
-    /// (None: none), the scope from where tests say (`cgroups`, None: none).
+    /// `born_with` — tests: the mirrors put on a device that isn't there (`off_lo`).
     fn born_lo(
         root: &Path,
         key: Option<&str>,
         ns: Ns,
         families: Families,
         off_lo: bool,
-        network: Option<NetworkFor>,
-        cgroups: Option<super::cgroup::Source>,
     ) -> io::Result<Arc<Keeper>> {
         let exe = exe()?;
         let (ours, theirs) = seqpacket()?;
         let null = open_null(libc::O_RDWR)?;
-        let birth = Birth::new(families, off_lo, network.is_some() && ns.netns())?;
-        #[cfg(test)]
-        let birth = {
-            let seam = lock(&CGROUPFS_SEAMS).iter().find(|(r, _)| r == root).map(|(_, s)| *s);
-            Birth { seam, ..birth }
-        };
+        let birth = Birth::new(families, off_lo)?;
         let mut lo_missing = Families::default();
-        let mut cgroupfs = None;
         let argv: Vec<CString> = keeper_argv();
         let argv_p: Vec<*const libc::c_char> =
             argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
@@ -362,7 +286,7 @@ impl Keeper {
         if pid == 0 {
             // SAFETY: as above — async-signal-safe calls only.
             unsafe {
-                let raw = birth.child(ns);
+                birth.child(ns);
                 for fd in 0..3 {
                     libc::dup2(null.as_raw_fd(), fd);
                 }
@@ -370,11 +294,6 @@ impl Keeper {
                     libc::fcntl(CHANNEL_FD, libc::F_SETFD, 0);
                 } else {
                     libc::dup2(theirs.as_raw_fd(), CHANNEL_FD);
-                }
-                // (after the channel's: whatever sat at 4 — its old place among them — isn't needed past here)
-                if raw >= 0 {
-                    libc::dup2(raw, RAW_FD);
-                    libc::close(raw);
                 }
                 // (the limit tarae started with: the keeper's runs inherit it — `nofile`)
                 crate::nofile::restore();
@@ -422,24 +341,13 @@ impl Keeper {
             if unsafe { libc::write(go.as_raw_fd(), [1u8].as_ptr().cast(), 1) } != 1 {
                 return Err(BirthError { step: BirthStep::Go, errno: errno() }.into());
             }
-            said_ready(ours.as_fd(), told, &mut lo_missing, &mut cgroupfs, &crate::log::Session::of(root))
+            said_ready(ours.as_fd(), told, &mut lo_missing, &crate::log::Session::of(root))
         })();
         let (ready, devices) = match ready {
             Ok(devices) => (Ok(()), devices),
             Err(e) => (Err(e), Vec::new()),
         };
         let ns = had;
-        // (6g: in a scope of its own before any run, its folder handed over — or why not, its runs in its cgroup;
-        // only where its birth made /sys/fs/cgroup read-only: else a run could move itself between the scope's
-        // cgroups, all the user's)
-        let runs_in = cgroups.filter(|_| ready.is_ok()).map(|source| -> Result<RunsIn, String> {
-            read_only(ns, cgroupfs)
-                .map_err(|why| format!("{why} — a run could move itself between cgroups"))?;
-            let scope = super::cgroup::place(&source, pid as u32)?;
-            channel::send(ours.as_fd(), &Msg::Cgroup, &[scope.dir.as_fd()])
-                .map_err(|e| format!("handing the keeper its scope: {e}"))?;
-            Ok(RunsIn { scope: scope.path, level: scope.level, source })
-        });
         static SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let k = Arc::new(Keeper {
             pid: pid as u32,
@@ -448,10 +356,6 @@ impl Keeper {
             ns,
             devices,
             lo_missing,
-            network: Mutex::new(None),
-            runs_in,
-            #[cfg(test)]
-            cgroupfs: read_only(ns, cgroupfs),
             chan: ours,
             pidfd,
             state: Mutex::new(State { key: key.map(str::to_string), ..State::default() }),
@@ -467,48 +371,10 @@ impl Keeper {
         }
         let reading = k.clone();
         crate::event::thread("tarae-keeper", move || reading.read());
-        if let Some(network) = network {
-            let carried =
-                Families { v4: families.v4 && !k.lo_missing.v4, v6: families.v6 && !k.lo_missing.v6 };
-            let network = match network {
-                NetworkFor::Session => super::redirect::Network::session(carried.v4, carried.v6),
-                #[cfg(test)]
-                NetworkFor::Given(network) => network,
-            };
-            let made = k.plant(carried).and_then(|handed| {
-                let session = super::redirect::netns_of_pid(k.pid).map_err(|e| BirthError {
-                    step: BirthStep::Netns,
-                    errno: e.raw_os_error().unwrap_or(libc::EIO),
-                })?;
-                super::redirect::make(session, handed, &network)
-            });
-            match made {
-                Ok(made) => *lock(&k.network) = Some(made),
-                // (never a retry: a half-made network is never a session's — `redirect.rs`)
-                Err(e) => {
-                    k.log().line(
-                        "sandbox",
-                        "warn",
-                        &format!(
-                            "a keeper for {}: its network failed ({e}) — keeper {} killed, its netns with it",
-                            root.display(),
-                            k.pid
-                        ),
-                    );
-                    k.thrown_away();
-                    return Err(e.into());
-                }
-            }
-        }
-        let runs = match &k.runs_in {
-            None => String::new(),
-            Some(Ok(r)) => format!("; runs in cgroups of their own in {} (level {})", r.scope, r.level),
-            Some(Err(why)) => format!("; runs in its cgroup — no scope of its own: {why}"),
-        };
         k.log().line(
             "sandbox",
             "info",
-            &format!("a keeper for {}: pid {}, {}{runs}", root.display(), k.pid, k.said()),
+            &format!("a keeper for {}: pid {}, {}", root.display(), k.pid, k.said()),
         );
         Ok(k)
     }
@@ -552,23 +418,7 @@ impl Keeper {
     fn heard(self: &Arc<Self>, msg: Msg, mut fds: Vec<OwnedFd>) {
         let mut s = lock(&self.state);
         match msg {
-            Msg::Started { id, pid, cgroup, missed } => {
-                // (D5: a run that couldn't have its own cgroup started in its keeper's — said, not refused)
-                if let Some((step, errno)) = missed {
-                    self.log().line(
-                        "sandbox",
-                        "info",
-                        &format!(
-                            "a run (keeper {}) started in its keeper's cgroup — {}: {}",
-                            self.pid,
-                            step.said(),
-                            io::Error::from_raw_os_error(errno)
-                        ),
-                    );
-                }
-                if let Some(slot) = s.runs.get_mut(&id) {
-                    slot.cgroup = cgroup;
-                }
+            Msg::Started { id, pid } => {
                 let pidfd = fds.pop();
                 // (in a PID namespace its number is the keeper's: tarae's own from its pidfd, read while it
                 // waits for its byte)
@@ -644,14 +494,6 @@ impl Keeper {
             }
             #[cfg(test)]
             Msg::Usage { rss_kb, pss_kb } => s.usage = Some((rss_kb, pss_kb)),
-            // (handed before any run, or not taken: a socket of the session's network comes from its keeper
-            // before a run could be in it — P5)
-            Msg::Planted { kinds, errno } if s.next == 0 => s.planted = Some((kinds, errno, fds)),
-            Msg::Planted { .. } => self.log().line(
-                "sandbox",
-                "warn",
-                &format!("keeper {} handed sockets after a run — refused", self.pid),
-            ),
             other => self.log().line("sandbox", "warn", &format!("its keeper said {other:?}")),
         }
         drop(s);
@@ -665,45 +507,6 @@ impl Keeper {
             return pid_in_fdinfo(info);
         }
         pid_of(pidfd)
-    }
-
-    /// The keeper killed (`SIGKILL` through its pidfd: no other process can be it) — its going no death (`ending`),
-    /// its netns gone with the last socket in it.
-    fn thrown_away(&self) {
-        lock(&self.state).ending = true;
-        // SAFETY: a signal through the pidfd of the keeper we made.
-        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, self.pidfd.as_raw_fd(), libc::SIGKILL, 0, 0) };
-    }
-
-    /// Asks the keeper for the sockets its session's network is made with (`Msg::Plant`: its `lo` carrying
-    /// `families`' addresses) and waits for them (`READY_WITHIN`): each its kind, exactly `redirect::Kind::wanted`'s
-    /// (and the birth's raw ICMP socket, the first time, where it made one), or the birth's error (`Planted`, with
-    /// the keeper's errno). Before any run: `heard` takes none after.
-    pub(super) fn plant(
-        &self,
-        families: Families,
-    ) -> Result<Vec<(super::redirect::Kind, OwnedFd)>, BirthError> {
-        let failed = |errno| BirthError { step: BirthStep::Planted, errno };
-        lock(&self.state).planted = None;
-        let ask = Msg::Plant { v4: families.v4, v6: families.v6 };
-        channel::send(self.chan.as_fd(), &ask, &[])
-            .map_err(|e| failed(e.raw_os_error().unwrap_or(libc::EIO)))?;
-        let deadline = Instant::now() + READY_WITHIN;
-        let mut s = lock(&self.state);
-        let (kinds, errno, fds) = loop {
-            if let Some(p) = s.planted.take() {
-                break p;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            match (s.gone.is_some(), left.is_zero()) {
-                (true, _) => return Err(failed(libc::ECHILD)),
-                (_, true) => return Err(failed(libc::ETIMEDOUT)),
-                _ => s = self.changed.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0,
-            }
-        };
-        drop(s);
-        let got = planted_kinds(families, &kinds, errno).map_err(failed)?;
-        Ok(got.into_iter().zip(fds).collect())
     }
 
     /// Waits for the keeper's process to end (and reaps it).
@@ -727,10 +530,6 @@ impl Keeper {
                 _ => format!("it was ended by signal {}", info.si_status()),
             }
         };
-        // (its scope, once no process of its is in it)
-        if let Some(Ok(r)) = &self.runs_in {
-            super::cgroup::let_go(&r.source, &r.scope);
-        }
         self.gone(how);
     }
 
@@ -771,8 +570,6 @@ impl Keeper {
         s.gone = Some(why);
         drop(s);
         self.changed.notify_all();
-        // (its owned table goes with tarae's socket, its netns with the last socket in it)
-        drop(lock(&self.network).take());
         for (pid, pidfd) in &runs {
             kill_run(*pid, pidfd);
         }
@@ -868,14 +665,14 @@ impl Keeper {
     }
 
     /// Asks for run `req` with its descriptors (the ruleset, stdin, stdout, stderr — and served or held, the
-    /// handoff socket's child end) and waits for its start (`STARTED_WITHIN`): its pid, pidfd and own cgroup's id
-    /// (0: none). `hold`, a held run's end of that socket: its byte goes once its pid is known (`heard`).
+    /// handoff socket's child end) and waits for its start (`STARTED_WITHIN`): its pid and pidfd. `hold`, a held
+    /// run's end of that socket: its byte goes once its pid is known (`heard`).
     fn run(
         &self,
         mut req: channel::Run,
         fds: &[BorrowedFd],
         hold: Option<Arc<OwnedFd>>,
-    ) -> io::Result<(u32, Arc<OwnedFd>, u64)> {
+    ) -> io::Result<(u32, Arc<OwnedFd>)> {
         let id = {
             let mut s = lock(&self.state);
             if let Some(why) = &s.gone {
@@ -897,13 +694,11 @@ impl Keeper {
         let deadline = Instant::now() + STARTED_WITHIN;
         let mut s = lock(&self.state);
         loop {
-            if let Some((started, cgroup)) =
-                s.runs.get(&id).and_then(|r| Some((r.started.clone()?, r.cgroup)))
-            {
+            if let Some(started) = s.runs.get(&id).and_then(|r| r.started.clone()) {
                 if started.is_err() {
                     s.runs.remove(&id);
                 }
-                return started.map(|(pid, pidfd)| (pid, pidfd, cgroup)).map_err(io::Error::other);
+                return started.map_err(io::Error::other);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -921,10 +716,6 @@ impl Keeper {
 /// A run the keeper started (`Keeper::start`).
 pub struct Started {
     pub spawned: crate::spawn::Spawned,
-    /// The id of the cgroup of its own it started in (6g) — None: its keeper's. Its rule's level is its keeper's
-    /// (`RunsIn.level`). Nothing reads it before 6d but tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub cgroup: Option<u64>,
 }
 
 impl Keeper {
@@ -1056,9 +847,9 @@ impl Keeper {
         fds.extend(handoff.as_ref().map(|(_, theirs)| theirs.as_fd()));
         let ours = handoff.as_ref().map(|(ours, _)| ours.clone());
         let hold = ours.clone().filter(|_| req.held);
-        let (pid, _pidfd, cgroup) = self.run(req, &fds, hold)?;
+        let (pid, _pidfd) = self.run(req, &fds, hold)?;
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
-        Ok((Started { spawned, cgroup: (cgroup != 0).then_some(cgroup) }, ours))
+        Ok((Started { spawned }, ours))
     }
 }
 
@@ -1105,10 +896,8 @@ impl Keeper {
         if !matches!(net, RunNet::Served | RunNet::Routed) {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
-        // (6d: where its session has the TPROXY network, beyond is the run's own socket marked as its run's)
-        let marks = lock(&self.network).as_ref().map(|n| n.marks.clone());
         let tree = (self.pid, self.serial);
-        let to = super::supervisor::serve(policy, net, refused, marks, tree, c.ptys.clone())?;
+        let to = super::supervisor::serve(policy, net, refused, tree, c.ptys.clone())?;
         let no_userns = super::tier::runs_refuse_userns();
         let (rules, covers) = c.rules_and_covers();
         let asks = Asks { no_userns, ptys: c.ptys.is_some(), covers: Some(covers) };
@@ -1203,58 +992,11 @@ struct Birth {
     families: Families,
     /// Tests: the mirrors put on a device that isn't there, to see them fail.
     off_lo: bool,
-    /// The session's network is made (`redirect`): a raw ICMP socket is made in its netns too, while the child still
-    /// has the capability that takes (`CAP_NET_RAW`) — `Taken` answers refused datagrams on it — and its
-    /// `tcp_fwmark_accept` set (6d: `BirthStep::Fwmark`).
-    icmp: bool,
-    /// Tests: what its read-only step does instead (`CgroupfsSeam`, by the keeper's root).
-    #[cfg(test)]
-    seam: Option<CgroupfsSeam>,
 }
 
 /// What a birth's child says on its birth pipe of a mirror it couldn't make (`Families`): IPv4's, IPv6's —
 /// codes past `BirthStep`'s, as (code, errno); the birth goes on (`said_ready` takes the family off).
 const LO_NOTES: [u8; 2] = [0x80, 0x81];
-/// What a birth's child says of its read-only step (`cgroupfs_read_only`), every time it has a mount namespace: 0
-/// made read-only, `NOTHING_THERE`, `NOT_A_MOUNT`, else the errno it couldn't for. The birth goes on whatever it
-/// says (the step is 6g's second lock — Landlock never grants the hierarchy — and only 6g needs it): a keeper whose
-/// step didn't make it read-only gets no scope (`read_only`).
-const CGROUPFS_NOTE: u8 = 0x82;
-/// `/sys/fs/cgroup` isn't there in its mount namespace (checked: `statx` says so).
-const NOTHING_THERE: i32 = -1;
-/// `/sys/fs/cgroup` is there but no mount's root (checked: `STATX_ATTR_MOUNT_ROOT`, or its device its parent's).
-const NOT_A_MOUNT: i32 = -2;
-
-/// Tests: what a birth's read-only step does instead of its calls — fails with this errno, or finds no
-/// `mount_setattr` (answered `ENOSYS`: the pre-5.12 way, forced).
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-enum CgroupfsSeam {
-    Fail(i32),
-    NoSetattr,
-}
-
-/// Tests: the seams asked for, by the keeper's root — one test's never reaches another's keeper.
-#[cfg(test)]
-static CGROUPFS_SEAMS: Mutex<Vec<(PathBuf, CgroupfsSeam)>> = Mutex::new(Vec::new());
-
-/// Whether a keeper whose birth said `said` (`CGROUPFS_NOTE`; None: nothing — no mount namespace of its own, `ns`)
-/// has `/sys/fs/cgroup` read-only in its namespace — else why not, for its log line: only such a keeper gets a
-/// scope (6g, the review's second pass). Pure.
-fn read_only(ns: Ns, said: Option<i32>) -> Result<(), String> {
-    match (ns.user, said) {
-        (false, _) => Err("it has no mount namespace of its own to make /sys/fs/cgroup read-only in".into()),
-        (true, Some(0)) => Ok(()),
-        (true, Some(NOTHING_THERE)) => Err("nothing is at /sys/fs/cgroup in its mount namespace".into()),
-        (true, Some(NOT_A_MOUNT)) => Err("/sys/fs/cgroup isn't a mount point in its mount namespace".into()),
-        (true, Some(e)) => Err(format!(
-            "/sys/fs/cgroup couldn't be made read-only there: {}",
-            io::Error::from_raw_os_error(e)
-        )),
-        (true, None) => Err("its birth said nothing of /sys/fs/cgroup".into()),
-    }
-}
-
 /// The address families tarae's own network has — what glibc's `AI_ADDRCONFIG` counts: an IPv4 address but
 /// loopback, an IPv6 one but loopback and link-local. The session's `lo` carries a documentation address of each
 /// (`SESSION_V4`, `SESSION_V6`), so a lookup inside answers as it would outside (M5). Decided at each birth.
@@ -1312,12 +1054,15 @@ struct IfAddr {
     rest: [u8; 8],
 }
 
-/// The addresses the session's `lo` carries beside loopback (`redirect.rs` says why — and its planted sockets are at
-/// them).
-pub use super::redirect::{SESSION_V4, SESSION_V6};
+/// The address the session's `lo` carries beside loopback where tarae's network has IPv4 (`Families`, `lo:1`, a
+/// /32): a documentation address, never anyone's — where a run's proxy variables point too (`route::PROXY`: a
+/// connect there is the proxy's, made by the supervisor).
+pub const SESSION_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1);
+/// `SESSION_V4`'s IPv6 twin (a /128 on `lo`), where tarae's network has IPv6 beyond loopback and link-local.
+pub const SESSION_V6: std::net::Ipv6Addr = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
 
 impl Birth {
-    fn new(families: Families, off_lo: bool, icmp: bool) -> io::Result<Birth> {
+    fn new(families: Families, off_lo: bool) -> io::Result<Birth> {
         let pipe = || -> io::Result<(OwnedFd, OwnedFd)> {
             let (r, w) = io::pipe()?;
             Ok((high(r.into())?, high(w.into())?))
@@ -1326,16 +1071,7 @@ impl Birth {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(63);
-        Ok(Birth {
-            go: pipe()?,
-            told: pipe()?,
-            last_cap,
-            families,
-            off_lo,
-            icmp,
-            #[cfg(test)]
-            seam: None,
-        })
+        Ok(Birth { go: pipe()?, told: pipe()?, last_cap, families, off_lo })
     }
 
     /// tarae's ends, the child's closed: the go pipe's writer, the birth pipe's reader.
@@ -1343,7 +1079,7 @@ impl Birth {
         (self.go.1, self.told.0)
     }
 
-    /// Says how a step the birth goes on without went (`LO_NOTES`, `CGROUPFS_NOTE`; an errno or its own code) on the
+    /// Says how a step the birth goes on without went (`LO_NOTES`; an errno) on the
     /// birth pipe; the child goes on.
     ///
     /// # Safety
@@ -1373,13 +1109,10 @@ impl Birth {
     /// tarae gave up — it exits), then, with namespaces: its mounts slaved to the system's (nothing it mounts
     /// goes out), a fresh `/proc` with a PID namespace, its own `devpts` with its `ptmx` over `/dev/ptmx`, its
     /// own `/dev/shm` (D10), `lo` up, and every capability dropped — each checked; a failure said and it exits.
-    /// With the session's network (`icmp`), a raw ICMP socket made in its netns before the drop: where it is (above
-    /// the descriptors the child moves, not close-on-exec), else -1 — a socket that can't be made is done without —
-    /// and its netns's `tcp_fwmark_accept` set, which it can't be born without (6d).
     ///
     /// # Safety
     /// The birth's child's: raw calls only (a copy of a multithreaded process).
-    unsafe fn child(&self, ns: Ns) -> libc::c_int {
+    unsafe fn child(&self, ns: Ns) {
         let null = std::ptr::null::<libc::c_char>();
         // SAFETY: raw calls on this process's own descriptors, static strings and buffers on its stack.
         unsafe {
@@ -1396,9 +1129,8 @@ impl Birth {
             }
             libc::close(self.go.0.as_raw_fd());
             if !ns.user {
-                return -1;
+                return;
             }
-            let mut raw = -1;
             let mount = |src: *const libc::c_char,
                          at: &std::ffi::CStr,
                          fs: *const libc::c_char,
@@ -1446,16 +1178,6 @@ impl Birth {
             {
                 self.failed(BirthStep::Shm, errno());
             }
-            // (said, never failed for: only 6g needs it, and only 6g is done without — `read_only`)
-            #[cfg(test)]
-            let (fail, setattr) = match self.seam {
-                Some(CgroupfsSeam::Fail(e)) => (Some(e), true),
-                Some(CgroupfsSeam::NoSetattr) => (None, false),
-                None => (None, true),
-            };
-            #[cfg(not(test))]
-            let (fail, setattr) = (None, true);
-            self.note(CGROUPFS_NOTE, cgroupfs_read_only(fail, setattr));
             if ns.net {
                 let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
                 let mut ifr = IfFlags { name: [0; 16], flags: 0, rest: [0; 22] };
@@ -1500,133 +1222,11 @@ impl Birth {
                         libc::close(s6);
                     }
                 }
-                if self.icmp {
-                    let r = libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP);
-                    if r >= 0 {
-                        raw = libc::fcntl(r, libc::F_DUPFD, 10);
-                        libc::close(r);
-                    }
-                    // 6d: a connection keeps its mark where the planted socket accepts it — its run's, tarae's to
-                    // give (`marks.rs`); this netns's own setting, written while the child still has the
-                    // capability over it
-                    let at = c"/proc/sys/net/ipv4/tcp_fwmark_accept";
-                    let f = libc::open(at.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
-                    if f < 0 || libc::write(f, b"1".as_ptr().cast(), 1) != 1 {
-                        self.failed(BirthStep::Fwmark, errno());
-                    }
-                    libc::close(f);
-                }
             }
             if let Err(e) = capabilities_dropped(self.last_cap) {
                 self.failed(BirthStep::Caps, e);
             }
-            raw
         }
-    }
-}
-
-/// `struct mount_attr` (Linux 5.12): what `mount_setattr` sets and clears.
-#[repr(C)]
-struct MountAttr {
-    attr_set: u64,
-    attr_clr: u64,
-    propagation: u64,
-    userns_fd: u64,
-}
-
-const MOUNT_ATTR_RDONLY: u64 = 1;
-
-/// `statx`'s attribute: the path is the root of a mount (Linux 5.8).
-const STATX_ATTR_MOUNT_ROOT: u64 = 0x2000;
-
-/// `/sys/fs/cgroup` and what's mounted under it read-only in the birth's mount namespace (6g, the review's second
-/// finding): every cgroup there is the user's — the runs' own uid — under `Delegate=yes`, so with it writable a run
-/// could move itself into another run's cgroup (6d's rules would count it that run's), into or out of its keeper's
-/// scope, or change one. The keeper itself writes none by path: its runs' cgroups are made and entered through the
-/// scope's folder tarae opened in its own namespace, writable there. What it says (`CGROUPFS_NOTE`): 0, made
-/// read-only; `NOTHING_THERE` or `NOT_A_MOUNT`, each as checked (`statx`), never guessed from an error; else the
-/// errno it couldn't for (`fail`: tests say one instead of trying).
-///
-/// `mount_setattr` only adds read-only, leaving what the mount has locked as it is. Without it (before 5.12 —
-/// `setattr` false: tests force that way), a bind remount, which must keep every flag a mount from a more privileged
-/// namespace has locked or be refused (`EPERM`): nosuid, nodev, noexec and the atime ones — noatime, nodiratime,
-/// relatime, else strictatime — each as `statvfs` says it has them (said, not left to the kernel's keeping atime on a
-/// remount that names none).
-///
-/// # Safety
-/// The birth's child's: raw calls only.
-unsafe fn cgroupfs_read_only(fail: Option<i32>, setattr: bool) -> i32 {
-    let at = c"/sys/fs/cgroup";
-    // SAFETY: raw calls with live buffers of their sizes and NUL-terminated paths.
-    unsafe {
-        let mut stx: libc::statx = std::mem::zeroed();
-        let how = libc::AT_SYMLINK_NOFOLLOW | libc::AT_NO_AUTOMOUNT;
-        if libc::statx(libc::AT_FDCWD, at.as_ptr(), how, libc::STATX_BASIC_STATS, &mut stx) != 0 {
-            return if errno() == libc::ENOENT { NOTHING_THERE } else { errno() };
-        }
-        let root = match stx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT != 0 {
-            true => stx.stx_attributes & STATX_ATTR_MOUNT_ROOT != 0,
-            // (before 5.8: a mount's root is on another device than its parent)
-            false => {
-                let mut parent: libc::statx = std::mem::zeroed();
-                let up = libc::statx(
-                    libc::AT_FDCWD,
-                    c"/sys/fs".as_ptr(),
-                    how,
-                    libc::STATX_BASIC_STATS,
-                    &mut parent,
-                );
-                up != 0
-                    || (stx.stx_dev_major, stx.stx_dev_minor) != (parent.stx_dev_major, parent.stx_dev_minor)
-            }
-        };
-        if !root {
-            return NOT_A_MOUNT;
-        }
-        if let Some(e) = fail {
-            return e;
-        }
-        if setattr {
-            let attr = MountAttr { attr_set: MOUNT_ATTR_RDONLY, attr_clr: 0, propagation: 0, userns_fd: 0 };
-            let r = libc::syscall(
-                libc::SYS_mount_setattr,
-                libc::AT_FDCWD,
-                at.as_ptr(),
-                libc::AT_RECURSIVE,
-                &raw const attr,
-                std::mem::size_of::<MountAttr>(),
-            );
-            if r == 0 {
-                return 0;
-            }
-            if errno() != libc::ENOSYS {
-                return errno();
-            }
-        }
-        let mut st: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(at.as_ptr(), &mut st) != 0 {
-            return errno();
-        }
-        let mut kept = 0;
-        for (st_flag, ms) in [
-            (libc::ST_NOSUID, libc::MS_NOSUID),
-            (libc::ST_NODEV, libc::MS_NODEV),
-            (libc::ST_NOEXEC, libc::MS_NOEXEC),
-            (libc::ST_NOATIME, libc::MS_NOATIME),
-            (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-            (libc::ST_RELATIME, libc::MS_RELATIME),
-        ] {
-            if st.f_flag & st_flag != 0 {
-                kept |= ms;
-            }
-        }
-        // (neither noatime nor relatime: strictatime, said as such)
-        if st.f_flag & (libc::ST_NOATIME | libc::ST_RELATIME) == 0 {
-            kept |= libc::MS_STRICTATIME;
-        }
-        let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | kept;
-        let null = std::ptr::null::<libc::c_char>();
-        if libc::mount(null, at.as_ptr(), null, flags, std::ptr::null()) == 0 { 0 } else { errno() }
     }
 }
 
@@ -1661,12 +1261,11 @@ fn id_maps(pid: i32) -> Result<(), BirthError> {
 /// Waits for a new keeper's `Ready` on `chan` (`READY_WITHIN`) — or what its birth pipe `told` says failed
 /// first (its end, the exec, says nothing). Its device handles: those of `DEVICE_HANDLES`' places, each once
 /// (another name or a second one is left out, said in the log). A mirror its child couldn't make (`LO_NOTES`)
-/// is put in `missing` and said in the log; what its read-only step said (`CGROUPFS_NOTE`), in `cgroupfs`.
+/// is put in `missing` and said in the log.
 fn said_ready(
     chan: BorrowedFd,
     told: OwnedFd,
     missing: &mut Families,
-    cgroupfs: &mut Option<i32>,
     log: &crate::log::Session,
 ) -> io::Result<Vec<(&'static str, OwnedFd)>> {
     let deadline = Instant::now() + READY_WITHIN;
@@ -1693,10 +1292,6 @@ fn said_ready(
             // SAFETY: a read into a buffer of its size.
             let n = unsafe { libc::read(t.as_raw_fd(), b.as_mut_ptr().cast(), b.len()) };
             let errno = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
-            if n == 5 && b[0] == CGROUPFS_NOTE {
-                *cgroupfs = Some(errno);
-                continue;
-            }
             if n == 5 && LO_NOTES.contains(&b[0]) {
                 let (family, address, lookups) = match b[0] == LO_NOTES[0] {
                     true => (&mut missing.v4, SESSION_V4.to_string(), "IPv4"),
@@ -1863,8 +1458,6 @@ fn readable(fd: BorrowedFd, wait: Duration) -> io::Result<bool> {
 struct Child {
     pid: i32,
     error: Option<OwnedFd>,
-    /// Its own cgroup's name in the keeper's scope (6g), removed once it's reaped.
-    cgroup: Option<CString>,
 }
 
 /// The keeper (`tarae --sandbox-keeper`, first thing in `main`): its loop over its channel, its children's
@@ -1897,18 +1490,7 @@ pub fn main() -> ! {
         }
         (OwnedFd::from_raw_fd(CHANNEL_FD), OwnedFd::from_raw_fd(sfd))
     };
-    let mut k = Kept {
-        chan,
-        signals,
-        children: HashMap::new(),
-        reaped: 0,
-        scope: None,
-        clone3: true,
-        ran: false,
-        emptied: Vec::new(),
-    };
-    // (handed with the first `Planted`, never to a run: close-on-exec from here)
-    let mut raw = birth_raw();
+    let mut k = Kept { chan, signals, children: HashMap::new(), reaped: 0 };
     // SAFETY: getpid has no preconditions.
     let me = unsafe { libc::getpid() } as u32;
     // Its device places, as its own mount namespace has them, opened now — before any run exists — and handed
@@ -1957,59 +1539,12 @@ pub fn main() -> ! {
                     let (rss_kb, pss_kb) = own_usage();
                     let _ = k.say(&Msg::Usage { rss_kb, pss_kb }, &[]);
                 }
-                // The sockets the session's network is made with, made here — in its netns — each in
-                // `Kind::wanted`'s order, until one fails (its errno said with those made)
-                Ok(Some((Ok(Msg::Plant { v4, v6 }), _))) => {
-                    let mut made: Vec<(super::redirect::Kind, OwnedFd)> = Vec::new();
-                    let mut errno = 0;
-                    for kind in super::redirect::Kind::wanted(v4, v6) {
-                        match super::redirect::open(kind) {
-                            Ok(fd) => made.push((kind, fd)),
-                            Err(e) => {
-                                errno = e.raw_os_error().unwrap_or(libc::EIO);
-                                break;
-                            }
-                        }
-                    }
-                    if errno == 0
-                        && let Some(r) = raw.take()
-                    {
-                        made.push((super::redirect::Kind::Icmp4, r));
-                    }
-                    let kinds = made.iter().map(|(kind, _)| kind.code()).collect();
-                    let fds: Vec<BorrowedFd> = made.iter().map(|(_, fd)| fd.as_fd()).collect();
-                    let _ = k.say(&Msg::Planted { kinds, errno }, &fds);
-                }
-                // (6g: its scope, taken before any run only — each run's own cgroup made there from now on)
-                Ok(Some((Ok(Msg::Cgroup), mut fds))) if !k.ran && k.scope.is_none() => k.scope = fds.pop(),
                 // (a keeper's own kinds, or a malformed record: refused, and it goes on)
                 Ok(Some((Ok(_), _))) | Ok(Some((Err(_), _))) => {
                     let _ = k.say(&Msg::Failed { id: 0, errno: libc::EINVAL, step: Step::Request }, &[]);
                 }
             }
         }
-    }
-}
-
-/// The raw ICMP socket its birth left at `RAW_FD` (`Birth::child`), made close-on-exec — None: nothing there, or what
-/// is there isn't one (left as it is).
-fn birth_raw() -> Option<OwnedFd> {
-    let opt = |name: i32| {
-        let (mut v, mut len) = (0i32, size_of::<i32>() as libc::socklen_t);
-        // SAFETY: an int and its length, ours for the call, on a descriptor that may not be a socket (then -1).
-        let r = unsafe { libc::getsockopt(RAW_FD, libc::SOL_SOCKET, name, (&raw mut v).cast(), &mut len) };
-        (r == 0).then_some(v)
-    };
-    let raw = opt(libc::SO_DOMAIN) == Some(libc::AF_INET)
-        && opt(libc::SO_TYPE) == Some(libc::SOCK_RAW)
-        && opt(libc::SO_PROTOCOL) == Some(libc::IPPROTO_ICMP);
-    if !raw {
-        return None;
-    }
-    // SAFETY: the descriptor checked above is this process's, its birth's to hand on: ours from here.
-    unsafe {
-        libc::fcntl(RAW_FD, libc::F_SETFD, libc::FD_CLOEXEC);
-        Some(OwnedFd::from_raw_fd(RAW_FD))
     }
 }
 
@@ -2020,32 +1555,16 @@ struct Kept {
     children: HashMap<u64, Child>,
     /// Orphans reaped since `Reaped` last said so.
     reaped: u32,
-    /// 6g: its scope's folder (`Msg::Cgroup`), where each run's own cgroup is made.
-    scope: Option<OwnedFd>,
-    /// Whether `clone3` is still worth asking — not once it was answered `ENOSYS`.
-    clone3: bool,
-    /// A run was asked: its scope is taken no more.
-    ran: bool,
-    /// The cgroups of runs reaped, still to remove: one a run's leftovers are still in (`EBUSY`) goes once the
-    /// last of them is reaped (`reap`), or at the end (`end_all`).
-    emptied: Vec<CString>,
 }
-
-/// `CLONE_INTO_CGROUP` (Linux 5.7): the child starts in the cgroup `clone_args.cgroup` names, never in its parent's.
-const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 
 impl Kept {
     fn say(&self, msg: &Msg, fds: &[BorrowedFd]) -> io::Result<()> {
         channel::send(self.chan.as_fd(), msg, fds)
     }
 
-    /// Starts run `run` (its child: `child`), then says `Started` with its pidfd — or `Failed`. With a scope (6g),
-    /// in a cgroup of its own made there: `clone3(CLONE_INTO_CGROUP)`, so nothing of the run ever runs in the
-    /// keeper's (no `cgroup.procs` write after the fact, and its tail — spike6 Q4). That folder or that call failing,
-    /// it's forked as without a scope, in the keeper's cgroup — `Started` says why (D5: said, never refused).
+    /// Starts run `run` (its child: `child`, forked), then says `Started` with its pidfd — or `Failed`.
     fn start(&mut self, run: channel::Run, fds: Vec<OwnedFd>) {
         let id = run.id;
-        self.ran = true;
         let failed = |k: &Kept, step, errno| {
             let _ = k.say(&Msg::Failed { id, errno, step }, &[]);
         };
@@ -2060,75 +1579,30 @@ impl Kept {
         }
         // SAFETY: both just made, ours.
         let (error_r, error_w) = unsafe { (OwnedFd::from_raw_fd(pipe[0]), OwnedFd::from_raw_fd(pipe[1])) };
-        // (a scope, but `clone3` answered missing before: not asked again — no folder made for nothing — and each
-        // run said to start in the keeper's cgroup, its own not tried)
-        let mut missed = (self.scope.is_some() && !self.clone3).then_some((Step::Cgroup, libc::ENOSYS));
-        let mut started: Option<(libc::pid_t, OwnedFd, u64, CString)> = None;
-        if let Some(scope) = self.scope.as_ref().filter(|_| self.clone3) {
-            match run_cgroup(scope.as_fd(), id) {
-                Ok((name, dir, cgroup)) => {
-                    let mut pidfd: libc::c_int = -1;
-                    // SAFETY: the child is `child`, which allocates nothing and makes raw calls only on what was made
-                    // before (`Exec`) — `clone_into`'s contract.
-                    let pid = unsafe { clone_into(&mut pidfd, dir.as_raw_fd()) };
-                    if pid == 0 {
-                        child(&run, &exec, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
-                    }
-                    if pid > 0 {
-                        // SAFETY: the pidfd `clone3` made for us.
-                        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
-                        started = Some((pid as libc::pid_t, pidfd, cgroup, name));
-                    } else {
-                        let e = errno();
-                        // (refused by a filter, or no such call: not asked again)
-                        self.clone3 &= e != libc::ENOSYS;
-                        remove_cgroup(scope.as_fd(), &name);
-                        missed = Some((Step::Fork, e));
-                    }
-                }
-                Err(e) => missed = Some((Step::Cgroup, e)),
-            }
+        // SAFETY: the child is `child` — raw calls on what was made before (`Exec`).
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            child(&run, &exec, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
         }
-        let (pid, pidfd, cgroup, name) = match started {
-            Some((pid, pidfd, cgroup, name)) => (pid, pidfd, cgroup, Some(name)),
-            None => {
-                // SAFETY: the child is `child` — raw calls on what was made before (`Exec`), as after a clone.
-                let pid = unsafe { libc::fork() };
-                if pid == 0 {
-                    child(&run, &exec, &fds, self.chan.as_raw_fd(), error_w.as_raw_fd());
-                }
-                if pid < 0 {
-                    return failed(self, Step::Fork, errno());
-                }
-                // SAFETY: plain call on our own child (not reaped yet: the pid is it).
-                let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
-                if pidfd < 0 {
-                    let e = errno();
-                    // SAFETY: our own unreaped child.
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
-                    self.children.insert(id, Child { pid, error: None, cgroup: None });
-                    return failed(self, Step::Fork, e);
-                }
-                // SAFETY: just made, ours.
-                (pid, unsafe { OwnedFd::from_raw_fd(pidfd as RawFd) }, 0, None)
-            }
-        };
+        if pid < 0 {
+            return failed(self, Step::Fork, errno());
+        }
+        // SAFETY: plain call on our own child (not reaped yet: the pid is it).
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+        if pidfd < 0 {
+            let e = errno();
+            // SAFETY: our own unreaped child.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            self.children.insert(id, Child { pid, error: None });
+            return failed(self, Step::Fork, e);
+        }
+        // SAFETY: just made, ours.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as RawFd) };
         drop(error_w);
         drop(fds);
-        self.children.insert(id, Child { pid, error: Some(error_r), cgroup: name });
-        let started = Msg::Started { id, pid: pid as u32, cgroup, missed };
+        self.children.insert(id, Child { pid, error: Some(error_r) });
+        let started = Msg::Started { id, pid: pid as u32 };
         let _ = self.say(&started, &[pidfd.as_fd()]);
-    }
-
-    /// Removes the cgroups of runs reaped (`emptied`) — keeping those still holding what a run left.
-    fn empty_cgroups(&mut self) {
-        let Some(scope) = &self.scope else { return };
-        // (kept only while something is in it: one gone already is let go)
-        self.emptied.retain(|name| {
-            // SAFETY: a removal by name in the scope's folder, ours.
-            let r = unsafe { libc::unlinkat(scope.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
-            r != 0 && errno() == libc::EBUSY
-        });
     }
 
     /// Reads run `id`'s failure pipe: a failure (step, errno) is said; its end (the exec closed it) closes it.
@@ -2163,9 +1637,7 @@ impl Kept {
                     if self.children.get(&id).is_some_and(|c| c.error.is_some()) {
                         self.failure(id);
                     }
-                    if let Some(name) = self.children.remove(&id).and_then(|c| c.cgroup) {
-                        self.emptied.push(name);
-                    }
+                    self.children.remove(&id);
                     let _ = self.say(&Msg::Exited { id, status }, &[]);
                 }
                 None => self.reaped += 1,
@@ -2175,8 +1647,6 @@ impl Kept {
             let _ = self.say(&Msg::Reaped { n: self.reaped }, &[]);
             self.reaped = 0;
         }
-        // (a run's cgroup goes with its last process: the run's own, else the last thing it left)
-        self.empty_cgroups();
     }
 
     /// `sig` to run `id`'s group (and itself) — only while unreaped: after, its pid may be another's.
@@ -2217,67 +1687,9 @@ impl Kept {
                 }
             }
         }
-        // (and with it every run's cgroup it could remove: `reap`'s last round)
         self.reap();
         std::process::exit(0)
     }
-}
-
-/// Run `id`'s own cgroup, made in the keeper's scope: its name there, its folder (for `clone3`) and its id (the
-/// folder's inode: a cgroup's id on a 64-bit kernel) — or the errno that stopped it.
-fn run_cgroup(scope: BorrowedFd, id: u64) -> Result<(CString, OwnedFd, u64), i32> {
-    let name = CString::new(format!("run-{id}")).map_err(|_| libc::EINVAL)?;
-    // SAFETY: a folder made and opened by name in the scope's folder, ours; a stat into a zeroed buffer.
-    unsafe {
-        if libc::mkdirat(scope.as_raw_fd(), name.as_ptr(), 0o755) != 0 {
-            return Err(errno());
-        }
-        let fd = libc::openat(
-            scope.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
-        );
-        if fd < 0 {
-            let e = errno();
-            remove_cgroup(scope, &name);
-            return Err(e);
-        }
-        let dir = OwnedFd::from_raw_fd(fd);
-        let mut st: libc::stat = std::mem::zeroed();
-        if libc::fstat(dir.as_raw_fd(), &mut st) != 0 {
-            let e = errno();
-            remove_cgroup(scope, &name);
-            return Err(e);
-        }
-        Ok((name, dir, st.st_ino))
-    }
-}
-
-/// Removes the cgroup `name` in `scope` (one no process is in).
-fn remove_cgroup(scope: BorrowedFd, name: &CString) {
-    // SAFETY: a removal by name in the scope's folder, ours.
-    unsafe { libc::unlinkat(scope.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
-}
-
-/// A child in the cgroup whose folder is `cgroup`, with its pidfd from the start (in `pidfd`): `clone3(CLONE_PIDFD |
-/// CLONE_INTO_CGROUP)` — 0 in the child, its pid in the parent, -1 and errno on failure (`ENOSYS`: no such call, or
-/// a filter refused it). Without a new stack, as a fork.
-///
-/// # Safety
-/// The child is a copy of the calling process without fork's bookkeeping — glibc's atfork handlers don't run (its
-/// malloc locks aren't reset: one another thread held at the clone stays held), its cached thread id is the
-/// parent's: until its exec it must allocate and free nothing and make no call that needs a thread id (`raise`,
-/// `pthread_kill`) — raw calls on what was made before the clone only, as `child` does.
-unsafe fn clone_into(pidfd: &mut libc::c_int, cgroup: RawFd) -> libc::c_long {
-    let args = CloneArgs {
-        flags: libc::CLONE_PIDFD as u64 | CLONE_INTO_CGROUP,
-        pidfd: (pidfd as *mut libc::c_int) as u64,
-        exit_signal: libc::SIGCHLD as u64,
-        cgroup: cgroup as u64,
-        ..CloneArgs::default()
-    };
-    // SAFETY: a live `clone_args` of its size; the caller keeps the child as said.
-    unsafe { libc::syscall(libc::SYS_clone3, &raw const args, std::mem::size_of::<CloneArgs>()) }
 }
 
 /// `capset`'s header, version 3 (two data blocks of effective, permitted, inheritable).
@@ -2350,7 +1762,7 @@ fn own_usage() -> (u64, u64) {
     (kb("Rss:"), kb("Pss:"))
 }
 
-/// A run's child, after the keeper's `clone3` or fork: its channel closed, the files named like keys hidden in a
+/// A run's child, after the keeper's fork: its channel closed, the files named like keys hidden in a
 /// mount namespace of its own where it's asked to (`cover`, 7d), dumpable again (finding 1: tarae reads a
 /// served run's memory through `/proc/<tid>/mem`, which a non-dumpable process refuses without a namespace of
 /// tarae's), a session of its own, its stdio, its folder, its name (what Landlock's audit names), every signal
@@ -2358,9 +1770,8 @@ fn own_usage() -> (u64, u64) {
 /// tarae (`hand_over`), one byte back; held, one byte once tarae knows its pid — then the exec. A failure on the way is written on `error` (step, errno) and in its stderr,
 /// and it exits 127.
 ///
-/// Nothing here allocates or frees: a raw `clone3`'s child has none of fork's bookkeeping — glibc's malloc locks
-/// aren't reset in it, so one another thread held at the clone (a test's keeper has libtest's thread beside it)
-/// would never be let go. Its strings and its seccomp program come made (`Exec`); a failure is said in fixed bytes
+/// Nothing here allocates or frees: after a fork of a process that may have more than one thread (a test's keeper
+/// has libtest's thread beside it) only async-signal-safe calls are. Its strings and its seccomp program come made (`Exec`); a failure is said in fixed bytes
 /// and its errno's digits (tarae says the errno's words, from `error`); every other call is a raw one.
 /// (`a_runs_child_allocates_nothing_before_its_exec` holds it.)
 fn child(run: &channel::Run, exec: &Exec, fds: &[OwnedFd], chan: RawFd, error: RawFd) -> ! {
@@ -2526,7 +1937,17 @@ impl Covering {
     }
 }
 
-/// `mount_setattr`'s: no set-user-ID, devices nor programs run from it (Linux 5.12).
+/// `struct mount_attr` (Linux 5.12): what `mount_setattr` sets and clears.
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+/// `mount_setattr`'s: read-only, no set-user-ID, devices nor programs run from it (Linux 5.12).
+const MOUNT_ATTR_RDONLY: u64 = 0x01;
 const MOUNT_ATTR_NOSUID: u64 = 0x02;
 const MOUNT_ATTR_NODEV: u64 = 0x04;
 const MOUNT_ATTR_NOEXEC: u64 = 0x08;
@@ -3883,7 +3304,7 @@ mod tests {
         {
             println!("{said}");
         }
-        let Some(tiers) = served_tiers("perf_keepers_memory_per_session", false) else { return };
+        let Some(tiers) = served_tiers("perf_keepers_memory_per_session") else { return };
         let Some(ip) = outside() else { return };
         // (the outside: each connection's first line answered, then kept open — the run's relay stays, idle)
         let l = std::net::TcpListener::bind((ip, 0)).unwrap();
@@ -3917,11 +3338,11 @@ mod tests {
             "|---|---|---|---|---|---|---|---|".to_string(),
         ];
         let abi = crate::landlock::abi().unwrap();
-        'tiers: for (tier, ns, network) in tiers {
+        'tiers: for (tier, ns) in tiers {
             for n in [1, 8, 16, 32] {
                 let before = Seen::now(&[]);
                 let ks: Vec<Arc<Keeper>> =
-                    (0..n).map(|i| keeper_for(&format!("mem-{tier}-{n}-{i}"), ns, network)).collect();
+                    (0..n).map(|i| keeper_for(&format!("mem-{tier}-{n}-{i}"), ns)).collect();
                 std::thread::sleep(IDLE);
                 let idle = Seen::now(&ks);
                 let mut runs = Vec::new();
@@ -4220,7 +3641,7 @@ mod tests {
 
     /// Whether this system's keepers have a network namespace of the session's own — the session's namespaces, served
     /// or not — else says the test skips
-    /// itself, with the probe's reason. A machine said to give one (`TARAE_EXPECT_NETWORK=tproxy`) fails instead.
+    /// itself, with the probe's reason. A machine said to give tier own (`TARAE_EXPECT_TIER=own`) fails instead.
     fn own_network(test: &str) -> bool {
         if !namespaced(test) {
             return false;
@@ -4229,8 +3650,8 @@ mod tests {
             return true;
         }
         let why = super::super::tier::get().short.clone().unwrap_or_default();
-        if std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy") {
-            panic!("{test}: a network namespace expected here (TARAE_EXPECT_NETWORK), none — {why}");
+        if std::env::var("TARAE_EXPECT_TIER").is_ok_and(|t| t.trim() == "own") {
+            panic!("{test}: a network namespace expected here (TARAE_EXPECT_TIER=own), none — {why}");
         }
         let line = format!(
             "{}sandbox::keeper::tests::{test} — no network namespace of the session's own here: {why}\n",
@@ -4339,7 +3760,6 @@ mod tests {
             }
             "listen" => return helper_listen(),
             "connect" => helper_connect(&std::env::var("TARAE_TO").unwrap_or_default()),
-            "origin" => helper_origin(&std::env::var("TARAE_TO").unwrap_or_default()),
             "swap" => helper_swap(&std::env::var("TARAE_TO").unwrap_or_default()),
             "proxied" => helper_proxied(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (step 8: `proxied`, its connection then kept open, idle, until `done` is in its folder — 120 s at most)
@@ -4358,8 +3778,6 @@ mod tests {
             "foreign" => helper_foreign(),
             "protocols" => helper_protocols(),
             "udp" => helper_udp(&std::env::var("TARAE_TO").unwrap_or_default()),
-            "within" => helper_within(&std::env::var("TARAE_TO").unwrap_or_default()),
-            "cgroupwrites" => helper_cgroup_writes(),
             "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
             // (step 7: another session's run holding what it holds until `done` is in its folder — 30 s at most)
             // (step 8: `hold` started as its child, what that holds said, then gone — the child left running below
@@ -4578,62 +3996,6 @@ mod tests {
                 let mine: String = mine.split_whitespace().map(|w| format!(" own-{w}")).collect();
                 format!("{theirs}{mine}")
             }
-            // (`within` once `$TARAE_GO` is there — what the test wanted in place first is: 5 s at most)
-            "within_when" => {
-                let go = std::env::var_os("TARAE_GO").unwrap_or_default();
-                let by = Instant::now() + Duration::from_secs(5);
-                while !Path::new(&go).exists() && Instant::now() < by {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                helper_within(&std::env::var("TARAE_TO").unwrap_or_default())
-            }
-            "asked" => helper_asked(&std::env::var("TARAE_TO").unwrap_or_default()),
-            "named" => helper_named(&std::env::var("TARAE_NAME").unwrap_or_default()),
-            "raw" => helper_raw(&std::env::var("TARAE_NAME").unwrap_or_default()),
-            "searched" => helper_searched(&std::env::var("TARAE_TO").unwrap_or_default()),
-            // (6e: a run's own DNS server at the session's 127.0.0.1:53 — `ready` once bound, then one question
-            // answered NOTIMP, its ID and question echoed: an answer only it gives)
-            "dnsserver" => {
-                let s = match std::net::UdpSocket::bind("127.0.0.1:53") {
-                    Ok(s) => s,
-                    Err(e) => return println!("helper: bind={}", tried::<()>(Err(e))),
-                };
-                println!("helper: ready");
-                s.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                let mut b = [0u8; 512];
-                let Ok((n, from)) = s.recv_from(&mut b) else { return println!("helper: nothing asked") };
-                let mut a = b[..n].to_vec();
-                if a.len() >= 4 {
-                    (a[2], a[3]) = (0x80 | (a[2] & 0x79), 0x84);
-                }
-                format!("answered={}", tried(s.send_to(&a, from)))
-            }
-            "ask" => helper_ask(&std::env::var("TARAE_TO").unwrap_or_default()),
-            // (6d: a TCP socket made in the run's network and its number said — then held, unconnected, until
-            // `$TARAE_GO` is there, 5 s at most, for the test to take it)
-            "socket" => {
-                // SAFETY: a plain call; the socket is this process's until it ends.
-                let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-                println!("helper: fd={fd}");
-                let go = std::env::var_os("TARAE_GO").unwrap_or_default();
-                let by = Instant::now() + Duration::from_secs(5);
-                while !Path::new(&go).exists() && Instant::now() < by {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                return;
-            }
-            "lookup_timed" => {
-                let name = std::env::var("TARAE_NAME").unwrap_or_default();
-                let t0 = Instant::now();
-                let found = lookup_in(&name, libc::AF_INET);
-                format!("lookup={found} ms={}", t0.elapsed().as_millis())
-            }
-            "datagram" => {
-                let to = std::env::var("TARAE_TO").unwrap_or_default();
-                let sent = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.send_to(b"x", to.as_str()));
-                format!("datagram={}", tried(sent))
-            }
-            "nlchanges" => helper_nl_changes(),
             "userns" => helper_userns(),
             "setns" => helper_setns(&std::env::var("TARAE_NS").unwrap_or_default()),
             "lookup4" => format!("v4={} lookup4={}", ipv4_addresses().join(","), lookup4_own_name()),
@@ -4899,37 +4261,6 @@ mod tests {
         println!("helper: served");
     }
 
-    /// `cgroupwrites` (6g): each way a run could move itself or change a cgroup, tried — its own cgroup's
-    /// `cgroup.procs`, a sibling run's (`$TARAE_SIBLING`), its keeper's scope's (`$TARAE_SCOPE`), the one above the
-    /// scope's (moving out of it), a folder made in the scope, a file of its own cgroup (`cgroup.max.descendants`):
-    /// `own=… sibling=… scope=… out=… mkdir=… file=…`, each `ok` or its errno.
-    fn helper_cgroup_writes() -> String {
-        let at = |c: &str| Path::new("/sys/fs/cgroup").join(c.trim_start_matches('/'));
-        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let own = own.lines().find_map(|l| l.strip_prefix("0::")).unwrap_or_default().to_string();
-        let scope = std::env::var("TARAE_SCOPE").unwrap_or_default();
-        let sibling = std::env::var("TARAE_SIBLING").unwrap_or_default();
-        let me = std::process::id().to_string();
-        let write = |p: PathBuf, v: &str| {
-            tried(
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(p)
-                    .and_then(|mut f| io::Write::write_all(&mut f, v.as_bytes())),
-            )
-        };
-        let out = Path::new(&scope).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        format!(
-            "own={} sibling={} scope={} out={} mkdir={} file={}",
-            write(at(&own).join("cgroup.procs"), &me),
-            write(at(&sibling).join("cgroup.procs"), &me),
-            write(at(&scope).join("cgroup.procs"), &me),
-            write(at(&out).join("cgroup.procs"), &me),
-            tried(std::fs::create_dir(at(&scope).join("made-by-a-run"))),
-            write(at(&own).join("cgroup.max.descendants"), "0"),
-        )
-    }
-
     /// `connect`: `$TARAE_TO` reached, `hello` written, its answer read: `reached <answer>`, or the errno.
     fn helper_connect(to: &str) -> String {
         let s = match std::net::TcpStream::connect(to) {
@@ -4941,299 +4272,6 @@ mod tests {
         let mut line = String::new();
         let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
         format!("reached {}", line.trim())
-    }
-
-    /// `origin` (6d): a plain request for `$TARAE_HOST` sent as a client sends it to its server (origin form) on a
-    /// TCP socket of its own connected to `$TARAE_TO` — the run trying `SO_MARK` on it before (`setmark`: its errno,
-    /// 0 had it worked) and clearing it after (`clear`) — and what it says: `peer=<its peer> reply=<the first line
-    /// back> setmark=<errno> mark=<even|odd|0> clear=<errno>`, or the connect's errno.
-    fn helper_origin(to: &str) -> String {
-        use std::io::{BufRead, Write};
-        let sa = sockaddr(to);
-        let host = std::env::var("TARAE_HOST").unwrap_or_default();
-        let mark = |fd: i32| {
-            let (mut v, mut len) = (0u32, 4 as libc::socklen_t);
-            // SAFETY: an int and its length, ours for the call.
-            unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_MARK, (&raw mut v).cast(), &mut len) };
-            v
-        };
-        let set = |fd: i32, v: u32| {
-            // SAFETY: an int, ours for the call.
-            let r =
-                unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_MARK, (&raw const v).cast(), 4) };
-            if r == 0 { 0 } else { errno_now() }
-        };
-        // SAFETY: plain calls on a socket this makes; an address of its size.
-        let (fd, setmark, r) = unsafe {
-            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-            let setmark = set(fd, 0x40);
-            let r =
-                libc::connect(fd, (&raw const sa).cast(), size_of::<libc::sockaddr_in>() as libc::socklen_t);
-            (fd, setmark, if r == 0 { 0 } else { errno_now() })
-        };
-        // SAFETY: the socket made above, ours from here.
-        let s = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-        if r != 0 {
-            return r.to_string();
-        }
-        let m = match mark(fd) {
-            0 => "0",
-            m if m & 1 == 0 => "even",
-            _ => "odd",
-        };
-        let clear = set(fd, 0);
-        let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes());
-        let mut reply = String::new();
-        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
-        format!("peer={peer} reply={} setmark={setmark} mark={m} clear={clear}", reply.trim_end())
-    }
-
-    /// `within`: `$TARAE_TO` reached within 2 s, and what it does with a connection that says nothing — `reached
-    /// closed` (it closed it), `reached reset`, `reached <data>`, `reached open` (still open 2 s on) — or the errno,
-    /// `timed out`.
-    fn helper_within(to: &str) -> String {
-        let Ok(to) = to.parse::<std::net::SocketAddr>() else { return format!("not an address: {to}") };
-        let s = match std::net::TcpStream::connect_timeout(&to, Duration::from_secs(2)) {
-            Ok(s) => s,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => return "timed out".into(),
-            // (a reset quick enough to land before the connect is seen through: reached all the same)
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => return "reached reset".into(),
-            Err(e) => return tried::<()>(Err(e)),
-        };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-        let mut b = [0u8; 64];
-        match io::Read::read(&mut &s, &mut b) {
-            Ok(0) => "reached closed".into(),
-            Ok(n) => format!("reached {}", String::from_utf8_lossy(&b[..n]).trim()),
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reached reset".into(),
-            Err(_) => "reached open".into(),
-        }
-    }
-
-    /// `named` (6e): `name` looked up as a tool does (`getaddrinfo` — glibc's resolver, its `resolv.conf`, and
-    /// `$LOCALDOMAIN`/`$RES_OPTIONS` where set), its first address connected to at port 80, and a plain request for
-    /// `name` sent there: `addr=<the address> reply=<the first line back>`, or `lookup=<why>`, or the connect's errno.
-    fn helper_named(name: &str) -> String {
-        use std::io::{BufRead, Write};
-        use std::net::ToSocketAddrs;
-        let first = match (name, 80).to_socket_addrs() {
-            Ok(mut a) => a.next(),
-            Err(e) => return format!("lookup={e}"),
-        };
-        let Some(at) = first else { return "lookup=none".into() };
-        let s = match std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5)) {
-            Ok(s) => s,
-            Err(e) => return format!("addr={} connect={}", at.ip(), tried::<()>(Err(e))),
-        };
-        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {name}\r\n\r\n").as_bytes());
-        let mut reply = String::new();
-        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
-        format!("addr={} reply={}", at.ip(), reply.trim_end())
-    }
-
-    /// `raw` (6e+): `name` looked up as a tool does (`getaddrinfo`), its first address connected to at `$TARAE_PORT`,
-    /// `$TARAE_SEND` and a line end sent (none set: a client that waits for its server to speak), and the first line
-    /// back: `addr=<the address> reply=<the line>` — `reply=reset` where the connection was reset — or what failed.
-    fn helper_raw(name: &str) -> String {
-        use std::io::{BufRead, Write};
-        use std::net::ToSocketAddrs;
-        let port: u16 = std::env::var("TARAE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let first = match (name, port).to_socket_addrs() {
-            Ok(mut a) => a.next(),
-            Err(e) => return format!("lookup={e}"),
-        };
-        let Some(at) = first else { return "lookup=none".into() };
-        let s = match std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5)) {
-            Ok(s) => s,
-            Err(e) => return format!("addr={} connect={}", at.ip(), tried::<()>(Err(e))),
-        };
-        // (past the proxy's hold: the user's answer is the test's, at once)
-        s.set_read_timeout(Some(Duration::from_secs(25))).ok();
-        if let Ok(line) = std::env::var("TARAE_SEND") {
-            let _ = (&s).write_all(format!("{line}\r\n").as_bytes());
-        }
-        let mut reply = String::new();
-        let reply = match std::io::BufReader::new(&s).read_line(&mut reply) {
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reset".to_string(),
-            Ok(0) => "closed".into(),
-            Ok(_) => reply.trim_end().to_string(),
-            Err(e) => e.to_string(),
-        };
-        format!("addr={} reply={reply}", at.ip())
-    }
-
-    /// `ask` (6e): a DNS question for `$TARAE_NAME`'s `$TARAE_TYPE` record (default A) sent to `to` on a connected
-    /// UDP socket — which takes an answer only from the address and port it asked — or over TCP (`$TARAE_TCP` set):
-    /// `rcode=<n> answers=<n> addr=<the first A/AAAA's>`, or what failed.
-    fn helper_ask(to: &str) -> String {
-        let name = std::env::var("TARAE_NAME").unwrap_or_default();
-        let qtype: u16 = std::env::var("TARAE_TYPE").ok().and_then(|t| t.parse().ok()).unwrap_or(1);
-        let tcp = std::env::var_os("TARAE_TCP").is_some();
-        ask_raw(to, &name, qtype, tcp).unwrap_or_else(|e| e)
-    }
-
-    /// `searched` (6e, E6): `$TARAE_NAME` looked up as glibc does under `ndots:5` with `$TARAE_SEARCH` its search
-    /// domain (M7: every glibc client did) — the candidate `<name>.<search>` asked first of `$TARAE_TO`, the name as
-    /// written only if that was NXDOMAIN — and the address taken connected to at port 80, a plain request for the name
-    /// sent: `candidate=<rcode> addr=<the address> reply=<the first line back>`.
-    fn helper_searched(to: &str) -> String {
-        use std::io::{BufRead, Write};
-        let name = std::env::var("TARAE_NAME").unwrap_or_default();
-        let search = std::env::var("TARAE_SEARCH").unwrap_or_default();
-        let candidate = ask_raw(to, &format!("{name}.{search}"), 1, false);
-        let first = |said: &str| said.strip_prefix("rcode=0 answers=1 addr=").map(str::to_string);
-        let (code, addr) = match candidate {
-            Ok(said) => match first(&said) {
-                Some(a) => ("0".to_string(), Some(a)),
-                None => (said.split(' ').next().unwrap_or("").replace("rcode=", ""), None),
-            },
-            Err(e) => return e,
-        };
-        let addr = match addr {
-            Some(a) => a,
-            None => match ask_raw(to, &name, 1, false).map(|s| first(&s)) {
-                Ok(Some(a)) => a,
-                Ok(None) => return format!("candidate={code} name=unanswered"),
-                Err(e) => return e,
-            },
-        };
-        let Ok(ip) = addr.parse::<std::net::IpAddr>() else { return format!("not an address: {addr}") };
-        let s = match std::net::TcpStream::connect_timeout(&(ip, 80).into(), Duration::from_secs(5)) {
-            Ok(s) => s,
-            Err(e) => return format!("candidate={code} addr={addr} connect={}", tried::<()>(Err(e))),
-        };
-        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        let _ = (&s).write_all(format!("GET / HTTP/1.1\r\nHost: {name}\r\n\r\n").as_bytes());
-        let mut reply = String::new();
-        let _ = std::io::BufReader::new(&s).read_line(&mut reply);
-        format!("candidate={code} addr={addr} reply={}", reply.trim_end())
-    }
-
-    /// A DNS question for `name`'s `qtype` record sent to `to` (over TCP where `tcp`): `rcode=<n> answers=<n>
-    /// addr=<the first A/AAAA's>` — Err: what failed, said.
-    fn ask_raw(to: &str, name: &str, qtype: u16, tcp: bool) -> Result<String, String> {
-        use std::io::{Read, Write};
-        let mut q = vec![0x6e, 0x6e, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
-        for l in name.split('.').filter(|l| !l.is_empty()) {
-            q.push(l.len() as u8);
-            q.extend_from_slice(l.as_bytes());
-        }
-        q.push(0);
-        q.extend(qtype.to_be_bytes());
-        q.extend([0, 1]);
-        let wait = Some(Duration::from_secs(3));
-        let failed = |e: io::Error| tried::<()>(Err(e));
-        let a = if tcp {
-            let Ok(to) = to.parse::<std::net::SocketAddr>() else {
-                return Err(format!("not an address: {to}"));
-            };
-            let mut s = std::net::TcpStream::connect_timeout(&to, Duration::from_secs(3)).map_err(failed)?;
-            s.set_read_timeout(wait).ok();
-            let mut framed = (q.len() as u16).to_be_bytes().to_vec();
-            framed.extend(&q);
-            let mut len = [0u8; 2];
-            s.write_all(&framed).and_then(|()| s.read_exact(&mut len)).map_err(failed)?;
-            let mut a = vec![0u8; usize::from(u16::from_be_bytes(len))];
-            s.read_exact(&mut a).map_err(failed)?;
-            a
-        } else {
-            let any = if to.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" };
-            let s = std::net::UdpSocket::bind(any).and_then(|s| s.connect(to).map(|()| s)).map_err(failed)?;
-            s.set_read_timeout(wait).ok();
-            let mut b = [0u8; 512];
-            let n = s.send(&q).and_then(|_| s.recv(&mut b)).map_err(failed)?;
-            b[..n].to_vec()
-        };
-        if a.len() < 12 || a[..2] != q[..2] {
-            return Err(format!("not its answer ({} bytes)", a.len()));
-        }
-        let answers = u16::from_be_bytes([a[6], a[7]]);
-        // (the first record's data: past the question — echoed — its name pointer, type, class, TTL and length)
-        let rdata = a.get(q.len() + 12..).unwrap_or_default();
-        let addr = match rdata.len() {
-            4 => std::net::Ipv4Addr::from(<[u8; 4]>::try_from(rdata).unwrap()).to_string(),
-            16 => std::net::Ipv6Addr::from(<[u8; 16]>::try_from(rdata).unwrap()).to_string(),
-            _ => "none".into(),
-        };
-        Ok(format!("rcode={} answers={answers} addr={addr}", a[3] & 0x0f))
-    }
-
-    /// `asked`: a datagram to `$TARAE_TO` on a connected UDP socket — as glibc's resolver sends its questions — and
-    /// its answer waited for 2 s: `answered`, or the errno (`EAGAIN`: none came) and how long that took, `ms=<n>`.
-    fn helper_asked(to: &str) -> String {
-        let s = match std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect(to).map(|()| s)) {
-            Ok(s) => s,
-            Err(e) => return tried::<()>(Err(e)),
-        };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-        let t0 = Instant::now();
-        let mut b = [0u8; 512];
-        let got = s.send(b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00").and_then(|_| s.recv(&mut b));
-        match got {
-            Ok(_) => "answered".into(),
-            Err(e) => format!("{} ms={}", tried::<()>(Err(e)), t0.elapsed().as_millis()),
-        }
-    }
-
-    /// `nlchanges`: what changing the session's network takes, tried by a run on its own routing socket, each sent
-    /// to the kernel's address as ip sends it — the policy rule tarae added deleted (`RTM_DELRULE`, table 100), the
-    /// main table's default route deleted and added again (`RTM_DELROUTE`, `RTM_NEWROUTE`), and a netfilter socket
-    /// (what nf_tables changes take): each `ok` or its errno.
-    fn helper_nl_changes() -> String {
-        // SAFETY: plain call; a descriptor made is ours.
-        let fd = unsafe {
-            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
-        };
-        if fd < 0 {
-            return format!("route={}", errno_now());
-        }
-        // SAFETY: just made.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let send = |kind: u16, flags: i32, body: &[u8]| -> String {
-            let mut m = Vec::new();
-            m.extend((16 + body.len() as u32).to_ne_bytes());
-            m.extend(kind.to_ne_bytes());
-            m.extend(((libc::NLM_F_REQUEST | libc::NLM_F_ACK | flags) as u16).to_ne_bytes());
-            m.extend(1u32.to_ne_bytes());
-            m.extend(0u32.to_ne_bytes());
-            m.extend(body);
-            // SAFETY: all zeros is the kernel's address; a send of our buffer on our socket.
-            unsafe {
-                let mut to: libc::sockaddr_nl = std::mem::zeroed();
-                to.nl_family = libc::AF_NETLINK as libc::sa_family_t;
-                let n = libc::sendto(
-                    fd.as_raw_fd(),
-                    m.as_ptr().cast(),
-                    m.len(),
-                    0,
-                    (&raw const to).cast(),
-                    size_of::<libc::sockaddr_nl>() as libc::socklen_t,
-                );
-                if n < 0 { errno_now().to_string() } else { "ok".into() }
-            }
-        };
-        // `struct fib_rule_hdr`: AF_INET, table 100, FR_ACT_TO_TBL; `struct rtmsg`: AF_INET, main, unicast
-        let rule = [libc::AF_INET as u8, 0, 0, 0, 100, 0, 0, 1, 0, 0, 0, 0];
-        let route = [libc::AF_INET as u8, 0, 0, 0, 254, 0, 0, 1, 0, 0, 0, 0];
-        let delrule = send(libc::RTM_DELRULE, 0, &rule);
-        let delroute = send(libc::RTM_DELROUTE, 0, &route);
-        let newroute = send(libc::RTM_NEWROUTE, libc::NLM_F_CREATE, &route);
-        // SAFETY: plain call; a descriptor it makes is closed at once.
-        let nf = unsafe {
-            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_NETFILTER)
-        };
-        let netfilter = match nf {
-            n if n < 0 => errno_now().to_string(),
-            n => {
-                // SAFETY: ours, just made.
-                unsafe { libc::close(n) };
-                "ok".into()
-            }
-        };
-        format!("delrule={delrule} delroute={delroute} newroute={newroute} netfilter={netfilter}")
     }
 
     /// This process's netns's IPv4 addresses (`getifaddrs`), as `a.b.c.d`.
@@ -6590,10 +5628,9 @@ mod tests {
         };
         // Without a supervisor a run has no socket but netlink
         let sockets = net != RunNet::Plain;
-        // (IPv6 judged only where it's carried: on this system's loopback — a container's often has none, so
-        // neither session makes one — and, in a session's own netns, by its network, which carries only the
-        // families tarae's own network has: `Families::here`, step 6)
-        let v6 = got["own-tcp6"] != "unmade" && (!ns.net || super::Families::here().v6);
+        // (IPv6 judged only where `::1` is there: this system's loopback — a container's often has none, so neither
+        // session makes one — or a session's own netns, whose `lo` has its own whatever tarae's network carries)
+        let v6 = got["own-tcp6"] != "unmade";
         if !v6 {
             eprintln!("{test}: IPv6 not judged — not carried here");
         }
@@ -6734,14 +5771,14 @@ mod tests {
         let said = helper_said(tried);
         let refused: Vec<String> = refused.try_iter().map(|d| d.reported()).collect();
         std::fs::write(s.root.join("done"), "").unwrap();
-        let (tier, ns) = (s.confine.tier(), s.keeper.ns);
+        let tier = s.confine.tier();
         s.end();
         let got: std::collections::HashMap<&str, &str> =
             said.split_whitespace().filter_map(|w| w.split_once('=')).collect();
         let line = format!("tier {tier}: left {left}\n  tried: {said}\n  refused: {refused:#?}\n");
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-        // (IPv6 only where it's carried, as in `two_sessions_cant_reach_each_others_sockets`)
-        let v6 = got["own-tcp6"] != "unmade" && (!ns.net || super::Families::here().v6);
+        // (IPv6 only where `::1` is there, as in `two_sessions_cant_reach_each_others_sockets`)
+        let v6 = got["own-tcp6"] != "unmade";
         let tried =
             [("tcp", true), ("tcp6", v6), ("udp", true), ("udp6", v6), ("tcp-any", true), ("udp-any", true)];
         for (what, judged) in tried {
@@ -7528,7 +6565,7 @@ mod tests {
 
     /// 9a: a run's guarantees are what its own keeper and supervisor decide for it — never the session's first run's.
     /// In every tier: runs on the session's keeper served, then not (no supervisor for that run), then served again
-    /// each say how their sockets go out (the network's way: TPROXY or tarae's proxy — then no socket). Where
+    /// each say how their sockets go out (the network's way: tarae's proxy — then no socket). Where
     /// the session has namespaces, also its keepers: a policy that writes in `/dev/shm` (its keeper born without a
     /// `/dev/shm` of its own, D14: another keeper for another policy) between two that don't, each says theirs; without
     /// namespaces `/dev/shm` is this system's for every keeper (said, not judged; a machine said to give them fails).
@@ -8124,20 +7161,19 @@ mod tests {
     /// Step 5: with the network open a run's connect to the proxy's address holds a real TCP socket of its own
     /// family — every option a client sets on it works (a unix socket in its place broke Python's `TCP_NODELAY`,
     /// M5) and its `O_NONBLOCK` is kept — and what it sends goes through tarae's proxy to the host it names, in
-    /// tier host (D-e) and a netns without TPROXY alike (in a TPROXY session the address isn't the proxy's:
-    /// `in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own`). The outside is a listener of the test's on this
+    /// tier host (D-e) and the session's netns alike. The outside is a listener of the test's on this
     /// machine's own address, named for the proxy (`proxy::TEST_NAMES`), beyond this machine for a policy made with
     /// no own addresses.
     #[test]
     fn a_proxied_connect_holds_a_tcp_socket() {
-        let Some(tiers) = served_tiers("a_proxied_connect_holds_a_tcp_socket", false) else { return };
+        let Some(tiers) = served_tiers("a_proxied_connect_holds_a_tcp_socket") else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns, network) in tiers {
+        for (tier, ns) in tiers {
             let (at, served) = answering(&format!("{ip}:0"), "out hello");
             let host = format!("outside-{tier}.test");
             super::super::proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
             let name = format!("proxied-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             // (the network open to any host — `llm.sandbox-hosts = "any"`, as `policy_in` makes it)
             let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
@@ -8163,52 +7199,16 @@ mod tests {
         }
     }
 
-    /// 6f: in a TPROXY session the proxy's reserved address (`route::PROXY`) is no longer the proxy — its runs are
-    /// told of none (6e′). It's the session's own address (`SESSION_V4`, on its `lo`; the session's rules return its
-    /// own addresses before any tproxy), where nothing listens at that port: a run that names it itself meets a
-    /// closed port of the session's, refused by the session (`ECONNREFUSED`) as one on its loopback is — the
-    /// supervisor's pair isn't taken, and nothing reaches the host a request through it names, though the run's
-    /// rules allow any.
-    #[test]
-    fn in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own() {
-        let test = "in_a_tproxy_session_the_old_proxy_address_is_the_sessions_own";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
-        let host = "old-proxy-6f.test";
-        super::super::proxy::TEST_NAMES.lock().unwrap().push((host.into(), at));
-        let k = keeper("old-proxy-6f");
-        let (p, c, root) = redirected_project("old-proxy-6f", &k, 6_000_101, |_| {});
-        let env = [
-            ("TARAE_TO", super::super::route::PROXY.to_string()),
-            ("TARAE_HOST", format!("{host}:{}", at.port())),
-        ];
-        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let to = super::super::route::PROXY.to_string();
-        let (connected, _) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
-        let (said, refused) = served_said(&k, (&p, &c, &root), "proxied", &env);
-        let reached = served.recv_timeout(Duration::from_millis(500)).is_ok();
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        assert_eq!(connected, libc::ECONNREFUSED.to_string(), "a closed port of the session's own");
-        assert!(
-            !reached && !said.ends_with("reply=out hello"),
-            "the host reached through it: {said} {refused:?}"
-        );
-    }
-
     /// Step 5e: a host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy — reached through
     /// the supervisor's TCP pair as macOS's runs reach it through their ports — and the main loop is asked, for
     /// that run; the session's answer lets it through, and the session's next run reaches the host unasked. The
-    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier host and a netns without TPROXY alike.
+    /// test stands in for the main loop (`proxy::TEST_ASKS`). In tier host and the session's netns alike.
     #[test]
     fn an_unknown_host_waits_for_the_answer() {
         use super::super::proxy::{self, FromProxy, Scope, ToProxy};
-        let Some(tiers) = served_tiers("an_unknown_host_waits_for_the_answer", false) else { return };
+        let Some(tiers) = served_tiers("an_unknown_host_waits_for_the_answer") else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns, network) in tiers {
+        for (tier, ns) in tiers {
             // (the outside answers two requests: the first run's, then the next's)
             let l = std::net::TcpListener::bind((ip, 0)).unwrap();
             let at = l.local_addr().unwrap();
@@ -8224,7 +7224,7 @@ mod tests {
             let host = format!("ask-{tier}.test");
             proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
             let name = format!("asked-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let session = proxy::session_of(&p.root);
             let (asks, asked) = std::sync::mpsc::channel();
@@ -8246,14 +7246,7 @@ mod tests {
             let answer = std::thread::spawn(move || {
                 let ask = asked.recv_timeout(Duration::from_secs(10)).ok()?;
                 let FromProxy::Ask { run, host, port, .. } = ask.clone();
-                proxy::get().send(ToProxy::Answer {
-                    session,
-                    run,
-                    kind: proxy::Kind::Host,
-                    host,
-                    port,
-                    scope: Scope::Session,
-                });
+                proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Session });
                 Some((ask, asked))
             });
             let env = [
@@ -8285,27 +7278,17 @@ mod tests {
     }
 
     /// Piece C: the network closed (`llm.sandbox-network` off), a run's connection beyond still reaches tarae's
-    /// proxy — the closed policy goes beyond through it with an empty list, `redirected` where the session's network
-    /// takes it (TPROXY: a name looked up, its stand-in address connected to) and through the proxy variable's
-    /// address elsewhere — and waits there on the main loop's answer: `y` lets this run's request through alone; the
-    /// next run is asked again, and a no refuses it, nothing more arriving outside. The test stands in for the main
-    /// loop (`proxy::TEST_ASKS`). In tier host, a netns without TPROXY and TPROXY's.
+    /// proxy — the closed policy goes beyond through it with an empty list, by the proxy variable's address — and
+    /// waits there on the main loop's answer: `y` lets this run's request through alone; the next run is asked
+    /// again, and a no refuses it, nothing more arriving outside. The test stands in for the main loop
+    /// (`proxy::TEST_ASKS`). In tier host and the session's netns alike.
     #[test]
     fn with_the_network_closed_a_connection_waits_on_the_card() {
         use super::super::proxy::{self, FromProxy, Scope, ToProxy};
         let test = "with_the_network_closed_a_connection_waits_on_the_card";
-        // (where the system redirects, a closed run is the session network's to take, never given the proxy
-        // variable — judged whatever tier this machine has: TPROXY's below may not be one)
-        let at = crate::scratch::Scratch::new("keeper-closed-taken");
-        let mut taken = project_policy_at(at.path(), Vec::new(), |e| e.asks_hosts = true);
-        taken.redirect(true);
-        assert!(
-            taken.redirected && taken.proxy_url().is_none(),
-            "a closed run taken where the system redirects"
-        );
-        let Some(tiers) = served_tiers(test, true) else { return };
+        let Some(tiers) = served_tiers(test) else { return };
         let Some(ip) = outside() else { return };
-        for (i, (tier, ns, network)) in tiers.into_iter().enumerate() {
+        for (i, (tier, ns)) in tiers.into_iter().enumerate() {
             let l = std::net::TcpListener::bind((ip, 0)).unwrap();
             let at = l.local_addr().unwrap();
             let (tx, served) = std::sync::mpsc::channel();
@@ -8320,19 +7303,14 @@ mod tests {
             let host = format!("closed-{tier}.test");
             proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
             let name = format!("closed-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let closed = |e: &mut super::super::Env| e.asks_hosts = true;
-            let (mut p, root) = project_policy_with(&name, Vec::new(), &[], closed);
-            p.redirect(network);
+            let (p, root) = project_policy_with(&name, Vec::new(), &[], closed);
             assert!(
                 p.network && p.asks_hosts && !p.egress.any && p.egress.hosts.is_empty(),
                 "{tier}: beyond through the proxy, each host asked, an empty list"
             );
-            assert_eq!(
-                (p.redirected, p.proxy_url().is_some()),
-                (network, !network),
-                "{tier}: taken by the session's network, else the proxy variable"
-            );
+            assert!(p.proxy_url().is_some(), "{tier}: the proxy variable");
             let abi = crate::landlock::abi().unwrap();
             let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false, Some(&k), Ok(()))
                 .unwrap();
@@ -8349,19 +7327,16 @@ mod tests {
                 let mut seen = Vec::new();
                 for scope in [Scope::Run, Scope::Refused] {
                     let Ok(a) = asked.recv_timeout(Duration::from_secs(10)) else { break };
-                    let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
-                    proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope });
+                    let FromProxy::Ask { run, host, port, .. } = a.clone();
+                    proxy::get().send(ToProxy::Answer { session, run, host, port, scope });
                     seen.push(a);
                 }
                 seen
             });
             let (to, named) = (super::super::route::PROXY.to_string(), format!("{host}:{}", at.port()));
-            let reach = |p: &Arc<super::super::Policy>| match network {
-                true => served_said(&k, (p, &c, &root), "named", &[("TARAE_NAME", host.as_str())]),
-                false => {
-                    let env = [("TARAE_TO", to.as_str()), ("TARAE_HOST", named.as_str())];
-                    served_said(&k, (p, &c, &root), "proxied", &env)
-                }
+            let reach = |p: &Arc<super::super::Policy>| {
+                let env = [("TARAE_TO", to.as_str()), ("TARAE_HOST", named.as_str())];
+                served_said(&k, (p, &c, &root), "proxied", &env)
             };
             let (said, refused) = reach(&first);
             assert!(
@@ -8388,45 +7363,30 @@ mod tests {
 
     /// Step 5: with the network through the proxy, a connect beyond this machine that doesn't go through it — a
     /// tool that ignores `HTTPS_PROXY` — is refused (`EPERM`, `network-direct`) and said in words that name the
-    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier host and the netns alike —
-    /// but where the session's network takes what goes beyond (6d, TPROXY), the connect isn't the supervisor's to
-    /// refuse: it reaches a planted socket, the proxy's to decide by the host it names (here none: still nothing
-    /// arrives); the datagram is refused as before (UDP: 6e's).
+    /// way out; nothing arrives outside. A datagram out is refused the same way. In tier host and the netns alike.
     #[test]
     fn a_direct_connect_is_refused_with_the_proxy() {
-        let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy", true) else { return };
+        let Some(tiers) = served_tiers("a_direct_connect_is_refused_with_the_proxy") else { return };
         let Some(ip) = outside() else { return };
-        for (tier, ns, network) in tiers {
+        for (tier, ns) in tiers {
             let l = std::net::TcpListener::bind((ip, 0)).unwrap();
             l.set_nonblocking(true).unwrap();
             let udp = std::net::UdpSocket::bind((ip, 0)).unwrap();
             udp.set_nonblocking(true).unwrap();
             let name = format!("direct-{tier}");
-            let k = keeper_for(&name, ns, network);
-            let redirected = lock(&k.network).is_some();
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = Arc::new(super::super::Policy { network: true, own_addresses: Some(Vec::new()), ..p });
             let to = l.local_addr().unwrap().to_string();
-            if redirected {
-                let (said, refused) = served_said(&k, (&p, &c, &root), "within", &[("TARAE_TO", &to)]);
-                assert_eq!(
-                    said, "reached open",
-                    "{tier}: on a planted socket, waiting for a host — {refused:?}"
-                );
-                assert!(!refused.iter().any(|d| d.op == "network-direct"), "{tier}: {refused:?}");
-            } else {
-                let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
-                assert_eq!(said, libc::EPERM.to_string(), "{tier}: {refused:?}");
-                let d = refused
-                    .iter()
-                    .find(|d| d.op == "network-direct")
-                    .unwrap_or_else(|| panic!("{refused:?}"));
-                assert!(
-                    d.plain().contains(&format!("{to} directly")) && d.plain().contains("HTTPS_PROXY"),
-                    "{}",
-                    d.plain()
-                );
-            }
+            let (said, refused) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
+            assert_eq!(said, libc::EPERM.to_string(), "{tier}: {refused:?}");
+            let d =
+                refused.iter().find(|d| d.op == "network-direct").unwrap_or_else(|| panic!("{refused:?}"));
+            assert!(
+                d.plain().contains(&format!("{to} directly")) && d.plain().contains("HTTPS_PROXY"),
+                "{}",
+                d.plain()
+            );
             let udp_to = udp.local_addr().unwrap().to_string();
             let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &udp_to)]);
             assert!(!said.starts_with("answer="), "{tier}: {said}");
@@ -8476,18 +7436,17 @@ mod tests {
     /// Step 5c (Q4, closing what D-c opened): with the network through the proxy a resolver `resolv.conf` names
     /// (a stand-in of the test's on this machine's loopback, on its own port) isn't reached — names are the
     /// proxy's to look up, and an open port 53 would be a way out no host rule sees. The datagram is refused,
-    /// said as a name lookup, and nothing arrives; in tier host and a netns without TPROXY alike (with it, names are the
-    /// session's: 6e). (Measured first: no
+    /// said as a name lookup, and nothing arrives; in tier host and the session's netns alike. (Measured first: no
     /// tool going through the proxy looked a name up itself — `measure_through_the_proxy`.)
     #[test]
     fn under_the_proxy_a_resolver_isnt_reached() {
-        let Some(tiers) = served_tiers("under_the_proxy_a_resolver_isnt_reached", false) else { return };
-        for (tier, ns, network) in tiers {
+        let Some(tiers) = served_tiers("under_the_proxy_a_resolver_isnt_reached") else { return };
+        for (tier, ns) in tiers {
             let resolver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             resolver.set_nonblocking(true).unwrap();
             let at = resolver.local_addr().unwrap();
             let name = format!("resolver-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = Arc::new(super::super::Policy { network: true, resolvers: vec![at], ..p });
             let (said, refused) = served_said(&k, (&p, &c, &root), "udp", &[("TARAE_TO", &at.to_string())]);
@@ -8517,33 +7476,24 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The served tiers here, each run's keeper born in them (`keeper_for`), with the session's network or not:
-    /// tier host's (no namespaces); the session's netns where this system gives one, born without the session's network
-    /// — a netns without TPROXY, whose runs go out by the proxy's variable and the pair (6f's F3); and, with `tproxy`,
-    /// that netns with the session's network where this system gives it (the swap's ways are the same there; the
-    /// proxy's address isn't the proxy's — 6f). None where nothing's served.
-    fn served_tiers(test: &str, tproxy: bool) -> Option<Vec<(&'static str, Ns, bool)>> {
+    /// The served tiers here, each run's keeper born in them (`keeper_for`): tier host's (no namespaces); the
+    /// session's netns where this system gives one, whose runs go out by the proxy's variable and the pair (6f's F3).
+    /// None where nothing's served.
+    fn served_tiers(test: &str) -> Option<Vec<(&'static str, Ns)>> {
         if super::super::supervisor::unavailable().is_some() || open_rules(test).is_none() {
             return None;
         }
-        let mut tiers = vec![("c", Ns::NONE, false)];
+        let mut tiers = vec![("c", Ns::NONE)];
         if ns().net {
-            tiers.push(("netns", ns(), false));
-            if tproxy && super::super::tier::get().redirect.is_ok() {
-                tiers.push(("tproxy", ns(), true));
-            }
+            tiers.push(("netns", ns()));
         }
         Some(tiers)
     }
 
-    /// `keeper_in`, born with the session's network where `network` asks it and this system gives it — else
-    /// without it, whatever the probe found.
-    fn keeper_for(test: &str, ns: Ns, network: bool) -> Arc<Keeper> {
-        if network {
-            return keeper_in(test, ns);
-        }
+    /// A keeper for `test`, born with `ns`.
+    fn keeper_for(test: &str, ns: Ns) -> Arc<Keeper> {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-{test}", std::process::id()));
-        Keeper::born_lo(&root, None, ns, Families::here(), false, None, None).expect("a keeper starts")
+        Keeper::born_lo(&root, None, ns, Families::here(), false).expect("a keeper starts")
     }
 
     /// This machine's own address beyond loopback (a container's, a LAN's, Docker's bridge's) is this machine,
@@ -8552,15 +7502,15 @@ mod tests {
     /// addresses as a policy reads them when it's made (`Here::now`).
     #[test]
     fn this_machines_own_address_is_reached_only_where_opened() {
-        let Some(tiers) = served_tiers("this_machines_own_address_is_reached_only_where_opened", true) else {
+        let Some(tiers) = served_tiers("this_machines_own_address_is_reached_only_where_opened") else {
             return;
         };
         let Some(ip) = outside() else { return };
         let own = super::super::Here::now().addresses;
         assert!(own.as_ref().is_some_and(|a| a.contains(&ip.into())), "{ip} among {own:?}");
-        for (tier, ns, network) in tiers {
+        for (tier, ns) in tiers {
             let name = format!("own-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let p = super::super::Policy { own_addresses: own.clone(), ..p };
             let (at, served) = answering(&format!("{ip}:0"), "machine hello");
@@ -8587,13 +7537,13 @@ mod tests {
     /// session's netns alike. (A run's own listener: `two_runs_share_the_sessions_loopback`.)
     #[test]
     fn a_socket_put_out_of_the_session_isnt_listened_on() {
-        let Some(tiers) = served_tiers("a_socket_put_out_of_the_session_isnt_listened_on", true) else {
+        let Some(tiers) = served_tiers("a_socket_put_out_of_the_session_isnt_listened_on") else {
             return;
         };
         let Some(ip) = outside() else { return };
-        for (tier, ns, network) in tiers {
+        for (tier, ns) in tiers {
             let name = format!("swaplisten-{tier}");
-            let k = keeper_for(&name, ns, network);
+            let k = keeper_for(&name, ns);
             let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
             let closed = std::net::TcpListener::bind((ip, 0)).unwrap();
             let to = closed.local_addr().unwrap().to_string();
@@ -8734,16 +7684,7 @@ mod tests {
         let Some(rules) = open_rules(test) else { return };
         let root = std::env::temp_dir().join(format!("tarae-keeper-{}-offlo", std::process::id()));
         let both = Families { v4: true, v6: true };
-        let k = Keeper::born_lo(
-            &root,
-            None,
-            ns(),
-            both,
-            true,
-            network_for(ns(), &super::super::tier::get().redirect),
-            None,
-        )
-        .expect("born, without its mirrors");
+        let k = Keeper::born_lo(&root, None, ns(), both, true).expect("born, without its mirrors");
         assert_eq!(k.lo_missing, both, "neither carried");
         assert!(k.said().contains("its lo without an IPv4 or IPv6 address"), "{}", k.said());
         let said =
@@ -8752,16 +7693,7 @@ mod tests {
         let said = helper_through(&k, rules.fd(), RunNet::Own, "lookup4", &[], None);
         assert!(said.starts_with("v4=127.0.0.1 "), "{said}");
         k.end();
-        let k = Keeper::born_lo(
-            &root,
-            None,
-            ns(),
-            both,
-            false,
-            network_for(ns(), &super::super::tier::get().redirect),
-            None,
-        )
-        .expect("a keeper starts");
+        let k = Keeper::born_lo(&root, None, ns(), both, false).expect("a keeper starts");
         assert_eq!(k.lo_missing, Families::default(), "both carried where they can be");
         assert!(!k.said().contains("its lo"), "{}", k.said());
         k.end();
@@ -8864,806 +7796,6 @@ mod tests {
         assert!(said[1].starts_with("v6=::1 lookup6=getaddrinfo"), "without: {}", said[1]);
     }
 
-    // ── step 6c: the session's network, made at its keeper's birth ─────────────────────────────────────────
-
-    /// Whether this system's keepers are born with the session's network (a netns, and the probe's landed) — else
-    /// says the test skips itself, and why. A machine said to give it (`TARAE_EXPECT_NETWORK=tproxy`) fails instead:
-    /// a network broken there isn't a skip.
-    fn network_here(test: &str) -> bool {
-        if !own_network(test) {
-            return false;
-        }
-        match (&super::super::tier::get().redirect, ns().netns()) {
-            (Ok(()), true) => true,
-            (r, _) => {
-                let why = r.as_ref().err().cloned().unwrap_or_else(|| "no network namespace".into());
-                if std::env::var("TARAE_EXPECT_NETWORK").is_ok_and(|n| n == "tproxy") {
-                    panic!("{test}: TPROXY expected here (TARAE_EXPECT_NETWORK), none — {why}");
-                }
-                let line = format!(
-                    "{}sandbox::keeper::tests::{test} — no TPROXY here: {why}\n",
-                    crate::test_results::SELF_SKIP
-                );
-                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-                false
-            }
-        }
-    }
-
-    /// The session's network as tarae reads it back over its own sockets: nf_tables' generation, each chain's
-    /// rule count, the routes and the policy rules (v4 and v6) — as text, to compare.
-    fn network_state(k: &Keeper) -> String {
-        use tarae_netlink::{Family, nft, route};
-        let mut net = lock(&k.network);
-        let made = net.as_mut().expect("its network");
-        let by = || Instant::now() + Duration::from_secs(2);
-        let generation = nft::generation(&mut made.nf, by()).unwrap();
-        let rules = nft::rules(&mut made.nf, by()).unwrap();
-        let count = |chain: &str| rules.iter().filter(|r| r.table == "tarae" && r.chain == chain).count();
-        let mut said = format!("generation {generation}, out {}, pre {}", count("out"), count("pre"));
-        for f in [Family::V4, Family::V6] {
-            said += &format!("\n{f:?} routes {:?}", route::routes(&mut made.route, f, by()).unwrap());
-            said += &format!("\n{f:?} rules {:?}", route::rules(&mut made.route, f, by()).unwrap());
-        }
-        said
-    }
-
-    /// A keeper is born with the session's network before any run: its owned table holds the session's ruleset
-    /// (4 rules leaving and 5 coming in for both families, and 2 and 6 more for each its `lo` carries — 8 and 17
-    /// with both: 6e's DNS over TCP one more each way, its own servers' two), its routes and policy rule are there, and
-    /// a run's own connect
-    /// beyond the session — on its own
-    /// socket, no supervisor — lands on a planted socket, which refuses it until 6d (accepted, reset, counted).
-    #[test]
-    fn the_session_has_its_network_before_any_run() {
-        let test = "the_session_has_its_network_before_any_run";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("network");
-        let here = Families::here();
-        let carried = [here.v4 && !k.lo_missing.v4, here.v6 && !k.lo_missing.v6].map(usize::from);
-        let (out, pre) = (4 + 2 * (carried[0] + carried[1]), 5 + 6 * (carried[0] + carried[1]));
-        let state = network_state(&k);
-        assert!(
-            state.starts_with("generation ") && state.contains(&format!(", out {out}, pre {pre}")),
-            "{state}"
-        );
-        assert!(state.contains("table: 100") && state.contains("fwmark: Some(1)"), "{state}");
-        let (_, c, root) = project_served("network-own", vec![], Some(&k), &[], Err("not served".into()));
-        assert_eq!(c.net, RunNet::Own);
-        let said = helper_through(
-            &k,
-            c.rules_fd(),
-            c.net,
-            "within",
-            &[("TARAE_TO", "203.0.113.7:443")],
-            Some(&root),
-        );
-        assert_eq!(said, "reached reset", "taken to the planted socket, refused there");
-        let taken = lock(&k.network).as_ref().map(|m| (m.taken.count(), m.taken.last()));
-        assert_eq!(
-            taken,
-            Some((1, Some("203.0.113.7:443".parse().unwrap()))),
-            "counted, its destination kept"
-        );
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A UDP datagram a run sends beyond the session lands on the planted UDP socket with where it was going
-    /// (`RECVORIGDSTADDR`): what 6e answers DNS with. (IPv4: these machines' containers have no IPv6 of their own.)
-    #[test]
-    fn a_datagram_beyond_lands_with_its_original_destination() {
-        let test = "a_datagram_beyond_lands_with_its_original_destination";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("datagram");
-        let (_, c, root) = project_served("datagram-own", vec![], Some(&k), &[], Err("not served".into()));
-        let said = helper_through(
-            &k,
-            c.rules_fd(),
-            c.net,
-            "datagram",
-            &[("TARAE_TO", "203.0.113.7:5000")],
-            Some(&root),
-        );
-        assert_eq!(said, "datagram=ok");
-        let seen = || lock(&k.network).as_ref().map(|m| (m.taken.count(), m.taken.last()));
-        let by = Instant::now() + Duration::from_secs(1);
-        while seen().is_some_and(|(n, _)| n == 0) && Instant::now() < by {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(
-            seen(),
-            Some((1, Some("203.0.113.7:5000".parse().unwrap()))),
-            "taken, its destination read"
-        );
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    // ── step 6d: accept, attribute, check ──────────────────────────────────────────────────────────────────
-
-    /// A served run's policy in a session with the TPROXY network, `change`d: the network open to any host, this
-    /// machine's own addresses none (the test's outside, on one of them, is beyond), run `run`.
-    fn redirected_project(
-        name: &str,
-        k: &Keeper,
-        run: u64,
-        change: impl FnOnce(&mut super::super::Policy),
-    ) -> (Arc<super::super::Policy>, super::super::linux::Confine, PathBuf) {
-        let (p, c, root) = project_served(name, Vec::new(), Some(k), &[], Ok(()));
-        let egress = super::super::proxy::egress::Egress { any: true, ..Default::default() };
-        let mut p =
-            super::super::Policy { network: true, own_addresses: Some(Vec::new()), egress, run_id: run, ..p };
-        change(&mut p);
-        (Arc::new(p), c, root)
-    }
-
-    /// P2 and P3 for TCP (6d): a served run's connect beyond the session goes on its own socket — its peer the
-    /// address it named, never a pair's or a swap's — marked by its supervisor as its run's, and the planted socket
-    /// hands it to the egress proxy, which reaches the host its request names; what the outside sees comes from
-    /// tarae's network, not the session's. The run can neither mark its own socket nor clear the mark tarae gave
-    /// (`EPERM`: M12), and that mark leaves bit 0 to the output chain (M12: with it, IPv4 took the destination as its
-    /// source — this connect would fail). Nothing lands refused on the planted socket.
-    #[test]
-    fn a_runs_connection_beyond_reaches_its_host_through_the_planted_socket() {
-        let test = "a_runs_connection_beyond_reaches_its_host_through_the_planted_socket";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
-        super::super::proxy::TEST_NAMES.lock().unwrap().push(("planted-6d.test".into(), at));
-        let k = keeper("planted-6d");
-        let (p, c, root) = redirected_project("planted-6d", &k, 6_000_001, |_| {});
-        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "planted-6d.test")];
-        let (said, refused) = served_said(&k, (&p, &c, &root), "origin", &env);
-        let e = libc::EPERM;
-        let expected = format!("peer=203.0.113.7:80 reply=out hello setmark={e} mark=even clear={e}");
-        assert_eq!(said, expected, "{refused:?}");
-        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
-        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network, not the session's");
-        assert_eq!(lock(&k.network).as_ref().map(|m| m.taken.count()), Some(0), "nothing refused there");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A run's mark outlives it (what it left running connects as its run), but not what's kept for it (6d): once no
-    /// process of the run is served, its refusals' sender is gone — the receiving end disconnected, so its
-    /// `tarae-refused` thread (`sandbox::told`, `for d in rx`) ends, and its policy with it — while the session's
-    /// marks still name the run. (A mark held the sender itself: every run's thread lived for the session's life.)
-    #[test]
-    fn a_runs_refusals_end_with_it_though_its_mark_is_kept() {
-        let test = "a_runs_refusals_end_with_it_though_its_mark_is_kept";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
-        super::super::proxy::TEST_NAMES.lock().unwrap().push(("ended-6d.test".into(), at));
-        let k = keeper("ended-6d");
-        let run = 6_000_031;
-        let (p, c, root) = redirected_project("ended-6d", &k, run, |_| {});
-        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "ended-6d.test")];
-        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "origin", &env);
-        let said = said_next(&mut lines);
-        lines.for_each(drop);
-        crate::spawn::wait(pid).unwrap();
-        assert!(said.contains("reply=out hello"), "{said}");
-        let ended = refused.recv_timeout(Duration::from_secs(5));
-        assert!(
-            matches!(ended, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
-            "its sender gone with the run: {ended:?}"
-        );
-        let kept = lock(&k.network).as_ref().map(|m| m.marks.of_run(run).len());
-        assert_eq!(kept, Some(1), "its mark kept");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A connection carrying the mark of a run that's over — nothing of it served, its refusals' sender gone — is
-    /// reset on the planted socket and said in the log, never handed to the proxy: no one would hear its refusal, and
-    /// no process of that run could have made it. Only tarae can mark a socket, so the test does what tarae's side
-    /// can: it takes a socket an unserved run made in the session's network (`pidfd_getfd`, as the supervisor does),
-    /// gives it the ended run's mark (`SO_MARK`, `CAP_NET_ADMIN` over the session's netns) and asks for a host that
-    /// run's rules allow (any) — whose outside answers if the connection gets through.
-    #[test]
-    fn a_connection_marked_for_a_run_thats_over_is_reset() {
-        use std::io::{BufRead, Write};
-        let test = "a_connection_marked_for_a_run_thats_over_is_reset";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (own_at, _own) = answering(&format!("{ip}:0"), "out hello");
-        let (late_at, late) = answering(&format!("{ip}:0"), "late hello");
-        for (name, at) in [("over-6d.test", own_at), ("late-6d.test", late_at)] {
-            super::super::proxy::TEST_NAMES.lock().unwrap().push((name.into(), at));
-        }
-        let captured = crate::log::capture();
-        let k = keeper("over-6d");
-        let run = 6_000_041;
-        let (p, c, root) = redirected_project("over-6d", &k, run, |_| {});
-        // (the run's own connection gives its mark; then the run ends, and its sender with it)
-        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "over-6d.test")];
-        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "origin", &env);
-        let said = said_next(&mut lines);
-        lines.for_each(drop);
-        crate::spawn::wait(pid).unwrap();
-        assert!(said.contains("reply=out hello"), "{said}");
-        let ended = refused.recv_timeout(Duration::from_secs(5));
-        assert!(matches!(ended, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)), "{ended:?}");
-        let marks = lock(&k.network).as_ref().map(|m| m.marks.of_run(run)).unwrap_or_default();
-        let [(mark, _)] = marks[..] else { panic!("one mark for the run: {marks:?}") };
-        // (a socket in the session's network, from a run tarae doesn't serve: unmarked, unconnected)
-        let (_, own, own_root) =
-            project_served("over-6d-own", vec![], Some(&k), &[], Err("not served".into()));
-        let go = own_root.join("go");
-        let cmd = helper_cmd("socket", &[("TARAE_GO", go.to_str().unwrap())], Some(&own_root));
-        let s = k.start_confined(&cmd, &crate::landlock::thread_name(), &own).unwrap();
-        let held = s.spawned.pid;
-        let mut out = io::BufReader::new(s.spawned.stdout.unwrap()).lines().map_while(Result::ok);
-        let n: i32 =
-            said_next(&mut out).strip_prefix("fd=").and_then(|n| n.parse().ok()).expect("its socket");
-        // SAFETY: a plain call for a process of our own runs'.
-        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, held, 0) };
-        assert!(pidfd >= 0, "pidfd_open: {}", io::Error::last_os_error());
-        // SAFETY: the descriptor just opened, ours from here.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
-        let sock = super::super::supervisor::pidfd_getfd(&pidfd, n).expect("the run's socket taken");
-        let sa = sockaddr("203.0.113.7:80");
-        // SAFETY: an int, then an address of its size, on the socket we hold.
-        let (set, connected) = unsafe {
-            let set = libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_MARK,
-                (&raw const mark).cast(),
-                4,
-            );
-            let len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-            (set, libc::connect(sock.as_raw_fd(), (&raw const sa).cast(), len))
-        };
-        assert_eq!(
-            (set, connected),
-            (0, 0),
-            "marked {mark:#x} and connected: {}",
-            io::Error::last_os_error()
-        );
-        std::fs::write(&go, "").unwrap();
-        crate::spawn::wait(held).unwrap();
-        let s = std::net::TcpStream::from(sock);
-        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-        // (a reset that lands before the request is the write's error, and the read then sees the end)
-        let wrote = (&s).write_all(b"GET / HTTP/1.1\r\nHost: late-6d.test\r\n\r\n");
-        let mut reply = String::new();
-        let got = match wrote.and_then(|()| io::BufReader::new(&s).read_line(&mut reply)) {
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => "reset".to_string(),
-            Ok(0) => "closed".into(),
-            Ok(_) => reply.trim().to_string(),
-            Err(e) => e.to_string(),
-        };
-        assert_eq!(got, "reset", "the outside reached: {:?}", late.try_recv());
-        assert!(late.try_recv().is_err(), "the outside not reached");
-        let log = captured.lines().join("\n");
-        let why = format!("run {run}'s ");
-        assert!(log.contains(&why) && log.contains("the run is over and nothing of it is served"), "{log}");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&own_root).ok();
-    }
-
-    /// Each question is its run's (6e, `SO_RCVMARK`): a served run's question to port 53 — the session's to answer —
-    /// goes on its own socket, marked by its supervisor, and the DNS socket reads the mark back with it. Two runs of
-    /// one session each ask for an MX record (REFUSED: Q3 — SRV and TXT are 6e+'s lookups), and each refusal is said
-    /// in its own run's report, never the other's. On a kernel that reads no datagram's mark (before 5.19, D5 — here
-    /// E5's stand-in, the sockets made without asking), the question is the session's: answered as one, said in no
-    /// run's report, and the session's start says why once.
-    #[test]
-    fn each_question_is_its_runs() {
-        let test = "each_question_is_its_runs";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let captured = crate::log::capture();
-        // (run `run` asks for `mx-<run>.test`'s MX record: REFUSED — what it said, and its report)
-        let mx = |k: &Keeper, run: u64| {
-            let p = redirected_project(&format!("question-6e-{run}"), k, run, |_| {});
-            let name = format!("mx-{run}.test");
-            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name.as_str()), ("TARAE_TYPE", "15")];
-            let said = served_said(k, (&p.0, &p.1, &p.2), "ask", &env);
-            std::fs::remove_dir_all(&p.2).ok();
-            said
-        };
-        let named = |report: &[super::super::Denial], run: u64| {
-            report.iter().any(|d| d.target.starts_with(&format!("mx-{run}.test (MX): ")))
-        };
-        let k = keeper("question-6e");
-        let ((said1, report1), (said2, report2)) = (mx(&k, 6_000_051), mx(&k, 6_000_053));
-        k.end();
-        assert!(said1.starts_with("rcode=5 ") && said2.starts_with("rcode=5 "), "REFUSED: {said1}; {said2}");
-        assert!(named(&report1, 6_000_051) && !named(&report1, 6_000_053), "its own: {report1:?}");
-        assert!(named(&report2, 6_000_053) && !named(&report2, 6_000_051), "its own: {report2:?}");
-        // (E5's stand-in: the planted UDP sockets made as before 5.19)
-        let here = Families::here();
-        let network = super::super::redirect::Network {
-            no_rcvmark: true,
-            ..super::super::redirect::Network::session(here.v4, here.v6)
-        };
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-question-d5", std::process::id()));
-        let given = Some(NetworkFor::Given(network));
-        let k = Keeper::born_lo(&root, None, ns(), here, false, given, None).expect("a keeper starts");
-        let (said, report) = mx(&k, 6_000_052);
-        k.end();
-        assert!(said.starts_with("rcode=5 "), "answered as the session's: {said}");
-        assert!(!named(&report, 6_000_052), "no run's to say it in: {report:?}");
-        let lines = captured.lines().join("\n");
-        assert!(
-            lines.contains("read no datagram's mark (Protocol not available"),
-            "said at the start: {lines}"
-        );
-    }
-
-    /// A name asked in the session reaches its host (6e): a tool's lookup (`getaddrinfo`, glibc, the resolver its
-    /// `resolv.conf` names — whichever: every question to a port 53 is the session's) gets an address of the session's
-    /// names, and its connection there names the host before any byte — the proxy reaches it by name, from tarae's
-    /// network. The name is one the run's rules name, so tarae looked it up for real first (E1, the test's stand-in
-    /// resolver).
-    #[test]
-    fn a_name_asked_in_the_session_reaches_its_host() {
-        let test = "a_name_asked_in_the_session_reaches_its_host";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
-        super::super::proxy::TEST_NAMES.lock().unwrap().push(("named-6e.test".into(), at));
-        let k = keeper("named-6e");
-        let host = super::super::proxy::egress::Pattern::parse("named-6e.test").unwrap();
-        let only = |p: &mut super::super::Policy| {
-            p.egress = super::super::proxy::egress::Egress { hosts: vec![host], ..Default::default() }
-        };
-        let (p, c, root) = redirected_project("named-6e", &k, 6_000_061, only);
-        let (said, refused) = served_said(&k, (&p, &c, &root), "named", &[("TARAE_NAME", "named-6e.test")]);
-        let addr: Option<std::net::IpAddr> =
-            said.strip_prefix("addr=").and_then(|s| s.split(' ').next()?.parse().ok());
-        assert!(
-            addr.is_some_and(super::super::names::in_pool),
-            "an address of the session's: {said} {refused:?}"
-        );
-        assert!(said.ends_with("reply=out hello"), "reached: {said}");
-        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
-        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// 6e+ (Q2): raw TCP from a run to a name it looked up in the session — an ssh-like client that speaks first, and
-    /// one that waits for its server (SMTP's) — is held at the proxy and the main loop asked, as raw (`Kind::Raw`, the
-    /// host and port), though the run's rules allow any host (F5); the user's `y` lets it through to the outside, from
-    /// tarae's network, what it sent first passed on; their `n` resets it, said in the run's report as raw. The test
-    /// stands in for the main loop (`proxy::TEST_ASKS`).
-    #[test]
-    fn raw_tcp_to_a_name_goes_on_the_users_yes() {
-        use super::super::proxy::{self, FromProxy, Kind, Scope, ToProxy};
-        let test = "raw_tcp_to_a_name_goes_on_the_users_yes";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, served) = answering(&format!("{ip}:0"), "out hello");
-        let l = std::net::TcpListener::bind((ip, 0)).unwrap();
-        let first_at = l.local_addr().unwrap();
-        std::thread::spawn(move || {
-            if let Ok((s, _)) = l.accept() {
-                let _ = io::Write::write_all(&mut &s, b"220 first-6eplus.test\r\n");
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
-        let names = [("raw-6eplus.test", at), ("first-6eplus.test", first_at), ("no-6eplus.test", at)];
-        proxy::TEST_NAMES.lock().unwrap().extend(names.map(|(n, a)| (n.to_string(), a)));
-        let k = keeper("raw-6eplus");
-        let (p, c, root) = redirected_project("raw-6eplus", &k, 6_000_111, |_| {});
-        let session = proxy::session_of(&p.root);
-        let (asks, asked) = std::sync::mpsc::channel();
-        proxy::TEST_ASKS.lock().unwrap().push((session, asks));
-        // (the main loop, stood in: `y` for this run, but `n` for `no-6eplus.test`)
-        let main = std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            while let Ok(a) = asked.recv_timeout(Duration::from_secs(30)) {
-                let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
-                let scope = if host == "no-6eplus.test" { Scope::Refused } else { Scope::Run };
-                proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope });
-                seen.push(a);
-                if seen.len() == 3 {
-                    break;
-                }
-            }
-            seen
-        });
-        let raw = |name: &str, port: u16, send: Option<&str>| {
-            let port = port.to_string();
-            let mut env = vec![("TARAE_NAME", name), ("TARAE_PORT", port.as_str())];
-            env.extend(send.map(|s| ("TARAE_SEND", s)));
-            served_said(&k, (&p, &c, &root), "raw", &env)
-        };
-        let (said, refused) = raw("raw-6eplus.test", at.port(), Some("SSH-2.0-tarae_6eplus"));
-        assert!(said.ends_with(" reply=out hello"), "through on its yes: {said} {refused:?}");
-        let peer = served.recv_timeout(Duration::from_secs(5)).expect("it arrived outside");
-        assert_eq!(peer.ip(), std::net::IpAddr::V4(ip), "from tarae's network");
-        let (said, refused) = raw("first-6eplus.test", first_at.port(), None);
-        assert!(
-            said.ends_with(" reply=220 first-6eplus.test"),
-            "the server's first words: {said} {refused:?}"
-        );
-        let (said, refused) = raw("no-6eplus.test", at.port(), Some("SSH-2.0-tarae_6eplus"));
-        assert!(said.ends_with(" reply=reset"), "refused: {said}");
-        let raw_said = |d: &&super::super::Denial| d.op == proxy::RAW_OP;
-        let said_raw: Vec<_> = refused.iter().filter(raw_said).map(|d| d.target.clone()).collect();
-        let why = format!("no-6eplus.test:{}: the user refused it", at.port());
-        assert!(said_raw.iter().any(|t| t.starts_with(&why)), "said as raw: {refused:?}");
-        let seen = main.join().unwrap();
-        let hosts: Vec<(Kind, &str)> = seen
-            .iter()
-            .map(|a| {
-                let FromProxy::Ask { kind, host, .. } = a;
-                (*kind, host.as_str())
-            })
-            .collect();
-        let want =
-            [(Kind::Raw, "raw-6eplus.test"), (Kind::Raw, "first-6eplus.test"), (Kind::Raw, "no-6eplus.test")];
-        assert_eq!(hosts, want, "each asked as raw");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// 6e+ (Q3, F1–F3): a run's SRV question for a name its rules don't allow is held — no answer — while the main loop
-    /// is asked (`Kind::Lookup`, the name its records are about); the user's yes answers it with tarae's records (here
-    /// the stand-in's, `proxy::TEST_RECORDS`). A name the rules allow is answered with no question to the main loop.
-    #[test]
-    fn a_names_records_wait_for_the_users_yes() {
-        use super::super::proxy::{self, FromProxy, Kind, Scope, ToProxy, dns};
-        let test = "a_names_records_wait_for_the_users_yes";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let srv = |name: &str| {
-            let r = dns::Record::Srv { priority: 0, weight: 0, port: 27017, target: format!("db1.{name}") };
-            (format!("_mongodb._tcp.{name}"), dns::TYPE_SRV, dns::Found::Records(vec![r], 60))
-        };
-        proxy::TEST_RECORDS.lock().unwrap().extend([srv("asked-6eplus.test"), srv("allowed-6eplus.test")]);
-        let k = keeper("lookup-6eplus");
-        let host = proxy::egress::Pattern::parse("allowed-6eplus.test").unwrap();
-        let only = |p: &mut super::super::Policy| {
-            p.egress = proxy::egress::Egress { hosts: vec![host], ..Default::default() }
-        };
-        let (p, c, root) = redirected_project("lookup-6eplus", &k, 6_000_121, only);
-        let session = proxy::session_of(&p.root);
-        let (asks, asked) = std::sync::mpsc::channel();
-        proxy::TEST_ASKS.lock().unwrap().push((session, asks));
-        let main = std::thread::spawn(move || {
-            let a = asked.recv_timeout(Duration::from_secs(10)).ok()?;
-            let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
-            proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope: Scope::Run });
-            Some((a, asked))
-        });
-        let ask = |name: &str| {
-            let env = [("TARAE_TO", "203.0.113.7:53"), ("TARAE_NAME", name), ("TARAE_TYPE", "33")];
-            served_said(&k, (&p, &c, &root), "ask", &env)
-        };
-        let (said, refused) = ask("_mongodb._tcp.asked-6eplus.test");
-        assert_eq!(said, "rcode=0 answers=1 addr=none", "answered on the yes: {refused:?}");
-        let (a, asked) = main.join().unwrap().expect("the main loop asked");
-        let FromProxy::Ask { kind, host, port, asked: questions, .. } = a;
-        assert_eq!((kind, host.as_str(), port), (Kind::Lookup, "asked-6eplus.test", 0));
-        assert_eq!(questions, ["SRV _mongodb._tcp.asked-6eplus.test"]);
-        let (said, refused) = ask("_mongodb._tcp.allowed-6eplus.test");
-        assert_eq!(said, "rcode=0 answers=1 addr=none", "allowed: answered at once — {refused:?}");
-        assert!(asked.try_recv().is_err(), "no question for a name the rules allow");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// 6e′: a run has no proxy URL exactly where its keeper is born with the session's network — the decision made
-    /// before there's a keeper (`tier::redirects`, the probe's) is the keeper's own (`network_for`). A run's policy
-    /// made on the real path (`sandbox::policy`: its keeper and Landlock rules made) with the network open: its
-    /// keeper has the network, and its environment no proxy variable.
-    #[test]
-    fn a_run_has_no_proxy_variable_where_its_keeper_has_the_network() {
-        let test = "a_run_has_no_proxy_variable_where_its_keeper_has_the_network";
-        if !network_here(test) {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-unproxied-6e2", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
-        let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
-        let p = super::super::policy(&root, &llm, &[]).unwrap();
-        let Some(Ok(c)) = &p.confine else {
-            panic!("no sandbox: {:?}", p.confine.as_ref().map(|r| r.as_ref().err()))
-        };
-        let k = c.keeper.clone().expect("its keeper");
-        let has = lock(&k.network).is_some();
-        let cmd = super::super::command(Some(&p), "true", &[]);
-        let vars: Vec<String> = cmd
-            .get_envs()
-            .filter(|(n, v)| v.is_some() && n.to_string_lossy().to_ascii_lowercase().contains("proxy"))
-            .map(|(n, _)| n.to_string_lossy().into_owned())
-            .collect();
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        assert!(has, "its keeper has the session's network");
-        assert!(p.redirected && p.proxy_url().is_none() && vars.is_empty(), "{} {vars:?}", p.redirected);
-    }
-
-    /// An answer comes from the address and port the question went to (6e) — what a connected UDP socket takes, and
-    /// nothing else: the loopback stub (`127.0.0.53`), GCP's (`169.254.169.254`), a LAN's (`10.0.0.2`), each answered
-    /// from the session's names by one DNS socket (`IP_PKTINFO`'s address, its port 53); and over TCP to the stub
-    /// (R6e's rules take it before loopback's return). None of them is reached: they're documentation stand-ins, and
-    /// the answers are the session's own addresses.
-    #[test]
-    fn an_answer_comes_from_the_address_asked() {
-        let test = "an_answer_comes_from_the_address_asked";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let k = keeper("asked-6e");
-        // (rules naming no host: the name gets its address unlooked-up — E1's lookups are another test's)
-        let none = |p: &mut super::super::Policy| p.egress = super::super::proxy::egress::Egress::default();
-        let (p, c, root) = redirected_project("asked-6e", &k, 6_000_071, none);
-        let ask = |to: &str, tcp: bool| {
-            let mut env = vec![("TARAE_TO", to), ("TARAE_NAME", "asked-6e.test")];
-            if tcp {
-                env.push(("TARAE_TCP", "1"));
-            }
-            served_said(&k, (&p, &c, &root), "ask", &env).0
-        };
-        let given = lock(&k.network).as_ref().unwrap().names.names.give("asked-6e.test").v4;
-        let want = format!("rcode=0 answers=1 addr={given}");
-        let captured = crate::log::capture();
-        for to in ["127.0.0.53:53", "169.254.169.254:53", "10.0.0.2:53"] {
-            let got = ask(to, false);
-            let said = |l: &String| l.contains("names") || l.contains("supervisor") || l.contains("planted");
-            let log: Vec<String> = captured.lines().into_iter().filter(said).collect();
-            assert_eq!(got, want, "UDP to {to}: {log:#?}");
-        }
-        assert_eq!(ask("127.0.0.53:53", true), want, "TCP to the stub");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// E6 (b): under `ndots:5` with a search domain, a tool asks the search list's candidate first
-    /// (`github.com.<search>`) — not named by the rules, so NXDOMAIN without a lookup — and then the name as written:
-    /// `github.com` reaches github.com, never `github.com.<search>`. The run asks as glibc does under `ndots:5`
-    /// (`searched`: M7 saw every glibc client ask so); tarae reads the search domain from its network's `search` (as
-    /// `resolv.conf` gives both in a real session). (The run's glibc took neither `LOCALDOMAIN` nor `RES_OPTIONS`
-    /// from its environment here — set, not in secure mode — so the order is the helper's, said plainly.)
-    #[test]
-    fn under_ndots_a_name_as_written_wins_over_its_search_candidate() {
-        let test = "under_ndots_a_name_as_written_wins_over_its_search_candidate";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
-        super::super::proxy::TEST_NAMES.lock().unwrap().push(("github.com".into(), at));
-        let here = Families::here();
-        let network = super::super::redirect::Network {
-            search: vec!["other-6e.example".into()],
-            ..super::super::redirect::Network::session(here.v4, here.v6)
-        };
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-ndots-6e", std::process::id()));
-        let given = Some(NetworkFor::Given(network));
-        let k = Keeper::born_lo(&root, None, ns(), here, false, given, None).expect("a keeper starts");
-        let host = super::super::proxy::egress::Pattern::parse("github.com").unwrap();
-        let only = |p: &mut super::super::Policy| {
-            p.egress = super::super::proxy::egress::Egress { hosts: vec![host], ..Default::default() }
-        };
-        let (p, c, project) = redirected_project("ndots-6e", &k, 6_000_081, only);
-        let env =
-            [("TARAE_TO", "10.0.0.2:53"), ("TARAE_NAME", "github.com"), ("TARAE_SEARCH", "other-6e.example")];
-        let (said, refused) = served_said(&k, (&p, &c, &project), "searched", &env);
-        assert!(said.starts_with("candidate=3 "), "the candidate NXDOMAIN: {said} {refused:?}");
-        assert!(said.ends_with("reply=out hello"), "github.com reached: {said} {refused:?}");
-        let names = lock(&k.network).as_ref().unwrap().names.clone();
-        let ip_said: Option<std::net::IpAddr> =
-            said.split(" addr=").nth(1).and_then(|s| s.split(' ').next()?.parse().ok());
-        assert_eq!(
-            ip_said.and_then(|ip| names.names.name_of(ip)).as_deref(),
-            Some("github.com"),
-            "its address github.com's"
-        );
-        k.end();
-        std::fs::remove_dir_all(&project).ok();
-    }
-
-    /// Where the session answers names, a server of the session's own and a port the user opened still come first
-    /// (6e review): (a) a run serving DNS at the session's `127.0.0.1:53` — its bind is the supervisor's, tarae's —
-    /// answers another run's question there, never tarae (prerouting delivers a question a session's own socket is
-    /// bound for to it; the route leaves it the session's); (b) a run whose policy opens port 53 reaches this
-    /// machine's own server at `127.0.0.1:53` (the test's, in its container) as before 6e. Each answer is one only
-    /// that server gives: NOTIMP (4) from the run's, SERVFAIL (2) from this machine's; tarae's would be NOERROR.
-    #[test]
-    fn a_sessions_own_server_and_an_opened_port_53_come_first() {
-        let test = "a_sessions_own_server_and_an_opened_port_53_come_first";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let k = keeper("own-dns-6e");
-        let (p, c, root) = redirected_project("own-dns-6e", &k, 6_000_091, |_| {});
-        let (mut lines, pid, refused) = served_helper(&k, (&p, &c, &root), "dnsserver", &[]);
-        assert_eq!(
-            said_next(&mut lines),
-            "ready",
-            "its bind at 53: {:?}",
-            refused.try_iter().collect::<Vec<_>>()
-        );
-        let env = [("TARAE_TO", "127.0.0.1:53"), ("TARAE_NAME", "own-6e.test")];
-        let (asked, _) = served_said(&k, (&p, &c, &root), "ask", &env);
-        assert_eq!(asked, "rcode=4 answers=0 addr=none", "the run's own server answered");
-        assert_eq!(said_next(&mut lines), "answered=ok");
-        lines.for_each(drop);
-        crate::spawn::wait(pid).unwrap();
-        // (b) this machine's own server, the port opened
-        let this_machine = match std::net::UdpSocket::bind("127.0.0.1:53") {
-            Ok(s) => s,
-            Err(e) => {
-                let line = format!(
-                    "{}sandbox::keeper::tests::{test} — (b) left out: this machine's 127.0.0.1:53 can't be bound \
-                     here ({e})\n",
-                    crate::test_results::SELF_SKIP
-                );
-                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-                k.end();
-                return;
-            }
-        };
-        std::thread::spawn(move || {
-            let mut b = [0u8; 512];
-            if let Ok((n, from)) = this_machine.recv_from(&mut b) {
-                let mut a = b[..n].to_vec();
-                if a.len() >= 4 {
-                    (a[2], a[3]) = (0x80 | (a[2] & 0x79), 0x82);
-                }
-                let _ = this_machine.send_to(&a, from);
-            }
-        });
-        let opened = |p: &mut super::super::Policy| p.ports = vec![53];
-        let (p, c, root2) = redirected_project("opened-dns-6e", &k, 6_000_092, opened);
-        let (asked, _) = served_said(&k, (&p, &c, &root2), "ask", &env);
-        assert_eq!(asked, "rcode=2 answers=0 addr=none", "this machine's own server answered");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&root2).ok();
-    }
-
-    /// E2: a question with no mark tarae gave — from a run tarae doesn't serve — is answered REFUSED at once (its
-    /// lookup ends as fast as a refused one) and said in the log, never answered as anyone's.
-    #[test]
-    fn an_unmarked_question_is_refused() {
-        let test = "an_unmarked_question_is_refused";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let captured = crate::log::capture();
-        let k = keeper("unmarked-q-6e");
-        let (_, c, root) = project_served("unmarked-q-6e", vec![], Some(&k), &[], Err("not served".into()));
-        let env = [("TARAE_TO", "203.0.113.53:53"), ("TARAE_NAME", "unmarked-6e.test")];
-        let said = helper_through(&k, c.rules_fd(), c.net, "ask", &env, Some(&root));
-        assert_eq!(said, "rcode=5 answers=0 addr=none", "REFUSED");
-        let lines = captured.lines().join("\n");
-        assert!(
-            lines.contains("a question for 203.0.113.53:53 from ") && lines.contains("answered REFUSED"),
-            "{lines}"
-        );
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Each connection is its own run's (6d): two runs of one session at once, of one program, each connecting
-    /// beyond — one to a host the user refused for the session, one to a host its own rules name — and each is
-    /// judged by its own run's rules, its refusal in its own run's report, never the other's: the planted socket
-    /// tells them apart by the mark each run's supervisor gave.
-    #[test]
-    fn each_connection_is_its_runs() {
-        use super::super::proxy::{self, Scope, ToProxy};
-        let test = "each_connection_is_its_runs";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let Some(ip) = outside() else { return };
-        let (at, _served) = answering(&format!("{ip}:0"), "out hello");
-        proxy::TEST_NAMES.lock().unwrap().push(("reached-6d.test".into(), at));
-        let k = keeper("runs-6d");
-        let (refused_run, reached_run) = (6_000_011, 6_000_012);
-        // (each run its own rules — the one naming no host, the other naming the host it reaches — so a connection
-        // taken for the other run's meets rules that aren't its own; the refused host is the user's answer, below)
-        let none = |p: &mut super::super::Policy| p.egress = proxy::egress::Egress::default();
-        let (p1, c, root) = redirected_project("runs-6d", &k, refused_run, none);
-        let host = proxy::egress::Pattern::parse("reached-6d.test").unwrap();
-        let egress = proxy::egress::Egress { hosts: vec![host], ..Default::default() };
-        let p2 = Arc::new(super::super::Policy { run_id: reached_run, egress, ..(*p1).clone() });
-        let session = proxy::session_of(&p1.root);
-        let (host, port, scope) = ("refused-6d.test".to_string(), 80, Scope::Refused);
-        proxy::get().send(ToProxy::Answer {
-            session,
-            run: refused_run,
-            kind: proxy::Kind::Host,
-            host,
-            port,
-            scope,
-        });
-        let to = |host: &'static str| [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", host)];
-        let (mut one, first, refused1) =
-            served_helper(&k, (&p1, &c, &root), "origin", &to("refused-6d.test"));
-        let (mut two, second, refused2) =
-            served_helper(&k, (&p2, &c, &root), "origin", &to("reached-6d.test"));
-        let (said1, said2) = (said_next(&mut one), said_next(&mut two));
-        one.for_each(drop);
-        two.for_each(drop);
-        crate::spawn::wait(first).unwrap();
-        crate::spawn::wait(second).unwrap();
-        let (refused1, refused2): (Vec<_>, Vec<_>) =
-            (refused1.try_iter().collect(), refused2.try_iter().collect());
-        assert!(said1.contains("reply=HTTP/1.1 403 Forbidden"), "{said1}");
-        assert!(said2.contains("reply=out hello"), "{said2}");
-        assert!(
-            refused1.iter().any(|d| d.op == proxy::HOST_OP && d.target.starts_with("refused-6d.test:80: ")),
-            "the refused run's own report: {refused1:?}"
-        );
-        assert!(refused2.is_empty(), "nothing in the other run's: {refused2:?}");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// What lands on the planted socket but isn't a run's connection tarae marked is refused there — reset, and said
-    /// in the log with why: a connection a served run made to the planted address itself (the output chain leaves the
-    /// session's own addresses alone: it reaches the listener as any local one), and one from a run tarae doesn't
-    /// serve, its socket never marked by a supervisor — even with a served run's mark given in the session before.
-    /// (A session each: a planted socket says its first refusal and counts the rest — `SAID_EVERY`.)
-    #[test]
-    fn what_tarae_didnt_mark_is_refused_on_the_planted_socket() {
-        let test = "what_tarae_didnt_mark_is_refused_on_the_planted_socket";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let captured = crate::log::capture();
-        let k = keeper("itself-6d");
-        let (p, c, root) = redirected_project("itself-6d", &k, 6_000_021, |_| {});
-        let planted = SESSION_V4.to_string() + ":15001";
-        let (said, _) = served_said(&k, (&p, &c, &root), "within", &[("TARAE_TO", &planted)]);
-        assert_eq!(said, "reached reset", "the planted address itself");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        let k = keeper("unmarked-6d");
-        let (p, c, root) = redirected_project("unmarked-6d", &k, 6_000_022, |_| {});
-        // (a served run's mark given in the session first: an unmarked connection still finds no owner)
-        let env = [("TARAE_TO", "203.0.113.7:80"), ("TARAE_HOST", "nowhere-6d.test")];
-        served_said(&k, (&p, &c, &root), "origin", &env);
-        let (_, own, own_root) =
-            project_served("unmarked-6d-own", vec![], Some(&k), &[], Err("not served".into()));
-        let said = helper_through(
-            &k,
-            own.rules_fd(),
-            own.net,
-            "within",
-            &[("TARAE_TO", "203.0.113.7:443")],
-            Some(&own_root),
-        );
-        assert_eq!(said, "reached reset", "a run tarae doesn't serve");
-        let lines = captured.lines().join("\n");
-        assert!(lines.contains("a connection to the planted socket itself; reset"), "{lines}");
-        assert!(lines.contains("for 203.0.113.7:443 (its mark 0x1 isn't one tarae gave"), "{lines}");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&own_root).ok();
-    }
-
-    // ── step 6g: a cgroup per run ──────────────────────────────────────────────────────────────────────────
-
     /// Set first thing in a run's child (`child`): from then on the test binary's allocator ends that process
     /// with `ALLOCATED` at any allocation or free, before it touches malloc's locks.
     pub(super) static NO_ALLOC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -9712,13 +7844,12 @@ mod tests {
     #[global_allocator]
     static ALLOC: Watched = Watched;
 
-    /// The review's first finding: a run's child allocates and frees nothing between the keeper's `clone3` (or fork)
-    /// and its exec — a raw `clone3` doesn't reset glibc's malloc locks, so in a keeper with another thread (a test's)
-    /// an allocation there could wait for good. Shown deterministically rather than by catching a thread holding
-    /// malloc's lock across the clone (a race a test can only hope to hit): the test binary's allocator ends a child
-    /// that allocates (`NO_ALLOC`, exit 121) — every run of every test here would show it; this one goes through the
-    /// way out too (a folder that isn't there: `fail`'s words, made of fixed bytes and the errno's digits), through
-    /// `clone3` where the keeper has a scope (`--cgroup`), else the fork.
+    /// The review's first finding: a run's child allocates and frees nothing between the keeper's fork and its exec
+    /// — in a keeper with another thread (a test's) only async-signal-safe calls are safe there. Shown
+    /// deterministically rather than by catching a thread holding malloc's lock across the fork (a race a test can
+    /// only hope to hit): the test binary's allocator ends a child that allocates (`NO_ALLOC`, exit 121) — every run
+    /// of every test here would show it; this one goes through the way out too (a folder that isn't there: `fail`'s
+    /// words, made of fixed bytes and the errno's digits).
     #[test]
     fn a_runs_child_allocates_nothing_before_its_exec() {
         let Some(rules) = open_rules("a_runs_child_allocates_nothing_before_its_exec") else { return };
@@ -9735,1008 +7866,6 @@ mod tests {
         assert_eq!(status.code(), Some(127), "its way out, not an allocation ({ALLOCATED}): {err}");
         let said = format!("tarae's sandbox couldn't start it — its folder: errno {}\n", libc::ENOENT);
         assert_eq!(err, said);
-        let way = if matches!(k.runs_in, Some(Ok(_))) { "clone3 into its cgroup" } else { "fork" };
-        let line = format!("a run's child, by {way}: nothing allocated before its exec\n");
-        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
         k.end();
-    }
-
-    /// Whether this system's keepers get a scope of their own, each run a cgroup of its own (6g: with the session's
-    /// network, where `tier::Probed.cgroups` says so — in tests only a folder `cargo xtask linux --cgroup` gives) —
-    /// else says the test skips itself, and why. A machine said to give them (`TARAE_EXPECT_CGROUP`, which `--cgroup`
-    /// sets) fails instead.
-    fn cgroups_here(test: &str) -> bool {
-        if !network_here(test) {
-            return false;
-        }
-        match &super::super::tier::get().cgroups {
-            Ok(_) => true,
-            Err(why) => {
-                if std::env::var_os("TARAE_EXPECT_CGROUP").is_some() {
-                    panic!("{test}: a cgroup per run expected here (TARAE_EXPECT_CGROUP), none — {why}");
-                }
-                let line = format!(
-                    "{}sandbox::keeper::tests::{test} — no cgroup per run here: {why}\n",
-                    crate::test_results::SELF_SKIP
-                );
-                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-                false
-            }
-        }
-    }
-
-    /// `k`'s scope, as it must have one here.
-    fn scope_of(k: &Keeper) -> RunsIn {
-        match &k.runs_in {
-            Some(Ok(r)) => r.clone(),
-            other => panic!("a keeper without its scope: {other:?}"),
-        }
-    }
-
-    /// A run's own cgroup's folder, as tarae sees the hierarchy.
-    fn folder(cgroup: &str) -> PathBuf {
-        Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'))
-    }
-
-    /// 6g: each run starts in a cgroup of its own right below its keeper's scope — not the keeper's, not another
-    /// run's — and what it forks is in its run's (a child inherits it: what a run leaves stays its run's, as 6d's
-    /// rules will see it — spike6 Q2). `Started` says that cgroup's id: its folder's inode, what a rule compares.
-    #[test]
-    fn each_run_is_in_its_own_cgroup() {
-        use std::io::BufRead;
-        use std::os::unix::fs::MetadataExt;
-        let test = "each_run_is_in_its_own_cgroup";
-        if !cgroups_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let k = keeper("cgroups");
-        let scope = scope_of(&k).scope;
-        assert_eq!(super::super::cgroup::cgroup_of(k.pid), Ok(scope.clone()), "the keeper is in its scope");
-        // (the run's shell's cgroup and its child's — sed's own — said, then it waits in its cgroup)
-        let script = "sed -n 's/^0:://p' /proc/$$/cgroup /proc/self/cgroup; exec sleep 30";
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", script]);
-        let runs: Vec<(Started, Vec<String>)> = (0..2)
-            .map(|_| {
-                let mut s =
-                    k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain).unwrap();
-                let lines = std::io::BufReader::new(s.spawned.stdout.take().unwrap());
-                let said = lines.lines().take(2).map(Result::unwrap).collect();
-                (s, said)
-            })
-            .collect();
-        let own: Vec<&String> = runs.iter().map(|(_, said)| &said[0]).collect();
-        assert_ne!(own[0], own[1], "each its own");
-        for (s, said) in &runs {
-            assert!(said[0].starts_with(&format!("{scope}/run-")), "right below the scope: {said:?}");
-            assert_eq!(said[1], said[0], "its child in its cgroup");
-            let ino = std::fs::metadata(folder(&said[0])).unwrap().ino();
-            assert_eq!(s.cgroup, Some(ino), "Started says its id");
-        }
-        for (s, _) in runs {
-            crate::dap::term_group(s.spawned.pid);
-            crate::spawn::wait(s.spawned.pid).unwrap();
-        }
-        k.end();
-    }
-
-    /// 6g, the real path (by hand — `target/sb/profile6h/m11-live.sh`: a machine with the user's systemd manager, as
-    /// the user, outside a container — whose cgroup the manager couldn't move a keeper out of): a keeper is put in a
-    /// scope of its own by the user's manager over the user bus (`StartTransientUnit`, `Delegate=yes`) — under
-    /// `user@<uid>.service`, the user's — its run starts in a cgroup of its own right below it, and the scope is gone
-    /// once the keeper is (`CollectMode=inactive-or-failed`). In the session's user and mount namespaces (no network,
-    /// no PID one): a scope goes only to a keeper whose birth made `/sys/fs/cgroup` read-only in a mount namespace of
-    /// its own — so on Ubuntu with its restriction, only as `/usr/bin/tarae` under tarae's profile. How long the birth
-    /// took, said.
-    #[test]
-    #[ignore = "the user's own systemd manager: by hand on a VM (target/sb/profile6h/m11-live.sh)"]
-    fn a_keeper_gets_its_own_delegated_scope() {
-        use std::os::unix::fs::MetadataExt;
-        let bus = super::super::cgroup::user_bus(
-            std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().as_deref(),
-            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).as_deref(),
-            |p| p.exists(),
-        )
-        .expect("a user bus");
-        let Some(rules) = open_rules("a_keeper_gets_its_own_delegated_scope") else { return };
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-scope", std::process::id()));
-        let source = super::super::cgroup::Source::UserBus(bus);
-        let t0 = Instant::now();
-        let k = Keeper::born_lo(
-            &root,
-            None,
-            Ns::session(true, false),
-            Families::here(),
-            false,
-            None,
-            Some(source),
-        )
-        .expect("a keeper starts");
-        let born = t0.elapsed();
-        let scope = scope_of(&k).scope;
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
-        assert!(scope.contains(&format!("/user@{uid}.service/")) && scope.ends_with(".scope"), "{scope}");
-        assert_eq!(super::super::cgroup::cgroup_of(k.pid), Ok(scope.clone()), "the keeper is in it");
-        assert_eq!(std::fs::metadata(folder(&scope)).unwrap().uid(), uid, "delegated: the user's");
-        let (out, status) = sh_through(&k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
-        assert!(status.success(), "{out}");
-        assert_eq!(out.trim(), format!("{scope}/run-1"), "its run in a cgroup of its own");
-        k.end();
-        assert!(gone_soon(&folder(&scope)), "the scope went with its keeper");
-        let line = format!("a keeper in {scope}: born in {} ms with its scope\n", born.as_millis());
-        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-    }
-
-    /// The folder the tests' scopes go in (`TARAE_TEST_CGROUP`), where this system gives a keeper the session's
-    /// namespaces too — a scope goes only to one with a mount namespace of its own — else says the test skips itself,
-    /// and why (`TARAE_EXPECT_CGROUP`: fails instead).
-    fn given_folder(test: &str) -> Option<PathBuf> {
-        if !namespaced(test) {
-            return None;
-        }
-        match std::env::var_os("TARAE_TEST_CGROUP") {
-            Some(folder) => Some(folder.into()),
-            None if std::env::var_os("TARAE_EXPECT_CGROUP").is_some() => {
-                panic!("{test}: a scope's folder expected (TARAE_EXPECT_CGROUP)")
-            }
-            None => {
-                let line = format!(
-                    "{}sandbox::keeper::tests::{test} — no folder for a scope (TARAE_TEST_CGROUP)\n",
-                    crate::test_results::SELF_SKIP
-                );
-                let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-                None
-            }
-        }
-    }
-
-    /// The review's second pass, its first finding: a birth whose read-only step fails (here told to, `EPERM`) is a
-    /// birth all the same — the step is 6g's second lock, not the keeper's — the keeper there, with no scope (its runs
-    /// in its own cgroup), why said on its line. Before, it failed every keeper's birth, 6g or not.
-    #[test]
-    fn a_birth_goes_on_where_cgroupfs_cant_be_made_read_only() {
-        let test = "a_birth_goes_on_where_cgroupfs_cant_be_made_read_only";
-        let Some(given) = given_folder(test) else { return };
-        let Some(rules) = open_rules(test) else { return };
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-ro-fails", std::process::id()));
-        lock(&CGROUPFS_SEAMS).push((root.clone(), CgroupfsSeam::Fail(libc::EPERM)));
-        let captured = crate::log::capture();
-        let source = super::super::cgroup::Source::Given(given.clone());
-        let born = Keeper::born_lo(&root, None, ns(), Families::here(), false, None, Some(source));
-        lock(&CGROUPFS_SEAMS).retain(|(r, _)| *r != root);
-        let k = born.expect("born all the same");
-        let why = match &k.runs_in {
-            Some(Err(why)) => why.clone(),
-            other => panic!("a scope where /sys/fs/cgroup wasn't read-only: {other:?}"),
-        };
-        let eperm = io::Error::from_raw_os_error(libc::EPERM);
-        assert!(why.contains(&format!("couldn't be made read-only there: {eperm}")), "{why}");
-        assert!(!given.join(format!("keeper-{}", k.pid)).exists(), "never put in one");
-        let (out, _) = sh_through(&k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
-        let keepers = super::super::cgroup::cgroup_of(k.pid).unwrap();
-        assert_eq!(out.trim(), keepers, "its run in its keeper's cgroup");
-        let said = format!("a keeper for {}: pid {}", root.display(), k.pid);
-        let line = captured.lines().into_iter().find(|l| l.contains(&said)).expect("its line");
-        assert!(line.contains("runs in its cgroup — no scope of its own: ") && line.contains(&why), "{line}");
-        k.end();
-    }
-
-    /// The review's second pass, its third finding: a scope goes only to a keeper whose birth made `/sys/fs/cgroup`
-    /// read-only in a mount namespace of its own. One born without namespaces (tier host's) has none to do it in: its runs
-    /// could move themselves between the scope's cgroups, all the user's — so it gets no scope (never even asked for
-    /// one), said; its runs in its own cgroup.
-    #[test]
-    fn a_scope_goes_only_to_a_keeper_whose_cgroupfs_is_read_only() {
-        let test = "a_scope_goes_only_to_a_keeper_whose_cgroupfs_is_read_only";
-        let Some(given) = given_folder(test) else { return };
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-no-mntns", std::process::id()));
-        let source = super::super::cgroup::Source::Given(given.clone());
-        let k = Keeper::born_lo(&root, None, Ns::NONE, Families::here(), false, None, Some(source))
-            .expect("born");
-        match &k.runs_in {
-            Some(Err(why)) => assert!(why.contains("no mount namespace of its own"), "{why}"),
-            other => panic!("a scope for a keeper without a mount namespace: {other:?}"),
-        }
-        assert!(!given.join(format!("keeper-{}", k.pid)).exists(), "never put in one");
-        k.end();
-    }
-
-    /// The review's second pass, its second finding: without `mount_setattr` (answered `ENOSYS` — the pre-5.12 way,
-    /// forced), the read-only step's bind remount keeps every flag the mount has locked — here a tmpfs over
-    /// `/sys/fs/cgroup` mounted nosuid, nodev, noexec, noatime in the scene's own user and mount namespaces, so locked
-    /// for the keeper's (a namespace below): a remount losing one is refused. In a process of its own
-    /// (`cgroupfs_fallback_scene`); what a run of the keeper's sees: the mount read-only with its flags, a write
-    /// `EROFS`.
-    #[test]
-    fn without_mount_setattr_the_remount_keeps_the_mounts_flags() {
-        use std::os::unix::process::CommandExt;
-        if !namespaced("without_mount_setattr_the_remount_keeps_the_mounts_flags") {
-            return;
-        }
-        let mut cmd = scene_cmd("cgroupfs_fallback_scene", &[]);
-        // SAFETY: plain calls with no arguments.
-        let (u, g) = unsafe { (libc::geteuid(), libc::getegid()) };
-        let maps: Vec<(&'static std::ffi::CStr, Vec<u8>)> = vec![
-            (c"/proc/self/setgroups", b"deny".to_vec()),
-            (c"/proc/self/uid_map", format!("{u} {u} 1").into_bytes()),
-            (c"/proc/self/gid_map", format!("{g} {g} 1").into_bytes()),
-        ];
-        // SAFETY: in the forked child before its exec: raw calls only, on strings made before the fork.
-        unsafe {
-            cmd.pre_exec(move || {
-                let null = std::ptr::null::<libc::c_char>();
-                if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                for (path, map) in &maps {
-                    let fd = libc::open(path.as_ptr(), libc::O_WRONLY);
-                    if fd < 0 || libc::write(fd, map.as_ptr().cast(), map.len()) != map.len() as isize {
-                        return Err(io::Error::last_os_error());
-                    }
-                    libc::close(fd);
-                }
-                let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOATIME;
-                if libc::mount(null, c"/".as_ptr(), null, libc::MS_REC | libc::MS_PRIVATE, std::ptr::null())
-                    != 0
-                    || libc::mount(
-                        c"tmpfs".as_ptr(),
-                        c"/sys/fs/cgroup".as_ptr(),
-                        c"tmpfs".as_ptr(),
-                        flags,
-                        std::ptr::null(),
-                    ) != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let want = "read-only=ok opts=ro,nosuid,nodev,noexec,noatime write=Read-only file system";
-        assert_eq!(said_by("cgroupfs_fallback_scene", cmd), want);
-    }
-
-    /// `without_mount_setattr_the_remount_keeps_the_mounts_flags`' scene, in the user and mount namespaces its test
-    /// made (`/sys/fs/cgroup` a tmpfs there): a keeper born in namespaces of its own with `mount_setattr` answered
-    /// missing (`CgroupfsSeam::NoSetattr`), and a run of its: `scene: read-only=<ok or why> opts=<the mount's, as the
-    /// run sees it> write=<a file made there>`.
-    #[test]
-    #[ignore = "run by without_mount_setattr_the_remount_keeps_the_mounts_flags in a process of its own"]
-    fn cgroupfs_fallback_scene() {
-        if std::env::var_os(SCENE).is_none() {
-            return;
-        }
-        let rules = open_rules("cgroupfs_fallback_scene").expect("Landlock");
-        let root = PathBuf::from("/tarae-keeper-cgroupfs-fallback");
-        lock(&CGROUPFS_SEAMS).push((root.clone(), CgroupfsSeam::NoSetattr));
-        let k = Keeper::born_lo(&root, None, Ns::session(true, false), Families::here(), false, None, None)
-            .expect("born");
-        let read_only = match &k.cgroupfs {
-            Ok(()) => "ok".to_string(),
-            Err(why) => why.clone(),
-        };
-        let script = "awk '$5 == \"/sys/fs/cgroup\" { print $6 }' /proc/self/mountinfo";
-        let (opts, _) = sh_through(&k, &rules, script);
-        // (the shell's own words for a file it can't make — `…: Read-only file system`, the errno's text)
-        let (made, _) = sh_through(&k, &rules, "( : > /sys/fs/cgroup/made-by-a-run ) 2>&1 && echo ok");
-        let write = made.trim().rsplit(": ").next().unwrap_or_default().to_string();
-        k.end();
-        // (the tmpfs is mounted over the hierarchy: the last line at that place is the mount the run sees)
-        let top = opts.trim().lines().last().unwrap_or_default();
-        println!("scene: read-only={read_only} opts={top} write={write}");
-    }
-
-    /// The keeper's lines in `captured` saying a run started in its keeper's cgroup: what kept it from its own.
-    fn missed_said(captured: &crate::log::Capture, k: &Keeper) -> Vec<String> {
-        let mark = format!("a run (keeper {}) started in its keeper's cgroup — ", k.pid);
-        captured.lines().iter().filter_map(|l| l.split_once(&mark).map(|(_, why)| why.to_string())).collect()
-    }
-
-    /// The review's third finding, D5's "said, never refused": a run whose own cgroup can't be made (here the scope
-    /// takes no more — `cgroup.max.descendants` 0, so `mkdirat` is `EAGAIN`) starts all the same, in its keeper's
-    /// cgroup; `Started` has no id of its own and why is said.
-    #[test]
-    fn a_run_without_its_own_cgroup_starts_in_its_keepers_said() {
-        let test = "a_run_without_its_own_cgroup_starts_in_its_keepers_said";
-        if !cgroups_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let k = keeper("cgroup-full");
-        let scope = scope_of(&k).scope;
-        let max = folder(&scope).join("cgroup.max.descendants");
-        std::fs::write(&max, "0").unwrap();
-        let captured = crate::log::capture();
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "sed -n 's/^0:://p' /proc/self/cgroup"]);
-        let started = k.start(&cmd, &crate::landlock::thread_name(), rules.fd(), RunNet::Plain);
-        std::fs::write(&max, "max").unwrap();
-        let s = started.expect("started all the same");
-        assert_eq!(s.cgroup, None, "no cgroup of its own");
-        let mut out = String::new();
-        io::Read::read_to_string(&mut s.spawned.stdout.unwrap(), &mut out).unwrap();
-        assert!(crate::spawn::wait(s.spawned.pid).unwrap().success());
-        assert_eq!(out.trim(), scope, "in its keeper's: sed, its child, is");
-        let why = io::Error::from_raw_os_error(libc::EAGAIN);
-        assert_eq!(missed_said(&captured, &k), [format!("its own cgroup: {why}")]);
-        k.end();
-    }
-
-    /// The review's third finding: where `clone3` answers `ENOSYS` (a filter's — the scene's own), a keeper with a
-    /// scope says its first run started in its cgroup for that, and asks it no more — no folder made for nothing —
-    /// each later run said not to have tried (`its own cgroup`, not `starting it`).
-    #[test]
-    fn clone3_missing_is_asked_once() {
-        if given_folder("clone3_missing_is_asked_once").is_none() {
-            return;
-        }
-        let no = io::Error::from_raw_os_error(libc::ENOSYS);
-        let want = format!("run1=starting it: {no} run2=its own cgroup: {no} run3=its own cgroup: {no}");
-        assert_eq!(scene("clone3_missing_scene", &[]), want);
-    }
-
-    /// `clone3_missing_is_asked_once`'s scene: this thread's `clone3` answered `ENOSYS` (a filter of its own — the
-    /// whole process is the scene's, the keeper born from it inherits it), a keeper in the session's user and mount
-    /// namespaces (where a scope may go: `/sys/fs/cgroup` read-only there) put in a scope of its own in
-    /// `TARAE_TEST_CGROUP`, three runs. Prints `scene: run1=… run2=… run3=…`, what each said.
-    #[test]
-    #[ignore = "run by clone3_missing_is_asked_once in a process of its own"]
-    fn clone3_missing_scene() {
-        if std::env::var_os(SCENE).is_none() {
-            return;
-        }
-        let given = std::env::var_os("TARAE_TEST_CGROUP").unwrap();
-        let rules = open_rules("clone3_missing_scene").expect("Landlock");
-        let op = |code: u32, k: u32, jt: u8, jf: u8| libc::sock_filter { code: code as u16, jt, jf, k };
-        let ret = libc::BPF_RET | libc::BPF_K;
-        let filter = [
-            op(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
-            op(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, libc::SYS_clone3 as u32, 0, 1),
-            op(ret, libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32, 0, 0),
-            op(ret, libc::SECCOMP_RET_ALLOW, 0, 0),
-        ];
-        let prog = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_ptr().cast_mut() };
-        // SAFETY: plain prctls on this thread; the program is live for the call.
-        unsafe {
-            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-            let r = libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &raw const prog);
-            assert_eq!(r, 0, "{}", io::Error::last_os_error());
-        }
-        let captured = crate::log::capture();
-        let root = Path::new("/tarae-keeper-clone3-missing");
-        let source = super::super::cgroup::Source::Given(given.into());
-        let ns = Ns::session(true, false);
-        let k = Keeper::born_lo(root, None, ns, Families::here(), false, None, Some(source)).expect("born");
-        for _ in 0..3 {
-            let (_, status) = sh_through(&k, &rules, "true");
-            assert!(status.success());
-        }
-        let said = missed_said(&captured, &k);
-        k.end();
-        let said: Vec<String> = said.iter().enumerate().map(|(i, w)| format!("run{}={w}", i + 1)).collect();
-        println!("scene: {}", said.join(" "));
-    }
-
-    /// The review's third finding: a keeper takes its scope once, and only before any run — a second one sent (a
-    /// folder elsewhere), or one sent after a run, is refused (said) and its runs never go there. Else a scope could
-    /// be swapped under a session whose runs 6d's rules already name.
-    #[test]
-    fn a_scope_is_taken_once_and_before_any_run() {
-        let test = "a_scope_is_taken_once_and_before_any_run";
-        if !cgroups_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let given = std::env::var("TARAE_TEST_CGROUP").unwrap();
-        let decoy = Path::new(&given).join(format!("decoy-{}", std::process::id()));
-        std::fs::create_dir(&decoy).unwrap();
-        let hand = |k: &Keeper| {
-            let dir = std::fs::File::open(&decoy).unwrap();
-            channel::send(k.chan.as_fd(), &Msg::Cgroup, &[dir.as_fd()]).unwrap();
-        };
-        let cgroup_of_a_run = |k: &Keeper| {
-            let (out, status) = sh_through(k, &rules, "sed -n 's/^0:://p' /proc/self/cgroup");
-            assert!(status.success(), "{out}");
-            out.trim().to_string()
-        };
-        let captured = crate::log::capture();
-        let refused = |k: &Keeper| {
-            let said = format!("a run (keeper {}) failed at the request", k.pid);
-            captured.lines().iter().filter(|l| l.contains(&said)).count()
-        };
-        // A second scope, before any run
-        let k = keeper("scope-twice");
-        let scope = scope_of(&k).scope;
-        hand(&k);
-        assert!(cgroup_of_a_run(&k).starts_with(&format!("{scope}/run-")), "its first scope");
-        assert_eq!(refused(&k), 1, "the second refused, said");
-        k.end();
-        // A scope after a run
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-scope-late", std::process::id()));
-        let k = Keeper::born_lo(&root, None, ns(), Families::here(), false, None, None).expect("born");
-        let before = cgroup_of_a_run(&k);
-        hand(&k);
-        assert_eq!(cgroup_of_a_run(&k), before, "still its keeper's");
-        assert_eq!(refused(&k), 1, "the late one refused, said");
-        k.end();
-        std::fs::remove_dir(&decoy).ok();
-    }
-
-    /// `cgroupwrites` as a run of `k`'s under `rules` (made for `net`), beside a sibling run waiting in its own
-    /// cgroup: what it said. Anything it made in the scope (a write let through) is removed after.
-    fn cgroup_writes(k: &Keeper, rules: BorrowedFd, net: RunNet, cwd: &Path) -> String {
-        let scope = scope_of(k).scope;
-        let mut wait = std::process::Command::new("sh");
-        wait.args(["-c", "exec sleep 30"]);
-        let sibling = k.start(&wait, &crate::landlock::thread_name(), rules, net).unwrap();
-        let theirs = super::super::cgroup::cgroup_of(sibling.spawned.pid).unwrap();
-        assert!(theirs.starts_with(&format!("{scope}/run-")), "a sibling in its own: {theirs}");
-        let env = [("TARAE_SCOPE", scope.as_str()), ("TARAE_SIBLING", theirs.as_str())];
-        let said = helper_through(k, rules, net, "cgroupwrites", &env, Some(cwd));
-        crate::dap::term_group(sibling.spawned.pid);
-        crate::spawn::wait(sibling.spawned.pid).unwrap();
-        let _ = std::fs::remove_dir(folder(&scope).join("made-by-a-run"));
-        said
-    }
-
-    /// The review's second finding: a run moves no process between cgroups and changes none — not into a sibling
-    /// run's (6d's rules would count its connections that run's), not into its keeper's scope nor out of it (the
-    /// session's default, or the user's own `app.slice`), not making one in the scope, not writing its own cgroup's
-    /// files — though every one of them is the user's, the runs' own uid (`Delegate=yes`). With a run's own rules
-    /// (the project's): each refused, said which way.
-    #[test]
-    fn a_run_moves_nothing_between_cgroups_nor_changes_one() {
-        let test = "a_run_moves_nothing_between_cgroups_nor_changes_one";
-        if !cgroups_here(test) {
-            return;
-        }
-        let k = keeper("cgroup-writes");
-        let (_, c, root) = project_served("cgroup-writes", vec![], Some(&k), &[], Err("not served".into()));
-        let said = cgroup_writes(&k, c.rules_fd(), c.net, &root);
-        let line = format!("a run's writes to cgroups, under its own rules: {said}\n");
-        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
-        assert!(said.starts_with("own=") && !said.contains("=ok"), "{said}");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The same, with Landlock out of the way (rules granting every write): the session's mount namespace holds it
-    /// alone — `/sys/fs/cgroup` is read-only there (`Birth::child`), each write `EROFS`. Two locks: a run's rules
-    /// never grant the hierarchy, and a grant that did (a setting, a card) meets the read-only mount.
-    #[test]
-    fn the_sessions_cgroup_hierarchy_is_read_only() {
-        let test = "the_sessions_cgroup_hierarchy_is_read_only";
-        if !cgroups_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let k = keeper("cgroup-ro");
-        let root = std::env::temp_dir();
-        let said = cgroup_writes(&k, rules.fd(), RunNet::Plain, &root);
-        let e = libc::EROFS;
-        let want = format!("own={e} sibling={e} scope={e} out={e} mkdir={e} file={e}");
-        assert_eq!(said, want, "every write refused by the mount, Landlock granting it");
-        k.end();
-    }
-
-    /// Whether `path` is gone within 2 s.
-    fn gone_soon(path: &Path) -> bool {
-        let by = Instant::now() + Duration::from_secs(2);
-        while path.exists() && Instant::now() < by {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        !path.exists()
-    }
-
-    /// 6g: a run's cgroup goes with its last process — right after the run's reap when it left nothing; while what it
-    /// left runs, it stays (that process is in it), and it goes once the keeper reaps that one too. A keeper's
-    /// scope never fills up with the folders of runs long gone.
-    #[test]
-    fn a_runs_cgroup_goes_with_its_last_process() {
-        let test = "a_runs_cgroup_goes_with_its_last_process";
-        if !cgroups_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let k = keeper("cgroup-gone");
-        let run = |n: u64| folder(&format!("{}/run-{n}", scope_of(&k).scope));
-        let (_, status) = sh_through(&k, &rules, "true");
-        assert!(status.success());
-        assert!(gone_soon(&run(1)), "removed after its reap");
-        let (_, status) = sh_through(&k, &rules, "sleep 30 >/dev/null 2>&1 &");
-        assert!(status.success());
-        assert!(run(2).exists(), "kept while what it left runs in it");
-        let left = k.leftovers();
-        assert_eq!(left.len(), 1, "the sleep it left: {left:?}");
-        crate::reaper::end(&left, LEFT_TERM);
-        assert!(gone_soon(&run(2)), "removed once the keeper reaped what it left");
-        k.end();
-    }
-
-    /// 6g, for 6d: a rule at a run's level (`RunsIn.level`) naming its cgroup's id holds that run's connections and no
-    /// other's — the level counted right on this kernel (the machine's root on Ubuntu's 6.8, the sender's namespace's
-    /// on 6.1 and 7.3: one and the same where tarae is in the machine's namespace). With `socket cgroupv2 level L <A>
-    /// drop` in the session's output chain, run A's connect beyond never reaches tarae; run B's, at the same moment,
-    /// lands on the planted socket. (IPv4: these machines' containers have no IPv6 of their own.)
-    #[test]
-    fn the_level_matches_on_this_kernel() {
-        use tarae_netlink::nft::{self, Expr, Reg, SocketKey, Transaction, Verdict};
-        let test = "the_level_matches_on_this_kernel";
-        if !cgroups_here(test) {
-            return;
-        }
-        let k = keeper("level");
-        let level = scope_of(&k).level;
-        let (_, c, root) = project_served("level-own", vec![], Some(&k), &[], Err("not served".into()));
-        let go = root.join("go");
-        let env = [("TARAE_TO", "203.0.113.7:443"), ("TARAE_GO", go.to_str().unwrap())];
-        let start = || {
-            let cmd = helper_cmd("within_when", &env, Some(&root));
-            k.start_confined(&cmd, &crate::landlock::thread_name(), &c).unwrap()
-        };
-        let (a, b) = (start(), start());
-        let id = a.cgroup.expect("run A in a cgroup of its own");
-        let mut t = Transaction::new();
-        t.rule(
-            "tarae",
-            "out",
-            &[
-                Expr::Socket { key: SocketKey::Cgroupv2 { level }, dreg: Reg::R1 },
-                Expr::Cmp { sreg: Reg::R1, data: nft::cgroup(id) },
-                Expr::Verdict(Verdict::Drop),
-            ],
-        );
-        let sent = lock(&k.network)
-            .as_mut()
-            .expect("its network")
-            .nf
-            .apply(&t.end(), Instant::now() + Duration::from_secs(2));
-        sent.expect("the rule taken");
-        std::fs::write(&go, "").unwrap();
-        let (said_a, said_b) = (helper_said(a), helper_said(b));
-        assert_eq!(said_b, "reached reset", "B's lands on the planted socket");
-        assert!(!said_a.starts_with("reached"), "A's held by the rule at level {level}: {said_a}");
-        let taken = lock(&k.network).as_ref().map(|m| m.taken.count());
-        assert_eq!(taken, Some(1), "only B's reached tarae");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// P5's "before any run": sockets a keeper hands once a run was asked of it aren't taken — they could be a
-    /// run's — so a later ask goes unanswered (refused, said in the log) and fails at its time limit.
-    #[test]
-    fn sockets_handed_after_a_run_are_refused() {
-        let test = "sockets_handed_after_a_run_are_refused";
-        if !network_here(test) {
-            return;
-        }
-        let Some(rules) = open_rules(test) else { return };
-        let k = keeper("after-a-run");
-        assert!(k.plant(Families::default()).is_ok(), "before any run: taken");
-        let (_, status) = sh_through(&k, &rules, "true");
-        assert!(status.success());
-        match k.plant(Families::default()) {
-            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Planted, libc::ETIMEDOUT), "{e}"),
-            Ok(_) => panic!("sockets taken after a run"),
-        }
-        k.end();
-    }
-
-    /// P4: without tarae's netfilter socket the session reaches nothing — the owned table goes with it (tarae's
-    /// crash stood in for by closing it): a run's own connect beyond, taken to the planted socket while the table is
-    /// there, isn't once it's gone.
-    #[test]
-    fn without_taraes_netlink_socket_the_session_reaches_nothing() {
-        let test = "without_taraes_netlink_socket_the_session_reaches_nothing";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("p4");
-        let (_, c, root) = project_served("p4-own", vec![], Some(&k), &[], Err("not served".into()));
-        let beyond = [("TARAE_TO", "203.0.113.7:443")];
-        let said = helper_through(&k, c.rules_fd(), c.net, "within", &beyond, Some(&root));
-        assert_eq!(said, "reached reset", "taken while the table is there");
-        let super::super::redirect::Made { nf, taken, route, .. } =
-            lock(&k.network).take().expect("its network");
-        drop(nf);
-        // (the table goes as its socket is released: asked again until it has, within a second)
-        let by = Instant::now() + Duration::from_secs(1);
-        let said = loop {
-            let said = helper_through(&k, c.rules_fd(), c.net, "within", &beyond, Some(&root));
-            if said != "reached reset" || Instant::now() > by {
-                break said;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        assert_ne!(said, "reached reset", "taken with tarae's socket gone");
-        assert_eq!(taken.count(), 1, "nothing more reached the planted socket");
-        drop((route, taken));
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// P5: tarae sends netlink only on sockets of the session's netns — the one its keeper (its runs) is in. Another
-    /// keeper's sockets, of a netns tarae owns too (so the lookup answers), handed in the session's keeper's place,
-    /// are refused before anything is sent: that netns has no table and no route after. Its own keeper's are taken.
-    #[test]
-    fn a_socket_of_another_netns_is_refused_before_anything_is_sent() {
-        use tarae_netlink::{Family, Protocol, Socket, nft, route};
-        let test = "a_socket_of_another_netns_is_refused_before_anything_is_sent";
-        if !network_here(test) {
-            return;
-        }
-        let session = keeper("p5-session");
-        let other_root = std::env::temp_dir().join(format!("tarae-keeper-{}-p5-other", std::process::id()));
-        let other = Keeper::born_lo(&other_root, None, ns(), Families::here(), false, None, None)
-            .expect("born, no network");
-        let carried = Families {
-            v4: Families::here().v4 && !other.lo_missing.v4,
-            v6: Families::here().v6 && !other.lo_missing.v6,
-        };
-        let handed = other.plant(carried).expect("its sockets");
-        let theirs = super::super::redirect::netns_of_pid(other.pid).unwrap();
-        let ours = super::super::redirect::netns_of_pid(session.pid).unwrap();
-        assert_ne!(theirs, ours, "two sessions, two netns");
-        let made = super::super::redirect::make(
-            ours,
-            handed,
-            &super::super::redirect::Network::session(carried.v4, carried.v6),
-        );
-        // (what's in the other netns now, read over its own fresh sockets)
-        // (its netlink sockets only: no planted ones to bind where the first set's may still be)
-        let mut look = other.plant(Families::default()).expect("its netlink sockets");
-        let by = || Instant::now() + Duration::from_secs(2);
-        let fd = |k: super::super::redirect::Kind, h: &mut Vec<(super::super::redirect::Kind, OwnedFd)>| {
-            let at = h.iter().position(|(kind, _)| *kind == k).unwrap();
-            h.remove(at).1
-        };
-        let mut nf =
-            Socket::from_fd(fd(super::super::redirect::Kind::Netfilter, &mut look), Protocol::Netfilter)
-                .unwrap();
-        let mut rt =
-            Socket::from_fd(fd(super::super::redirect::Kind::Route, &mut look), Protocol::Route).unwrap();
-        assert!(nft::tables(&mut nf, by()).unwrap().is_empty(), "no table landed there");
-        let routes = route::routes(&mut rt, Family::V4, by()).unwrap();
-        assert!(!routes.iter().any(|r| r.table == 100), "no route landed there: {routes:?}");
-        match made {
-            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Netns, libc::EPERM), "{e}"),
-            Ok(_) => panic!("another netns's sockets taken as the session's"),
-        }
-        drop((look, nf, rt));
-        let own = super::super::redirect::make(
-            theirs,
-            look_again(&other, carried),
-            &super::super::redirect::Network::session(carried.v4, carried.v6),
-        );
-        assert!(own.is_ok(), "its own keeper's sockets are the session's: {:?}", own.err());
-        drop(own);
-        other.end();
-        session.end();
-    }
-
-    /// `plant`, again: a fresh set of the keeper's sockets (it has run nothing).
-    fn look_again(k: &Keeper, carried: Families) -> Vec<(super::super::redirect::Kind, OwnedFd)> {
-        k.plant(carried).expect("its sockets")
-    }
-
-    /// P1, for the birth's state: nothing a run does changes the session's rules or routes. A served run's own
-    /// routing socket deleting the policy rule and the main table's default route, adding one, and asking for a
-    /// netfilter socket — each refused — and the generation, the rule counts, the routes and the policy rules read
-    /// back the same. (tarae makes a served run's netlink sends, with its own capability over the netns: what
-    /// nlguard lets through lands.)
-    #[test]
-    fn a_run_changes_none_of_the_sessions_rules_or_routes() {
-        let test = "a_run_changes_none_of_the_sessions_rules_or_routes";
-        if !network_here(test) || !routed_here(test) {
-            return;
-        }
-        let k = keeper("p1");
-        let before = network_state(&k);
-        let (p, c, root) = routed_project("p1", &k, |_| {});
-        let (said, refused) = served_said(&k, (&p, &c, &root), "nlchanges", &[]);
-        let each: HashMap<&str, &str> = said.split(' ').filter_map(|w| w.split_once('=')).collect();
-        let eperm = libc::EPERM.to_string();
-        for change in ["delrule", "delroute", "newroute"] {
-            assert_eq!(each.get(change), Some(&eperm.as_str()), "{change}: {said} — {refused:?}");
-        }
-        assert!(each.get("netfilter").is_some_and(|n| *n != "ok"), "{said}");
-        assert_eq!(network_state(&k), before, "the session's network as it was");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A refusal while making the session's network fails the birth, said with its step and errno — the keeper
-    /// and its netns thrown away (the keeper gone within a second), never a session with half its network: a route
-    /// on a device that isn't there (`ENODEV` at the routes), a rule for a chain that isn't there (`ENOENT` at the
-    /// rules).
-    #[test]
-    fn the_birth_says_which_part_failed() {
-        use tarae_netlink::nft::{Expr, Transaction, Verdict};
-        use tarae_netlink::route::{Changes, RouteKind};
-        use tarae_netlink::{Family, route};
-        let test = "the_birth_says_which_part_failed";
-        if !network_here(test) {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-failed", std::process::id()));
-        let mut no_device = Changes::new();
-        no_device.default_route(Family::V4, route::MAIN, RouteKind::Unicast, 4242);
-        let routes = super::super::redirect::Network {
-            routes: vec![no_device.end()],
-            ..super::super::redirect::Network::session(true, true)
-        };
-        let mut no_chain = Transaction::new();
-        no_chain.table("tarae", true);
-        no_chain.rule("tarae", "nosuch", &[Expr::Verdict(Verdict::Accept)]);
-        let rules = super::super::redirect::Network {
-            rules: no_chain.end(),
-            ..super::super::redirect::Network::session(true, true)
-        };
-        for (network, step, errno) in
-            [(routes, BirthStep::Routes, libc::ENODEV), (rules, BirthStep::Rules, libc::ENOENT)]
-        {
-            let captured = crate::log::capture();
-            let given = Some(NetworkFor::Given(network));
-            let e = match Keeper::born_lo(&root, None, ns(), Families::here(), false, given, None) {
-                Ok(k) => {
-                    k.end();
-                    panic!("born with half its network ({step:?})");
-                }
-                Err(e) => e,
-            };
-            assert_eq!(BirthError::of(&e), Some(BirthError { step, errno }), "{e}");
-            assert!(e.to_string().starts_with(step.said()), "said with its step: {e}");
-            // (and thrown away: the keeper — the last thing in its netns but tarae's sockets, gone with the error —
-            // gone within a second)
-            let ours = format!("a keeper for {}: its network failed", root.display());
-            let said = captured.lines().into_iter().find(|l| l.contains(&ours)).expect("its failure said");
-            let pid: u32 = said
-                .split(" — keeper ")
-                .nth(1)
-                .and_then(|r| r.split(' ').next()?.parse().ok())
-                .unwrap_or_else(|| panic!("its pid: {said}"));
-            let by = Instant::now() + Duration::from_secs(1);
-            while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < by {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(!Path::new(&format!("/proc/{pid}")).exists(), "keeper {pid} still there ({step:?})");
-        }
-    }
-
-    /// The interim until 6d and 6e (`redirect.rs`): a run tarae doesn't serve, beyond the session — where it used to
-    /// get `ENETUNREACH` at once — is refused as quickly and as plainly as by a closed port, never left to its own
-    /// time limits: its connect reset (`ECONNRESET` on its first read), a datagram it asks on a connected UDP socket
-    /// answered port unreachable (`ECONNREFUSED`), and so its name lookup gives up at once — glibc asks on connected
-    /// sockets (`RES_OPTIONS` keeps one that would wait to 2 s). Since 6e an unserved run's question is answered
-    /// REFUSED (E2: its mark isn't one tarae gave) — even `asked`'s header alone, whose ID and flags can be read — and
-    /// its lookup ends as fast.
-    #[test]
-    fn an_unserved_runs_way_out_fails_fast() {
-        let test = "an_unserved_runs_way_out_fails_fast";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("unserved");
-        let (_, c, root) = project_served("unserved-own", vec![], Some(&k), &[], Err("not served".into()));
-        let run = |what: &str, env: &[(&str, &str)]| {
-            helper_through(&k, c.rules_fd(), c.net, what, env, Some(&root))
-        };
-        let ms = |said: &str| {
-            said.rsplit_once("ms=").and_then(|(_, n)| n.parse::<u128>().ok()).unwrap_or(u128::MAX)
-        };
-        assert_eq!(run("within", &[("TARAE_TO", "203.0.113.7:443")]), "reached reset", "the connect");
-        let t0 = Instant::now();
-        let asked = run("asked", &[("TARAE_TO", "203.0.113.53:53")]);
-        assert!(asked == "answered" && t0.elapsed() < Duration::from_secs(1), "the datagram: {asked}");
-        let env = [("TARAE_NAME", "tarae-6c.example"), ("RES_OPTIONS", "timeout:2 attempts:1")];
-        let lookup = run("lookup_timed", &env);
-        assert!(lookup.starts_with("lookup=getaddrinfo ") && ms(&lookup) < 1000, "the lookup: {lookup}");
-        eprintln!("{test}: {asked}; {lookup}");
-        k.end();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// A family the session's `lo` doesn't carry gets no routes and no rules: a run's connect beyond in that family
-    /// fails at once, as before 6c (`ENETUNREACH`: no route) — never its SYN meeting the final drop and waiting out
-    /// TCP's time limit. A session born as for a network without IPv6 (`born_with`); IPv4, carried, still lands on
-    /// its planted socket.
-    #[test]
-    fn a_family_not_carried_fails_at_once_as_before() {
-        let test = "a_family_not_carried_fails_at_once_as_before";
-        if !network_here(test) {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-v6off", std::process::id()));
-        let k =
-            Keeper::born_with(&root, None, ns(), Families { v4: true, v6: false }).expect("a keeper starts");
-        let (_, c, project) = project_served("v6off-own", vec![], Some(&k), &[], Err("not served".into()));
-        let run =
-            |to: &str| helper_through(&k, c.rules_fd(), c.net, "within", &[("TARAE_TO", to)], Some(&project));
-        assert_eq!(run("[2001:db8::7]:443"), libc::ENETUNREACH.to_string(), "IPv6, not carried: no route");
-        assert_eq!(run("203.0.113.7:443"), "reached reset", "IPv4, carried: taken");
-        k.end();
-        std::fs::remove_dir_all(&project).ok();
-    }
-
-    /// P2's second line, the ruleset's last rule: what no rule took — neither TCP nor UDP — is dropped. Its stand-in
-    /// sender is the raw ICMP socket the birth made in the session's netns (runs make TCP and UDP sockets only —
-    /// `a_run_makes_tcp_and_udp_sockets_only`), marked as the output chain marks what leaves (`SO_MARK`: tarae has
-    /// `CAP_NET_ADMIN` over the netns), so routing takes what it sends as this machine's (table 100): an echo to the
-    /// session's own address arrives — the sender works — and one beyond the session meets the drop: it never
-    /// arrives, where without the rule it would be delivered here as this machine's own. (Unmarked, it would die
-    /// anyway: the netns forwards nothing, and `ip_error` says nothing then — so only the marked one shows the rule.)
-    #[test]
-    fn what_isnt_tcp_or_udp_meets_the_final_drop() {
-        let test = "what_isnt_tcp_or_udp_meets_the_final_drop";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("drop");
-        let icmp =
-            lock(&k.network).as_ref().and_then(|m| m.icmp.clone()).expect("the birth's raw ICMP socket");
-        let mark = |m: u32| {
-            // SAFETY: an int, ours for the call, on a socket we hold.
-            unsafe {
-                libc::setsockopt(icmp.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, (&raw const m).cast(), 4)
-            }
-        };
-        assert_eq!(mark(1), 0, "{}", io::Error::last_os_error());
-        // (it only sends as made — `the_raw_icmp_socket_only_sends`: given every type while this test watches)
-        super::super::redirect::icmp_filter(icmp.as_fd(), 0).unwrap();
-        let beyond = std::net::Ipv4Addr::new(203, 0, 113, 7);
-        assert!(
-            echo(icmp.as_fd(), SESSION_V4, 0x6c01),
-            "to the session's own address it arrives: the sender works"
-        );
-        assert!(!echo(icmp.as_fd(), beyond, 0x6c02), "beyond the session, untaken: dropped");
-        mark(0);
-        super::super::redirect::icmp_filter(icmp.as_fd(), u32::MAX).unwrap();
-        k.end();
-    }
-
-    /// An ICMP echo to `to` (its `id`) on raw socket `fd`, and whether it got anywhere within a second: delivered in
-    /// this netns (a raw ICMP socket sees every ICMP packet delivered here — the request itself, as it arrives), its
-    /// reply, or an error quoting it. (Taken as this machine's beyond the session, the request is delivered but its
-    /// reply can't leave: its source, `to`, is no local address once unmarked — so the arrival is what shows it.)
-    fn echo(fd: BorrowedFd, to: std::net::Ipv4Addr, id: u16) -> bool {
-        send_echo(fd, to, id);
-        let ours = |icmp: &[u8]| icmp.len() >= 6 && icmp[4..6] == id.to_be_bytes();
-        let by = Instant::now() + Duration::from_secs(1);
-        let mut b = [0u8; 2048];
-        while let Some(left) = by.checked_duration_since(Instant::now()) {
-            if !readable(fd, left).unwrap_or(false) {
-                break;
-            }
-            // SAFETY: a receive into a buffer of its size, on a socket we hold.
-            let n = unsafe { libc::recv(fd.as_raw_fd(), b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
-            let Ok(n) = usize::try_from(n) else { continue };
-            let packet = &b[..n];
-            let Some(icmp) = packet.get(usize::from(packet.first().unwrap_or(&0) & 0xf) * 4..) else {
-                continue;
-            };
-            let quoted = icmp.get(8..).and_then(|inner| inner.get(usize::from(inner.first()? & 0xf) * 4..));
-            match icmp.first() {
-                Some(0 | 8) if ours(icmp) => return true,
-                Some(3 | 11) if quoted.is_some_and(|q| q.first() == Some(&8) && ours(q)) => return true,
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// An ICMP echo request to `to` (its `id`) sent on raw socket `fd`.
-    fn send_echo(fd: BorrowedFd, to: std::net::Ipv4Addr, id: u16) {
-        let mut p = vec![8u8, 0, 0, 0];
-        p.extend(id.to_be_bytes());
-        p.extend(1u16.to_be_bytes());
-        p.extend(b"tarae 6c");
-        let sum = super::super::redirect::checksum(&p);
-        p[2..4].copy_from_slice(&sum.to_be_bytes());
-        let to = std::net::SocketAddr::new(to.into(), 0);
-        let (sa, len) = super::super::redirect::socket_address(to);
-        // SAFETY: a send of our buffer to an address of ours, on a socket we hold.
-        let n = unsafe {
-            libc::sendto(fd.as_raw_fd(), p.as_ptr().cast(), p.len(), 0, (&raw const sa).cast(), len)
-        };
-        assert_eq!(n, p.len() as isize, "the echo: {}", io::Error::last_os_error());
-    }
-
-    /// The bytes waiting on socket `fd` (`FIONREAD`: a raw socket's next packet's).
-    fn queued(fd: BorrowedFd) -> i32 {
-        let mut n: libc::c_int = 0;
-        // SAFETY: an int, ours for the call, on a socket we hold.
-        let r = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &mut n) };
-        assert_eq!(r, 0, "FIONREAD: {}", io::Error::last_os_error());
-        n
-    }
-
-    /// The birth's raw ICMP socket only sends: a raw socket gets a copy of every ICMP packet delivered in its netns,
-    /// and nothing reads this one, so every type it can be given is filtered (`ICMP_FILTER`) — its queue would fill
-    /// and stay full. After an echo to the session's own address, nothing waits on it; with the filter lifted, the
-    /// same echo's request and reply do (the control: the echo is delivered).
-    #[test]
-    fn the_raw_icmp_socket_only_sends() {
-        let test = "the_raw_icmp_socket_only_sends";
-        if !network_here(test) {
-            return;
-        }
-        let k = keeper("raw-sends");
-        let icmp =
-            lock(&k.network).as_ref().and_then(|m| m.icmp.clone()).expect("the birth's raw ICMP socket");
-        send_echo(icmp.as_fd(), SESSION_V4, 0x6c11);
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(queued(icmp.as_fd()), 0, "as made: nothing kept");
-        super::super::redirect::icmp_filter(icmp.as_fd(), 0).unwrap();
-        send_echo(icmp.as_fd(), SESSION_V4, 0x6c12);
-        let by = Instant::now() + Duration::from_secs(1);
-        while queued(icmp.as_fd()) == 0 && Instant::now() < by {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(queued(icmp.as_fd()) > 0, "unfiltered, the echo's copies would wait there");
-        k.end();
-    }
-
-    /// tarae takes a keeper's sockets only as the kinds it asked: exactly `Kind::wanted`'s, in order, and the raw
-    /// ICMP socket besides at most once. A kind missing, one extra, one twice, one unknown — `EPROTO`; the keeper's
-    /// own failure — its errno. Each fails the birth at `Planted` (`plant`).
-    #[test]
-    fn a_keepers_sockets_are_taken_only_as_the_kinds_asked() {
-        use super::super::redirect::Kind;
-        let v4 = Families { v4: true, v6: false };
-        let codes = |k: &[Kind]| k.iter().map(|k| k.code()).collect::<Vec<u8>>();
-        let asked = [Kind::Route, Kind::Netfilter, Kind::Tcp4, Kind::Udp4, Kind::Dns4];
-        assert_eq!(planted_kinds(v4, &codes(&asked), 0), Ok(asked.to_vec()));
-        let with_raw = [&asked[..], &[Kind::Icmp4]].concat();
-        assert_eq!(planted_kinds(v4, &codes(&with_raw), 0), Ok(with_raw.clone()), "the raw socket besides");
-        assert_eq!(
-            planted_kinds(v4, &codes(&asked), libc::EADDRNOTAVAIL),
-            Err(libc::EADDRNOTAVAIL),
-            "its errno"
-        );
-        let wrong: [(&str, Vec<u8>); 6] = [
-            ("one missing", codes(&asked[..3])),
-            ("one extra", codes(&[&asked[..], &[Kind::Tcp6]].concat())),
-            ("one twice", codes(&[&asked[..], &[Kind::Udp4]].concat())),
-            ("out of order", codes(&[Kind::Netfilter, Kind::Route, Kind::Tcp4, Kind::Udp4, Kind::Dns4])),
-            ("the raw socket twice", codes(&[&with_raw[..], &[Kind::Icmp4]].concat())),
-            ("a kind that isn't one", [codes(&asked), vec![9]].concat()),
-        ];
-        for (what, kinds) in wrong {
-            assert_eq!(planted_kinds(v4, &kinds, 0), Err(libc::EPROTO), "{what}");
-        }
-    }
-
-    /// The keeper's own failure to make a socket fails the birth at `Planted` with its errno: a keeper whose `lo`
-    /// couldn't take the session's IPv4 address (`born_lo`'s `off_lo`) asked for IPv4's planted sockets — their bind
-    /// refused (`EADDRNOTAVAIL`), nothing taken.
-    #[test]
-    fn a_socket_the_keeper_cant_make_fails_its_plant() {
-        let test = "a_socket_the_keeper_cant_make_fails_its_plant";
-        if !namespaced(test) || !ns().netns() {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("tarae-keeper-{}-badplant", std::process::id()));
-        let k = Keeper::born_lo(&root, None, ns(), Families { v4: true, v6: false }, true, None, None)
-            .expect("born");
-        assert!(k.lo_missing.v4, "its lo without the session's IPv4 address");
-        match k.plant(Families { v4: true, v6: false }) {
-            Err(e) => assert_eq!((e.step, e.errno), (BirthStep::Planted, libc::EADDRNOTAVAIL), "{e}"),
-            Ok(_) => panic!("sockets taken that couldn't be made"),
-        }
-        k.end();
-    }
-
-    /// A keeper gets the session's network only where it has a netns of its own and the probe's network landed
-    /// (D-b): none without a netns (tier host; a policy that opens something where tarae can't swap; `net` without a user
-    /// namespace makes none), none where the probe's batch didn't land — whatever the other says.
-    #[test]
-    fn a_keeper_gets_the_network_only_with_a_netns_and_the_probes_yes() {
-        let (yes, no): (Result<(), String>, Result<(), String>) = (Ok(()), Err("no NFT_TPROXY here".into()));
-        assert!(network_for(Ns::session(true, true), &yes).is_some(), "the session's namespaces");
-        assert!(network_for(Ns::session(true, false), &yes).is_some(), "A: no PID namespace, its netns");
-        assert!(network_for(Ns::NONE, &yes).is_none(), "no namespaces");
-        assert!(network_for(Ns { net: true, ..Ns::NONE }, &yes).is_none(), "net without user makes none");
-        assert!(network_for(Ns::session(true, true), &no).is_none(), "the probe's didn't land");
     }
 }

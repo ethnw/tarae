@@ -761,19 +761,10 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   in `sandbox.json`; `:granted` lists hosts (always, this session) and `d` on one (or `:sandbox-disallow host
   name:port`) takes it back — for the runs going on too. A host refused (unanswered, or `n`) is offered on
   `space m s` as well. While the network is off, the list does nothing
-- **Raw connections and service records** (Linux, where tarae takes a session's connections). A command
-  connecting to a host it looked up with something that isn't TLS or HTTP — ssh, a database client, Redis, a
-  server that speaks first — gets its own card, "Let a command open a raw connection to …?", saying tarae can't
-  see what passes. Only a list entry with that port (`"db.example.com:5432"`) lets it through unasked; neither
-  `"*"` nor an entry without a port does. A lookup of a host's SRV or TXT records (MongoDB's `mongodb+srv://`) is
-  made by tarae. A name tarae already looks up, by the rules or your yes, gets its service records without a card:
-  one the list names (the registries by default, every name with `"*"`), or one you said `y` or `s` to on its host or raw card — its
-  records show the DNS's operators nothing they don't see already, and every host they name is still asked about
-  when connected to. Any other name gets a card, the lookup held meanwhile — answered within about 5 s, it gets the
-  records; later, from its next try. Both cards answer `y`, `s` or `n` (no `A`: write the
-  entry in `llm.sandbox-hosts` instead), and `:granted` lists an `s` as raw TCP to `name:port` or looking up a
-  name's records, taken back by `d` there, or by `:sandbox-disallow raw name:port` / `lookup name`. A raw connection to an address no name was looked up for
-  is refused
+- **What doesn't go through the proxy can't go out.** A connection that isn't through tarae's proxy — ssh, a
+  database client, Redis, a tool that ignores `HTTPS_PROXY` — can't go out from the sandbox, on either system, and
+  no card or setting opens it. Claude's result says so in plain words; the way out is running that command outside
+  the sandbox (Claude's `outside_sandbox`, your `y` or `n`; `space m s` on the run offers it too)
 - **Through your own proxy.** Where tarae itself goes out through a proxy — `HTTPS_PROXY`, `HTTP_PROXY` or
   `ALL_PROXY` in the environment you started it from, lowercase forms first, as curl reads them — tarae's proxy
   goes on through that one, with the `user:password` its URL carries. Through an `http://` one a tunnel becomes a
@@ -1031,12 +1022,10 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Kept apart | Shared |
 |---|---|---|
-| own, TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, the project in /dev/shm | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
 | own, its lo without an IPv6 address | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own without a PID namespace, TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | offline, the session's namespaces | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
@@ -1105,13 +1094,10 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   multicast or broadcast. This machine — its loopback and its own addresses (its LAN's, Docker's bridge's, as
   they were when the command started) — it reaches only on the ports `llm.sandbox-ports` and
   `llm.sandbox-localhost` open. Claude's result says so.
-- **No proxy variable where the session has a network of its own** (tier own). Every connection a command
-  makes and every name it looks up is tarae's to take: a name gets an address of the session's own, and a
-  connection's first bytes (TLS's server name, HTTP's `Host`) say where it goes, checked as through the proxy. So
-  a tool goes out as it would anywhere, with nothing to set. Measured with curl, cargo, npm, pip, Go and Gradle. A
-  connection that's neither TLS nor HTTP (ssh, a database client) can't go out yet. Elsewhere (macOS, Linux
-  without that network) the commands' proxy variables name tarae's proxy, and the packs tell the tools that
-  ignore them.
+- **Through tarae's proxy, by its variables**, on both systems and in every tier: the commands' proxy variables
+  (`HTTPS_PROXY` and the rest) name tarae's proxy, and the packs tell the tools that ignore them (Gradle's
+  `gradle.properties`, Node's `NODE_USE_ENV_PROXY`). Names are looked up by the proxy: a command that looks one up
+  itself (`dig`, `getent`) gets no resolver.
 - **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
   machine, no unix socket, not even the project's — and Claude's result says why (tier offline). That happens:
   - in a container without `CAP_SYS_PTRACE` (Docker's default, a dev container started the usual way): its

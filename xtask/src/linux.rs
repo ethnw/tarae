@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments] | test --installed … | test --as-user … | test --keep … | test --kept …]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments] | test --installed … | test --as-user … | test --keep … | test --kept …]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -90,46 +90,7 @@ enum What {
 /// The user `test --as-user` runs the tests as, made in the container.
 const AS_USER: &str = "tarae-test";
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments] | test --as-user [the test binary's arguments] | test --keep [cargo test's arguments] | test --kept [the test binary's arguments]]";
-
-/// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
-/// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
-/// tests' keepers to be put in (`TARAE_TEST_CGROUP`, standing for the user manager's scopes; `TARAE_EXPECT_CGROUP`:
-/// a test that finds no cgroup per run fails rather than skips). With `--userns`: only TPROXY sessions get one.
-/// The container's cgroup goes with it, whatever was left in that folder (M11: deb12, 6.8, 7.3).
-///
-/// **What it opens**: the machine's whole cgroup hierarchy, writable by the container's root — the root of the
-/// machine's processes all the same as far as cgroups go: it can move any of the machine's processes between cgroups,
-/// set their limits, freeze them, kill every process of one (`cgroup.kill`). No capability is added (no `SYS_ADMIN`:
-/// the bind mount does it, root's ownership does the rest), but that's the reach. For a throwaway test VM only —
-/// never a Docker whose machine runs anything you'd mind (colima's VM is shared by every session's runs).
-const CGROUP_OPTS: [&str; 4] = ["--cgroupns", "host", "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw"];
-const CGROUP_SETUP: &str = "c=/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)\n\
-                            mkdir \"$c/tarae-tests\"\n\
-                            export TARAE_TEST_CGROUP=\"$c/tarae-tests\" TARAE_EXPECT_CGROUP=1\n\
-                            echo \"--cgroup: the tests' keepers go in $TARAE_TEST_CGROUP\"\n";
-
-/// A leading `--cgroup`, and the arguments after it.
-fn cgroup(args: &[String]) -> (bool, &[String]) {
-    match args.split_first() {
-        Some((c, rest)) if c == "--cgroup" => (true, rest),
-        _ => (false, args),
-    }
-}
-
-/// `docker run`'s arguments with `--cgroup`'s: its options after `run --rm --cap-add SYS_PTRACE`, its setup first
-/// in the script (the last argument).
-fn with_cgroup(mut a: Vec<String>, on: bool) -> Vec<String> {
-    if !on {
-        return a;
-    }
-    let at = 4.min(a.len());
-    a.splice(at..at, CGROUP_OPTS.map(String::from));
-    if let Some(script) = a.last_mut() {
-        *script = format!("{CGROUP_SETUP}{script}");
-    }
-    a
-}
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments] | test --as-user [the test binary's arguments] | test --keep [cargo test's arguments] | test --kept [the test binary's arguments]]";
 
 /// What `--userns` lets the container do, so the sandbox's tier tests reach a real session keeper
 /// (`src/sandbox/tier.rs`): Docker's default seccomp profile refuses new namespaces, its `docker-default`
@@ -437,7 +398,6 @@ pub fn run(args: &[String]) -> Result<()> {
         return Err(format!("--docker-default and --userns: one or the other — {USAGE}"));
     }
     let set = expect_offline(set, stock);
-    let (cgroups, args) = cgroup(args);
     let (named, args) = image_named(args)?;
     let (volume, args) = volume_named(args)?;
     let (platform, what) = ask(args)?;
@@ -489,9 +449,8 @@ pub fn run(args: &[String]) -> Result<()> {
     if let Some(v) = &volume {
         eprintln!("--volume: {v}");
     }
-    // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed; then
-    // `--docker-default` takes the capability out)
-    docker.args(with_name(without_ptrace(with_cgroup(args, cgroups), stock)?, name));
+    // (the name last; `--docker-default` takes the capability out)
+    docker.args(with_name(without_ptrace(args, stock)?, name));
     if let Some(u) = ns {
         eprintln!("--userns: the container's own seccomp and AppArmor profiles lifted ({u:?})");
     }
@@ -503,9 +462,6 @@ pub fn run(args: &[String]) -> Result<()> {
             "--docker-default: Docker {version}'s default seccomp and AppArmor profiles, no SYS_PTRACE — \
              pidfd_getfd refused"
         );
-    }
-    if cgroups {
-        eprintln!("--cgroup: the container in the machine's cgroup namespace, the hierarchy writable");
     }
     let tar = match tree {
         Tree::Mounted(_) => None,
@@ -1230,10 +1186,9 @@ pub fn prune(mine: bool) -> Result<()> {
     Ok(())
 }
 
-/// The images this repository builds: `trace.rs`'s (`tarae-trace:<minor>-<hash>`) and netlink's capture
-/// fixtures' (`tarae-redirect` — `netlink/fixtures/capture/vm.sh`), and compat's (`COMPAT`). `rust:<minor>` isn't
-/// ours: pulled, maybe another project's too.
-const OWN_IMAGES: [&str; 2] = ["tarae-trace", "tarae-redirect"];
+/// The images this repository builds: `trace.rs`'s (`tarae-trace:<minor>-<hash>`), and compat's (`COMPAT`).
+/// `rust:<minor>` isn't ours: pulled, maybe another project's too.
+const OWN_IMAGES: [&str; 1] = ["tarae-trace"];
 
 /// What `cargo xtask compat` makes starts with this: its images (`tarae-compat-node:1.99-<hash>`, one per recipe
 /// in `compat/linux/`) and a volume per stack (`tarae-compat-go-cache`, the stack's home). Its own as
@@ -1474,7 +1429,7 @@ fn script(tree: Tree, what: &What) -> String {
     s.push_str(match tree {
         Tree::Mounted(_) => {
             "git clone -q /src /work/tarae && cd /work/tarae\n\
-             git -C /src diff HEAD | git apply --allow-empty\n\
+             git -C /src diff --binary HEAD | git apply --allow-empty\n\
              git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n"
         }
         Tree::Streamed => {
@@ -1688,8 +1643,8 @@ mod tests {
     }
 
     /// `--docker-default` (6f′'s M8b): the container as `docker run` makes one — `--cap-add SYS_PTRACE` taken out
-    /// and nothing else changed (no `--security-opt`, the image and its script as they were, `--cgroup`'s options
-    /// kept), leading or in `--userns`'s place; without it the capability stays.
+    /// and nothing else changed (no `--security-opt`, the image and its script as they were), leading or in
+    /// `--userns`'s place; without it the capability stays.
     /// `--docker-default` expects tier offline unless an `--env` names the tier; without it nothing's added.
     #[test]
     fn docker_default_expects_offline_unless_told_otherwise() {
@@ -1712,8 +1667,6 @@ mod tests {
         assert_eq!(&stock[..2], ["run", "--rm"]);
         assert_eq!((stock.len(), &stock[2..]), (base.len() - 2, &base[4..]), "only the capability gone");
         assert!(!stock.iter().any(|a| a.contains("SYS_PTRACE") || a == "--security-opt"), "{stock:?}");
-        let cg = without_ptrace(with_cgroup(base.clone(), true), true).unwrap();
-        assert_eq!(&cg[..4], ["run", "--rm", "--cgroupns", "host"], "--cgroup's options kept");
     }
 
     /// `--docker-default` takes the capability by value — wherever it stands among the options, in either form —
@@ -1737,39 +1690,6 @@ mod tests {
             let e = without_ptrace(at(kept), true).unwrap_err();
             assert!(e.contains("still gives SYS_PTRACE"), "{kept:?}: {e}");
         }
-    }
-
-    /// `--cgroup` (6g): the container in the machine's cgroup namespace with the hierarchy writable, and the script
-    /// first makes the tests' folder under the container's own cgroup and names it (`TARAE_TEST_CGROUP`, with
-    /// `TARAE_EXPECT_CGROUP`) — before anything else it runs; without it, nothing of that. No capability is added
-    /// (no `SYS_ADMIN`, no `--privileged`), but the container's root can write the machine's whole hierarchy through
-    /// that mount (`CGROUP_OPTS` says what that reaches): a throwaway VM's option.
-    #[test]
-    fn cgroup_gives_the_tests_a_folder_in_the_machines_namespace() {
-        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let on = args(&["--cgroup", "test", "keeper"]);
-        assert_eq!(cgroup(&on), (true, &on[1..]));
-        let off = args(&["test"]);
-        assert_eq!(cgroup(&off), (false, &off[..]));
-        let base = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Both);
-        assert_eq!(with_cgroup(base.clone(), false), base);
-        let with = with_cgroup(base.clone(), true);
-        assert_eq!(
-            &with[..8],
-            ["run", "--rm", "--cap-add", "SYS_PTRACE", "--cgroupns", "host", "-v", CGROUP_OPTS[3]]
-        );
-        let (script, was) = (with.last().unwrap(), base.last().unwrap());
-        assert!(
-            script.starts_with(CGROUP_SETUP) && script.ends_with(was.as_str()),
-            "its setup first: {script}"
-        );
-        assert!(script.contains("export TARAE_TEST_CGROUP=") && script.contains("TARAE_EXPECT_CGROUP=1"));
-        assert_eq!(with.len(), base.len() + 4);
-        assert!(!with.iter().any(|a| a == "--privileged" || a.contains("SYS_ADMIN")), "{with:?}");
-        // (after --userns, as the usage says)
-        let both = args(&["--userns", "--cgroup", "clippy"]);
-        let (u, rest) = userns(&both).unwrap();
-        assert_eq!((u, cgroup(rest).0), (Some(Userns::Full), true));
     }
 
     #[test]
@@ -1798,7 +1718,11 @@ mod tests {
         assert_eq!((image("1.100.2"), image("1.99")), ("rust:1.100".to_string(), "rust:1.99".to_string()));
         let s = a.last().unwrap();
         assert!(s.contains("git clone -q /src /work/tarae && cd /work/tarae"), "{s}");
-        assert!(s.contains("git -C /src diff HEAD | git apply") && s.contains("ls-files --others"), "{s}");
+        // (`--binary`: a changed or removed binary file, a fuzz seed's, applies too)
+        assert!(
+            s.contains("git -C /src diff --binary HEAD | git apply") && s.contains("ls-files --others"),
+            "{s}"
+        );
         assert!(
             s.contains("--features bundled-grammars -- -D warnings")
                 && s.contains("cargo test --locked --no-fail-fast --workspace\n"),
@@ -2327,7 +2251,7 @@ mod tests {
              version) echo 27.0 ;;\n\
              info) printf 'standin\\tID:1\\n' ;;\n\
              system) printf 'tarae-registry\\t800MB\\t\\n' ;;\n\
-             image) [ \"$2\" = ls ] && printf 'tarae-redirect:latest\\t1.1GB\\n' ;;\n\
+             image) [ \"$2\" = ls ] && printf 'tarae-trace:1.99-0a1b2c3d\\t1.9GB\\n' ;;\n\
              esac\nexit 0\n",
             log.display()
         );
@@ -2342,7 +2266,7 @@ mod tests {
         prune_all_with(docker.as_os_str(), none(), true, true, None).unwrap();
         let a = asked();
         assert!(
-            a.contains("volume rm tarae-registry") && a.contains("image rm tarae-redirect:latest"),
+            a.contains("volume rm tarae-registry") && a.contains("image rm tarae-trace:1.99-0a1b2c3d"),
             "{a}"
         );
         assert_eq!(drops(&a), 2, "{a}");
@@ -2369,7 +2293,6 @@ mod tests {
                       tarae-compat-go-cache\t300MB\ttarae.compat=go\n\
                       k8s-data\t3GB\ttarae.machine=me\n";
         let images = "tarae-trace:1.99-0a1b2c3d\t1.9GB\n\
-                      tarae-redirect:latest\t1.1GB\n\
                       rust:1.99\t1.5GB\n\
                       tarae-compat-go:1.99-0123456789ab\t2GB\n\
                       tarae-traced:x\t1MB\n";
@@ -2389,7 +2312,6 @@ mod tests {
                 "tarae-trace-target-1.99.0",
                 "tarae-compat-go-cache",
                 "tarae-trace:1.99-0a1b2c3d",
-                "tarae-redirect:latest",
                 "tarae-compat-go:1.99-0123456789ab"
             ]
         );
@@ -2410,7 +2332,7 @@ mod tests {
         let said = dropped_list(&here);
         assert_eq!(said[0], "  volume tarae-target-1.99.0-aaaa  7.2 GB  (/w/gone)");
         assert_eq!(said[6], "  image tarae-trace:1.99-0a1b2c3d  1.9 GB");
-        assert_eq!(said.last().unwrap(), "  21.8 GB in all");
+        assert_eq!(said.last().unwrap(), "  20.7 GB in all");
         // The open sessions: asked of the socket `TARAE_UI` names, as `tarae state` asks (a stand-in answers
         // here) — never by running a `tarae`; not run from one, or one answering an error: said, none
         assert!(tarae_sessions(None).unwrap_err().contains("not run from a tarae"));
@@ -2445,8 +2367,6 @@ mod tests {
         // The names are the ones this repository builds its images under
         let trace = std::fs::read_to_string(root().join("xtask/src/trace.rs")).unwrap();
         assert!(trace.contains("format!(\"tarae-trace:{}-{:08x}\""), "trace.rs's image name");
-        let vm = std::fs::read_to_string(root().join("netlink/fixtures/capture/vm.sh")).unwrap();
-        assert!(vm.lines().any(|l| l == "IMAGE=tarae-redirect"), "the capture fixtures' image name");
         assert!(prune_cmd(&["--some".to_string()]).unwrap_err().starts_with("usage:"));
     }
 

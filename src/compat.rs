@@ -1131,20 +1131,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/sandbox.rs", "in fn runs_root: if let Some(runs) = &here.runs {", RUNS),
     ("src/sandbox.rs", "in fn spawn_as: held", HOOK),
     ("src/sandbox.rs", "in fn spawn_as: if let Some(held) = held {", HOOK),
-    ("src/sandbox/cgroup.rs", "in fn let_go: if let Source::Given(_) = source {", CGROUP),
-    ("src/sandbox/cgroup.rs", "in fn moved: Source", CGROUP),
-    ("src/sandbox/cgroup.rs", "in fn said: Source", CGROUP),
-    ("src/sandbox/cgroup.rs", r#"in fn source: return match std::env::var_os("TARAE_TEST_CGROUP")"#, CGROUP),
-    (
-        "src/sandbox/cgroup.rs",
-        "in fn source: user_bus(",
-        "Linux: a test build never asks systemd's user bus for a cgroup — compat's runs get the fallback (piece 4)",
-    ),
-    ("src/sandbox/keeper.rs", "in fn born_lo: NetworkFor", HOOK),
-    ("src/sandbox/keeper.rs", "in fn born_lo: birth", HOOK),
-    ("src/sandbox/keeper.rs", "in fn born_lo: cgroupfs", HOOK),
-    ("src/sandbox/keeper.rs", "in fn child: (fail, setattr) = (None, true);", HOOK),
-    ("src/sandbox/keeper.rs", "in fn child: (fail, setattr) = match self.seam {", HOOK),
     ("src/sandbox/keeper.rs", "in fn child: if exec.leak {", SEAM),
     (
         "src/sandbox/keeper.rs",
@@ -1163,7 +1149,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn keeper_env: match cfg!(test) {",
         "`TARAE_KEEPER=1`: the test binary starts as the keeper",
     ),
-    ("src/sandbox/keeper.rs", "in fn new: seam", HOOK),
     ("src/sandbox/keeper.rs", "in fn number: if let Some(info) = s.fdinfo {", HOOK),
     ("src/sandbox/keeper.rs", "in fn of: leak", SEAM),
     ("src/sandbox/keeper.rs", "in fn ready: if let Some(began) = slow {", HOOK),
@@ -1180,10 +1165,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ),
     ("src/sandbox/proxy.rs", "in fn get: asks", ASKS),
     ("src/sandbox/proxy.rs", "in fn get: asks", ASKS),
-    ("src/sandbox/proxy.rs", "in fn get: lookup", NAMES),
-    ("src/sandbox/proxy.rs", "in fn get: lookup", NAMES),
-    ("src/sandbox/proxy.rs", "in fn get: records", NAMES),
-    ("src/sandbox/proxy.rs", "in fn get: records", NAMES),
     ("src/sandbox/proxy.rs", "in fn get: resolve", NAMES),
     ("src/sandbox/proxy.rs", "in fn get: resolve", NAMES),
     ("src/sandbox/proxy.rs", "in fn run: In", RECORD),
@@ -1199,9 +1180,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/sandbox/proxy/relay.rs", "in fn relay_with: if let Ok(peer) = peer {", RECORD),
     ("src/sandbox/proxy/relay.rs", "in fn relay_with: if let Ok(peer) = peer {", RECORD),
     ("src/sandbox/proxy/relay.rs", "in fn relay_with: peer", RECORD),
-    ("src/sandbox/redirect.rs", "in fn make: refused", HOOK),
-    ("src/sandbox/redirect.rs", "in fn make: refused", HOOK),
-    ("src/sandbox/redirect.rs", "in fn session: no_rcvmark", HOOK),
     ("src/sandbox/supervisor.rs", "in fn kept_apart: if APART_OFF.load(Relaxed) == self.session {", HOOK),
     ("src/sandbox/supervisor.rs", "in fn routed: if p.resolvers.iter().any(|r| r.ip().to_canonical(", RECORD),
     ("src/sandbox/supervisor.rs", "in fn swapped_for: if let Some(pause) = p.swap_pause {", HOOK),
@@ -1224,7 +1202,6 @@ const CLAUDES: &str = "the claude process's, not a run's: the chat here is a sta
 const ASKED: &str = "a record of the variables a policy reads; the shipped twin does nothing";
 const RUNS: &str = "runs' folders in the temp folder (`Here::runs`), not tarae's cache: the same RunDir, another \
                     parent, and the check that every run may write there skipped";
-const CGROUP: &str = "Linux: a folder given in TARAE_TEST_CGROUP instead of systemd's: off unless set";
 const ASKS: &str = "the proxy's questions go to a test's sender (`TEST_ASKS`): the driver's, which hands them to its \
                     editor as the main loop does (`answered_by_script`) — each host card comes";
 const NAMES: &str = "names resolved from `TEST_NAMES`/`TEST_RECORDS` only, never the network — the network lane \

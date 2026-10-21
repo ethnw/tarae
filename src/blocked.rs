@@ -671,7 +671,6 @@ mod tests {
             served: Ok(()),
             abi: 4,
             ptys: Some(4),
-            tproxy: Err("no network namespace of its own".into()),
             lo_missing: Vec::new(),
             short: None,
             brief: Some("AppArmor blocks user namespaces".into()),
@@ -720,7 +719,9 @@ mod tests {
         assert!(said.starts_with("that run was on a commit's tree"), "{said}");
     }
 
-    /// What a run's denials offer: the folders a write may open, a port that isn't a risky one — once each.
+    /// What a run's denials offer: the folders a write may open, a port that isn't a risky one — once each. A
+    /// connection past the proxy (`network-direct`: ssh, a database client) offers no grant: the list's last row, a
+    /// run outside once, is its one way (`the_user_opens_what_the_sandbox_blocked`).
     #[test]
     fn what_a_runs_denials_offer() {
         let base = crate::scratch::Scratch::new("blocked");
@@ -739,6 +740,7 @@ mod tests {
             // (Linux's supervisor names the address: a port on this machine is offered, one beyond isn't)
             d("network-outbound", "remote:[::1]:8080".into()),
             d("network-outbound", "remote:192.0.2.1:9".into()),
+            d(crate::sandbox::DIRECT_OP, "remote:192.0.2.7:22".into()),
         ];
         let all = choices(&denials, &crate::caps::Caps::at(&home, &root));
         assert_eq!((all[0].hint.as_str(), all[1].hint.as_str()), ("…/x", "…/cache/x"), "below the folder");
@@ -753,8 +755,8 @@ mod tests {
                 Grant::Localhost,
                 Grant::Port(8080)
             ],
-            "Docker's port, an address beyond this machine and the project's .git aren't offered; each folder once \
-             and every port here once, after the first port"
+            "Docker's port, an address beyond this machine, a connection past the proxy and the project's .git \
+             aren't offered; each folder once and every port here once, after the first port"
         );
     }
 

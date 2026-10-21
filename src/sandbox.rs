@@ -32,12 +32,7 @@ mod apart;
 // (the profile and its hint: plain text, built everywhere — said on Linux)
 pub mod apparmor;
 #[cfg(target_os = "linux")]
-pub mod cgroup;
-#[cfg(target_os = "linux")]
 pub mod channel;
-#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-// (a keeper's scope from the user's manager: the wire built everywhere — its tests run on macOS too —, asked on Linux)
-pub mod dbus;
 #[cfg(test)]
 pub(crate) mod golden;
 // (9a: what a run's sandbox keeps apart and shares — pure, built everywhere: its golden says every tier on any machine;
@@ -52,11 +47,6 @@ pub mod keeper;
 pub mod linux;
 #[cfg(test)]
 mod loops;
-// (6d: the session's marks — which run a connection is — given on Linux; the table built and tested everywhere)
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub mod marks;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub mod names;
 // (step 8: which session a socket is where sessions share a loopback — given on Linux, the lookup tested everywhere)
 pub mod owners;
 mod policy;
@@ -64,8 +54,6 @@ mod policy;
 pub mod ptys;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
-// (the session's transparent proxy: its ruleset built everywhere — its golden runs on macOS too —, sent on Linux)
-pub mod redirect;
 pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
@@ -415,9 +403,18 @@ impl Guard {
                      log says why.",
                 );
             }
+            // (beyond this machine not through the proxy: no grant, setting nor `also` opens it — only a run outside)
+            if all_seen.iter().any(|d| d.op == DIRECT_OP) {
+                s.push_str(
+                    "\nWhat says network-direct no grant opens: beyond this machine your commands go only through \
+                     tarae's proxy, so a connection that doesn't (ssh, a database client, a tool that ignores \
+                     HTTPS_PROXY) can't go out in the sandbox. If the command needs it, ask to run it outside the \
+                     sandbox (outside_sandbox, with your reason — the user answers y or n); don't work around it.",
+                );
+            }
             // (step 8: another session's port, or one whose can't be told — no grant opens it, so nothing to
-            // point at)
-            let openable = |d: &&Denial| d.op != SESSION_OP && d.op != UNTOLD_OP;
+            // point at; nor beyond this machine past the proxy)
+            let openable = |d: &&Denial| d.op != SESSION_OP && d.op != UNTOLD_OP && d.op != DIRECT_OP;
             let open: Vec<Denial> = all_seen.iter().filter(openable).filter(|_| !all).cloned().collect();
             let openable = all_seen.iter().any(|d| openable(&d));
             if (!all && openable) || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
@@ -697,18 +694,8 @@ impl Guard {
                     (true, here, none) => format!(
                         ", and reach the network beyond this machine (its loopback and its own addresses) {}; \
                          {checks}{} — {}",
-                        match p.redirected {
-                            // (6e′: the session's network takes every connection and answers every name — no
-                            // variable; what isn't TLS or HTTP names no host to check — E4)
-                            true => "through tarae's proxy, which takes every connection they make and answers \
-                                     their names (no proxy variable is set); one that's neither TLS nor HTTP (ssh, \
-                                     a database client) can't go out"
-                                .to_string(),
-                            false => "only through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that \
-                                      ignores it (ssh, a database client, Node's fetch without NODE_USE_ENV_PROXY) \
-                                      can't go out"
-                                .to_string(),
-                        },
+                        "only through tarae's proxy (HTTPS_PROXY, set for every run) — a tool that ignores it \
+                         (ssh, a database client, Node's fetch without NODE_USE_ENV_PROXY) can't go out",
                         // (piece C: the network closed, each host waits on the user's card)
                         match (p.asks_hosts, p.egress.any) {
                             (true, _) => "; each host only once the user said yes to it on its card \
@@ -839,6 +826,10 @@ pub const SESSION_OP: &str = "network-session";
 /// neither the kernel's list of sockets nor `/proc/net` read (step 8, `supervisor::told`): refused, never said to be
 /// another session's.
 pub const UNTOLD_OP: &str = "network-untold";
+
+/// A refusal's op beyond this machine by no way that goes out (Linux's supervisor, `route::Refusal::Direct`): not
+/// through tarae's proxy — raw TCP, a datagram, a tool that ignores the proxy variable. No grant opens it.
+pub const DIRECT_OP: &str = "network-direct";
 
 /// What a Seatbelt policy's runs are kept apart from and share (9a, `guarantees.rs`): its shared memory and priority
 /// — and, where it opens this machine's ports, what listens on them. Pinned by
@@ -983,9 +974,6 @@ pub struct Here {
     /// couldn't be read.
     #[cfg(target_os = "linux")]
     pub addresses: Option<Vec<std::net::IpAddr>>,
-    /// Linux: a keeper of a policy that opens the network takes its runs' connections in the session's network
-    /// (`tier::redirects`) — asked on a run's way only (`policy_from`: the probe); `now` and stand-ins: false.
-    pub redirects: bool,
     /// The sandbox refuses an IPv6 socket on this machine's loopback reached through a v4-mapped address
     /// (`::ffff:127.0.0.1`, what a JVM's 127.0.0.1 is): macOS's Seatbelt takes it as no `localhost`, connect and
     /// bind alike, below 27 — measured refused on 26.6.2, taken on 27.0.1 (`target/sb/macos26-jvm.md`; older ones
@@ -1028,7 +1016,6 @@ impl Here {
                     crate::log::line("sandbox", "warn", &said);
                 })
                 .ok(),
-            redirects: false,
             v4_mapped_refused: macos_major().is_some_and(|m| m < 27),
             #[cfg(test)]
             asked: Default::default(),
@@ -1688,17 +1675,15 @@ impl Denial {
                 None => self.shown(),
             },
             // (step 5: beyond this machine only through tarae's proxy — a direct connect, or a send naming it)
-            "network-direct" => {
-                match t.strip_prefix("remote:").map(|r| r.split_once(" — ").unwrap_or((r, ""))) {
-                    Some((at, "")) => format!(
-                        "connecting to {at} directly — beyond this machine your commands go only through tarae's \
+            DIRECT_OP => match t.strip_prefix("remote:").map(|r| r.split_once(" — ").unwrap_or((r, ""))) {
+                Some((at, "")) => format!(
+                    "connecting to {at} directly — beyond this machine your commands go only through tarae's \
                      proxy (HTTPS_PROXY); a tool that ignores it (ssh, a database client, Node's fetch without \
                      NODE_USE_ENV_PROXY) can't go out"
-                    ),
-                    Some((at, why)) => format!("connecting to {at} — {why}"),
-                    None => self.shown(),
-                }
-            }
+                ),
+                Some((at, why)) => format!("connecting to {at} — {why}"),
+                None => self.shown(),
+            },
             // (step 5: the egress proxy's own refusals, `host:port: why` — `proxy::tell`)
             "network-proxy" => format!("reaching {t}"),
             // (step 5g: the upstream proxy's failure, not tarae's refusal — `host:port: through …`)
@@ -1710,16 +1695,6 @@ impl Denial {
             "network-host" => match t.split_once(": ") {
                 Some((at, why)) => format!("reaching {at} — {why}"),
                 None => format!("reaching {t}"),
-            },
-            // (6e+: raw TCP the user's answer would let through — `host:port: why`)
-            "network-raw" => match t.split_once(": ") {
-                Some((at, why)) => format!("a raw connection to {at} — {why}"),
-                None => format!("a raw connection to {t}"),
-            },
-            // (6e+: a name's records the user's answer would let it look up — `SRV _x._tcp.name: why`)
-            "network-lookup" => match t.split_once(": ") {
-                Some((asked, why)) => format!("looking up {asked} — {why}"),
-                None => format!("looking up {t}"),
             },
             "network-bound" => match t.strip_prefix("remote:").and_then(|t| t.split_once(' ')) {
                 Some((at, why)) => format!("connecting to {at} {why}"),
@@ -3325,9 +3300,6 @@ pub fn policy_opening(root: &Path, llm: &crate::llm::LlmConfig, keys: &[PathBuf]
 /// The policy for the run about to start with the settings and grants `w` (`tools::with_allowed`) and what
 /// `here` says of tarae's surroundings (`Editor.sandbox_here`: a test's own).
 pub fn policy_from(root: &Path, w: crate::tools::Widened, here: &Here) -> Result<Policy, String> {
-    // (Linux: whether its keeper takes its connections in the session's network — the probe's, asked here)
-    #[cfg(target_os = "linux")]
-    let here = &Here { redirects: here.os == Os::Linux && tier::redirects(), ..here.clone() };
     let mut p = run_policy_in(root, &w.llm, &w.reads, here)?;
     // (what no setting carries goes on before Linux's rules are made from the policy: a file named like a key
     // the user opened is left out of what they close — 7b)
@@ -3404,11 +3376,9 @@ fn policy_computed(
             .inspect_err(|e| crate::log::line("sandbox", "warning", &format!("a run's proxy port: {e}")))
             .ok();
     }
-    // (Linux: the supervisor hands the run's connections over — in the session's network where its keeper gets
-    // one, taken there: the open network needs no proxy URL)
+    // (Linux: the supervisor hands a connect to the proxy's address over to the proxy)
     p.supervised = here.os == Os::Linux;
     p.keys = Some(Vec::new());
-    p.redirect(here.redirects);
     with_kept(&mut p, &env);
     (p, Found { real_home, above, own })
 }
@@ -6939,7 +6909,7 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// A run with no proxy URL (the network closed — and after step 6, a session whose network redirects) gets
+    /// A run with no proxy URL (the network closed) gets
     /// none of the packs' proxy lines: no file, no variable — and a kept home holding a file from an earlier
     /// run with one loses it (the file is tarae's whole; Gradle would read a proxy that isn't there).
     #[test]
@@ -7171,17 +7141,15 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
-    /// 6e′: where the session's network takes a run's connections (Linux, `Here.redirects` — the probe's, on a
-    /// run's way), the run has no proxy URL and none of what hangs on it — no proxy variable, none of the packs'
-    /// proxy lines (Node's flag, Maven's settings) — and its key isn't that of a run that has them (a daemon
-    /// started with proxy lines isn't reused). Where it doesn't (no TPROXY), as before; the network closed, nothing to
-    /// take; macOS keeps the run's own port whatever `redirects` says.
+    /// Every Linux run that goes beyond — the open network's, and the closed one's that asks each host (piece C) —
+    /// has the proxy URL and what hangs on it, whatever tier its keeper is: the proxy variables and the packs' proxy
+    /// lines (Node's flag); the report names the variable a tool mustn't ignore. macOS keeps the run's own port.
     #[test]
-    fn where_the_session_takes_the_connections_a_run_gets_no_proxy_lines() {
-        let made = |os: Os, network: bool, redirects: bool| {
-            let t = crate::scratch::Scratch::new(&format!("sb-6e2-{os:?}-{network}-{redirects}")).into_path();
+    fn every_run_that_goes_beyond_gets_the_proxy_lines() {
+        let made = |os: Os, network: bool| {
+            let t = crate::scratch::Scratch::new(&format!("sb-proxy-lines-{os:?}-{network}")).into_path();
             std::fs::create_dir_all(t.join("p")).unwrap();
-            let here = Here { tmp: Some(t.clone()), uid: 501, os, redirects, ..Here::default() };
+            let here = Here { tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
             let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
             let p = policy_in(&t.join("p"), &llm, &[], &here);
             let cmd = command(Some(&p), "true", &[]);
@@ -7195,43 +7163,27 @@ mod tests {
             std::fs::remove_dir_all(&t).ok();
             (p, vars)
         };
-        let (taken, vars) = made(Os::Linux, true, true);
-        assert!(taken.redirected && taken.supervised, "{taken:?}");
-        assert_eq!((taken.proxy_url(), vars), (None, Vec::<String>::new()));
-        let (proxied, vars) = made(Os::Linux, true, false);
-        assert!(!proxied.redirected && proxied.proxy_url().is_some());
-        for v in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY"] {
-            assert!(vars.iter().any(|s| s == v), "no TPROXY: {v} — {vars:?}");
+        for network in [true, false] {
+            let (p, vars) = made(Os::Linux, network);
+            assert!(p.supervised && p.proxy_url().is_some_and(|u| !u.per_run), "network {network}: {p:?}");
+            assert_eq!(p.asks_hosts, !network);
+            for v in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NODE_USE_ENV_PROXY"] {
+                assert!(vars.iter().any(|s| s == v), "network {network}: {v} — {vars:?}");
+            }
+            // (and the report names the variable a tool mustn't ignore — Linux's report: on macOS a Linux policy has
+            // no port of its own to the proxy, and reads as loopback only)
+            #[cfg(target_os = "linux")]
+            {
+                let said = Guard::In(Box::new(p.clone())).report(&[]);
+                let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    said.contains("only through tarae's proxy (HTTPS_PROXY, set for every run)"),
+                    "{said}"
+                );
+            }
         }
-        assert_ne!(policy_key(&taken), policy_key(&proxied), "with the lines or without: two keys");
-        // (and the report says which: no variable to name, or the one a tool mustn't ignore — Linux's report: on
-        // macOS a Linux policy has no port of its own to the proxy, and reads as loopback only)
-        #[cfg(target_os = "linux")]
-        {
-            let said = |p: &Policy| {
-                Guard::In(Box::new(p.clone())).report(&[]).split_whitespace().collect::<Vec<_>>().join(" ")
-            };
-            let (taken_said, proxied_said) = (said(&taken), said(&proxied));
-            assert!(
-                taken_said.contains(
-                    "through tarae's proxy, which takes every connection they make and answers their names (no \
-                     proxy variable is set)"
-                ) && !taken_said.contains("HTTPS_PROXY"),
-                "{taken_said}"
-            );
-            assert!(
-                proxied_said.contains("only through tarae's proxy (HTTPS_PROXY, set for every run)"),
-                "{proxied_said}"
-            );
-        }
-        // (piece C: closed, each host asked goes the same way — taken, no proxy line)
-        let (closed, vars) = made(Os::Linux, false, true);
-        assert!(
-            closed.asks_hosts && closed.redirected && closed.proxy_url().is_none() && vars.is_empty(),
-            "{vars:?}"
-        );
-        let (mac, _) = made(Os::Mac, true, true);
-        assert!(!mac.redirected && mac.proxy_url().is_some_and(|u| u.per_run));
+        let (mac, _) = made(Os::Mac, true);
+        assert!(mac.proxy_url().is_some_and(|u| u.per_run));
     }
 
     /// A proxy URL that's the same for every run is part of a policy's key (step 5f): a home a daemon lives from
@@ -8409,6 +8361,39 @@ mod tests {
         );
     }
 
+    /// A run refused only beyond this machine past the proxy (`network-direct`: ssh, a database client) is told in
+    /// plain words that no grant opens it and that the way is a run outside — Claude's `outside_sandbox`, the user's
+    /// y or n; not pointed at settings that wouldn't help, and nothing in it is `also`'s to open.
+    #[test]
+    fn a_connection_past_the_proxy_is_said_to_open_only_outside() {
+        let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let w = Watch::quiet("t.");
+        w.record(Denial {
+            process: "ssh".into(),
+            op: DIRECT_OP.into(),
+            target: "remote:192.0.2.7:22".into(),
+        });
+        let r = Guard::In(Box::new(Policy { watch: Some(w), ..p })).report_with(&[], Told::default(), false);
+        let text = r.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            text.contains(
+                "connecting to 192.0.2.7:22 directly — beyond this machine your commands go only through tarae's \
+                 proxy (HTTPS_PROXY)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "What says network-direct no grant opens: beyond this machine your commands go only through tarae's \
+                 proxy"
+            ) && text.contains("ask to run it outside the sandbox (outside_sandbox, with your reason — the user \
+                 answers y or n)"),
+            "{text}"
+        );
+        assert!(!text.contains("space m s") && !text.contains("llm.sandbox-network and"), "{text}");
+        assert!(r.open.is_empty(), "nothing for also to open: {:?}", r.open);
+    }
+
     /// What Claude reads: what was blocked (deduplicated, with who tried); that nothing was; or that nothing
     /// could watch — then the output's refusals.
     #[test]
@@ -8524,26 +8509,6 @@ mod tests {
         let closed = crate::llm::LlmConfig { sandbox_hosts: Hosts::Any, ..Default::default() };
         let closed = policy_in(&root, &closed, &[], &here).egress;
         assert!(closed.closed && !closed.any && closed.hosts.is_empty(), "{closed:?}");
-    }
-
-    /// 6e+: a raw connection or a name's records refused say so in the report, each in its own words and op — the
-    /// host:port or the question first (as the proxy sends them: `serve_raw`'s reset, the held lookup's refusal),
-    /// then why; a target without its why said whole.
-    #[test]
-    fn the_report_says_why_raw_tcp_or_a_lookup_was_refused() {
-        let raw = |target: &str| denial(proxy::RAW_OP, target).reported();
-        assert_eq!(
-            raw("db.test:5432: the user refused it — tarae refused it: the tool sees its connection reset"),
-            "a raw connection to db.test:5432 — the user refused it — tarae refused it: the tool sees its connection \
-             reset (network-raw, touch)"
-        );
-        assert_eq!(raw("db.test:5432"), "a raw connection to db.test:5432 (network-raw, touch)");
-        let lookup = |target: &str| denial(proxy::LOOKUP_OP, target).reported();
-        assert_eq!(
-            lookup("SRV _mongodb._tcp.cluster.test: the user refused it for this session"),
-            "looking up SRV _mongodb._tcp.cluster.test — the user refused it for this session (network-lookup, touch)"
-        );
-        assert_eq!(lookup("TXT cluster.test"), "looking up TXT cluster.test (network-lookup, touch)");
     }
 
     /// Seatbelt's words in plain ones (its network denials name only the port: measured) — and its own
@@ -8705,7 +8670,6 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
-            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -9750,7 +9714,6 @@ mod tests {
                 tag: None,
                 proxy: None,
                 supervised: Os::HOST == Os::Linux,
-                redirected: false,
                 egress: Default::default(),
                 run_id: 0,
                 session: 0,
@@ -9833,7 +9796,6 @@ mod tests {
             tag: Some(tag.to_string()),
             proxy: None,
             supervised: Os::HOST == Os::Linux,
-            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -9903,7 +9865,6 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
-            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,
@@ -11106,7 +11067,6 @@ mod tests {
             tag: None,
             proxy: None,
             supervised: Os::HOST == Os::Linux,
-            redirected: false,
             egress: Default::default(),
             run_id: 0,
             session: 0,

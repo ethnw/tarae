@@ -1708,7 +1708,6 @@ fn landlock_run(ns: crate::sandbox::guarantees::Ns, served: bool) -> crate::sand
         served: if served { Ok(()) } else { Err(PIDFD_REFUSED.into()) },
         abi: 8,
         ptys: None,
-        tproxy: if ns.netns() { Ok(()) } else { Err("no network namespace of its own".into()) },
         lo_missing: Vec::new(),
         short: None,
         brief: None,
@@ -1739,7 +1738,7 @@ fn tarae_state_says_the_sandbox() {
         frame(ed);
         sandbox.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
     };
-    // The first run: its keeper has every namespace (its own network: TPROXY)
+    // The first run: its keeper has every namespace (its network by tarae's proxy)
     let own = landlock_run(Ns::session(true, true), true);
     let line = "tier own · Landlock ABI 8 · loopback its own · network closed · shared nothing";
     watch::sandbox(&mut ed, own.clone());
@@ -1760,7 +1759,7 @@ fn tarae_state_says_the_sandbox() {
         json!({
             "by": "landlock", "tier": "own", "abi": 8, "partial": false,
             "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
-            "network": { "open": false, "asked": false, "listed": false, "way": "tproxy" }, "kept": kept, "shared": [],
+            "network": { "open": false, "asked": false, "listed": false, "way": "proxy" }, "kept": kept, "shared": [],
             "why": null, "hint": null, "line": line,
         })
     );

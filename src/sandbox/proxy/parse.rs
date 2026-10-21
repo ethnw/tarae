@@ -137,23 +137,6 @@ fn token(s: &[u8]) -> bool {
     !s.is_empty() && s.iter().all(|&c| tchar(c))
 }
 
-/// Whether `b` — a connection's first bytes, before its blank line — can still start an origin-form request line: a
-/// method (a token no longer than the longest of `METHODS`), one space, a path (`/`). ssh's banner, a database's
-/// binary startup, Redis's commands can't — told at once rather than waited on.
-fn may_start(b: &[u8]) -> bool {
-    let longest = METHODS.iter().map(|m| m.len()).max().unwrap_or(0);
-    let sp = b.iter().position(|&c| c == b' ');
-    let method = &b[..sp.unwrap_or(b.len())];
-    if method.len() > longest || !method.iter().all(|&c| tchar(c)) {
-        return false;
-    }
-    match sp {
-        None => true,
-        Some(0) => false,
-        Some(i) => b.get(i + 1).is_none_or(|&c| c == b'/'),
-    }
-}
-
 /// A head in `buf` — what a client sent so far: the request, None while its blank line hasn't come (and
 /// `HEAD_MAX` isn't reached), or why it's refused.
 pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
@@ -221,58 +204,6 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
         plain(method, target, version, &headers, body)?
     };
     Ok(Some(Head { request, auth, len: end + 4 }))
-}
-
-/// A plain-http request as a client sends it to its server (origin form: `GET /path HTTP/1.1` and its `Host`) —
-/// what the session's network hands tarae (6d), its connection having gone to `port`: the request `head` would make
-/// of it in absolute form, its host its one `Host`'s. A port `Host` names must be `port`; without one, `port` is it
-/// (`Host` leaves out only the scheme's default, which is the port it went to). None while its blank line hasn't come
-/// and what came can still start a request line (`may_start`: 6e+, so raw TCP is told at its first bytes); `CONNECT`
-/// and every other refusal as `head`'s, and: a target that isn't a path, no `Host` or two of them.
-pub fn origin(buf: &[u8], port: u16) -> Result<Option<Head>, Refusal> {
-    let window = &buf[..buf.len().min(HEAD_MAX)];
-    let Some(end) = find(window, b"\r\n\r\n") else {
-        if !may_start(window) {
-            return Err(Refusal::Malformed("its first bytes can't start a request line"));
-        }
-        return if buf.len() >= HEAD_MAX { Err(Refusal::TooLong) } else { Ok(None) };
-    };
-    let head_bytes = &window[..end + 4];
-    let line_end = find(head_bytes, b"\r\n").unwrap_or(end);
-    let mut parts = head_bytes[..line_end].split(|&c| c == b' ');
-    let (Some(method), Some(target), Some(version), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(Refusal::Malformed("a request line that isn't three words"));
-    };
-    if !target.starts_with(b"/") {
-        return Err(Refusal::Malformed("a target that isn't a path (a request to its server names one)"));
-    }
-    let hosts: Vec<&[u8]> = head_bytes[line_end..end]
-        .split(|&c| c == b'\n')
-        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
-        .filter_map(|l| {
-            let colon = l.iter().position(|&c| c == b':')?;
-            l[..colon].eq_ignore_ascii_case(b"host").then(|| l[colon + 1..].trim_ascii())
-        })
-        .collect();
-    let [named] = hosts[..] else {
-        return Err(Refusal::Malformed("a request to its server without one `Host`"));
-    };
-    let (host, at) = authority(named, Some(port))?;
-    if at != port {
-        return Err(Refusal::Host("its Host names another port than the one it connected to"));
-    }
-    // (in absolute form — the head `head` takes, its checks all of them — then its length back to what was sent)
-    let mut absolute = Vec::with_capacity(end + 300);
-    absolute.extend_from_slice(method);
-    absolute.extend_from_slice(format!(" http://{}", host.header(port, 80)).as_bytes());
-    absolute.extend_from_slice(target);
-    absolute.push(b' ');
-    absolute.extend_from_slice(version);
-    absolute.extend_from_slice(&head_bytes[line_end..]);
-    let grown = absolute.len() - head_bytes.len();
-    Ok(head(&absolute)?.map(|h| Head { len: h.len - grown, ..h }))
 }
 
 /// A plain request's body framed one way only, so the proxy and the server can't read its end differently: no

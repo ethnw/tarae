@@ -977,21 +977,12 @@ pub fn confine(
     // (9a: what this run's keeper is — never a session's earlier one: a policy that changed has another keeper)
     let guarantees = keeper.map(|k| {
         let probed = super::tier::probed();
-        let tproxy = match k.network.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-            true => Ok(()),
-            false if !ns.netns() => Err("no network namespace of its own".to_string()),
-            false => match probed.map(|p| &p.redirect) {
-                Some(Err(why)) => Err(why.clone()),
-                _ => Err("its keeper has no network of the session's".to_string()),
-            },
-        };
         let lo = [(k.lo_missing.v4, "IPv4"), (k.lo_missing.v6, "IPv6")];
         super::guarantees::Guarantees::landlock(super::guarantees::Found {
             ns,
             served: c.serve.clone(),
             abi: c.abi,
             ptys: ptys.as_ref().map(|_| super::ptys::POOL),
-            tproxy,
             lo_missing: lo.into_iter().filter_map(|(m, f)| m.then_some(f)).collect(),
             short: probed.and_then(|p| p.short.clone()),
             brief: probed.and_then(|p| p.brief.clone()),

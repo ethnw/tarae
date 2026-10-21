@@ -5002,7 +5002,7 @@ mod tests {
         assert!(super::could_reach_out(&ed, true), "past the sandbox");
         let why = Why::NotACheck("git".into());
         assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::None);
-        ed.session.hosts.push((crate::sandbox::proxy::Kind::Host, "crates.io".into(), 443));
+        ed.session.hosts.push(("crates.io".into(), 443));
         assert!(super::could_reach_out(&ed, false), "closed, a host let through for the session");
         assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::Outward);
         ed.session.hosts.clear();
@@ -5750,7 +5750,7 @@ mod tests {
     #[test]
     fn a_hosts_yes_reaches_the_runs_rules_alone() {
         use crate::allow::Grant;
-        use crate::sandbox::proxy::{Kind, Scope, ToProxy};
+        use crate::sandbox::proxy::{Scope, ToProxy};
         use serde_json::json;
         let scratch = crate::scratch::Scratch::new("also-host");
         let dir = std::fs::canonicalize(&scratch).unwrap();
@@ -5789,7 +5789,7 @@ mod tests {
         // `a`: this conversation's — to the proxy, kept with the chat
         also_sent(&mut ed, generation, 2, also("chat.example.invalid")).unwrap().expect("its card");
         also_key(&mut ed, 'a');
-        let chat = |m: &ToProxy| matches!(m, ToProxy::Answer { kind: Kind::Host, host, scope: Scope::Chat, .. } if host == "chat.example.invalid");
+        let chat = |m: &ToProxy| matches!(m, ToProxy::Answer { host, scope: Scope::Chat, .. } if host == "chat.example.invalid");
         assert!(sent().iter().any(chat), "to the proxy for the conversation");
         let kept = &ed.session.chat.as_ref().unwrap().allowed.hosts;
         assert_eq!(kept, &[("chat.example.invalid".to_string(), 443)]);
@@ -5798,7 +5798,7 @@ mod tests {
         also_key(&mut ed, 's');
         let session = |m: &ToProxy| matches!(m, ToProxy::Answer { host, scope: Scope::Session, .. } if host == "session.example.invalid");
         assert!(sent().iter().any(session), "to the proxy for the session");
-        assert_eq!(ed.session.hosts, [(Kind::Host, "session.example.invalid".to_string(), 443)]);
+        assert_eq!(ed.session.hosts, [("session.example.invalid".to_string(), 443)]);
         ed.session.task_run = None;
     }
 
@@ -5807,7 +5807,6 @@ mod tests {
     /// another host comes to its card, open or closed.
     #[test]
     fn a_host_let_through_already_just_runs() {
-        use crate::sandbox::proxy::Kind;
         use serde_json::json;
         let scratch = crate::scratch::Scratch::new("also-listed");
         let dir = std::fs::canonicalize(&scratch).unwrap();
@@ -5829,7 +5828,7 @@ mod tests {
         assert_eq!(also_sent(&mut ed, generation, 3, also("pkg.example.invalid")), Ok(None), "any host");
         // The network closed: the session's grant, a registry's `*.domain` too
         ed.config.llm.sandbox_network = false;
-        ed.session.hosts.push((Kind::Host, "*.crates.io".into(), 443));
+        ed.session.hosts.push(("*.crates.io".into(), 443));
         assert_eq!(also_sent(&mut ed, generation, 4, also("static.crates.io")), Ok(None), "granted");
         assert!(also_sent(&mut ed, generation, 5, also("crates.io")).unwrap().is_some(), "not under it");
         ed.offers.clear();

@@ -242,8 +242,8 @@ Kept:
   test: `sandbox::tests::a_closed_network_goes_through_the_proxy_with_an_empty_list` ·
   `caps::tests::what_may_be_kept_and_for_how_long` · `hosts::tests::the_closed_network_asks_each_host_for_a_session_at_most` ·
   `sandbox::proxy::macos_tests::with_the_network_closed_a_host_waits_and_yes_lets_it_through`
-- **Before your yes nothing leaves**: the name stays in the request (macOS) or gets a stand-in address (TPROXY,
-  E1) — no lookup; a name a run makes up reaches only your screen; at most `Limits::questions` (8) wait at once.
+- **Before your yes nothing leaves**: the name stays in the request — no lookup; a name a run makes up reaches
+  only your screen; at most `Limits::questions` (8) wait at once.
   A conversation's yes (`a`) is taken back when it ends.
   test: `hosts::tests::a_chat_answer_is_taken_back_when_the_conversation_ends` ·
   `sandbox::proxy::tests::a_registrys_suggestion_answered_lets_its_names_through`
@@ -256,15 +256,15 @@ Kept:
   `sandbox::keeper::tests::this_machines_own_address_is_reached_only_where_opened` ·
   `sandbox::route::tests::this_machines_own_addresses_are_this_machine`
 - **Beyond, only through tarae's proxy.** On macOS the run gets `HTTPS_PROXY` and may connect only to its own
-  proxy port, with a token of its own. On Linux, where the session has its own network (TPROXY), there's no
-  variable: every connection and every name lookup is taken by tarae; elsewhere the variable, and a tool that
-  ignores it can't go out.
+  proxy port, with a token of its own. On Linux, in every tier, the variable names the proxy's reserved address,
+  which the supervisor hands to the proxy; a tool that ignores it, or raw TCP (ssh, a database client), can't go
+  out — no card opens it, only a run outside the sandbox.
   test: `sandbox::proxy::macos_tests::a_run_goes_out_only_through_its_proxy` ·
   `sandbox::proxy::macos_tests::a_run_reaches_only_its_own_proxy_port` ·
   `sandbox::proxy::macos_tests::a_runs_token_is_its_own_and_never_passed_through` ·
   `sandbox::route::tests::the_proxy_is_the_only_way_out` · `sandbox::keeper::tests::a_direct_connect_is_refused_with_the_proxy` ·
-  `sandbox::keeper::tests::a_runs_connection_beyond_reaches_its_host_through_the_planted_socket` ·
-  `sandbox::keeper::tests::a_run_has_no_proxy_variable_where_its_keeper_has_the_network`
+  `sandbox::keeper::tests::a_proxied_connect_holds_a_tcp_socket` ·
+  `sandbox::tests::a_connection_past_the_proxy_is_said_to_open_only_outside`
 - **Hosts by name.** The proxy reads the host from `CONNECT` and the TLS server name (they must match), resolves
   it itself, checks every address, and connects to the address it checked. With the network on, a host
   `llm.sandbox-hosts` doesn't name — by default every host but the packs' registries — waits on a card.
@@ -304,8 +304,7 @@ Not kept:
   `localhost` only), so the risky ports there are reached with the network on. An open item in the design doc.
 - **Behind an upstream proxy**, the addresses a name leads to are the upstream's to look up: tarae checks the host
   and server name, not the address.
-- **DNS as a channel**: where the session answers names (TPROXY), a run's questions are tarae's; with the
-  variable, a tool that does its own lookups gets no resolver
+- **DNS as a channel**: a tool that does its own lookups gets no resolver
   (test: `sandbox::keeper::tests::under_the_proxy_a_resolver_isnt_reached`). Names asked through the proxy still
   leave as lookups tarae makes — a name can carry data.
 
@@ -317,12 +316,10 @@ table is the code's — a test fails when they differ.
 <!-- tiers: from src/snapshots/sandbox_guarantees.txt, ABI 6 and Seatbelt — the_docs_tier_table_is_the_codes -->
 | Tier, and what differs | Network | Kept apart from other sessions' commands | Shared with them |
 |---|---|---|---|
-| own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
-| own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
+| own, the project in /dev/shm | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
+| own, its lo without an IPv6 address | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
@@ -669,7 +666,7 @@ Not Claude's, but a hostile repository reaches them:
 - **The supervisor** — `src/sandbox/supervisor.rs`: reads a run's arguments from `/proc/<tid>/mem` after
   `SECCOMP_IOCTL_NOTIF_ID_VALID`, decides on tarae's copy (`route.rs`), makes the call on the run's socket
   (`pidfd_getfd`), never `CONTINUE`. Unix paths: `openat2`, no links.
-- **The proxy** — `src/sandbox/proxy.rs`, `proxy/parse`, `proxy/egress`, `proxy/upstream`, `redirect.rs` (TPROXY).
+- **The proxy** — `src/sandbox/proxy.rs`, `proxy/parse`, `proxy/egress`, `proxy/upstream`, `supervisor.rs`'s `proxied` (a run's connect to the proxy's address).
 - **The keeper's birth** — `src/sandbox/keeper.rs` (`clone3`, raw calls until exec), `channel.rs` (its request
   channel), `tier.rs` (the probe).
 - How each test was seen failing: the design doc's

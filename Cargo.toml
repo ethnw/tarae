@@ -33,9 +33,6 @@ ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
-# The transparent proxy's netlink (sandbox/redirect.rs): the session's routes and owned nf_tables batch. Its
-# builders compile everywhere (the ruleset's golden runs on macOS too); only Linux sends them.
-tarae-netlink = { path = "netlink" }
 
 [profile.release]
 lto = true
@@ -117,9 +114,8 @@ tar = "0.4"
 toml = "1.1.6"
 
 # Dev task crate (cargo xtask — .cargo/config.toml). Doesn't affect `cargo install --path .`
-# `netlink`: tarae's own netlink (step 6's transparent proxy, `target/sb/step6-plan.md`)
 [workspace]
-members = ["xtask", "netlink"]
+members = ["xtask"]
 
 # `fuzzing`: what cargo-fuzz sets (`--cfg fuzzing`) when fuzz/parsers includes a reader's module — its properties
 # (`check`) are built for tests and for it, never in tarae's own build
@@ -129,4 +125,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 [dev-dependencies]
 vt100 = "0.16.2"
 wat = "1"  # wasm runtime tests are written as text
-tarae-netlink = { path = "netlink", features = ["fixtures"] }  # what nft and ip sent, for redirect.rs's golden

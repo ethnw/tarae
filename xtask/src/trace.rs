@@ -34,7 +34,7 @@ const PACKAGES: &str = "clang llvm bpftool libbpf-dev libelf-dev zlib1g-dev pkg-
 /// rebuilds only what changed (a fresh clone each run relinked all of tarae: ~110 s).
 const SYNC: &str = "git config --global --add safe.directory '*'\n\
      rm -rf /tmp/new && git clone -q --depth 1 file:///src /tmp/new && cd /tmp/new\n\
-     git -C /src diff HEAD | git apply --allow-empty\n\
+     git -C /src diff --binary HEAD | git apply --allow-empty\n\
      git -C /src ls-files --others --exclude-standard -z | (cd /src && tar --null -T - -cf -) | tar -xf -\n\
      mkdir -p /work/tarae && rsync -rlc --delete --exclude=/target /tmp/new/ /work/tarae/ && cd /work/tarae\n\
      echo \"toolchain: $(rustc --version)\"\n";

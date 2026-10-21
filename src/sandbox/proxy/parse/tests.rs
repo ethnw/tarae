@@ -148,106 +148,6 @@ fn the_connect_parser_never_panics() {
     assert!(past > 5000, "grown past the limit: {past}");
 }
 
-/// curl's plain POST as it sends it to its server (no proxy): what the session's network hands tarae (6d).
-const TO_ITS_SERVER: &[u8] =
-    b"POST /form?a=1 HTTP/1.1\r\nHost: example.invalid\r\nUser-Agent: curl/8.7.1\r\n\
-    Accept: */*\r\nContent-Length: 3\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nx=1";
-
-/// A request to its server (origin form, 6d) is read by its `Host`, at the port it connected to: the head that goes
-/// on is the one a proxy's absolute form makes — its path, its `Host` again (with the port where it isn't 80), no
-/// `Proxy-*`, `Connection: close` — and its length is the head as sent, so the body after it is the client's own
-/// bytes. A head cut short anywhere is "more".
-#[test]
-fn a_request_to_its_server_is_read_by_its_host() {
-    let h = origin(TO_ITS_SERVER, 80).unwrap().unwrap();
-    assert_eq!(&TO_ITS_SERVER[h.len..], b"x=1", "the body after the head as sent");
-    for cut in 0..h.len {
-        assert_eq!(origin(&TO_ITS_SERVER[..cut], 80), Ok(None), "cut at {cut}");
-    }
-    let Request::Plain { method: "POST", host: Host::Name(n), port: 80, head: on, body: Framing::Length(3) } =
-        h.request
-    else {
-        panic!("{:?}", h.request)
-    };
-    assert_eq!(n, "example.invalid");
-    let on = String::from_utf8(on).unwrap();
-    assert!(
-        on.starts_with("POST /form?a=1 HTTP/1.1\r\nHost: example.invalid\r\nUser-Agent: curl/8.7.1\r\n"),
-        "{on}"
-    );
-    assert!(on.ends_with("\r\nConnection: close\r\n\r\n"), "{on}");
-    // (another port: `Host` names it, or leaves it out — it's the one the connection went to either way)
-    let named = b"GET / HTTP/1.1\r\nHost: Example.Invalid:8080\r\n\r\n";
-    let unnamed = b"GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n";
-    for raw in [&named[..], &unnamed[..]] {
-        let h = origin(raw, 8080).unwrap().unwrap();
-        let Request::Plain { host, port, head, .. } = h.request else { panic!() };
-        assert_eq!((host, port), (Host::Name("example.invalid".into()), 8080));
-        assert!(head.starts_with(b"GET / HTTP/1.1\r\nHost: example.invalid:8080\r\n"));
-        assert_eq!(h.len, raw.len());
-    }
-    // (an address is read as one — the proxy refuses it: rules name hosts)
-    let addressed = origin(b"GET / HTTP/1.1\r\nHost: 93.184.216.34\r\n\r\n", 80).unwrap().unwrap();
-    assert!(matches!(addressed.request, Request::Plain { host: Host::Addr(_), .. }));
-}
-
-/// What isn't a request to its server is refused, each with its why: no `Host` or two (which one would the rules
-/// judge?), a port in `Host` other than the one it connected to (the rules would judge one, the server see the
-/// other), a target that isn't a path — absolute form, `CONNECT` — and everything `head` refuses.
-#[test]
-fn what_isnt_a_request_to_its_server_is_refused() {
-    let refused = |raw: &[u8], port| origin(raw, port).err();
-    assert!(matches!(refused(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", 80), Some(Refusal::Malformed(_))));
-    let two = b"GET / HTTP/1.1\r\nHost: a.example\r\nHost: b.example\r\n\r\n";
-    assert!(matches!(refused(two, 80), Some(Refusal::Malformed(_))));
-    assert!(matches!(refused(b"GET / HTTP/1.1\r\nHost: a.example:81\r\n\r\n", 80), Some(Refusal::Host(_))));
-    let absolute = b"GET http://a.example/ HTTP/1.1\r\nHost: a.example\r\n\r\n";
-    assert!(matches!(refused(absolute, 80), Some(Refusal::Malformed(_))));
-    let connect = b"CONNECT a.example:443 HTTP/1.1\r\nHost: a.example:443\r\n\r\n";
-    assert!(matches!(refused(connect, 443), Some(Refusal::Malformed(_))));
-    assert_eq!(refused(b"BREW / HTTP/1.1\r\nHost: a.example\r\n\r\n", 80), Some(Refusal::Method));
-    assert!(refused(b"GET / HTTP/1.1\r\nHost: a.example\r\nX\x01: y\r\n\r\n", 80).is_some());
-}
-
-/// 6e+: first bytes that can't start a request line are refused at once, before any blank line — so raw TCP (ssh's
-/// banner, Postgres's binary startup, a Redis command) is told at its first bytes, not after the head's time. A
-/// request still coming — a method so far, its space, its path's `/` — is "more".
-#[test]
-fn what_cant_start_a_request_is_refused_at_once() {
-    let cant = Some(Refusal::Malformed("its first bytes can't start a request line"));
-    for raw in [
-        &b"SSH-2.0-OpenSSH_9.9\r\n"[..],
-        &[0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f],
-        b"*1\r\n$4\r\nPING\r\n",
-        b"PING\r\n",
-    ] {
-        assert_eq!(origin(raw, 80).err(), cant, "{raw:?}");
-    }
-    assert_eq!(origin(b"GET http", 80).err(), cant, "absolute form, told at its first letter");
-    assert_eq!(origin(b" GET", 80).err(), cant);
-    for more in [&b""[..], b"G", b"OPTIONS", b"GET ", b"GET /index.ht"] {
-        assert_eq!(origin(more, 80), Ok(None), "{more:?}");
-    }
-}
-
-/// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal as `check::origin` has
-/// it. The hand-made request mutated 100,000 times, some grown past `HEAD_MAX`.
-#[test]
-fn the_origin_parser_never_panics() {
-    let mut rng = Rng(0x6d6d_0d0d_5eed_0006);
-    let (mut requests, mut refusals) = (0, 0);
-    for _ in 0..100_000 {
-        let mut b = TO_ITS_SERVER.to_vec();
-        mutate(&mut rng, &mut b, HEAD_MAX);
-        match check::origin(&b) {
-            "request" => requests += 1,
-            "more" => {}
-            _ => refusals += 1,
-        }
-    }
-    assert!(requests > 1000 && refusals > 10_000, "{requests} / {refusals}");
-}
-
 /// The handshake bytes of a captured ClientHello (from its records), and the same split into `k` records.
 fn handshake(hello: &[u8]) -> Vec<u8> {
     let (mut hs, mut at) = (Vec::new(), 0);
@@ -569,8 +469,7 @@ fn the_body_parser_never_panics() {
     assert!(done > 1000 && errors > 10_000, "{done} / {errors}");
 }
 
-/// The fuzz targets' seeds (`fuzz/parsers/seeds/`): `head` the captured heads, `origin` requests to their server,
-/// `sni` the captured ClientHellos whole and in three records, `body` chunked bodies (`check::body_input`'s first
+/// The fuzz targets' seeds (`fuzz/parsers/seeds/`): `head` the captured heads, `sni` the captured ClientHellos whole and in three records, `body` chunked bodies (`check::body_input`'s first
 /// byte: 1, 3, 255, 511 bytes at a time).
 #[test]
 #[ignore = "writes fuzz/parsers/seeds: by hand"]
@@ -578,8 +477,6 @@ fn writes_fuzz_seeds() {
     use crate::mutate::fuzz_seeds;
     let client = |k: usize| CAPTURED[k].0.replace([' ', ','], "-");
     fuzz_seeds("head", heads().into_iter().enumerate().map(|(k, h)| (client(k), h.to_vec())));
-    let get = b"GET /a?b=1 HTTP/1.1\r\nHost: example.invalid:80\r\nAccept: */*\r\n\r\n";
-    fuzz_seeds("origin", [("curl-post".into(), TO_ITS_SERVER.to_vec()), ("get".into(), get.to_vec())]);
     let tunnels: Vec<usize> =
         (0..CAPTURED.len()).filter(|&k| CAPTURED[k].1.starts_with(b"CONNECT")).collect();
     let hellos = hellos().into_iter().zip(&tunnels).flat_map(|(h, &k)| {

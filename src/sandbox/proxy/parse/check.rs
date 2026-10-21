@@ -37,29 +37,6 @@ pub(crate) fn head(b: &[u8]) -> &'static str {
     }
 }
 
-/// Whatever a request to its server holds, `origin` answers a request, "more", or a refusal — never a panic: a
-/// request it answers ends at the first blank line of what was sent, its host a name as `name` makes it (or an
-/// address) at the port it connected to (80 here).
-pub(crate) fn origin(b: &[u8]) -> &'static str {
-    let blank = find(&b[..b.len().min(HEAD_MAX)], b"\r\n\r\n");
-    match super::origin(b, 80) {
-        Ok(Some(h)) => {
-            assert_eq!(Some(h.len - 4), blank, "ends at its first blank line as sent");
-            let Request::Plain { host, port, .. } = &h.request else { panic!("a CONNECT") };
-            assert_eq!(*port, 80);
-            if let Host::Name(n) = host {
-                assert_eq!(name(n).as_ref(), Ok(n));
-            }
-            "request"
-        }
-        Ok(None) => {
-            assert!(blank.is_none() && b.len() < HEAD_MAX);
-            "more"
-        }
-        Err(_) => "refused",
-    }
-}
-
 /// What a tunnel's first bytes claim, read apart from the parser: the handshake's length and how many records it
 /// took to come whole — None where they don't hold one.
 pub(crate) fn claimed(b: &[u8]) -> Option<(usize, usize)> {

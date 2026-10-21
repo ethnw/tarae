@@ -10,7 +10,6 @@ use crate::allow::{Allowed, Grant};
 use crate::caps::{Caps, Source, Why};
 use crate::editor::Editor;
 use crate::picker::{Action, Item, Picker};
-use crate::sandbox::proxy::Kind;
 
 /// The list's kind (`features::PICKERS`) and title.
 pub const KIND: &str = "granted";
@@ -47,7 +46,7 @@ fn taken_as(g: &Grant) -> String {
         Grant::Read(p) | Grant::Write(p) | Grant::Key(p) => p.display().to_string(),
         Grant::Port(n) => format!("port {n}"),
         Grant::Socket(s) => format!("socket {}", s.display()),
-        Grant::Host(h, p) => crate::hosts::listed(Kind::Host, h, *p),
+        Grant::Host(h, p) => crate::hosts::listed(h, *p),
         Grant::Terminals => crate::allow::TERMINALS_LISTED.into(),
         Grant::Localhost => crate::allow::LOCALHOST_LISTED.into(),
         Grant::Env(n) => format!("env {n}"),
@@ -68,7 +67,7 @@ fn when(at: Option<u64>, now: u64) -> String {
 pub fn items(
     caps: &Caps,
     [kept, session, chat]: [&Allowed; 3],
-    hosts: &[(Kind, String, u16)],
+    hosts: &[(String, u16)],
     now: u64,
 ) -> Vec<Item> {
     let mut out = vec![heading("by default")];
@@ -108,13 +107,9 @@ pub fn items(
             seen.push(g);
         }
         if title == "this session" {
-            for (kind, h, p) in hosts {
-                let label = match kind {
-                    Kind::Host => format!("reach {h}:{p}"),
-                    Kind::Raw => format!("raw TCP to {h}:{p}"),
-                    Kind::Lookup => format!("look up {h}'s records"),
-                };
-                let action = Action::Granted(Some(crate::hosts::listed(*kind, h, *p)));
+            for (h, p) in hosts {
+                let label = format!("reach {h}:{p}");
+                let action = Action::Granted(Some(crate::hosts::listed(h, *p)));
                 let hint = "you · until you quit".into();
                 rows.push((0, Item { label, action, hint, glyph: Some(("•", "ui.virtual")) }));
             }

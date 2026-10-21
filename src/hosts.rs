@@ -16,15 +16,11 @@
 //! is answered with the pack's other registries, listed on the card (Q6: the suggestion is words, the yes grants).
 //! A grant naming a registry of a pack with caches opens them to the runs that start under it
 //! (`Policy::open_granted_caches`).
-//!
-//! 6e+ (`target/sb/step6eplus-design.md`): raw TCP to a host:port (`What::HostRaw`) and a name's SRV/TXT records
-//! (`What::Lookup`) are asked the same way, each kept apart from the others (F4) — `y` · `s` · `n`, no `A`: a
-//! lasting allow is the user's own line in `llm.sandbox-hosts`.
 
 use crate::editor::Editor;
 use crate::event::SessionId;
 use crate::offer::{Offer, What};
-use crate::sandbox::proxy::{FromProxy, Kind, Scope, ToProxy};
+use crate::sandbox::proxy::{FromProxy, Scope, ToProxy};
 
 /// A host a run asked to reach, as its card holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,12 +28,8 @@ pub struct Ask {
     /// The proxy's session (`proxy::session_of` its project) and run — what the answer names.
     pub session: u64,
     pub run: u64,
-    /// What's asked for: the host over TLS or HTTP, raw TCP, or its records.
-    pub kind: Kind,
     pub host: String,
     pub port: u16,
-    /// A lookup's questions so far (`SRV _mongodb._tcp.db.example`).
-    pub asked: Vec<String>,
     /// What asked (its process) and in which run (its panel's words).
     pub process: String,
     pub label: String,
@@ -56,53 +48,25 @@ pub struct Ask {
 }
 
 impl Ask {
-    /// `host:port` — a lookup's name alone.
+    /// `host:port`.
     pub fn at(&self) -> String {
-        at(self.kind, &self.host, self.port)
+        format!("{}:{}", self.host, self.port)
     }
 
     /// Whether `other` asks for the same in the same session (one card for both).
     fn same(&self, other: &Ask) -> bool {
-        (self.session, self.kind, &self.host, self.port)
-            == (other.session, other.kind, &other.host, other.port)
+        (self.session, &self.host, self.port) == (other.session, &other.host, other.port)
     }
 }
 
-/// `host:port` — a lookup's name alone.
-fn at(kind: Kind, host: &str, port: u16) -> String {
-    match kind {
-        Kind::Lookup => host.to_string(),
-        _ => format!("{host}:{port}"),
-    }
-}
-
-/// What an answer lets commands do, in words (`reach github.com:443`).
-fn doing(kind: Kind, host: &str, port: u16) -> String {
-    match kind {
-        Kind::Host => format!("reach {host}:{port}"),
-        Kind::Raw => format!("open raw connections to {host}:{port}"),
-        Kind::Lookup => format!("look up {host}'s service records"),
-    }
-}
-
-/// How `:granted` lists it and `:sandbox-disallow` takes it (`host a:443`, `raw a:22`, `lookup a`).
-pub fn listed(kind: Kind, host: &str, port: u16) -> String {
-    match kind {
-        Kind::Host => format!("host {host}:{port}"),
-        Kind::Raw => format!("raw {host}:{port}"),
-        Kind::Lookup => format!("lookup {host}"),
-    }
+/// How `:granted` lists it and `:sandbox-disallow` takes it (`host a:443`).
+pub fn listed(host: &str, port: u16) -> String {
+    format!("host {host}:{port}")
 }
 
 /// What `listed` says, read back.
-pub fn unlisted(s: &str) -> Option<(Kind, String, u16)> {
-    let (word, rest) = s.split_once(' ')?;
-    match word {
-        "host" => crate::allow::host_port(rest).map(|(h, p)| (Kind::Host, h, p)),
-        "raw" => crate::allow::host_port(rest).map(|(h, p)| (Kind::Raw, h, p)),
-        "lookup" => crate::sandbox::proxy::parse::name(rest).ok().map(|n| (Kind::Lookup, n, 0)),
-        _ => None,
-    }
+pub fn unlisted(s: &str) -> Option<(String, u16)> {
+    crate::allow::host_port(s.strip_prefix("host ")?)
 }
 
 /// The proxy's questions come to the main loop from now on (`main`, before any run): a thread of their own
@@ -143,22 +107,19 @@ fn find_run(ed: &Editor, run: u64) -> Option<(SessionId, String, bool)> {
 /// names, saying so — never a wait with no card. A session that's gone raises nothing (the proxy dropped its
 /// questions with it).
 pub fn asked(ed: &mut Editor, ask: FromProxy) {
-    let FromProxy::Ask { session, run, kind, host, port, process, asked } = ask;
+    let FromProxy::Ask { session, run, host, port, process } = ask;
     let found = find_run(ed, run).map(|(id, label, users)| (id, label, users, false)).or_else(|| {
         let s = std::iter::once(&ed.session).chain(&ed.sessions);
         let id = s.into_iter().find(|s| s.proxy_id() == session)?.id;
         Some((id, String::new(), false, true))
     });
     let Some((id, label, users, left)) = found else {
-        let msg = format!("the proxy asked about {} for a session that's gone", at(kind, &host, port));
+        let msg = format!("the proxy asked about {host}:{port} for a session that's gone");
         return crate::log::line("sandbox", "info", &msg);
     };
-    let also = match kind {
-        Kind::Host => suggested(&crate::sandboxpack::get().registries, &host, port),
-        Kind::Raw | Kind::Lookup => Vec::new(),
-    };
+    let also = suggested(&crate::sandboxpack::get().registries, &host, port);
     let (open, hosts) = (ed.config.llm.sandbox_network, ed.config.llm.sandbox_hosts.clone());
-    let a = Ask { session, run, kind, host, port, asked, process, label, users, left, open, hosts, also };
+    let a = Ask { session, run, host, port, process, label, users, left, open, hosts, also };
     ed.with_session(id, move |ed| {
         let front = !ed.background();
         let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
@@ -166,8 +127,8 @@ pub fn asked(ed: &mut Editor, ask: FromProxy) {
             if let Some(h) = o.host()
                 && h.same(&a)
             {
-                // (another run's, or a lookup's next question)
-                if h.run != a.run || h.asked != a.asked {
+                // (another run's)
+                if h.run != a.run {
                     let fresh = card(a);
                     (o.question, o.what, o.asked) = (fresh.question, fresh.what, fresh.asked);
                     o.rev += 1;
@@ -181,10 +142,6 @@ pub fn asked(ed: &mut Editor, ask: FromProxy) {
 
 /// Its title.
 pub const TITLE: &str = "Let a command reach";
-/// A raw connection's card's title (6e+).
-pub const RAW_TITLE: &str = "Let a command open a raw connection to";
-/// A lookup's card's title (6e+).
-pub const LOOKUP_TITLE: &str = "Let a command look up the service records of";
 
 /// The open network's line on a host card: what's reached without asking, as `llm.sandbox-hosts` holds it (C1b).
 fn open_lasts(hosts: &crate::llm::Hosts) -> &'static str {
@@ -200,88 +157,41 @@ fn open_lasts(hosts: &crate::llm::Hosts) -> &'static str {
     }
 }
 
-/// The card for `a` — of its kind.
+/// The card for `a` — the network open's, else the closed one's.
 pub fn card(a: Ask) -> Offer {
     use crate::cards::{Asked, Request, Why};
+    if !a.open {
+        return closed_card(a);
+    }
     let by = match (a.left, a.users) {
         (true, _) => format!("asked by {}, left running by a run that's over", a.process),
         (false, true) => format!("asked by {} in `{}`, your command", a.process, a.label),
         (false, false) => format!("asked by {} in `{}`, Claude's command", a.process, a.label),
     };
-    let waits = waits();
-    // (piece C: with the network closed nothing lasts past the session — always is the setting)
-    let lasting = match a.open {
-        true => open_lasts(&a.hosts),
-        false => CLOSED_LASTS,
+    let (waits, lasting) = (waits(), open_lasts(&a.hosts));
+    let packs = crate::sandboxpack::get();
+    let pack = registry_of(&packs.registries, &a.host, a.port);
+    let named = match (&pack, a.also.is_empty()) {
+        (None, _) => String::new(),
+        (Some(pack), true) => format!("\n{} is the {pack} pack's registry", a.host),
+        (Some(pack), false) => format!(
+            "\n{} is the {pack} pack's registry — a yes lets them reach its others too: {}",
+            a.host,
+            a.also.join(", ")
+        ),
     };
-    match a.kind {
-        Kind::Host if !a.open => closed_card(a),
-        Kind::Host => {
-            let packs = crate::sandboxpack::get();
-            let pack = registry_of(&packs.registries, &a.host, a.port);
-            let named = match (&pack, a.also.is_empty()) {
-                (None, _) => String::new(),
-                (Some(pack), true) => format!("\n{} is the {pack} pack's registry", a.host),
-                (Some(pack), false) => format!(
-                    "\n{} is the {pack} pack's registry — a yes lets them reach its others too: {}",
-                    a.host,
-                    a.also.join(", ")
-                ),
-            };
-            let question =
-                format!("on port {}, through tarae's proxy\n{by}{named}\n\n{waits} {lasting}", a.port);
-            let decided = 2 + usize::from(pack.is_some());
-            // (what a yes gives besides the host: what's read can go there — the network open, the caches are)
-            let warn = format!("What your commands read can be sent to {} too.", a.host);
-            let at = question.split('\n').count() + 1;
-            let question = format!("{question}\n\n{warn}");
-            let asked = Asked::new(Why::Host, Request::Host(a.at()));
-            let title = format!("{TITLE} {}?", a.host);
-            Offer::new(title, &question, "", String::new(), What::Host(Box::new(a)))
-                .deciding(0..decided)
-                .warning(at..at + 1)
-                .asked(asked)
-        }
-        // (Q2: what passes can't be checked — said in the warning colour)
-        Kind::Raw => {
-            let question = format!(
-                "on port {}, through tarae's proxy\n{by}\nNot TLS or HTTP: tarae can't see what passes, only that it \
-                 goes to the name the command looked up.\n\n{waits} {}",
-                a.port,
-                match a.open {
-                    true => format!("A line {} in llm.sandbox-hosts lets it through without asking.", a.at()),
-                    false => lasting.to_string(),
-                }
-            );
-            let asked = Asked::new(Why::HostRaw, Request::HostRaw(a.at()));
-            let title = format!("{RAW_TITLE} {}?", a.host);
-            Offer::new(title, &question, "", String::new(), What::HostRaw(Box::new(a)))
-                .deciding(0..2)
-                .warning(2..3)
-                .asked(asked)
-        }
-        // (M13: a held lookup is asked again at 5 s by glibc and Go — an answer before then reaches it)
-        Kind::Lookup => {
-            let question = format!(
-                "{}\n{by}\ntarae asks the network's DNS for them: the name is seen by that DNS's operators; the \
-                 records may name other hosts, each asked about when connected to.\n\nIts lookup gets the records if \
-                 you answer within about 5 s; after that, from its next try. A name tarae already looks up, by the \
-                 rules (llm.sandbox-hosts) or your yes on its host or raw card, gets its service records without this \
-                 card.",
-                a.asked.join(", ")
-            );
-            let types = a.asked.iter().filter_map(|q| q.split_once(' ')).map(|(t, _)| t.to_string());
-            let mut types: Vec<String> = types.collect();
-            crate::sorting::sort(&mut types);
-            types.dedup();
-            let asked = Asked::new(Why::Lookup, Request::Lookup { name: a.host.clone(), types });
-            let title = format!("{LOOKUP_TITLE} {}?", a.host);
-            Offer::new(title, &question, "", String::new(), What::Lookup(Box::new(a)))
-                .deciding(0..2)
-                .warning(2..3)
-                .asked(asked)
-        }
-    }
+    let question = format!("on port {}, through tarae's proxy\n{by}{named}\n\n{waits} {lasting}", a.port);
+    let decided = 2 + usize::from(pack.is_some());
+    // (what a yes gives besides the host: what's read can go there — the network open, the caches are)
+    let warn = format!("What your commands read can be sent to {} too.", a.host);
+    let at = question.split('\n').count() + 1;
+    let question = format!("{question}\n\n{warn}");
+    let asked = Asked::new(Why::Host, Request::Host(a.at()));
+    let title = format!("{TITLE} {}?", a.host);
+    Offer::new(title, &question, "", String::new(), What::Host(Box::new(a)))
+        .deciding(0..decided)
+        .warning(at..at + 1)
+        .asked(asked)
 }
 
 /// The pack whose `registries` name `host:port` (Q6: words on the card, never a grant) — at the port a registry
@@ -449,7 +359,6 @@ pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
     // (C2: a no on Claude's command is its `also`'s too — that conversation asks for the host on no card again)
     let ours = ed.session.proxy_id() == a.session;
     if let Some(c) = ed.session.chat.as_mut().filter(|_| ours && scope == Scope::Refused)
-        && a.kind == Kind::Host
         && !a.users
     {
         let g = crate::allow::Grant::Host(a.host.clone(), a.port);
@@ -457,30 +366,15 @@ pub fn answer(ed: &mut Editor, id: u64, a: Ask, scope: Scope) {
             c.also_refused.push(g);
         }
     }
-    keep(ed, a.session, a.run, a.kind, &a.host, also, a.port, scope);
+    keep(ed, a.session, a.run, &a.host, also, a.port, scope);
 }
 
-/// An answer for `host:port` of `kind` (`session`'s, the proxy's id) and `also` (the registries the card listed, at
-/// that port): to the proxy, kept as far as it reaches, said. Only a host's lasts in the project (`A`): raw and
-/// lookups have no `A` (F7).
-#[allow(clippy::too_many_arguments)]
-fn keep(
-    ed: &mut Editor,
-    session: u64,
-    run: u64,
-    kind: Kind,
-    host: &str,
-    also: &[String],
-    port: u16,
-    scope: Scope,
-) {
-    let scope = match scope {
-        Scope::Project if kind != Kind::Host => Scope::Session,
-        s => s,
-    };
-    let (at, mut doing) = (at(kind, host, port), doing(kind, host, port));
+/// An answer for `host:port` (`session`'s, the proxy's id) and `also` (the registries the card listed, at that
+/// port): to the proxy, kept as far as it reaches, said.
+fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], port: u16, scope: Scope) {
+    let (at, mut doing) = (format!("{host}:{port}"), format!("reach {host}:{port}"));
     for h in std::iter::once(host).chain(also.iter().map(String::as_str)) {
-        send(ToProxy::Answer { session, run, kind, host: h.into(), port, scope });
+        send(ToProxy::Answer { session, run, host: h.into(), port, scope });
     }
     if !also.is_empty() {
         doing = format!("{doing} and {}", also.join(", "));
@@ -501,9 +395,9 @@ fn keep(
         return ed.set_success(format!("Commands may {doing} in this conversation — :granted lists it"));
     }
     for h in also {
-        keep_one(ed, session, kind, h, port, scope);
+        keep_one(ed, session, h, port, scope);
     }
-    keep_one(ed, session, kind, host, port, scope);
+    keep_one(ed, session, host, port, scope);
     match scope {
         Scope::Run => ed.set_success(format!("Commands may {doing} in this run")),
         Scope::Session => {
@@ -523,11 +417,7 @@ fn keep(
             ed.session.checkpoints.tell.push(format!(
                 "The user refused your commands to {doing} for this session: don't try it again."
             ));
-            let lift = match kind {
-                Kind::Host => " — space m s on the run lets it through",
-                _ => "",
-            };
-            ed.set_status(format!("{at} refused for this session{lift}"));
+            ed.set_status(format!("{at} refused for this session — space m s on the run lets it through"));
         }
         Scope::Chat => {}
     }
@@ -535,13 +425,13 @@ fn keep(
 
 /// `keep`'s record of one host, as far as `scope` reaches: the session's list (`s`, `n` takes it off) or the
 /// project's (`A`).
-fn keep_one(ed: &mut Editor, session: u64, kind: Kind, host: &str, port: u16, scope: Scope) {
+fn keep_one(ed: &mut Editor, session: u64, host: &str, port: u16, scope: Scope) {
     // (the card's session is the one in front — it parks otherwise; what's kept here is that session's)
     let ours = ed.session.proxy_id() == session;
-    let this = |(k, h, p): &(Kind, String, u16)| *k == kind && h == host && *p == port;
+    let this = |(h, p): &(String, u16)| h == host && *p == port;
     match scope {
         Scope::Session if ours && !ed.session.hosts.iter().any(this) => {
-            ed.session.hosts.push((kind, host.into(), port));
+            ed.session.hosts.push((host.into(), port));
         }
         Scope::Project => {
             let kept = host.to_string();
@@ -559,9 +449,8 @@ pub fn chat_ended(ed: &Editor) {
     let Some(c) = ed.session.chat.as_ref() else { return };
     let session = ed.session.proxy_id();
     for (host, port) in &c.allowed.hosts {
-        let held = |(k, h, p): &(Kind, String, u16)| *k == Kind::Host && h == host && p == port;
-        if !ed.session.hosts.iter().any(held) {
-            send(ToProxy::Taken { session, kind: Kind::Host, host: host.clone(), port: *port });
+        if !ed.session.hosts.iter().any(|(h, p)| h == host && p == port) {
+            send(ToProxy::Taken { session, host: host.clone(), port: *port });
         }
     }
 }
@@ -573,13 +462,11 @@ pub fn granted(ed: &mut Editor, host: &str, port: u16, scope: crate::allow::Scop
     let session = ed.session.proxy_id();
     let also = &with_suggested(host, port)[1..];
     match scope {
-        crate::allow::Scope::Once => {
-            send(ToProxy::Lifted { session, kind: Kind::Host, host: host.into(), port })
-        }
-        crate::allow::Scope::ThisChat => keep(ed, session, 0, Kind::Host, host, also, port, Scope::Chat),
+        crate::allow::Scope::Once => send(ToProxy::Lifted { session, host: host.into(), port }),
+        crate::allow::Scope::ThisChat => keep(ed, session, 0, host, also, port, Scope::Chat),
         // (piece C: a host is never kept past a session — `Caps::storable`; always is the setting)
         crate::allow::Scope::Session | crate::allow::Scope::Always => {
-            keep(ed, session, 0, Kind::Host, host, also, port, Scope::Session)
+            keep(ed, session, 0, host, also, port, Scope::Session)
         }
     }
 }
@@ -589,7 +476,7 @@ pub fn granted(ed: &mut Editor, host: &str, port: u16, scope: crate::allow::Scop
 /// left), asked again: a card for that one comes.
 pub fn run_ended(ed: &mut Editor, run: Option<u64>) {
     let Some(run) = run else { return };
-    let its = |w: &What| matches!(w, What::Host(h) | What::HostRaw(h) | What::Lookup(h) if h.run == run);
+    let its = |w: &What| matches!(w, What::Host(h) if h.run == run);
     ed.drop_cards_for(its, "its run ended");
     send(ToProxy::RunEnded { run });
 }
@@ -599,9 +486,9 @@ pub fn session_ended(s: &crate::session::Session) {
     send(ToProxy::SessionEnded { session: s.proxy_id() });
 }
 
-/// The user took back `host:port` of `kind` for session `s` (and what the project keeps): asked again.
-pub fn taken(s: &crate::session::Session, kind: Kind, host: &str, port: u16) {
-    send(ToProxy::Taken { session: s.proxy_id(), kind, host: host.into(), port });
+/// The user took back `host:port` for session `s` (and what the project keeps): asked again.
+pub fn taken(s: &crate::session::Session, host: &str, port: u16) {
+    send(ToProxy::Taken { session: s.proxy_id(), host: host.into(), port });
 }
 
 /// A message to the proxy — none while it isn't running: nothing it holds to change (tests: kept to look at, and
@@ -626,19 +513,14 @@ fn send(m: ToProxy) {
 #[cfg(test)]
 fn copied(m: &ToProxy) -> Option<ToProxy> {
     Some(match m {
-        ToProxy::Answer { session, run, kind, host, port, scope } => ToProxy::Answer {
-            session: *session,
-            run: *run,
-            kind: *kind,
-            host: host.clone(),
-            port: *port,
-            scope: *scope,
-        },
-        ToProxy::Taken { session, kind, host, port } => {
-            ToProxy::Taken { session: *session, kind: *kind, host: host.clone(), port: *port }
+        ToProxy::Answer { session, run, host, port, scope } => {
+            ToProxy::Answer { session: *session, run: *run, host: host.clone(), port: *port, scope: *scope }
         }
-        ToProxy::Lifted { session, kind, host, port } => {
-            ToProxy::Lifted { session: *session, kind: *kind, host: host.clone(), port: *port }
+        ToProxy::Taken { session, host, port } => {
+            ToProxy::Taken { session: *session, host: host.clone(), port: *port }
+        }
+        ToProxy::Lifted { session, host, port } => {
+            ToProxy::Lifted { session: *session, host: host.clone(), port: *port }
         }
         ToProxy::SessionEnded { session } => ToProxy::SessionEnded { session: *session },
         _ => return None,

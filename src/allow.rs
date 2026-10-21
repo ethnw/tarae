@@ -954,10 +954,9 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
 }
 
 impl crate::editor::Editor {
-    /// `:sandbox-disallow <path | port N | socket path | host name:port | raw name:port | lookup name>` — taken
-    /// back (this conversation, this session and kept): Claude asks again before reading there, its commands can't
-    /// write there or connect there, a host (raw TCP to it, its records) is asked again (its runs going on too — the
-    /// proxy is told).
+    /// `:sandbox-disallow <path | port N | socket path | host name:port>` — taken back (this conversation, this
+    /// session and kept): Claude asks again before reading there, its commands can't write there or connect there, a
+    /// host is asked again (its runs going on too — the proxy is told).
     pub fn sandbox_disallow(&mut self, what: &str) -> Result<(), String> {
         let what = what.trim().to_string();
         let host = crate::hosts::unlisted(&what);
@@ -971,7 +970,7 @@ impl crate::editor::Editor {
         {
             return Err(
                 "usage: :sandbox-disallow <path | port N | socket path | terminals | localhost | env NAME | host \
-                        name:port | raw name:port | lookup name> — as :granted lists it"
+                        name:port> — as :granted lists it"
                     .into(),
             );
         }
@@ -996,9 +995,9 @@ impl crate::editor::Editor {
         if self.session.allowed != had {
             self.sessions_keep();
         }
-        if let Some((kind, h, p)) = host {
-            self.session.hosts.retain(|(sk, sh, sp)| (*sk, sh, *sp) != (kind, &h, p));
-            crate::hosts::taken(&self.session, kind, &h, p);
+        if let Some((h, p)) = host {
+            self.session.hosts.retain(|(sh, sp)| (sh, *sp) != (&h, p));
+            crate::hosts::taken(&self.session, &h, p);
         }
         // (a run's `Caps` made before the write lands leaves it out too: `caps::Basis.taking`)
         self.allow_taking.push(what.clone());
@@ -1133,14 +1132,13 @@ pub(crate) mod tests {
         // Taken back
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         (ed.session.root, ed.allow_path) = (root.clone(), Some(path.clone()));
-        use crate::sandbox::proxy::Kind;
-        ed.session.hosts.push((Kind::Host, "static.example.invalid".into(), 443));
+        ed.session.hosts.push(("static.example.invalid".into(), 443));
         crate::hosts::SENT.with(|s| s.borrow_mut().clear());
         ed.sandbox_disallow("host static.example.invalid:443").unwrap();
         assert!(ed.session.hosts.is_empty(), "the session's");
         let taken = crate::hosts::SENT.with(|s| {
             s.borrow().iter().any(|m| {
-                matches!(m, crate::sandbox::proxy::ToProxy::Taken { session, kind: Kind::Host, host, port: 443 }
+                matches!(m, crate::sandbox::proxy::ToProxy::Taken { session, host, port: 443 }
                     if *session == crate::sandbox::proxy::session_of(&root) && host == "static.example.invalid")
             })
         });

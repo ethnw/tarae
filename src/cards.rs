@@ -160,10 +160,6 @@ pub enum Why {
     Blocked,
     /// A host a run's rules don't name, held by tarae's proxy (`hosts.rs`).
     Host,
-    /// Raw TCP to a host:port no rule naming its port lets through, held by tarae's proxy (6e+, Q2).
-    HostRaw,
-    /// A name's SRV/TXT records, for a name the rules don't allow — the run's question held (6e+, Q3).
-    Lookup,
     /// A warning of it asks each time, whatever was allowed before (`cardwarn.rs`, `asks` — D2, D4): its ids.
     Asks(String),
     /// Claude's `also`: one thing past the session's capabilities its command asks for (cardauto P3).
@@ -197,8 +193,6 @@ impl Why {
             Why::Screen => "screen".into(),
             Why::Blocked => "blocked".into(),
             Why::Host => "host".into(),
-            Why::HostRaw => "host-raw".into(),
-            Why::Lookup => "lookup".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
             Why::Also => "also".into(),
             Why::Own => "own".into(),
@@ -237,8 +231,6 @@ impl Why {
             | Why::Blocked
             | Why::Also
             | Why::Host
-            | Why::HostRaw
-            | Why::Lookup
             | Why::Own
             | Why::Spend => return None,
         })
@@ -296,10 +288,6 @@ pub enum Request {
     Grant(crate::allow::Grant),
     /// A host reached through tarae's proxy (`host:port`).
     Host(String),
-    /// Raw TCP through tarae's proxy (`host:port`).
-    HostRaw(String),
-    /// A name's records looked up by tarae, and the types asked (`SRV`, `TXT`).
-    Lookup { name: String, types: Vec<String> },
     /// tarae's own question (`Why::Own`): no capability asked for.
     Own,
 }
@@ -319,10 +307,6 @@ pub enum Decision {
     Screen,
     /// A host past the session's (the proxy holds it).
     Host,
-    /// Raw TCP past the session's (the proxy holds it).
-    HostRaw,
-    /// A name's records, past the session's names (the run's question held).
-    Lookup,
     /// tarae's own question: asked as today, the model has nothing to say of it.
     Own,
 }
@@ -343,8 +327,6 @@ impl Decision {
             Decision::Outward => "outward",
             Decision::Screen => "screen",
             Decision::Host => "host",
-            Decision::HostRaw => "host-raw",
-            Decision::Lookup => "lookup",
             Decision::Own => "own",
         }
     }
@@ -380,8 +362,6 @@ pub fn decide(r: &Request, caps: &crate::caps::Caps) -> Decision {
         Request::Grant(crate::allow::Grant::Socket(_)) => Decision::Socket,
         Request::Grant(crate::allow::Grant::Host(..)) => Decision::Host,
         Request::Host(_) => Decision::Host,
-        Request::HostRaw(_) => Decision::HostRaw,
-        Request::Lookup { .. } => Decision::Lookup,
         Request::Own => Decision::Own,
     }
 }
@@ -853,10 +833,6 @@ mod tests {
         assert_eq!(g(crate::allow::Grant::Write("/w".into())), Decision::Grant(Verb::Write));
         assert_eq!(g(crate::allow::Grant::Port(5432)), Decision::Grant(Verb::Port));
         assert_eq!(g(crate::allow::Grant::Socket("/s".into())), Decision::Socket);
-        // (6e+: raw TCP and a name's records, each its own — never the host's)
-        assert_eq!(decide(&Request::HostRaw("db.test:5432".into())), Decision::HostRaw);
-        let lookup = Request::Lookup { name: "cluster.test".into(), types: vec!["SRV".into()] };
-        assert_eq!((decide(&lookup).word(), Decision::HostRaw.word()), ("lookup", "host-raw"));
     }
 
     /// A place's class: keys first (wherever else they are), then the places read by default, then home,

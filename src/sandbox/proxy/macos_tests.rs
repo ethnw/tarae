@@ -379,14 +379,7 @@ fn with_the_network_closed_a_host_waits_and_yes_lets_it_through() {
         c.envs(set.into_iter().filter(|(k, _)| k.to_lowercase().ends_with("_proxy")));
         c
     };
-    let answer = |run, scope| ToProxy::Answer {
-        kind: super::Kind::Host,
-        session,
-        run,
-        host: name.into(),
-        port,
-        scope,
-    };
+    let answer = |run, scope| ToProxy::Answer { session, run, host: name.into(), port, scope };
     let p = closed();
     let ended = after_run(Some(&p));
     let s = spawn(Some(&p), &curl(&p, "first")).unwrap();
@@ -442,14 +435,7 @@ fn an_unknown_host_waits_for_the_answer() {
     let ask = asked.recv_timeout(Duration::from_secs(10)).expect("the main loop asked");
     let FromProxy::Ask { run, host, port: at, process, .. } = ask;
     assert_eq!((run, host.as_str(), at, process.as_str()), (p.run_id, name, port, "curl"));
-    super::get().send(ToProxy::Answer {
-        kind: super::Kind::Host,
-        session,
-        run,
-        host: name.into(),
-        port,
-        scope: Scope::Session,
-    });
+    super::get().send(ToProxy::Answer { session, run, host: name.into(), port, scope: Scope::Session });
     let (_, out, _) = finish(s, 30);
     ended();
     let (h, l) = seen.join().unwrap();

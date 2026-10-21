@@ -437,19 +437,19 @@ fn the_report_is_pinned() {
         ("Seatbelt", None),
         (
             "own, ABI 11",
-            Some(Found { abi: 11, network: false, ..tier_found(Ns::session(true, true), true, true) }),
+            Some(Found { abi: 11, network: false, ..tier_found(Ns::session(true, true), true) }),
         ),
         (
             "own without a PID namespace, ABI 6",
             Some(Found {
                 short: no_pid.clone(),
                 brief: no_pid_brief.clone(),
-                ..tier_found(Ns::session(true, false), true, false)
+                ..tier_found(Ns::session(true, false), true)
             }),
         ),
         (
             "offline in the session's namespaces, ABI 6",
-            Some(tier_found(Ns::session(true, true), false, false)),
+            Some(tier_found(Ns::session(true, true), false)),
         ),
         (
             "host, ABI 4",
@@ -457,7 +457,7 @@ fn the_report_is_pinned() {
                 abi: 4,
                 short: none.clone(),
                 brief: none_brief.clone(),
-                ..tier_found(Ns::NONE, true, false)
+                ..tier_found(Ns::NONE, true)
             }),
         ),
         (
@@ -470,12 +470,12 @@ fn the_report_is_pinned() {
                         .into(),
                 ),
                 brief: Some("a seccomp filter blocks namespaces".into()),
-                ..tier_found(Ns::NONE, false, false)
+                ..tier_found(Ns::NONE, false)
             }),
         ),
         (
             "offline without namespaces, ABI 3",
-            Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false, false) }),
+            Some(Found { abi: 3, short: none, ..tier_found(Ns::NONE, false) }),
         ),
     ];
     for (label, found) in tiers {
@@ -491,20 +491,14 @@ fn the_report_is_pinned() {
     pinned("sandbox_report.txt", &f.named(&out, run.as_deref()));
 }
 
-/// A keeper's `Found` at Landlock ABI 6, `served` or not (Yama's 3), its runs going out by TPROXY or not (why not:
-/// no `nft_tproxy`, or no network namespace of its own), the network open; nothing else short.
-fn tier_found(ns: super::guarantees::Ns, served: bool, tproxy: bool) -> super::guarantees::Found {
+/// A keeper's `Found` at Landlock ABI 6, `served` or not (Yama's 3), the network open; nothing else short.
+fn tier_found(ns: super::guarantees::Ns, served: bool) -> super::guarantees::Found {
     let net = ns.run_net(served);
     super::guarantees::Found {
         ns,
         served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
         abi: 6,
         ptys: ns.serves_ptys(net).then_some(16),
-        tproxy: match (tproxy, ns.netns()) {
-            (true, _) => Ok(()),
-            (false, true) => Err("this kernel has no nft_tproxy".into()),
-            (false, false) => Err("no network namespace of its own".into()),
-        },
         lo_missing: Vec::new(),
         short: None,
         brief: None,
@@ -519,10 +513,10 @@ fn tier_found(ns: super::guarantees::Ns, served: bool, tproxy: bool) -> super::g
 fn the_status_is_the_tier_and_the_abi() {
     use super::guarantees::{Found, Guarantees, Ns};
     let status = |f: Found| Guarantees::landlock(f).status();
-    assert_eq!(status(Found { abi: 8, ..tier_found(Ns::session(true, true), true, true) }), "own:8");
-    assert_eq!(status(Found { abi: 4, ..tier_found(Ns::NONE, true, false) }), "host:4", "colima's");
-    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::session(true, false), false, false) }), "offline:2");
-    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::NONE, false, false) }), "offline:2");
+    assert_eq!(status(Found { abi: 8, ..tier_found(Ns::session(true, true), true) }), "own:8");
+    assert_eq!(status(Found { abi: 4, ..tier_found(Ns::NONE, true) }), "host:4", "colima's");
+    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::session(true, false), false) }), "offline:2");
+    assert_eq!(status(Found { abi: 2, ..tier_found(Ns::NONE, false) }), "offline:2");
     assert_eq!(Guarantees::seatbelt(true, true).status(), "seatbelt");
 }
 
@@ -536,8 +530,8 @@ fn the_report_says_the_tier_once() {
     let f = Fixture::new("tier-once", Os::Mac, &[]);
     let p = f.policy(&crate::llm::LlmConfig::default());
     let calm = Guard::In(Box::new(Policy { watch: Some(Watch::quiet("tier-once.")), ..p }));
-    let closed = Found { network: false, ..tier_found(Ns::session(true, true), true, true) };
-    let open = tier_found(Ns::NONE, true, false);
+    let closed = Found { network: false, ..tier_found(Ns::session(true, true), true) };
+    let open = tier_found(Ns::NONE, true);
     let (closed, open) = (Guarantees::landlock(closed), Guarantees::landlock(open));
     assert_ne!(closed.told(), open.told(), "another keeper's namespaces, other words");
     let mut known = Told::default();
@@ -555,7 +549,7 @@ fn the_report_says_the_tier_once() {
 }
 
 /// 9a: what each tier's runs are kept apart from and share, in every place's words (`guarantees.rs`) — every tier,
-/// Landlock ABI 2 to 11, each network way (TPROXY, tarae's proxy by its variable, no socket), and Seatbelt's, ports and the network each open or not. Beside the golden, what each
+/// Landlock ABI 2 to 11, each network way (tarae's proxy by its variable, no socket), and Seatbelt's, ports and the network each open or not. Beside the golden, what each
 /// must share whatever the words, and (9f) the profile's hint where Ubuntu's restriction is why a keeper has no
 /// namespaces — what the profile would give in the panel's words, then whole —, written out per scene for ABI 2, 3 to 5 and 6 on — every ABI around a boundary
 /// tried (7, 9 and 11 add nothing a run is kept from) — and nothing else: what's shared is said shared everywhere, the
@@ -572,7 +566,7 @@ fn the_guarantees_say_each_tier() {
         short: Some("no user namespaces: Ubuntu's restriction".to_string()),
         brief: Some("AppArmor blocks user namespaces".to_string()),
         hint: Some(Hint::of(Tier::of(Ns::NONE, served), &packaged)),
-        ..found(Ns::NONE, served, false)
+        ..found(Ns::NONE, served)
     };
     let no_pid =
         Some("no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)".to_string());
@@ -581,58 +575,38 @@ fn the_guarantees_say_each_tier() {
         Some("user namespaces are turned off".to_string()),
         Some("/proc is masked, no PID namespace".to_string()),
     );
-    let a_plus = || found(Ns::session(true, true), true, true);
-    let a = |tproxy: bool| Found {
-        short: no_pid.clone(),
-        brief: no_pid_brief.clone(),
-        ..found(Ns::session(true, false), true, tproxy)
-    };
+    let own = || found(Ns::session(true, true), true);
+    let no_pid_own =
+        Found { short: no_pid.clone(), brief: no_pid_brief.clone(), ..found(Ns::session(true, false), true) };
     // (what each shares at ABI 2 — no truncating rule: files; no signal scope —, at 3 to 5 — still no signal scope:
     // signals where other processes are in sight —, and from 6; every ABI around a boundary tried, 3, 5 and 6 too)
     // (its label, its tier, what its keeper is, what it shares at ABI 2, 3 to 5 and from 6)
     type Scene = (&'static str, Option<Tier>, Found, [&'static [Part]; 3]);
     let scenes: Vec<Scene> = vec![
-        ("own, TPROXY", Some(Tier::Own), a_plus(), [&[Files], &[], &[]]),
-        (
-            "own, tarae's proxy",
-            Some(Tier::Own),
-            found(Ns::session(true, true), true, false),
-            [&[Files], &[], &[]],
-        ),
+        ("own, tarae's proxy", Some(Tier::Own), own(), [&[Files], &[], &[]]),
         (
             "own, the project in /dev/shm",
             Some(Tier::Own),
-            found(Ns { shm: false, ..Ns::session(true, true) }, true, true),
+            found(Ns { shm: false, ..Ns::session(true, true) }, true),
             [&[Files, Shm], &[Shm], &[Shm]],
         ),
         (
             "own, its lo without an IPv6 address",
             Some(Tier::Own),
-            Found { lo_missing: vec!["IPv6"], ..a_plus() },
+            Found { lo_missing: vec!["IPv6"], ..own() },
             [&[Files], &[], &[]],
         ),
-        (
-            "own, the network closed",
-            Some(Tier::Own),
-            Found { network: false, ..a_plus() },
-            [&[Files], &[], &[]],
-        ),
-        (
-            "own without a PID namespace, TPROXY",
-            Some(Tier::Own),
-            a(true),
-            [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
-        ),
+        ("own, the network closed", Some(Tier::Own), Found { network: false, ..own() }, [&[Files], &[], &[]]),
         (
             "own without a PID namespace, tarae's proxy",
             Some(Tier::Own),
-            a(false),
+            no_pid_own,
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
             "offline, the session's namespaces",
             Some(Tier::Offline),
-            found(Ns::session(true, true), false, false),
+            found(Ns::session(true, true), false),
             [&[Files], &[], &[]],
         ),
         (
@@ -641,14 +615,14 @@ fn the_guarantees_say_each_tier() {
             Found {
                 short: no_pid.clone(),
                 brief: no_pid_brief.clone(),
-                ..found(Ns::session(true, false), false, false)
+                ..found(Ns::session(true, false), false)
             },
             [&[Files, Processes, Signals], &[Processes, Signals], &[Processes]],
         ),
         (
             "host, tarae's proxy",
             Some(Tier::Host),
-            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true, false) },
+            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, true) },
             [&[Files, Processes, Signals, Ipc, Shm], &[Processes, Signals, Ipc, Shm], &[Processes, Ipc, Shm]],
         ),
         (
@@ -660,7 +634,7 @@ fn the_guarantees_say_each_tier() {
         (
             "offline, no namespaces",
             Some(Tier::Offline),
-            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, false, false) },
+            Found { short: none.clone(), brief: none_brief.clone(), ..found(Ns::NONE, false) },
             [
                 &[Files, Processes, Signals, Ipc, Shm, Ptys],
                 &[Processes, Signals, Ipc, Shm, Ptys],

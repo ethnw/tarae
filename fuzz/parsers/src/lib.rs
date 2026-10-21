@@ -4,8 +4,6 @@
 //! property function the reader's in-tree loop calls too (its module's `check`), on libFuzzer's input. A property
 //! broken panics — libFuzzer's crash.
 
-use std::sync::OnceLock;
-
 #[allow(dead_code)]
 #[path = "../../../src/sandbox/supervisor/wire.rs"]
 mod wire;
@@ -13,7 +11,7 @@ mod wire;
 #[allow(dead_code)]
 mod proxy;
 
-use proxy::{dns, parse};
+use proxy::parse;
 
 /// A `struct sockaddr` as a call names it (`wire::parse`).
 pub fn sockaddr(b: &[u8]) {
@@ -38,11 +36,6 @@ pub fn head(b: &[u8]) {
     parse::check::head(b);
 }
 
-/// A request to its server, as the session's network hands it over (`parse::origin`).
-pub fn origin(b: &[u8]) {
-    parse::check::origin(b);
-}
-
 /// A tunnel's first bytes: TLS records holding a ClientHello (`parse::server_name`).
 pub fn sni(b: &[u8]) {
     parse::check::sni(b);
@@ -51,15 +44,4 @@ pub fn sni(b: &[u8]) {
 /// A chunked body, given a few bytes at a time (`parse::Body`) — the first byte says how many.
 pub fn body(b: &[u8]) {
     parse::check::body_input(b);
-}
-
-/// A run's DNS question (`dns::question`).
-pub fn dns_question(b: &[u8]) {
-    dns::check::question(b);
-}
-
-/// A resolver's response to tarae's own question (`dns::response`).
-pub fn dns_response(b: &[u8]) {
-    static ASKED: OnceLock<Vec<u8>> = OnceLock::new();
-    dns::check::response(b, ASKED.get_or_init(dns::check::asked));
 }

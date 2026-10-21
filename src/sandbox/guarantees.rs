@@ -181,8 +181,6 @@ pub enum By {
 /// How what the policy opens beyond this machine goes (Q5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Way {
-    /// Taken in the session's network namespace by its routes and owned table (TPROXY, step 6).
-    Tproxy,
     /// To tarae's proxy, by the variable a run gets (macOS: at its own port).
     Proxy,
     /// Nowhere: not served (tier offline), a run makes no socket that leaves its namespace.
@@ -193,7 +191,6 @@ impl Way {
     /// Its name in `tarae state`.
     pub fn key(self) -> &'static str {
         match self {
-            Way::Tproxy => "tproxy",
             Way::Proxy => "proxy",
             Way::NoSocket => "no-socket",
         }
@@ -236,10 +233,10 @@ pub struct Guarantees {
     /// registries (C1b, `!Egress.any`); others asked on a card. Neither this nor `asks`: any host.
     pub listed: bool,
     pub way: Way,
-    /// What's missing — the probe's, the supervisor's, no TPROXY's, Landlock's — None where nothing is.
+    /// What's missing — the probe's, the supervisor's, Landlock's — None where nothing is.
     pub why: Option<String>,
     /// The same in a few words, ` · ` between (the sandbox panel, 9e, under the tier): `AppArmor blocks user
-    /// namespaces · no TPROXY` — `why` is the report's and `tarae state`'s.
+    /// namespaces · Landlock ABI 2: partial` — `why` is the report's and `tarae state`'s.
     pub brief: Option<String>,
     /// How the tier would go up — the profile's (9f, `Found.hint`); None elsewhere, and on macOS.
     pub hint: Option<Hint>,
@@ -257,8 +254,6 @@ pub struct Found {
     pub abi: u32,
     /// Where its runs open only the ptys they make (3b, `Ns::serves_ptys`): how many at a time.
     pub ptys: Option<usize>,
-    /// The keeper takes its runs' connections in the session's network (TPROXY) — or why not.
-    pub tproxy: Result<(), String>,
     /// The families its `lo` couldn't carry (`Keeper.lo_missing`).
     pub lo_missing: Vec<&'static str>,
     /// The probe's why not all namespaces (`tier::Probed.short`).
@@ -359,15 +354,11 @@ impl Guarantees {
         ];
         let way = match net {
             RunNet::Plain | RunNet::Own => Way::NoSocket,
-            RunNet::Routed | RunNet::Served if f.tproxy.is_ok() => Way::Tproxy,
             RunNet::Routed | RunNet::Served => Way::Proxy,
         };
         let mut why: Vec<String> = f.short.into_iter().collect();
         if let Err(w) = &f.served {
             why.push(format!("tarae can't serve its calls: {w}"));
-        }
-        if let (Way::Proxy, Err(w), true) = (way, &f.tproxy, f.network) {
-            why.push(format!("no TPROXY: {w}"));
         }
         if f.abi < 3 {
             why.push(format!("Landlock ABI {}: partial, every run asks", f.abi));
@@ -378,9 +369,6 @@ impl Guarantees {
             Err(w) if w == PIDFD_REFUSED => brief.push(PIDFD_REFUSED_BRIEF.into()),
             Err(w) => brief.push(format!("not served: {w}")),
             Ok(()) => {}
-        }
-        if let (Way::Proxy, Err(_), true) = (way, &f.tproxy, f.network) {
-            brief.push("no TPROXY".into());
         }
         if f.abi < 3 {
             brief.push(format!("Landlock ABI {}: partial", f.abi));
@@ -503,7 +491,6 @@ impl Guarantees {
         let network = match (self.way, self.network) {
             (Way::NoSocket, _) => "no socket",
             (_, false) => "closed",
-            (Way::Tproxy, true) => "TPROXY",
             (Way::Proxy, true) => "tarae's proxy",
         };
         let network = match (self.asks, self.listed, self.way) {
@@ -736,7 +723,6 @@ mod tests {
                 served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
                 abi: 4,
                 ptys: None,
-                tproxy: Err("no network namespace of its own".into()),
                 lo_missing: Vec::new(),
                 short: None,
                 brief: None,

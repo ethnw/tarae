@@ -891,10 +891,8 @@ fn snapshot_host_card_closed() {
         let a = crate::hosts::Ask {
             session: s.ed.session.proxy_id(),
             run: 1,
-            kind: crate::sandbox::proxy::Kind::Host,
             host: "index.crates.io".into(),
             port: 443,
-            asked: Vec::new(),
             process: "cargo".into(),
             label: "cargo build".into(),
             users: false,
@@ -3824,7 +3822,6 @@ fn snapshot_sandbox_blocked_with_step() {
 fn snapshot_granted() {
     use crate::allow::{Allowed, Grant};
     use crate::caps::{Caps, Entry, Source, Why};
-    use crate::sandbox::proxy::Kind;
     let at = |p: &str| PathBuf::from(format!("/private/tmp/tarae-shot-granted/{p}"));
     let now = 1_792_000_000;
     let answer = |a: &mut Allowed, g: Grant, ago: u64| {
@@ -3837,7 +3834,7 @@ fn snapshot_granted() {
     answer(&mut session, Grant::Port(5432), 2 * 3600);
     answer(&mut chat, Grant::Read(at("notes")), 12 * 60);
     answer(&mut chat, Grant::Terminals, 20);
-    let hosts = vec![(Kind::Raw, "db.example.com".to_string(), 5432)];
+    let hosts = vec![("db.example.com".to_string(), 5432)];
     let caps = |answers: [&Allowed; 3]| {
         let mut c = Caps::granted(&at("tarae"), answers[0], answers[1], answers[2]);
         let d = |what: PathBuf, why| Entry { what, source: Source::Default(why) };
@@ -3850,7 +3847,7 @@ fn snapshot_granted() {
         c.outside = true;
         c
     };
-    let scene = |w: u16, h: u16, answers: [&Allowed; 3], hosts: &[(Kind, String, u16)]| {
+    let scene = |w: u16, h: u16, answers: [&Allowed; 3], hosts: &[(String, u16)]| {
         let mut s = Shot::new(w, h);
         s.file("src/demo.rs", DEMO_RS);
         let mut c = crate::chat::Chat::new();
@@ -3914,7 +3911,6 @@ fn offline_docker_default() -> crate::sandbox::guarantees::Guarantees {
         served: Err(PIDFD_REFUSED.into()),
         abi: 4,
         ptys: None,
-        tproxy: Err("no network namespace of its own".into()),
         lo_missing: Vec::new(),
         short: Some(
             "a seccomp filter tarae runs under refuses new namespaces — Docker's default profile does".into(),
@@ -3938,7 +3934,6 @@ fn host_restricted() -> crate::sandbox::guarantees::Guarantees {
         served: Ok(()),
         abi: 4,
         ptys: Some(4),
-        tproxy: Err("no network namespace of its own".into()),
         lo_missing: Vec::new(),
         short: Some("no user namespaces: Ubuntu's restriction".into()),
         brief: Some("AppArmor blocks user namespaces".into()),
@@ -3960,7 +3955,6 @@ fn snapshot_sandbox_panel_tier() {
         served: Ok(()),
         abi: 8,
         ptys: None,
-        tproxy: Ok(()),
         lo_missing: Vec::new(),
         short: None,
         brief: None,

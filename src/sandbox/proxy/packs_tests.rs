@@ -336,21 +336,6 @@ fn gradle_resolves_through_the_proxy() {
         p.own_addresses = Some(Vec::new());
     }
     p.watch = crate::sandbox::watch_for(&p);
-    // (6e′: where the session's network takes the run's connections there's no URL and no lines to test —
-    // `m5_tests::m5_gradle` runs Gradle there, without them)
-    #[cfg(target_os = "linux")]
-    if p.redirected {
-        if let Some(Ok(c)) = &p.confine
-            && let Some(k) = &c.keeper
-        {
-            k.end();
-        }
-        std::fs::remove_dir_all(&base).ok();
-        return skip(
-            TEST,
-            "the session's network takes its runs' connections: no proxy lines (6e′) — m5_tests::m5_gradle runs Gradle there",
-        );
-    }
     assert!(p.proxy_url().is_some(), "the run has a proxy URL");
     let args = ["--console=plain", "--stacktrace", "fetch"].map(String::from);
     let mut cmd = crate::sandbox::command(Some(&p), &gradle.to_string_lossy(), &args);

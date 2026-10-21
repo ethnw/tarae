@@ -69,11 +69,9 @@ from each other. Daemons such as Gradle's stay warm between runs.
    it chains to that one, http:// or SOCKS5 (host and SNI checks kept; the address checks are that proxy's, said
    in the report).
    Later: an `https://` upstream, and Negotiate/NTLM.
-6. **The transparent proxy** — done (6c–6f′ on main). In tiers A+ and A, sockets tarae plants in the session's
-   network take every connection and UDP datagram (TPROXY), marked per run and program. DNS is answered in the
-   session with synthetic addresses, and no proxy variable is set. Raw TCP to a name and a name's SRV/TXT records
-   each ask on a card of their own. The supervisor is slimmed. Docker's default profile (no `CAP_SYS_PTRACE`) is
-   offline. Elsewhere step 5's per-run proxy stays.
+6. **The transparent proxy** — built (6c–6g), then removed (2026-10-17): no security gain where a session's netns
+   already fails closed, a cost per connection, tests only a VM could run. Every tier goes out by step 5's proxy
+   variable; the supervisor is slimmed; Docker's default profile (no `CAP_SYS_PTRACE`) is offline.
 7. **Sessions kept apart** — done. Tests that one session can't reach another's processes, sockets or files, on
    Linux in every tier and on macOS, and the fixes they found: a run's folder no other run can write, on macOS no
    signal or terminal outside a run's own. The keepers' memory with many sessions, measured; tarae's log names each
@@ -412,7 +410,7 @@ git tab, search, a short Kubernetes one.
   2026-10-03: the same scenario; the editor alone and its whole process tree; measured numbers only; a one-off
   script.
 - **Raw TCP to an address**: user-written `ip:port` / `cidr:port` rules in `llm.sandbox-hosts` (never a card), for
-  a LAN database or a container's or VM's IP. Waiting for the user's call; 6e+'s design note has what it takes.
+  a LAN database or a container's or VM's IP. Waiting for the user's call.
 - **Open from step 6**: `go get` sometimes takes 36–40 s in the sandbox (cause unknown);
   `gradle_builds_in_the_sandbox` fails in the M5 image's tier C (Gradle 8.10.2 starts an ordinary daemon; next
   frictions batch); a crash-recovery test that failed once.

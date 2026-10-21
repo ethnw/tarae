@@ -18,7 +18,7 @@
 15
 16     this session
 17     • connect to port 5432                  you · 2 h ago
-18     • raw TCP to db.exa…le.com:5432  you · until you quit
+18     • reach db.example.com:5432      you · until you quit
 19
 20     this chat
 21   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀

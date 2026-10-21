@@ -61,7 +61,7 @@ how many it judged by path, or kept. Past
 30 GB a run says what tarae's volumes take (or that Docker couldn't measure them), the
 checkouts' targets apart from the shared ones (registry, toolchains), which only `cargo xtask linux prune --all`
 frees: it lists every volume and image of this repository's on this machine — gone checkouts' targets,
-toolchains, the registry, trace's, the `tarae-trace` and `tarae-redirect` images (not `rust:<version>`, a pulled
+toolchains, the registry, trace's, the `tarae-trace` images (not `rust:<version>`, a pulled
 one; volumes without the machine id and the images only with `--mine`) — with their sizes, and drops them only
 when run again with `--yes`; the next run builds them again. A live checkout's target
 stays, said why — its folder is there, or the tarae it's run from has its session open (asked of its UI-state
@@ -92,7 +92,7 @@ The sandbox's tiers ([design](docs/design/sandbox-keeper.md#tiers)) are reached 
 | `--docker-default` | as `docker run` makes one: no `CAP_SYS_PTRACE` | offline: `pidfd_getfd` refused |
 
 The options go in this order: `--env NAME=VALUE`… first, then `--userns[=masked]` or `--docker-default`, then
-`--cgroup`, `--image`, `--platform`, then `clippy` or `test`. An `--env` after `--userns` is an error (`not
+`--image`, `--platform`, then `clippy` or `test`. An `--env` after `--userns` is an error (`not
 --env`). `--env TARAE_EXPECT_TIER=own` makes a test that finds no namespaces fail rather than skip itself.
 `test --as-user …` runs the tests as an ordinary user of the container's
 (root's ways differ: it can't map itself into a run's user namespace), and `test --installed …` runs tarae's tests
@@ -108,12 +108,6 @@ The keepers' memory with many sessions (1 to 32, idle and each keeping a run) is
 optimized build: `cargo xtask linux [--env TARAE_EXPECT_TIER=own --userns] test --profile perf --bin tarae --
 --exact sandbox::keeper::tests::perf_keepers_memory_per_session --nocapture`. The numbers it gave are in the
 [design](docs/design/sandbox-keeper.md#measured).
-
-The sandbox's per-run cgroups (step 6g) are tested with `cargo xtask linux --userns --cgroup …`: the container
-runs in the machine's cgroup namespace with `/sys/fs/cgroup` mounted writable, so the tests can stand a folder in
-for the user's systemd manager. That gives the container's root the machine's **whole** cgroup hierarchy — it can
-move, freeze or kill any of the machine's processes through it. Use it only on a throwaway test VM, never on a
-Docker whose machine runs anything else (colima's VM is every session's).
 
 `cargo perf` runs the performance budgets (a key → frame on a 200k-line file must stay under 16 ms) and
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory

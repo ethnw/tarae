@@ -13,7 +13,7 @@ root=$(cd ../.. && pwd)
 secs=${1:-3600}
 jobs=${JOBS:-$(nproc)}
 channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-targets="sockaddr netlink msghdr head origin sni body dns_question dns_response"
+targets="sockaddr netlink msghdr head sni body"
 
 [ "$(uname -s)" = Linux ] || { echo "hour.sh is written for Linux (README.md runs one target anywhere)" >&2; exit 2; }
 [ -n "$channel" ] || { echo "no channel in rust-toolchain.toml" >&2; exit 2; }

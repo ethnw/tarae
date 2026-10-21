@@ -2284,7 +2284,6 @@ mod tests {
             served: Ok(()),
             abi: 8,
             ptys: None,
-            tproxy: Ok(()),
             lo_missing: Vec::new(),
             short: None,
             brief: None,

@@ -60,13 +60,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "origin"
-path = "fuzz_targets/origin.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "sni"
 path = "fuzz_targets/sni.rs"
 test = false
@@ -76,20 +69,6 @@ bench = false
 [[bin]]
 name = "body"
 path = "fuzz_targets/body.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "dns_question"
-path = "fuzz_targets/dns_question.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "dns_response"
-path = "fuzz_targets/dns_response.rs"
 test = false
 doc = false
 bench = false

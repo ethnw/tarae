@@ -18,7 +18,7 @@
 15                                                                › Where is this used across the pro…
 16     this session                                               › Why is this diagnostic happening?
 17     • connect to port 5432                  you · 2 h ago
-18     • raw TCP to db.exa…le.com:5432  you · until you quit      C-t for another model
+18     • reach db.example.com:5432      you · until you quit      C-t for another model
 19
 20     this chat
 21     • open terminals, yours too            you · just now
