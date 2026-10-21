@@ -922,3 +922,10 @@ why: —
 brief: —
 hint: —
 report: Here a command shares System V and POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there — and can lower their priority (renice): macOS's sandbox has no rule for either. What listens on this machine's ports it opens is reached whoever's it is — another tarae session's commands' too: macOS's sandbox can't tell whose a listener is.
+══ the network open, hosts listed (Seatbelt)
+line: sandbox Seatbelt · loopback none of its ports open · network hosts listed, others asked, tarae's proxy · shared processes, System V shared memory, POSIX shared memory
+sentence: Seatbelt: kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (none of its ports open); shared with them — processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory.
+why: —
+brief: —
+hint: —
+report: Here a command shares System V and POSIX shared memory with other sessions' commands and the user's other programs — it can read and write what they keep there — and can lower their priority (renice): macOS's sandbox has no rule for either.

@@ -900,6 +900,7 @@ fn snapshot_host_card_closed() {
             users: false,
             left: false,
             open: false,
+            hosts: Default::default(),
             also: vec!["crates.io".into(), "*.crates.io".into()],
         };
         s.ed.push_offer(crate::hosts::card(a));

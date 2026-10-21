@@ -4483,7 +4483,8 @@ mod tests {
     #[ignore = "a measurement (step 5c, Q4): run by hand on a VM"]
     fn measure_through_the_proxy() {
         let Ok(cases) = std::env::var("TARAE_M6") else { return };
-        let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+        let any = crate::llm::Hosts::Any;
+        let llm = crate::llm::LlmConfig { sandbox_network: true, sandbox_hosts: any, ..Default::default() };
         println!();
         for line in cases.lines().filter(|l| !l.trim().is_empty()) {
             let mut parts = line.splitn(3, '\t');
@@ -4517,7 +4518,8 @@ mod tests {
     #[ignore = "a measurement (M5): run by target/sb/m5-lookups.sh"]
     fn measure_lookups() {
         let Ok(cases) = std::env::var("TARAE_M5") else { return };
-        let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+        let any = crate::llm::Hosts::Any;
+        let llm = crate::llm::LlmConfig { sandbox_network: true, sandbox_hosts: any, ..Default::default() };
         println!();
         for line in cases.lines().filter(|l| !l.trim().is_empty()) {
             let mut parts = line.splitn(3, '\t');

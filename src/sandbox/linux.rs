@@ -1001,6 +1001,7 @@ pub fn confine(
             network: p.network,
         })
         .asking(p.asks_hosts)
+        .listing(!p.egress.any)
     });
     Ok(Confine { no_userns, guarantees, ptys, ..c })
 }
@@ -2687,7 +2688,9 @@ mod tests {
                 );
                 // (step 4: the open network is routed out — never the addresses D-d names; this machine's
                 // ports only as opened; step 5: only through the proxy, a tool that ignores it can't go out)
-                let open = said(Policy { network: true, ..s.policy() });
+                // (any host, as `"*"` makes it: C1b's default list adds its sentence before the ports)
+                let any = crate::sandbox::proxy::egress::Egress { any: true, ..s.policy().egress };
+                let open = said(Policy { network: true, egress: any, ..s.policy() });
                 assert!(
                     open.contains(
                         "reach the network beyond this machine (its loopback and its own addresses) only through \

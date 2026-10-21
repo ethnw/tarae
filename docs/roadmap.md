@@ -196,8 +196,8 @@ Done so far, under way, and the order after it (2026-10-16):
   - **A property loop in `caps.rs`**: no change made without a card ever widens what a session may do. Changes
     that narrow apply at once; widening always asks. Progent's split, without a solver: tarae's grants are sets
     of paths, ports and hosts.
-  - **A question for the user after C1's numbers**: with `llm.sandbox-network` on, `llm.sandbox-hosts` defaulting
-    to the packs' registries (others asked) rather than any host. It narrows G4.
+  - **C1b (built, 2026-10-17)**: with `llm.sandbox-network` on, `llm.sandbox-hosts` defaults to the packs'
+    registries (others asked); `"*"` is any host. It narrows G4.
   - Later: `cargo xtask compat --propose`, a pack-data draft from the refusals a stack met, for a person to
     review, never applied by itself. At Plugin API 0.3 (§7), a plugin's WebAssembly imports checked against the
     permissions it declares.

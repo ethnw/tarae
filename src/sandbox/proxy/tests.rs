@@ -434,6 +434,42 @@ fn plain_http_is_checked_by_host() {
     assert_eq!(out.accepted.load(Ordering::SeqCst), 2, "only the two let go reached the outside");
 }
 
+/// C1b: the open network's default rules (`llm.sandbox-hosts` unset — the packs' registries, `Hosts::rules`): a
+/// registry goes through unasked, another host is held and asked, and the user's no refuses it. (The registry's
+/// name is the test resolver's: it leads to the stand-in outside on loopback.)
+#[test]
+fn with_the_network_open_a_registry_passes_and_another_host_waits() {
+    let out = outside(web);
+    let names = vec![("index.crates.io", vec![vec![out.at]]), ("other.example.invalid", vec![vec![out.at]])];
+    let f = start(resolver(names).0, limits());
+    let default = crate::llm::Hosts::default().rules().expect("a list, not any");
+    let go = |run| connection(&f.proxy, 1, run, Egress { hosts: default.clone(), ..rules(&[]) });
+    let (mut c, _) = go(1);
+    assert_eq!(
+        ask(&mut c, "GET http://index.crates.io/config.json HTTP/1.1\r\nHost: index.crates.io\r\n\r\n"),
+        200
+    );
+    assert!(f.asks.try_recv().is_err(), "a registry is reached unasked");
+    let (mut c, d) = go(2);
+    c.write_all(b"GET http://other.example.invalid/ HTTP/1.1\r\nHost: other.example.invalid\r\n\r\n")
+        .unwrap();
+    let asked = f.asks.recv_timeout(WAIT).expect("another host is asked");
+    assert!(
+        matches!(&asked, FromProxy::Ask { run: 2, host, port: 80, .. } if host == "other.example.invalid")
+    );
+    f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
+        session: 1,
+        run: 2,
+        host: "other.example.invalid".into(),
+        port: 80,
+        scope: Scope::Refused,
+    });
+    assert_eq!(status(&mut c), 403);
+    assert!(said_host(&d).contains("refused"));
+    assert_eq!(out.accepted.load(Ordering::SeqCst), 1, "only the registry reached the outside");
+}
+
 /// One plain request in, one out: what reaches the checked address is the request's rebuilt head and its body as
 /// its framing ends it (by length, or chunked to its last chunk), then the server's side half-closes — a request
 /// pipelined behind it, under another `Host`, never reaches it, and its dropping is said.

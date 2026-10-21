@@ -665,6 +665,19 @@ run env:
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle
+hosts:
+    *.crates.io
+    crates.io
+    downloads.gradle.org
+    files.pythonhosted.org
+    plugins.gradle.org
+    proxy.golang.org
+    pypi.org
+    registry.npmjs.org
+    repo.maven.apache.org
+    repo1.maven.org
+    services.gradle.org
+    sum.golang.org
 ══ Linux: homes at their defaults
 profile:
 (version 1)
@@ -1330,3 +1343,16 @@ run env:
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle
+hosts:
+    *.crates.io
+    crates.io
+    downloads.gradle.org
+    files.pythonhosted.org
+    plugins.gradle.org
+    proxy.golang.org
+    pypi.org
+    registry.npmjs.org
+    repo.maven.apache.org
+    repo1.maven.org
+    services.gradle.org
+    sum.golang.org

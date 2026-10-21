@@ -19,8 +19,8 @@ Seatbelt; Linux: Landlock): it reads no key folders or files named like keys and
 temp — not the project, not what runs later (§2). What's not kept: the `claude` program still runs git in the
 project and reaches Anthropic's servers, on macOS reads its login from your keychain, and on Linux below Landlock
 ABI 3 runs unconfined (§2 lists what it touched, measured); a command can read what's outside your home folder and
-the temp folders; with the network on
-and no host list, it can send what it read to any host; and on macOS it can read your other processes' command
+the temp folders; with the network on it can send what it read to the language packs' registries (they take
+uploads) and to any host you said yes to — to any host at all with `llm.sandbox-hosts = "*"`; and on macOS it can read your other processes' command
 lines and starting environments.
 
 ## Who and what this defends against
@@ -228,7 +228,8 @@ Closed by default: **nothing beyond this machine unless you say yes to a host on
 conversation or a session at most, through tarae's proxy** (piece C) — "always" is `llm.sandbox-network`. Three
 settings open more, all in your config (a project's `.tarae.toml` only once trusted): `llm.sandbox-ports` (ports
 on this machine), `llm.sandbox-localhost` (every port on this machine), `llm.sandbox-network` (beyond this machine,
-every host or `llm.sandbox-hosts`' list, through tarae's proxy).
+through tarae's proxy: the packs' registries unasked by default, `llm.sandbox-hosts`' list instead, or every host
+with `"*"`; any other host a card).
 
 Kept:
 - **Closed**: no port on this machine; beyond it only a host you said yes to.
@@ -265,8 +266,11 @@ Kept:
   `sandbox::keeper::tests::a_runs_connection_beyond_reaches_its_host_through_the_planted_socket` ·
   `sandbox::keeper::tests::a_run_has_no_proxy_variable_where_its_keeper_has_the_network`
 - **Hosts by name.** The proxy reads the host from `CONNECT` and the TLS server name (they must match), resolves
-  it itself, checks every address, and connects to the address it checked. With `llm.sandbox-hosts` a list, an
-  unknown host waits on a card.
+  it itself, checks every address, and connects to the address it checked. With the network on, a host
+  `llm.sandbox-hosts` doesn't name — by default every host but the packs' registries — waits on a card.
+  test: `sandbox::tests::the_open_networks_default_is_the_packs_registries` ·
+  `sandbox::proxy::tests::with_the_network_open_a_registry_passes_and_another_host_waits` ·
+  `settings::tests::sandbox_hosts_reads_the_default_star_and_a_list`
   test: `sandbox::proxy::tests::sni_must_match_the_connect_host` · `sandbox::proxy::tests::plain_http_is_checked_by_host` ·
   `sandbox::proxy::parse::tests::a_name_is_never_an_address_in_another_form` ·
   `sandbox::proxy::tests::an_unknown_host_is_held_and_asked` · `sandbox::proxy::macos_tests::an_unknown_host_waits_for_the_answer` ·
@@ -289,9 +293,11 @@ Not kept:
   caches (`~/.cargo/registry/src`) that your own builds then run — the card says so (Rust and Go: tarae's own fetch,
   piece C3, is the way that keeps them closed).
 - A run waits up to `Limits::hold` (20 s) on a card (availability only).
-- **With the network on and `llm.sandbox-hosts = "any"` (the default), a run can send anything it read to any
-  host.** The read rules above are then the only thing between your project and the internet. A host list makes
-  every other host a card.
+- **With the network on, a run can send anything it read to the packs' registries** (`llm.sandbox-hosts`' default,
+  every built-in pack's whatever the project's languages: crates.io, npm, PyPI, Go's proxy, Maven Central, Gradle's —
+  each takes uploads) and to a host you said yes to; every other host is a card. **With `llm.sandbox-hosts = "*"`
+  (`"any"` reads the same; the default before C1b), to any host** — the read rules above are then the only thing
+  between your project and the internet. A list is that list alone: the registries aren't added to it.
 - **`llm.sandbox-localhost` opens the risky ports too.** Neither OS can say "every port but these" once it's on.
   On macOS it also opens other runs' proxy ports, which then only their tokens guard.
 - **macOS: this machine's LAN and bridge addresses** are reached as the network is (Seatbelt names ports by
@@ -464,9 +470,9 @@ Not kept:
 |---|---|
 | `y`/`a`/`A` on a blocked write (`space m s`) | that folder writable for runs (never home, above it, keys, folders of programs, shared caches, toolchain homes) |
 | a port or `llm.sandbox-localhost` | those ports (the risky ones too, with localhost) |
-| `llm.sandbox-network` | the internet through the proxy; every host unless `llm.sandbox-hosts` lists them |
+| `llm.sandbox-network` | the internet through the proxy: the packs' registries unasked (`llm.sandbox-hosts`' default), others a card; every host with `"*"`, a list's hosts alone with a list |
 | `y`/`a`/`s` on a host card, the network closed | that host — and the registries the card lists with it — for the run, conversation or session; a registry's pack's caches writable from the next run under it |
-| `A` on a host card, the network open with a list | that host, always, in this project |
+| `A` on a host card, the network open (by default, or with a list) | that host, always, in this project |
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
 | `y`/`s` on a no-sandbox card | commands as you, unconfined — `s` its checks and reads unasked until the session ends, in every chat of it, never kept past a restart |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |
@@ -763,7 +769,7 @@ Not Claude's, but a hostile repository reaches them:
 | G1 | The `claude` process confined (the default on both) reads all but keys and tarae's state, and the network is open; on Linux it writes all of `~/.claude` (G25) and a file named like a key deeper in home than its top is open to it; where it can't be confined (no Seatbelt, Landlock below ABI 3 or none, rules not made) it runs as you, said | it needs your login and Anthropic; Landlock only grants, by folder | a profile on both (§2): Seatbelt; Landlock + a seccomp filter (no unix socket); `llm.claude-sandbox-required` refuses to start one unconfined |
 | G2 | Your own Claude `allow` rules and plugins apply in the chat | they're yours; claude reads them itself | said |
 | G3 | Reads outside home are open | programs need `/usr`, `/opt`; no list | said |
-| G4 | Network on + hosts "any" = exfiltration to any host | the default favours builds that fetch | said; a host list is one setting |
+| G4 | Network on = exfiltration to the packs' registries and the hosts you said yes to; with hosts `"*"`, to any host | registries take uploads; `"*"` favours builds that fetch from anywhere | said; narrowed by C1b (the default was any host); a list narrows more |
 | G5 | macOS: other processes' environments and command lines | no Seatbelt rule | said to Claude and you |
 | G6 | macOS: shared memory, renice, loopback whoever's | no Seatbelt rule | said |
 | G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | open; the proxy could check |

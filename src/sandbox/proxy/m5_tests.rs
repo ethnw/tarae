@@ -410,7 +410,7 @@ fn fetches(tool: &str) {
     let rule = super::egress::Pattern::parse(&host(tool)).unwrap();
     let llm = crate::llm::LlmConfig {
         sandbox_network: true,
-        sandbox_hosts: Some(vec![rule]),
+        sandbox_hosts: crate::llm::Hosts::List(vec![rule]),
         sandbox_localhost: true,
         ..Default::default()
     };

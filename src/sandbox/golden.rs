@@ -244,6 +244,14 @@ fn policy_said(f: &Fixture, p: &Policy) -> String {
     for (name, values) in fields {
         s.push_str(&format!("{name}:\n{}", lines(f, run, values)));
     }
+    // (C1b: an open network's hosts reached unasked — by default the packs' registries; said only where it's open)
+    if p.network && !p.asks_hosts {
+        let hosts: Vec<String> = match p.egress.any {
+            true => vec!["any".into()],
+            false => p.egress.hosts.iter().map(ToString::to_string).collect(),
+        };
+        s.push_str(&format!("hosts:\n{}", lines(f, run, hosts)));
+    }
     s
 }
 
@@ -707,6 +715,10 @@ fn the_guarantees_say_each_tier() {
         }
         all.push((label.to_string(), None, Guarantees::seatbelt(ports, network), shared));
     }
+    // (C1b: the open network's default — the hosts listed, others asked; a head that keeps it out of the docs' tier
+    // tables, which are about tiers)
+    let listed = Guarantees::seatbelt(false, true).listing(true);
+    all.push(("the network open, hosts listed (Seatbelt)".into(), None, listed, vec![Processes, Ipc, Shm]));
     let mut out = String::new();
     let mut wrong = Vec::new();
     for (label, tier, g, mut want) in all {

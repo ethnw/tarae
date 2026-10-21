@@ -322,7 +322,7 @@ fn gradle_resolves_through_the_proxy() {
     let host = super::egress::Pattern::parse(&format!("{HOST}:{port}")).unwrap();
     let llm = crate::llm::LlmConfig {
         sandbox_network: true,
-        sandbox_hosts: Some(vec![host]),
+        sandbox_hosts: crate::llm::Hosts::List(vec![host]),
         sandbox_localhost: true,
         ..Default::default()
     };

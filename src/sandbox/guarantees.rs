@@ -248,6 +248,9 @@ pub struct Guarantees {
     pub network: bool,
     /// That network is each host asked on a card — `llm.sandbox-network` off (piece C, `Policy.asks_hosts`).
     pub asks: bool,
+    /// That network open, only the hosts `llm.sandbox-hosts` lists reached unasked — by default the packs'
+    /// registries (C1b, `!Egress.any`); others asked on a card. Neither this nor `asks`: any host.
+    pub listed: bool,
     pub way: Way,
     /// Why not the top tier — the probe's, the supervisor's, no TPROXY's, Landlock's — None at the top.
     pub why: Option<String>,
@@ -405,6 +408,7 @@ impl Guarantees {
             rows,
             network: f.network,
             asks: false,
+            listed: false,
             way,
             why: (!why.is_empty()).then(|| why.join("; ")),
             brief: (!brief.is_empty()).then(|| brief.join(" · ")),
@@ -431,6 +435,7 @@ impl Guarantees {
             ],
             network,
             asks: false,
+            listed: false,
             way: Way::Proxy,
             why: None,
             brief: None,
@@ -442,6 +447,12 @@ impl Guarantees {
     /// Its network each host asked (`asks`), as the policy says.
     pub fn asking(self, asks: bool) -> Guarantees {
         Guarantees { asks: asks && self.network, ..self }
+    }
+
+    /// Its open network's hosts a list (`listed`) rather than any, as the policy says (`!Egress.any`) — after
+    /// `asking`.
+    pub fn listing(self, listed: bool) -> Guarantees {
+        Guarantees { listed: listed && self.network && !self.asks, ..self }
     }
 
     /// Its tier — None: Seatbelt's (no tiers).
@@ -513,9 +524,10 @@ impl Guarantees {
             (Way::Proxy, true) => "tarae's proxy",
             (Way::Copies, true) => "tarae's proxy, by copies",
         };
-        let network = match (self.asks, self.way) {
-            (true, Way::NoSocket) | (false, _) => network.to_string(),
-            (true, _) => format!("each host asked, {network}"),
+        let network = match (self.asks, self.listed, self.way) {
+            (_, _, Way::NoSocket) | (false, false, _) => network.to_string(),
+            (true, _, _) => format!("each host asked, {network}"),
+            (false, true, _) => format!("hosts listed, others asked, {network}"),
         };
         v.push(("network", network));
         let shared: Vec<&str> = self.shared().into_iter().map(|p| self.name(p)).collect();
@@ -565,7 +577,9 @@ impl Guarantees {
             .map(|n| json!({ "user": n.user, "net": n.net, "pid": n.pid, "shm": n.shm, "netns": n.netns() }));
         json!({
             "by": by, "tier": tier, "abi": abi, "partial": abi.is_some_and(|a| a < 3), "namespaces": ns,
-            "network": { "open": self.network && !self.asks, "asked": self.asks, "way": self.way.key() },
+            "network": {
+                "open": self.network && !self.asks, "asked": self.asks, "listed": self.listed, "way": self.way.key()
+            },
             "kept": parts(true), "shared": parts(false),
             "why": self.why, "hint": self.hint.as_ref().map(|h| &h.said), "line": self.line(),
         })

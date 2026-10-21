@@ -19,7 +19,8 @@ pub enum Kind {
     Ports {
         max: usize,
     },
-    /// `"any"`, or a list of host rules (`github.com`, `*.crates.io`, `host:8443` — `egress::Pattern`).
+    /// `"registries"`, `"*"` (`"any"`), or a list of host rules (`github.com`, `*.crates.io`, `host:8443` —
+    /// `egress::Pattern`).
     Hosts,
 }
 
@@ -44,7 +45,7 @@ impl Kind {
             }
         }
         let ok = match (self, v) {
-            (Kind::Hosts, Value::String(s)) => s == "any",
+            (Kind::Hosts, Value::String(s)) => ["registries", "*", "any"].contains(&s.as_str()),
             (Kind::Hosts, Value::Array(a)) => a.iter().all(Value::is_str),
             (Kind::Ports { .. }, Value::Array(a)) => {
                 a.iter().all(|p| p.as_integer().is_some_and(|n| (1..=65535).contains(&n)))
@@ -67,7 +68,10 @@ impl Kind {
             Kind::Str => "string".into(),
             Kind::StrList => "list of strings".into(),
             Kind::Ports { max } => format!("list of ports 1..=65535, at most {max}"),
-            Kind::Hosts => "\"any\" | list of hosts (\"github.com\", \"*.crates.io\", \"host:8443\")".into(),
+            Kind::Hosts => {
+                "\"registries\" | \"*\" | list of hosts (\"github.com\", \"*.crates.io\", \"host:8443\")"
+                    .into()
+            }
         }
     }
 }
@@ -522,16 +526,24 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "llm.sandbox-hosts",
         kind: Kind::Hosts,
-        doc: "Chat, with llm.sandbox-network on (unused while it's off): the hosts Claude's commands reach without asking — \"any\", the default, is every host; with a list (\"github.com\", \"*.crates.io\" — its subdomains, \"host:8443\"; else 443, or 80 for plain http) another host waits up to 20 s on a card: this run, this session, always here, or no",
+        doc: "Chat, with llm.sandbox-network on (unused while it's off): the hosts Claude's commands reach without asking — \"registries\", the default, is every built-in language pack's package registries (crates.io, npm, PyPI, Go's proxy, Maven Central…, whatever the project's languages; a registry takes uploads too); \"*\" is every host (\"any\" reads the same); a list (\"github.com\", \"*.crates.io\" — its subdomains, \"host:8443\"; else 443, or 80 for plain http) is those hosts alone, the registries not added. Any other host waits up to 20 s on a card: this run, this chat, this session, always here, or no",
         get: |c| match &c.llm.sandbox_hosts {
-            None => Value::from("any"),
-            Some(h) => Value::Array(h.iter().map(|p| Value::from(p.to_string())).collect()),
+            crate::llm::Hosts::Registries => Value::from("registries"),
+            crate::llm::Hosts::Any => Value::from("*"),
+            crate::llm::Hosts::List(h) => {
+                Value::Array(h.iter().map(|p| Value::from(p.to_string())).collect())
+            }
         },
         set: |c, v| {
-            c.llm.sandbox_hosts = v.as_array().map(|a| {
-                let rules = a.iter().filter_map(Value::as_str);
-                rules.filter_map(|s| crate::sandbox::proxy::egress::Pattern::parse(s).ok()).collect()
-            })
+            c.llm.sandbox_hosts = match v {
+                Value::Array(a) => {
+                    let rules = a.iter().filter_map(Value::as_str);
+                    let parsed = rules.filter_map(|s| crate::sandbox::proxy::egress::Pattern::parse(s).ok());
+                    crate::llm::Hosts::List(parsed.collect())
+                }
+                Value::String(s) if s == "*" || s == "any" => crate::llm::Hosts::Any,
+                _ => crate::llm::Hosts::Registries,
+            }
         },
     },
     Setting {
@@ -862,7 +874,7 @@ mod tests {
                 Kind::Str => "string".into(),
                 Kind::StrList => "list of strings".into(),
                 Kind::Ports { max } => format!("list of ports (at most {max})"),
-                Kind::Hosts => md_code("\"any\"") + " or a list of hosts",
+                Kind::Hosts => md_code("\"registries\"") + " · " + &md_code("\"*\"") + " or a list of hosts",
             };
             let (on_mac, on_linux) = ((s.get)(&mac).to_string(), (s.get)(&linux).to_string());
             let default = match on_mac == on_linux {
@@ -949,20 +961,36 @@ mod tests {
         assert!(RENAMED.iter().all(|r| find(r.1).is_some() && find(r.0).is_none()));
     }
 
-    /// `llm.sandbox-hosts` takes `"any"` or a list of rules the proxy reads (`[]`: every host asked); a rule it
-    /// can't read is refused where it's set, in the parser's words — never kept as some other host, never dropped
-    /// in silence (a dropped rule would ask for a host the user meant to let go; a mangled one could let another).
+    /// `llm.sandbox-hosts` (C1b): unset is the packs' registries, said `"registries"` so it round-trips; `"*"` is
+    /// any host, `"any"` read the same (configs written before); a list is that list alone (`[]`: every host
+    /// asked); another string is refused. A rule it can't read is refused where it's set, in the parser's words —
+    /// never kept as some other host, never dropped in silence (a dropped rule would ask for a host the user meant
+    /// to let go; a mangled one could let another).
     #[test]
-    fn a_host_rule_is_checked_where_it_is_set() {
+    fn sandbox_hosts_reads_the_default_star_and_a_list() {
+        use crate::llm::Hosts;
         let set = |v: Value| {
             let mut cfg = EditorConfig::default();
             apply(&mut cfg, "llm.sandbox-hosts", &v).map(|_| cfg.llm.sandbox_hosts)
         };
-        assert_eq!(set(Value::from("any")), Ok(None));
+        let get = |h: Hosts| {
+            let mut cfg = EditorConfig::default();
+            cfg.llm.sandbox_hosts = h;
+            (SETTINGS.iter().find(|s| s.path == "llm.sandbox-hosts").unwrap().get)(&cfg)
+        };
+        assert_eq!(EditorConfig::default().llm.sandbox_hosts, Hosts::Registries);
+        assert_eq!(get(Hosts::Registries), Value::from("registries"));
+        assert_eq!(set(Value::from("registries")), Ok(Hosts::Registries));
+        assert_eq!(set(Value::from("*")), Ok(Hosts::Any));
+        assert_eq!(set(Value::from("any")), Ok(Hosts::Any));
+        assert_eq!(get(Hosts::Any), Value::from("*"));
         let list = ["github.com", "*.crates.io", "api.test:8443"];
-        let rules = set(Value::Array(list.iter().map(|s| Value::from(*s)).collect())).unwrap().unwrap();
+        let Ok(Hosts::List(rules)) = set(Value::Array(list.iter().map(|s| Value::from(*s)).collect())) else {
+            panic!("a list")
+        };
         assert_eq!(rules.iter().map(ToString::to_string).collect::<Vec<_>>(), list);
-        assert_eq!(set(Value::Array(Vec::new())), Ok(Some(Vec::new())));
+        assert_eq!(set(Value::Array(Vec::new())), Ok(Hosts::List(Vec::new())));
+        assert_eq!(get(Hosts::List(Vec::new())), Value::Array(Vec::new()));
         for (bad, why) in [
             ("1.2.3.4", "an address — a rule names hosts"),
             ("*", "a `*` but as `*.` at its start"),
@@ -971,7 +999,9 @@ mod tests {
             let e = set(Value::Array(vec![Value::from("github.com"), Value::from(bad)])).unwrap_err();
             assert!(e.contains(&format!("\"{bad}\": {why}")), "{bad}: {e}");
         }
-        assert!(set(Value::from("all")).is_err(), "a string but \"any\"");
+        for other in ["all", "none", "github.com"] {
+            assert!(set(Value::from(other)).is_err(), "a string but the three: {other}");
+        }
     }
 
     #[test]

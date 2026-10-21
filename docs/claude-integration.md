@@ -749,11 +749,13 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
 - It reaches nothing over the network, so a build that needs to download something fails.
   `llm.sandbox-network` lets it through, and `llm.sandbox-write` adds folders
 - **Which hosts.** With `llm.sandbox-network` on, a command goes out only through tarae's proxy, and
-  `llm.sandbox-hosts` says which hosts it reaches without asking: `"any"`, the default, is every host; a list
+  `llm.sandbox-hosts` says which hosts it reaches without asking: `"registries"`, the default, is every built-in
+  language pack's package registries (crates.io, npm, PyPI, Go's proxy, Maven Central, Gradle's — whatever the
+  project's languages; a registry takes uploads too); `"*"` is every host (`"any"` reads the same); a list
   (`["github.com", "*.crates.io", "api.example.com:8443"]` — `*.` its subdomains, else port 443, or 80 for plain
-  http) lets those through, and holds a connection to any other up to 20 s while a card asks: `y` this run,
-  `s` this session (until you quit), `A` always in this project, `n` refused for this session. `[]` asks for
-  every host. One card per host, in the session of the run that asked — another session's keys never answer
+  http) lets those alone through, the registries not added. A connection to any other host is held up to 20 s
+  while a card asks: `y` this run, `a` this conversation, `s` this session (until you quit), `A` always in this
+  project, `n` refused for this session. `[]` asks for every host. One card per host, in the session of the run that asked — another session's keys never answer
   it — and it goes when its run ends. At most 8 hosts of a session wait on cards at once; a ninth is refused
   unasked, and the result says so. An answer after the 20 s counts from the tool's next try. "Always" is kept
   in `sandbox.json`; `:granted` lists hosts (always, this session) and `d` on one (or `:sandbox-disallow host
@@ -763,9 +765,9 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   connecting to a host it looked up with something that isn't TLS or HTTP — ssh, a database client, Redis, a
   server that speaks first — gets its own card, "Let a command open a raw connection to …?", saying tarae can't
   see what passes. Only a list entry with that port (`"db.example.com:5432"`) lets it through unasked; neither
-  `"any"` nor an entry without a port does. A lookup of a host's SRV or TXT records (MongoDB's `mongodb+srv://`) is
+  `"*"` nor an entry without a port does. A lookup of a host's SRV or TXT records (MongoDB's `mongodb+srv://`) is
   made by tarae. A name tarae already looks up, by the rules or your yes, gets its service records without a card:
-  one the list names (or every name, with `"any"`), or one you said `y` or `s` to on its host or raw card — its
+  one the list names (the registries by default, every name with `"*"`), or one you said `y` or `s` to on its host or raw card — its
   records show the DNS's operators nothing they don't see already, and every host they name is still asked about
   when connected to. Any other name gets a card, the lookup held meanwhile — answered within about 5 s, it gets the
   records; later, from its next try. Both cards answer `y`, `s` or `n` (no `A`: write the

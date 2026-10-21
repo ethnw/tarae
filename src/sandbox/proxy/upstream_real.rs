@@ -161,7 +161,9 @@ fn run_through(
         }
         got
     });
-    let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+    // (any host: what's checked here is the way out, not which hosts are asked — C1b's default asks for these)
+    let any = crate::llm::Hosts::Any;
+    let llm = crate::llm::LlmConfig { sandbox_network: true, sandbox_hosts: any, ..Default::default() };
     #[allow(unused_mut)]
     let mut p = crate::sandbox::policy(&root, &llm, &[]).unwrap();
     // (as tarae's environment names it — a test's own `Here` keeps no proxy variable: `Here::now`)

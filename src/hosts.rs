@@ -49,6 +49,8 @@ pub struct Ask {
     /// `llm.sandbox-network` on when it asked (a host list's unknown host): `A` is offered — off, every host is
     /// asked and nothing lasts past the session (piece C).
     pub open: bool,
+    /// `llm.sandbox-hosts` when it asked — what the open network's card says is reached without asking (C1b).
+    pub hosts: crate::llm::Hosts,
     /// A host's: the pack's other registries when it's one (as written, `*.crates.io`) — a yes grants them too.
     pub also: Vec<String>,
 }
@@ -155,8 +157,8 @@ pub fn asked(ed: &mut Editor, ask: FromProxy) {
         Kind::Host => suggested(&crate::sandboxpack::get().registries, &host, port),
         Kind::Raw | Kind::Lookup => Vec::new(),
     };
-    let open = ed.config.llm.sandbox_network;
-    let a = Ask { session, run, kind, host, port, asked, process, label, users, left, open, also };
+    let (open, hosts) = (ed.config.llm.sandbox_network, ed.config.llm.sandbox_hosts.clone());
+    let a = Ask { session, run, kind, host, port, asked, process, label, users, left, open, hosts, also };
     ed.with_session(id, move |ed| {
         let front = !ed.background();
         let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
@@ -184,6 +186,20 @@ pub const RAW_TITLE: &str = "Let a command open a raw connection to";
 /// A lookup's card's title (6e+).
 pub const LOOKUP_TITLE: &str = "Let a command look up the service records of";
 
+/// The open network's line on a host card: what's reached without asking, as `llm.sandbox-hosts` holds it (C1b).
+fn open_lasts(hosts: &crate::llm::Hosts) -> &'static str {
+    match hosts {
+        crate::llm::Hosts::Registries => {
+            "Without asking, commands reach the language packs' registries — llm.sandbox-hosts' default; a list \
+             there is reached instead, \"*\" any host."
+        }
+        crate::llm::Hosts::List(_) => {
+            "Without asking, commands reach llm.sandbox-hosts' list alone — the packs' registries aren't added to it."
+        }
+        crate::llm::Hosts::Any => "llm.sandbox-hosts lists the hosts reached without asking.",
+    }
+}
+
 /// The card for `a` — of its kind.
 pub fn card(a: Ask) -> Offer {
     use crate::cards::{Asked, Request, Why};
@@ -195,7 +211,7 @@ pub fn card(a: Ask) -> Offer {
     let waits = waits();
     // (piece C: with the network closed nothing lasts past the session — always is the setting)
     let lasting = match a.open {
-        true => "llm.sandbox-hosts lists the hosts reached without asking.",
+        true => open_lasts(&a.hosts),
         false => CLOSED_LASTS,
     };
     match a.kind {

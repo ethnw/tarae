@@ -449,6 +449,7 @@ fn a_registry_is_named_on_the_hosts_card() {
             users: false,
             left: false,
             open: false,
+            hosts: Default::default(),
             also: Vec::new(),
         })
     };
@@ -467,6 +468,40 @@ fn a_registry_is_named_on_the_hosts_card() {
         (a.why, crate::cards::decide(&a.request, &Default::default()), o.answers(false))
     };
     assert_eq!(decided(&named), decided(&plain));
+}
+
+/// C1b: the open network's card says what's reached without asking as `llm.sandbox-hosts` holds it — the packs'
+/// registries by default, a list alone (the registries not added to it); the old line, which read as if nothing
+/// but the setting's list were reached, only under `"*"`.
+#[test]
+fn the_open_cards_words_follow_the_hosts_setting() {
+    use crate::llm::Hosts;
+    let question = |hosts: Hosts| {
+        let a = Ask {
+            session: 1,
+            run: 2,
+            kind: Kind::Host,
+            host: HOST.into(),
+            port: 443,
+            asked: Vec::new(),
+            process: "curl".into(),
+            label: "curl https://static.example.invalid".into(),
+            users: false,
+            left: false,
+            open: true,
+            hosts,
+            also: Vec::new(),
+        };
+        card(a).question
+    };
+    let old = "llm.sandbox-hosts lists the hosts reached without asking";
+    let default = question(Hosts::Registries);
+    let want = "Without asking, commands reach the language packs' registries — llm.sandbox-hosts' default";
+    assert!(default.contains(want) && !default.contains(old), "{default}");
+    let list = question(Hosts::List(Vec::new()));
+    let want =
+        "Without asking, commands reach llm.sandbox-hosts' list alone — the packs' registries aren't added";
+    assert!(list.contains(want) && !list.contains(old), "{list}");
 }
 
 /// The proxy asking about `kind` for run `run` of the project at `root`: `host:port`, a lookup's questions.

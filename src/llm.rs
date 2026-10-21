@@ -78,6 +78,37 @@ impl ModelInfo {
     }
 }
 
+/// `llm.sandbox-hosts`: with the network on, the hosts Claude's commands reach without asking (piece C1b).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Hosts {
+    /// Every built-in pack's registries, whatever the project's languages (`"registries"`, the default).
+    #[default]
+    Registries,
+    /// Any host (`"*"`; `"any"` read the same — configs written before C1b).
+    Any,
+    /// That list alone — the registries aren't added (`[]`: every host asked).
+    List(Vec<crate::sandbox::proxy::egress::Pattern>),
+}
+
+impl Hosts {
+    /// The rules a run's proxy holds — None: any host.
+    pub fn rules(&self) -> Option<Vec<crate::sandbox::proxy::egress::Pattern>> {
+        match self {
+            Hosts::Any => None,
+            Hosts::List(l) => Some(l.clone()),
+            Hosts::Registries => {
+                let mut v: Vec<crate::sandbox::proxy::egress::Pattern> = Vec::new();
+                for (_, p) in &crate::sandboxpack::get().registries {
+                    if !v.contains(p) {
+                        v.push(p.clone());
+                    }
+                }
+                Some(v)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
     pub command: String,
@@ -125,9 +156,9 @@ pub struct LlmConfig {
     /// With it, a claude that can't be confined doesn't start (`sandbox::claude::start_as`) — your config only.
     pub claude_sandbox_required: bool,
     pub sandbox_network: bool,
-    /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`) — None: any host (`"any"`);
-    /// another is held and asked on a card (`hosts.rs`).
-    pub sandbox_hosts: Option<Vec<crate::sandbox::proxy::egress::Pattern>>,
+    /// With the network on, the hosts reached without asking (`llm.sandbox-hosts`); another is held and asked on a
+    /// card (`hosts.rs`).
+    pub sandbox_hosts: Hosts,
     /// With the network on, whether tarae's proxy goes on through the proxy tarae's own environment names
     /// (`HTTPS_PROXY`…, `NO_PROXY` — `proxy::upstream`), or straight out.
     pub sandbox_upstream: crate::sandbox::proxy::upstream::Setting,
@@ -182,7 +213,7 @@ impl Default for LlmConfig {
             claude_sandbox: crate::sandbox::claude::on_by_default(crate::sandbox::Os::HOST),
             claude_sandbox_required: false,
             sandbox_network: false,
-            sandbox_hosts: None,
+            sandbox_hosts: Hosts::default(),
             sandbox_upstream: Default::default(),
             sandbox_write: Vec::new(),
             sandbox_protect: Vec::new(),

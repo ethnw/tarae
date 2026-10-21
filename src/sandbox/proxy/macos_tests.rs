@@ -120,7 +120,8 @@ fn a_runs_token_is_its_own_and_never_passed_through() {
         ]),
         ..Here::default()
     };
-    let llm = crate::llm::LlmConfig { sandbox_network: true, ..Default::default() };
+    let any = crate::llm::Hosts::Any;
+    let llm = crate::llm::LlmConfig { sandbox_network: true, sandbox_hosts: any, ..Default::default() };
     let run_env = run_env_of(&here, &llm);
     for n in ["HTTPS_PROXY", "GIT_CONFIG_COUNT"] {
         assert!(run_env.var(n).is_none(), "{n} passed");

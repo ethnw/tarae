@@ -710,10 +710,14 @@ impl Guard {
                                 .to_string(),
                         },
                         // (piece C: the network closed, each host waits on the user's card)
-                        match p.asks_hosts {
-                            true => "; each host only once the user said yes to it on its card \
-                                     (llm.sandbox-network is off) — a host refused is the user's no",
-                            false => "",
+                        match (p.asks_hosts, p.egress.any) {
+                            (true, _) => "; each host only once the user said yes to it on its card \
+                                          (llm.sandbox-network is off) — a host refused is the user's no",
+                            // (C1b: the open network's list — by default the packs' registries)
+                            (false, false) => "; without asking only the hosts llm.sandbox-hosts lists (by default \
+                                                the language packs' package registries), any other once the user \
+                                                said yes to it on its card — a host refused is the user's no",
+                            (false, true) => "",
                         },
                         match (here, none) {
                             (true, _) => format!("and every port of this machine's{every}"),
@@ -840,7 +844,9 @@ pub const UNTOLD_OP: &str = "network-untold";
 /// — and, where it opens this machine's ports, what listens on them. Pinned by
 /// `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
 fn seatbelt_guarantees(p: &Policy) -> guarantees::Guarantees {
-    guarantees::Guarantees::seatbelt(p.localhost || !p.ports.is_empty(), p.network).asking(p.asks_hosts)
+    guarantees::Guarantees::seatbelt(p.localhost || !p.ports.is_empty(), p.network)
+        .asking(p.asks_hosts)
+        .listing(!p.egress.any)
 }
 
 /// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
@@ -2905,7 +2911,7 @@ pub struct Env {
     pub asks_hosts: bool,
     pub ports: Vec<u16>,
     pub localhost: bool,
-    /// `llm.sandbox-hosts` (None: any host).
+    /// `llm.sandbox-hosts` as its rules (None: any host; by default the packs' registries — `Hosts::rules`).
     pub hosts: Option<Vec<proxy::egress::Pattern>>,
     /// The proxy tarae itself goes out by, as its environment names it (`llm.sandbox-upstream`, step 5g).
     pub upstream: proxy::upstream::Upstreams,
@@ -3073,7 +3079,7 @@ pub(crate) fn env_in(
         asks_hosts: false,
         ports: llm.sandbox_ports.clone(),
         localhost: llm.sandbox_localhost,
-        hosts: llm.sandbox_hosts.clone(),
+        hosts: llm.sandbox_hosts.rules(),
         upstream: upstream_of(here, llm.sandbox_upstream),
         tmux_tmpdir: here.path("TMUX_TMPDIR"),
         zellij_dir: here.path("ZELLIJ_SOCKET_DIR"),
@@ -8155,8 +8161,20 @@ mod tests {
             r.split_whitespace().collect::<Vec<_>>().join(" ")
         };
         let base = Policy::for_project(&env(Path::new("/Users/u/p")));
-        let open = Policy { network: true, proxy: Some(proxy::RunPort::new(0).unwrap()), ..base.clone() };
+        // (any host, as `"*"` makes it: C1b's default list is said below)
+        let any = proxy::egress::Egress { any: true, ..base.egress.clone() };
+        let run_port = Some(proxy::RunPort::new(0).unwrap());
+        let open = Policy { network: true, proxy: run_port, egress: any, ..base.clone() };
+        let listed = said(Policy { egress: base.egress.clone(), ..open.clone() });
+        assert!(
+            listed.contains(
+                "; without asking only the hosts llm.sandbox-hosts lists (by default the language packs' package \
+                 registries), any other once the user said yes to it on its card"
+            ),
+            "{listed}"
+        );
         let r = said(Policy { ports: vec![3000], ..open.clone() });
+        assert!(!r.contains("without asking only"), "{r}");
         assert!(
             r.contains(
                 "reach the network beyond this machine (its loopback and its own addresses) only through tarae's \
@@ -8256,6 +8274,48 @@ mod tests {
         );
         let golden = include_str!("snapshots/sandbox_report.txt");
         assert!(golden.contains("llm.sandbox-network and llm.sandbox-hosts open more"));
+    }
+
+    /// C1b: with the network open and `llm.sandbox-hosts` unset, a run's proxy reaches every built-in pack's
+    /// registries unasked — whatever the project's languages (this one has none) — and any other host is asked;
+    /// `"*"` is any host (the open network before C1b), a list that list alone (the registries not added).
+    #[test]
+    fn the_open_networks_default_is_the_packs_registries() {
+        use crate::llm::Hosts;
+        let dir = crate::scratch::Scratch::new("open-hosts");
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let here = Here { tmp: Some(profile_path(&std::env::temp_dir())), os: Os::HOST, ..Here::default() };
+        let open = |hosts: Hosts| {
+            let llm =
+                crate::llm::LlmConfig { sandbox_network: true, sandbox_hosts: hosts, ..Default::default() };
+            policy_in(&root, &llm, &[], &here)
+        };
+        let packs = &crate::sandboxpack::get().registries;
+        assert!(packs.len() > 3, "the built-in packs name their registries: {packs:?}");
+        let p = open(Hosts::default());
+        assert!(p.network && !p.asks_hosts && !p.egress.any && !p.egress.closed, "{:?}", p.egress);
+        let said: Vec<String> = p.egress.hosts.iter().map(ToString::to_string).collect();
+        for (pack, r) in packs {
+            assert!(p.egress.hosts.contains(r), "{pack}'s {r} not in {said:?}");
+        }
+        let mut once = said.clone();
+        crate::sorting::sort(&mut once);
+        once.dedup();
+        assert_eq!(once.len(), said.len(), "each once: {said:?}");
+        assert!(
+            p.egress.allows("index.crates.io", 443, 443) && p.egress.allows("registry.npmjs.org", 443, 443)
+        );
+        assert!(!p.egress.allows("static.example.invalid", 443, 443), "another host is asked");
+        let any = open(Hosts::Any).egress;
+        assert!(any.any && any.hosts.is_empty(), "{any:?}");
+        let rule = proxy::egress::Pattern::parse("api.example.invalid").unwrap();
+        let list = open(Hosts::List(vec![rule.clone()])).egress;
+        assert!(!list.any && list.hosts == vec![rule], "{list:?}");
+        assert!(!list.allows("index.crates.io", 443, 443), "a list is the user's whole answer");
+        // (the network closed: the setting unused, every host asked)
+        let closed = crate::llm::LlmConfig { sandbox_hosts: Hosts::Any, ..Default::default() };
+        let closed = policy_in(&root, &closed, &[], &here).egress;
+        assert!(closed.closed && !closed.any && closed.hosts.is_empty(), "{closed:?}");
     }
 
     /// 6e+: a raw connection or a name's records refused say so in the report, each in its own words and op — the

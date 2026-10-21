@@ -243,6 +243,7 @@
         },
         "network": {
           "asked": false,
+          "listed": false,
           "open": false,
           "way": "copies"
         },
@@ -276,6 +277,7 @@
         "namespaces": null,
         "network": {
           "asked": false,
+          "listed": false,
           "open": false,
           "way": "proxy"
         },
