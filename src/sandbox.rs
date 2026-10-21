@@ -2038,15 +2038,21 @@ pub fn path_dirs_in(here: &Here) -> Vec<PathBuf> {
 /// Removed, on a thread of its own, once the run is gone; a gone tarae's at the next start (`prune_runs`).
 /// `<base>/<instance>/<n>`: in this tarae's own folder (`Instance`), whose lock says whose they are.
 #[derive(Debug, PartialEq, Eq)]
-pub struct RunDir(PathBuf);
+pub struct RunDir {
+    path: PathBuf,
+    /// Its tag (`run_tag`), made with it.
+    tag: String,
+}
 
 /// The lock file in an instance's folder.
 const INSTANCE_LOCK: &str = "lock";
 
-/// This tarae's folder for its runs' folders in one base — `<pid>-<ms it was made>` (a later ms while that's
-/// taken: another tarae with this pid, one in a container, made its folder in the same ms) — and the lock in it
-/// (`INSTANCE_LOCK`): an flock held until this tarae ends, the kernel letting go however it ends (`:restart`'s
-/// exec too: its runs are ended first, and the next start's prune takes what's left). Whose a run folder is
+/// This tarae's folder for its runs' folders in one base — `<pid>-<k>`, the first `k` from 0 whose name isn't
+/// taken (another tarae's with this pid, one in a container; a gone one's with it, its lock free, is cleared and
+/// its name taken over — pids come back) — short, as a run's `TMPDIR` is in it and a socket's path holds 104
+/// bytes (`a_runs_temp_leaves_room_for_a_programs_socket`) — and the lock in it (`INSTANCE_LOCK`): an flock
+/// held until this tarae ends, the kernel letting go however it ends (`:restart`'s exec too: its runs are ended
+/// first, and the next start's prune takes what's left). Whose a run folder is
 /// isn't its pid: a gone tarae's pid is often the next start's after a reboot, and a pid means nothing in
 /// another pid namespace; a held lock is held for every process on this machine whatever its namespace.
 ///
@@ -2056,27 +2062,56 @@ const INSTANCE_LOCK: &str = "lock";
 struct Instance {
     dir: PathBuf,
     lock: std::fs::File,
+    /// When it was made (`instance_since`): its runs' tags carry it, as its name is reused — an earlier holder's
+    /// runs' leftovers (a `:restart`'s: the same pid, `SEQ` from 0 again) may still carry theirs.
+    since: u64,
+}
+
+/// When an instance is made: the wall clock's µs, after any earlier one this process made — an exec takes longer
+/// than that, so a `:restart`'s instance's is after its earlier self's too.
+fn instance_since() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::clock::system().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_micros();
+    let now = u64::try_from(now).unwrap_or(u64::MAX);
+    let last = LAST.try_update(Ordering::SeqCst, Ordering::SeqCst, |l| Some(now.max(l + 1)));
+    now.max(last.unwrap_or_default() + 1)
+}
+
+/// The tag of run `n` in `instance`: `tarae-<pid>-<k>-<since>-<n>.` — closed with a dot (so `…-1.` isn't found in
+/// `…-10.`); `tarae-<pid>-` first, as `ours` reads it.
+fn run_tag(instance: &Instance, n: u64) -> String {
+    let name = instance.dir.file_name().unwrap_or_default().to_string_lossy();
+    format!("tarae-{name}-{}-{n}.", instance.since)
 }
 
 /// Each base's instance (in tarae one, the cache's; tests have their own).
 static INSTANCES: Mutex<Vec<(PathBuf, Instance)>> = Mutex::new(Vec::new());
 
 impl Instance {
-    /// This tarae's (`pid`) folder in `base`, made new (named for `ms`, or the next free ms) and its lock taken.
+    /// This tarae's (`pid`) folder in `base`, made new (the first free `<pid>-<k>`) and its lock taken.
     /// A prune can take a lock between its making and its taking — before it's held — and remove the folder:
     /// then it's made again under the next name. Blocks (a worker's).
-    fn make(base: &Path, pid: u32, ms: u128) -> io::Result<Instance> {
+    fn make(base: &Path, pid: u32) -> io::Result<Instance> {
         use std::os::unix::fs::DirBuilderExt;
         let mut last = None;
         for k in 0..8 {
-            let dir = base.join(format!("{pid}-{}", ms + k));
-            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            let dir = base.join(format!("{pid}-{k}"));
+            let make = || std::fs::DirBuilder::new().mode(0o700).create(&dir);
+            match make() {
                 Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                // (a gone tarae's with this pid — pids come back — its lock free: cleared as the prune clears it
+                // and its name used, so leftovers never fill the names; one whose tarae runs, or that can't be
+                // told whose, the next name)
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if gone_cleared(&dir) != Ok(true) || make().is_err() {
+                        continue;
+                    }
+                }
                 Err(e) => return Err(e),
             }
             match lock_taken(&dir.join(INSTANCE_LOCK)) {
-                Ok(Some(lock)) => return Ok(Instance { dir, lock }),
+                Ok(Some(lock)) => return Ok(Instance { dir, lock, since: instance_since() }),
                 // (a prune holds it: the folder is going)
                 Ok(None) => {}
                 Err(e) => {
@@ -2122,11 +2157,11 @@ fn lock_taken(path: &Path) -> io::Result<Option<std::fs::File>> {
     Ok(there.ok().filter(|t| t.dev() == ours.dev() && t.ino() == ours.ino()).map(|_| f))
 }
 
-/// Whether `name` is an instance folder's (`<pid>-<ms>`, the pid not 0).
+/// Whether `name` is an instance folder's (`<pid>-<k>`, the pid not 0).
 fn instance_name(name: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     name.split_once('-')
-        .is_some_and(|(pid, ms)| digits(pid) && digits(ms) && pid.parse::<u32>().is_ok_and(|p| p > 0))
+        .is_some_and(|(pid, k)| digits(pid) && digits(k) && pid.parse::<u32>().is_ok_and(|p| p > 0))
 }
 
 impl RunDir {
@@ -2143,15 +2178,14 @@ impl RunDir {
         let instance = match instances.iter().position(|(b, _)| b == base) {
             Some(i) => &instances[i].1,
             None => {
-                let ms =
-                    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis();
-                instances.push((base.to_path_buf(), Instance::make(base, std::process::id(), ms)?));
+                instances.push((base.to_path_buf(), Instance::make(base, std::process::id())?));
                 &instances[instances.len() - 1].1
             }
         };
-        let dir = instance.dir.join(SEQ.fetch_add(1, Ordering::Relaxed).to_string());
-        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        Ok(std::sync::Arc::new(RunDir(dir)))
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = instance.dir.join(n.to_string());
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(std::sync::Arc::new(RunDir { path, tag: run_tag(instance, n) }))
     }
 
     /// Tests: a new folder in the test's own temp folder (as `Here::now` says runs' are made).
@@ -2161,21 +2195,18 @@ impl RunDir {
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
-    /// The run's tag: `tarae-<instance>-<n>.` — its instance's name and its own, closed with a dot (so `…-1.`
-    /// isn't found in `…-10.`); `tarae-<pid>-` first, as `ours` reads it.
+    /// The run's tag (`run_tag`): its denials are watched by it, and what it leaves running carries it.
     pub fn tag(&self) -> String {
-        let name =
-            |p: Option<&Path>| p.and_then(Path::file_name).unwrap_or_default().to_string_lossy().into_owned();
-        format!("tarae-{}-{}.", name(self.0.parent()), name(Some(&self.0)))
+        self.tag.clone()
     }
 }
 
 impl Drop for RunDir {
     fn drop(&mut self) {
-        let dir = std::mem::take(&mut self.0);
+        let dir = std::mem::take(&mut self.path);
         crate::event::thread("tarae-tidy", move || std::fs::remove_dir_all(dir));
     }
 }
@@ -2218,44 +2249,43 @@ struct Pruned {
 /// or something not tarae's), an instance's name on what isn't a folder; what isn't an instance's name stays
 /// unsaid. Blocks (a worker's).
 fn runs_pruned(base: &Path) -> Pruned {
-    use std::os::unix::fs::OpenOptionsExt;
     let mut pruned = Pruned::default();
     for e in std::fs::read_dir(base).into_iter().flatten().flatten() {
         if !e.file_name().to_str().is_some_and(instance_name) {
             continue;
         }
         let dir = e.path();
-        // (the entry's own type: a link isn't followed)
-        if !e.file_type().is_ok_and(|t| t.is_dir()) {
-            pruned.left.push((dir, "not a folder, so not a tarae's".into()));
-            continue;
-        }
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(dir.join(INSTANCE_LOCK));
-        let lock = match lock {
-            Ok(l) => l,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                pruned.left.push((dir, "no lock in it, so whose it is can't be told".into()));
-                continue;
-            }
-            Err(e) => {
-                pruned.left.push((dir, format!("its lock: {e}")));
-                continue;
-            }
-        };
-        match lock.try_lock() {
-            Ok(()) => match std::fs::remove_dir_all(&dir) {
-                Ok(()) => pruned.gone.push(dir),
-                Err(e) => pruned.left.push((dir, format!("removing it: {e}"))),
-            },
+        match gone_cleared(&dir) {
+            Ok(true) => pruned.gone.push(dir),
             // (its tarae is running)
-            Err(std::fs::TryLockError::WouldBlock) => {}
-            Err(std::fs::TryLockError::Error(e)) => pruned.left.push((dir, format!("its lock: {e}"))),
+            Ok(false) => {}
+            Err(why) => pruned.left.push((dir, why)),
         }
     }
     pruned
+}
+
+/// An instance's folder `dir` removed with what's in it where its tarae is gone — its lock free, taken here:
+/// true; its tarae running: false; left, and why: Err. A link isn't followed (`remove_dir_all` follows none inside).
+fn gone_cleared(dir: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return Err("not a folder, so not a tarae's".into());
+    }
+    let lock =
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(dir.join(INSTANCE_LOCK));
+    let lock = match lock {
+        Ok(l) => l,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err("no lock in it, so whose it is can't be told".into());
+        }
+        Err(e) => return Err(format!("its lock: {e}")),
+    };
+    match lock.try_lock() {
+        Ok(()) => std::fs::remove_dir_all(dir).map(|()| true).map_err(|e| format!("removing it: {e}")),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("its lock: {e}")),
+    }
 }
 
 /// One denial the kernel reported: the process, what it tried (`file-write-create`, `network-outbound`…)
@@ -3138,7 +3168,7 @@ pub struct Left {
     pub root: Option<PathBuf>,
 }
 
-/// Whether `tag` is one of this tarae's runs' (`RunDir::tag`: `tarae-<pid>-<ms>-<n>.` — its instances' since it
+/// Whether `tag` is one of this tarae's runs' (`run_tag`: `tarae-<pid>-<k>-<since>-<n>.` — its instances' since it
 /// started, a `:restart`'s too: the same pid).
 fn ours(tag: &str) -> bool {
     tag.strip_prefix(&format!("tarae-{}-", std::process::id())).is_some_and(|n| n.ends_with('.'))
@@ -6596,12 +6626,44 @@ mod tests {
         drop(lock);
     }
 
+    /// friction 50: a program binding a socket in its run's `TMPDIR` (its `RunDir`) has room for its own names
+    /// below it — `sun_path` holds 103 bytes and its NUL: tarae's cache under a long home (`/Users/` and an
+    /// 18-letter name), the instance and the run as wide as they get (`99999-7`, `9999`), and 46 bytes a
+    /// program's own. Measured (2026-10-20): the deepest socket tarae's own tests make needs 40 below `TMPDIR`
+    /// (62 bytes of it fit, 64 don't); tmux's `tmux-<uid>/default` 16, ssh-agent's `ssh-…/agent.<pid>` 26. A real
+    /// folder of that depth, a `RunDir` made in it, a socket bound there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_runs_temp_leaves_room_for_a_programs_socket() {
+        if skipped_inside_for(
+            "sandbox::tests::a_runs_temp_leaves_room_for_a_programs_socket",
+            "it binds a socket in /private/tmp, closed to a run",
+        ) {
+            return;
+        }
+        const ROOM: usize = 46;
+        let home = format!("/Users/{}", "h".repeat(18));
+        let here = Here { env: HashMap::new(), ..Here::now() };
+        let runs = taraes_cache(Some(Path::new(&home)), &here).unwrap().join("runs");
+        // (a folder as deep as that one: `/private/tmp` is short enough to start from)
+        let scratch = crate::scratch::Scratch::in_dir(Path::new("/private/tmp"), "room");
+        let base = scratch.join("p".repeat(runs.as_os_str().len() - scratch.path().as_os_str().len() - 1));
+        assert_eq!(base.as_os_str().len(), runs.as_os_str().len(), "{}", runs.display());
+        let run = RunDir::new_in(&base).unwrap();
+        let width = |p: Option<&Path>| p.and_then(Path::file_name).map_or(0, |n| n.len());
+        let (instance, n) = (width(run.path().parent()), width(Some(run.path())));
+        let name = "s".repeat(ROOM + 7usize.saturating_sub(instance) + 4usize.saturating_sub(n));
+        let at = run.path().join(name);
+        let bound = std::os::unix::net::UnixListener::bind(&at);
+        assert!(bound.is_ok(), "{} ({} bytes): {:?}", at.display(), at.as_os_str().len(), bound.err());
+    }
+
     /// A tarae makes its run folders in a folder of its own (`Instance`) whose lock it holds while it runs —
-    /// named for its pid and the ms it was made in, so a gone tarae's folders never have the names a new one's
-    /// would (a reused pid's after a reboot); another tarae with that pid that made its folder in the same ms (in
-    /// another pid namespace) has it, and this one takes the next ms. A run's tag still starts with this
-    /// tarae's pid (`ours`). A cache cleared under tarae: the next run folder makes its folder again, its lock
-    /// held. (A cache of the test's own.)
+    /// named for its pid and the first free `k`: another tarae with that pid (in another pid namespace) holds its
+    /// own and this one takes the next; a gone one's (a reused pid's after a reboot), its lock free, is cleared
+    /// as the prune clears it and its name taken over, so leftovers — eight of one pid — never keep a start from
+    /// its runs. A run's tag still starts with this tarae's pid (`ours`). A cache cleared under tarae: the next
+    /// run folder makes its folder again, its lock held. (A cache of the test's own.)
     #[test]
     fn a_tarae_makes_its_run_folders_in_a_folder_it_holds() {
         let scratch = crate::scratch::Scratch::new("runs-instance");
@@ -6609,19 +6671,30 @@ mod tests {
         let base = t.join("runs");
         std::fs::create_dir_all(&base).unwrap();
         let held = |dir: &Path| lock_taken(&dir.join(INSTANCE_LOCK)).unwrap().is_none();
-        let first = Instance::make(&base, 777, 5000).unwrap();
-        assert_eq!(first.dir, base.join("777-5000"));
+        let first = Instance::make(&base, 777).unwrap();
+        assert_eq!(first.dir, base.join("777-0"));
         assert!(held(&first.dir), "its lock is held");
-        let same_ms = Instance::make(&base, 777, 5000).unwrap();
-        assert_eq!(same_ms.dir, base.join("777-5001"), "the next ms");
-        assert!(held(&same_ms.dir));
-        // A gone one's folder of that name, its lock free: never taken over — its leftovers are the prune's
-        let gone = base.join("778-5000");
-        std::fs::create_dir_all(gone.join("0")).unwrap();
-        std::fs::write(gone.join(INSTANCE_LOCK), "").unwrap();
-        let after_gone = Instance::make(&base, 778, 5000).unwrap();
-        assert_eq!(after_gone.dir, base.join("778-5001"));
-        assert!(gone.join("0").is_dir());
+        let same_pid = Instance::make(&base, 777).unwrap();
+        assert_eq!(same_pid.dir, base.join("777-1"), "the next free name");
+        assert!(held(&same_pid.dir));
+        // Gone ones' folders of every name it tries, each its lock free and a run's folder left in it — but the
+        // first, whose tarae still runs (its lock held): the second cleared, its leftovers gone, its name taken over
+        let leftover = |k: u32| {
+            let dir = base.join(format!("778-{k}"));
+            std::fs::create_dir_all(dir.join("0")).unwrap();
+            std::fs::write(dir.join(INSTANCE_LOCK), "").unwrap();
+            dir
+        };
+        let gone: Vec<PathBuf> = (0..8).map(leftover).collect();
+        let running = lock_taken(&gone[0].join(INSTANCE_LOCK)).unwrap().expect("held here");
+        let after_gone = Instance::make(&base, 778).expect("a start never fails on leftovers");
+        assert_eq!(after_gone.dir, gone[1], "the first gone one's name");
+        assert!(held(&after_gone.dir) && !gone[1].join("0").exists(), "cleared, its lock held");
+        assert!(
+            gone[0].join("0").is_dir() && gone[2].join("0").is_dir(),
+            "a running one's, and the rest, as they were"
+        );
+        drop(running);
         // This tarae's run folders
         let run = RunDir::new_in(&base).unwrap();
         let own = run.path().parent().unwrap().to_path_buf();
@@ -6632,12 +6705,21 @@ mod tests {
         assert_eq!(other.path().parent(), Some(own.as_path()), "one folder of its own for all its runs");
         assert!(ours(&run.tag()) && ours(&other.tag()) && run.tag() != other.tag(), "{}", run.tag());
         assert!(run.tag().ends_with('.'));
+        // A `:restart` (the same pid, its lock let go by the exec, `SEQ` from 0 again): its name taken over, its
+        // runs' tags never its earlier self's — what that one's runs left running may still carry theirs
+        let before = Instance::make(&base, 779).unwrap();
+        let tag_before = run_tag(&before, 0);
+        drop(before);
+        let restarted = Instance::make(&base, 779).unwrap();
+        assert_eq!(restarted.dir, base.join("779-0"), "its name taken over");
+        assert_ne!(run_tag(&restarted, 0), tag_before, "a tag of the earlier one's");
+        drop(restarted);
         // The cache cleared
         drop((run, other));
         std::fs::remove_dir_all(&base).unwrap();
         let again = RunDir::new_in(&base).unwrap();
         assert!(again.path().is_dir() && held(again.path().parent().unwrap()), "made again, held");
-        drop((again, first, same_ms, after_gone));
+        drop((again, first, same_pid, after_gone));
         std::fs::remove_dir_all(&t).ok();
     }
 

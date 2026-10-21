@@ -103,7 +103,7 @@ mod tests {
         ("refactor.rs", 2),
         ("restart.rs", 6),
         ("runhomes.rs", 1),
-        ("sandbox.rs", 9),
+        ("sandbox.rs", 8),
         ("sandbox/keeper.rs", 13),
         ("sandbox/linux.rs", 3),
         ("sandbox/proxy.rs", 3),
