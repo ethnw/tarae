@@ -158,8 +158,8 @@ configs carry over as they are.
 - **Toasts** — status messages fade in as cards at the top right, the left bar colored by kind (info, saved, warning,
   error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png))
 - **Rendered doc comments** — `///`, `//!`, and `/** */` blocks show as rewrapped prose: markers stripped, paragraphs
-  joined, headings in accent, `code`, lists, `@param` tags, and example code in its language's colors, on a lightly
-  tinted panel (`editor.render-doc-comments`, [folded](screenshots/ux-doc-comments.png) ·
+  joined, headings in accent, `code`, lists, `@param` tags, and example code set in, in its language's colors — on the
+  code's own ground, a faint bar at the left (the accent's on the block the cursor is in) (`editor.render-doc-comments`, [folded](screenshots/ux-doc-comments.png) ·
   [unfolded](screenshots/ux-doc-comments-open.png)). Plain `//` comments are left alone, apart from `TODO`/`NOTE`
   colors. **One rule everywhere** a file's code is drawn — every pane of a split, a code review, `:diff`, Claude's
   edit under review, an edit follow shows, a picker's preview — and for every move over it (`j`/`k`, clicks,

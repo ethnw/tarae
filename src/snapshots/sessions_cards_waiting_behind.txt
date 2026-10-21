@@ -35,9 +35,9 @@
 01                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppppppppppp
 03                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
-04     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
-05     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
-06     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
+04                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
+05                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
+06                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 07                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 08                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 09                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
@@ -66,9 +66,9 @@
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa    ffffffffffffffffffffffffffffffffffffffffffff
 02   A                                                                        TTTT f ddddddddd ww wwwww f d
 03   f
-04   f
-05
-06
+04   f f
+05     f
+06     f
 07   f
 08   f
 09   f                                                                        a TTT TTTTTT
@@ -93,5 +93,5 @@
 28                                                                            DDDDD D fffff  DDDDD D fffff
 29  a TTTTTT   ww wwwwwww                                                                           dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

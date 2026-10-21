@@ -42,7 +42,7 @@
 08   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 10   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11   pppppppppppppppppppppppppppppppppppppppppp ppppp111111111111111111111111111111111111111111111111111111111p
+11   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 12   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 13   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 14   pppppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -73,7 +73,7 @@
 08                                                 f
 09                                                 f
 10                                                 f
-11                                                 f
+11                                                 f f
 12                                                 f
 13                                                ff
 14                                                ff
@@ -93,5 +93,5 @@
 28
 29  a TTTTTT   DDDD ffffff  DDD fffff                                                    dddd   ddddd dd   TTTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

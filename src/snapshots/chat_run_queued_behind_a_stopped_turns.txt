@@ -35,9 +35,9 @@
 01                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ppppppppppppppppppppppppppppppppppppppppppppppp
 03                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
-04     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
-05     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
-06     11111111111111111111111111111111111111111111111111111111111111111111 ppppppppppppppppppppppppppppppppppppppppppppppp
+04                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
+05                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
+06                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 07                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 08                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
 09                                                                          ppppppppppppppppppppppppppppppppppppppppppppppp
@@ -66,9 +66,9 @@
 01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02   A                                                                        a TTT TTT TTT TTTTT
 03   f
-04   f                                                                        a fff    ggggg gggg gg ggggg
-05                                                                              ffffff ffff ffffff f fffffff ffffff fff
-06                                                                              dddd ddd dddd dd f ffff  DDDDD D D ffff ff
+04   f f                                                                      a fff    ggggg gggg gg ggggg
+05     f                                                                        ffffff ffff ffffff f fffffff ffffff fff
+06     f                                                                        dddd ddd dddd dd f ffff  DDDDD D D ffff ff
 07   f
 08   f
 09   f
@@ -93,5 +93,5 @@
 28   dddddd d ddddd dddd   ffffff f fff f ffffff ffff fff ffff fff f ffff     DDD ffff  DDD ffff  DDD ffffff
 29  a TTTT                                                                                          dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  1=other
+bg: c=ui.cursorline.primary  p=ui.popup
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

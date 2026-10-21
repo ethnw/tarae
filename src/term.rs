@@ -4772,10 +4772,11 @@ pub(crate) fn fold_rows(
     out
 }
 
-/// One screen row of a folded doc comment: indent · bar · text on a faint panel. Body a tone lower — reads
-/// smaller, quieter than code (terminals can't resize fonts: contrast); example code = a well of editor bg.
-/// `width` cells, the row's end left as it is. (On a card — a picker's preview — `ui` is the card's, `Ui::on`:
-/// the panel a tone off it, as off the code's ground.)
+/// One screen row of a folded doc comment: indent · bar · text, on the code's own ground — no panel, so a file
+/// thick with comments stays one surface. The bar says where a block is (faint; the accent on the block the cursor
+/// is in); the prose a tone above the comment colour (it's read, and quieter than code); example code set in two
+/// cells, in its syntax colours. `width` cells, the row's end left as it is. (On a card — a picker's preview —
+/// `ui` is the card's, `Ui::on`: its ground.)
 #[allow(clippy::too_many_arguments)]
 fn draw_folded_row(
     out: &mut impl Write,
@@ -4788,22 +4789,20 @@ fn draw_folded_row(
     current: bool,
     dim: bool,
 ) -> io::Result<()> {
-    let (ground, tint) = (ui.base, ui.tint);
+    let ground = ui.base;
     let comment_fg = editor.theme.try_get("comment").and_then(|s| s.fg).or(ui.virt.fg);
-    let panel_bg = blend(comment_fg, tint, if current { 0.16 } else { 0.09 }).or(ground.bg);
-    let panel = Style { bg: panel_bg, fg: blend(ground.fg, comment_fg, 0.55).or(ground.fg), ..ground };
-    let well = Style { bg: ground.bg, ..panel };
+    let prose = Style { fg: blend(ground.fg, comment_fg, 0.35).or(ground.fg), ..ground };
     let indent = indent.min(width.saturating_sub(4));
     apply(out, ground)?;
     queue!(out, Spaces(indent))?;
-    apply(out, Style { fg: if current { ui.accent.fg.or(comment_fg) } else { comment_fg }, ..panel })?;
+    apply(out, Style { fg: if current { ui.accent.fg.or(ui.linenr.fg) } else { ui.linenr.fg }, ..ground })?;
     queue!(out, Print("▎ "))?;
     let mut used = indent + 2;
-    let base = if code { well } else { panel };
+    let base = if code { ground } else { prose };
     if code {
-        apply(out, well)?;
-        queue!(out, Print(" "))?;
-        used += 1;
+        apply(out, ground)?;
+        queue!(out, Spaces(2))?;
+        used += 2;
     }
     for sp in spans {
         if used >= width {
@@ -4819,13 +4818,8 @@ fn draw_folded_row(
         queue!(out, Print(&text))?;
         used += text.width();
     }
-    apply(out, if code { well } else { panel })?;
-    let pad = if code { (width.saturating_sub(used)).saturating_sub(1) } else { width.saturating_sub(used) };
-    queue!(out, Spaces(pad))?;
-    if code {
-        apply(out, panel)?;
-        queue!(out, Print(" "))?;
-    }
+    apply(out, ground)?;
+    queue!(out, Spaces(width.saturating_sub(used)))?;
     Ok(())
 }
 

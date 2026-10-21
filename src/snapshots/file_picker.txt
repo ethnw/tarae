@@ -37,8 +37,8 @@
 03   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 04   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 05   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-06   pppppppppppppppppppppppppppppppppppppppp ppppp1111111111111111111111111111111111111111111111111p
-07   pppppppppppppppppppppppppppppppppppppppp ppppp1111111111111111111111111111111111111111111111111p
+06   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+07   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 08   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 09   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 10   pppppppppppppppppppppppppppppppppppppppp ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
@@ -68,8 +68,8 @@
 03    ffffffffffffffffffffffffffffffffffffff   fffffffffffffffffffffffffffffffffffffffffffffffffffff
 04       dddf                                    f
 05   a f   AAAATTT                               f
-06                                               f
-07
+06                                               f f
+07                                                 f
 08                                               f
 09                                               f                  gggggggggggggggg  gggggg
 10                                                     ggggggggggg
@@ -93,5 +93,5 @@
 28
 29  a TTTTTT   DDDD ffffff  DDD fffff                                                  ddddd dd   TTT
 ## legend
-bg: p=ui.popup  P=ui.menu.selected  1=other
+bg: p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

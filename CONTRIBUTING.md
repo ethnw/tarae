@@ -437,6 +437,6 @@ The design language:
 - **Glyphs** only from what JetBrains Mono, Hack, Menlo, and SF Mono all have: `ƒ τ ν π § ◦ # ¶ ● ▲ › ▎ ▐ ▌ ▄ ▀`
 - When space runs out, fold the least important information first
 - The built-in themes meok and hanji ([`src/themes/`](src/themes)) have **the same set of keys** — change one, change
-  the other
+  the other (`builtin_themes_have_the_same_keys`)
 - Status messages are toasts: `set_status`, `set_success`, `set_warning`, `set_error`; `note` records without a toast
   (for things already visible on screen)

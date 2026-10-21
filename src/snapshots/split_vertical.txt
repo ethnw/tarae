@@ -22,10 +22,10 @@
 02                                                    1111111111111111111111111111111111111111111111111
 03
 04
-05     222222222222222222222222222222222222222222222
-06     222222222222222222222222222222222222222222222
-07     222222222222222222222222222222222222222222222
-08     222222222222222222222222222222222222222222222
+05
+06
+07
+08
 09                                                        Accccccccccccccccccccccccccccccccccccccccccc
 10
 11
@@ -39,10 +39,10 @@
 02  f ddddddddddd                                    f a TTTTTTTTTTT
 03   f                                              ff ff
 04   f                                              ff ff                gggg ggggg ggggg ggg ggggg
-05   f                                              ff        gggg ggg gggg gggg
-06                                                  ff ff
-07                                                  ff ff              ggg gggggggg gggggg
-08                                                  ff
+05   f f                                            ff        gggg ggg gggg gggg
+06     f                                            ff ff
+07     f                                            ff ff              ggg gggggggg gggggg
+08     f                                            ff
 09   f                                              ff AA
 10                                                  ff
 11   f                                               f                                                f
@@ -51,5 +51,5 @@
 14                                                   f                                                f
 15  a TTTTTT                                                                   dddd   ddddd dd   TTTT
 ## legend
-bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other  2=other
+bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

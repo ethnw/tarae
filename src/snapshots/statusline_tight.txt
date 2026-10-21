@@ -10,16 +10,16 @@
 00
 01     k11111111111111111111111111111111111111111111
 02     Acccccccccccccccccccccccccccccccccccccccccccc
-03     222222222222222222222222222222222222222222222
-04     222222222222222222222222222222222222222222222
+03
+04
 05
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT
 01 e f                                  e        ff e
 02   A
-03   f
-04
+03   f f
+04     f
 05  a TTTTTT    dddd       e e   w w   a aaaa   TTT
 ## legend
-bg: c=ui.cursorline.primary  A=ui.cursor.primary  k=ui.cursor  1=other  2=other
+bg: c=ui.cursorline.primary  A=ui.cursor.primary  k=ui.cursor  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning

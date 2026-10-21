@@ -27,16 +27,16 @@
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
 01 ppppppppppppppppppppppppppppp
-02 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111
-03 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111
-04 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111
+02 ppppppppppppppppppppppppppppp
+03 ppppppppppppppppppppppppppppp
+04 ppppppppppppppppppppppppppppp
 05 ppppppppppppppppppppppppppppp
 06 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp
 07 ppppppppppppppppppppppppppppp
 08 ppppppppppppppppppppppppppppp
-09 ppppppppppppppppppppppppppppp 2222222222222222222222222222222222222222222222222222222222222222222222
-10 ppppppppppppppppppppppppppppp     333333333333333333333333333333333333333333333333333333333333333333
-11 ppppppppppppppppppppppppppppp     333333333333333333333333333333333333333333333333333333333333333333
+09 ppppppppppppppppppppppppppppp 1111111111111111111111111111111111111111111111111111111111111111111111
+10 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222
+11 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222
 12 ppppppppppppppppppppppppppppp
 13 ppppppppppppppppppppppppppppp
 14 ppppppppppppppppppppppppppppp
@@ -52,9 +52,9 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00   TTTTTT         fffffffffff   ddddd  f  ddd  f  TTTTTTT  f    dddd
 01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  gg                    f
-03   f ff f ffffff d d dddddddd
-04                                               BBBBBBBBBB
+02   d dddd  gg                    f f
+03   f ff f ffffff d d dddddddd      f
+04                                   f           BBBBBBBBBB
 05     dddf                        f
 06 a f f ttttttt           w gg    f
 07                                 f
@@ -75,5 +75,5 @@
 22   DDDDD D D fff
 23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

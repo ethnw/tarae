@@ -29,9 +29,9 @@
 01 ppppppppppppppppppppppppppppppp
 02 ppppppppppppppppppppppppppppppp     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03 ppppppppppppppppppppppppppppppp
-04 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-05 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-06 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+04 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp
+05 ppppppppppppppppppppppppppppppp
+06 ppppppppppppppppppppppppppppppp
 07 ppppppppppppppppppppppppppppppp
 08 ppppppppppppppppppppppppppppppp
 09 ppppppppppppppppppppppppppppppp
@@ -54,9 +54,9 @@
 01   aaaaaaaaaaaaaaaaaaaaaaaaaaaa   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02     TTTTTTT                 d     A
 03   f   dddf                        f
-04 a f f w TTTTTTT         dd dd     f
-05   f f e                   ddd
-06   f f   ddf
+04 a f f w TTTTTTT         dd dd     f f
+05   f f e                   ddd       f
+06   f f   ddf                         f
 07   f f f g                 ddd     f
 08     TTTTTT                  d     f
 09   f w                      dd     f
@@ -75,5 +75,5 @@
 22   D ffffff  D ffffff ffffff
 23  a TTT                                                                                   dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus

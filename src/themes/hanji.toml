@@ -1,5 +1,6 @@
 # 한지 (hanji) — tarae's default light theme. Warm paper background + a single seal-vermilion accent.
-# Same skeleton as 먹 (meok) — keys are 1:1, so when you change one, change the other too.
+# Same skeleton as 먹 (meok) — keys are 1:1, so when you change one, change the other too. The code's hues are ayu
+# light's family, each deepened until it reads on the paper (ayu light's own sit near 2.5:1).
 
 "ui.background" = { bg = "paper" }
 "ui.text" = "ink"
@@ -11,7 +12,7 @@
 "ui.cursor" = { fg = "paper", bg = "vermilion_dim" }
 "ui.cursor.primary" = { fg = "paper", bg = "vermilion" }
 "ui.cursor.primary.insert" = { fg = "paper", bg = "green" }
-"ui.cursor.primary.select" = { fg = "paper", bg = "plum" }
+"ui.cursor.primary.select" = { fg = "paper", bg = "magenta" }
 "ui.cursor.match" = { bg = "surface_hi", bold = true }
 "ui.cursorline.primary" = { bg = "line" }
 "ui.linenr" = "faint"
@@ -20,7 +21,7 @@
 "ui.statusline.inactive" = { fg = "dim", bg = "paper" }
 "ui.statusline.normal" = { fg = "paper", bg = "vermilion", bold = true }
 "ui.statusline.insert" = { fg = "paper", bg = "green", bold = true }
-"ui.statusline.select" = { fg = "paper", bg = "plum", bold = true }
+"ui.statusline.select" = { fg = "paper", bg = "magenta", bold = true }
 "ui.bufferline" = { fg = "dim", bg = "paper" }
 "ui.bufferline.active" = { fg = "ink_hi", bg = "paper", bold = true }
 "ui.virtual" = "dim"
@@ -36,42 +37,42 @@
 "ui.window" = "faint"
 
 "error" = "red"
-"warning" = "ochre"
+"warning" = "amber"
 "info" = "blue"
 "hint" = "dim"
 "diagnostic.error" = { underline = { color = "red", style = "curl" } }
-"diagnostic.warning" = { underline = { color = "ochre", style = "curl" } }
+"diagnostic.warning" = { underline = { color = "amber", style = "curl" } }
 "diagnostic.info" = { underline = { color = "blue", style = "curl" } }
 "diagnostic.hint" = { underline = { color = "dim", style = "curl" } }
 "diagnostic.unnecessary" = { dim = true }
 "diagnostic.deprecated" = { crossed = true }
 "diff.plus" = "green"
 "diff.minus" = "red"
-"diff.delta" = "ochre"
+"diff.delta" = "amber"
 
-"comment" = { fg = "comment", italic = true }
-"keyword" = "plum"
-"keyword.control" = "plum"
-"keyword.operator" = "plum"
+"comment" = "comment"
+"keyword" = "orange"
+"keyword.control" = "orange"
+"keyword.operator" = "orange"
 "keyword.directive" = "teal"
-"function" = "blue"
-"function.builtin" = "blue"
+"function" = "yellow"
+"function.builtin" = "yellow"
 "function.macro" = "teal"
 "function.special" = "teal"
-"type" = "brown"
-"type.builtin" = "brown"
-"type.enum.variant" = "orange"
-"constructor" = "brown"
-"constant" = "orange"
-"constant.builtin" = "orange"
-"constant.numeric" = "orange"
+"type" = "blue"
+"type.builtin" = "blue"
+"type.enum.variant" = "magenta"
+"constructor" = "blue"
+"constant" = "magenta"
+"constant.builtin" = "magenta"
+"constant.numeric" = "magenta"
 "constant.character" = "green"
 "constant.character.escape" = "teal"
 "string" = "green"
 "string.regexp" = "teal"
 "string.special" = "teal"
 "variable" = "ink"
-"variable.builtin" = { fg = "plum", italic = true }
+"variable.builtin" = { fg = "orange", italic = true }
 "variable.parameter" = { fg = "ink", italic = true }
 "variable.other.member" = "ink"
 "attribute" = "brown"
@@ -97,22 +98,23 @@ paper = "#f5f1e8"
 line = "#efeadf"
 surface = "#ebe5d8"
 surface_hi = "#ded6c4"
-sel = "#e6dfcf"
-sel_hi = "#dcd2bd"
-faint = "#cbc4b4"
+sel = "#e9e2d3"
+sel_hi = "#e2d9c5"
+faint = "#9c9586"
 guide = "#e4ddcd"
-dim = "#8d887c"
-comment = "#a39d90"
+dim = "#7c776c"
+comment = "#706a5e"
 punct = "#7d786d"
 ink = "#34322d"
 ink_hi = "#1d1c19"
-vermilion = "#c4452c"
+vermilion = "#b33a22"
 vermilion_dim = "#d99a88"
-brown = "#8a6414"
-plum = "#8a3f9c"
-blue = "#2c5d99"
-green = "#3f7a3a"
-orange = "#b4501f"
-teal = "#1f7d7d"
-red = "#b8322a"
-ochre = "#a8740e"
+brown = "#7c5810"
+orange = "#a44c00"
+yellow = "#7a6400"
+amber = "#703000"
+blue = "#1a63a0"
+magenta = "#7a48ad"
+green = "#406c00"
+teal = "#15716a"
+red = "#b52f49"

@@ -447,6 +447,120 @@ mod tests {
         assert!(load("dracula").is_err(), "Helix themes are not read");
     }
 
+    /// Every built-in theme's text clears its floor (WCAG 2 contrast) on each ground it's read on, read from the
+    /// themes themselves: body text and the code's colours 4.5 on the ground and the cards (4.0 under the primary
+    /// selection and on a card's selected row — hanji's paper has no room for 4.5 there without going muddy),
+    /// comments 4 (2.5 under a selection), punctuation and dim 3, faint 2; a mode's word and the cursor 4.5 on
+    /// their own colour.
+    #[test]
+    fn builtin_themes_clear_their_contrast_floors() {
+        use crate::chrome::contrast;
+        let rgb = |c: Option<Color>| match c {
+            Some(Color::Rgb { r, g, b }) => [r, g, b],
+            other => panic!("a built-in theme's colour is a true colour: {other:?}"),
+        };
+        let mut low = Vec::new();
+        for name in ["meok", "hanji"] {
+            let t = load(name).unwrap();
+            let (fg, bg) = (|k: &str| rgb(t.get(k).fg), |k: &str| rgb(t.get(k).bg));
+            let grounds = [
+                ("ground", bg("ui.background")),
+                ("card", bg("ui.popup")),
+                ("selected row", bg("ui.menu.selected")),
+                ("selection", bg("ui.selection.primary")),
+                ("cursor line", bg("ui.cursorline.primary")),
+            ];
+            let on = |g: &str| grounds.iter().find(|(n, _)| *n == g).unwrap().1;
+            let mut check = |what: &str, fg: [u8; 3], ground: &str, floor: f64| {
+                let r = contrast(fg, on(ground));
+                if r < floor {
+                    low.push(format!("{name}: {what} on the {ground} {r:.2} (floor {floor})"));
+                }
+            };
+            let code = ["variable", "keyword", "function", "type", "constant", "string", "function.macro"];
+            for k in code.into_iter().chain([
+                "attribute",
+                "tag",
+                "ui.text",
+                "ui.accent",
+                "error",
+                "warning",
+                "info",
+            ]) {
+                check(k, fg(k), "ground", 4.5);
+                check(k, fg(k), "cursor line", 4.5);
+                check(k, fg(k), "selection", 4.0);
+            }
+            for k in ["ui.text", "ui.accent", "error", "warning", "info", "diff.plus", "diff.minus"] {
+                check(k, fg(k), "card", 4.5);
+                check(k, fg(k), "selected row", 4.0);
+            }
+            check("comment", fg("comment"), "ground", 4.0);
+            check("comment", fg("comment"), "cursor line", 4.0);
+            check("comment", fg("comment"), "selection", 2.5);
+            check("punctuation", fg("punctuation"), "ground", 3.0);
+            for g in ["ground", "card", "selected row"] {
+                check("dim", fg("ui.virtual"), g, 3.0);
+                check("faint", fg("ui.linenr"), g, 2.0);
+            }
+            for k in
+                ["ui.statusline.normal", "ui.statusline.insert", "ui.statusline.select", "ui.cursor.primary"]
+            {
+                let r = contrast(fg(k), bg(k));
+                if r < 4.5 {
+                    low.push(format!("{name}: {k}'s text on its colour {r:.2} (floor 4.5)"));
+                }
+            }
+        }
+        assert!(low.is_empty(), "under their floors:\n{}", low.join("\n"));
+    }
+
+    /// A warning never reads as code: its colour stands apart (CIE76 ΔE in CIELAB, ≥ 20) from every colour the code
+    /// and the accent use. On ink a light signal amber has the room; on paper the code's ochres fill the amber band at
+    /// their lightness, so hanji's warning is the amber's paper form — a deep burnt amber, apart by lightness (a grid
+    /// search, 2026-10-21: the only warm colour ≥ 20 from all of them at 4.5:1).
+    #[test]
+    fn warnings_stand_apart_from_the_codes_colours() {
+        let lab = |c: Option<Color>| {
+            let Some(Color::Rgb { r, g, b }) = c else {
+                panic!("a built-in theme's colour is a true colour: {c:?}")
+            };
+            let lin = |v: u8| {
+                let v = v as f64 / 255.0;
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            let (r, g, b) = (lin(r), lin(g), lin(b));
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+            let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+            [116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))]
+        };
+        let code =
+            ["variable", "keyword", "function", "type", "constant", "string", "attribute", "function.macro"];
+        for (name, floor) in [("meok", 20.0), ("hanji", 20.0)] {
+            let t = load(name).unwrap();
+            let w = lab(t.get("warning").fg);
+            for k in code.into_iter().chain(["ui.accent", "error"]) {
+                let c = lab(t.get(k).fg);
+                let de = ((w[0] - c[0]).powi(2) + (w[1] - c[1]).powi(2) + (w[2] - c[2]).powi(2)).sqrt();
+                assert!(de >= floor, "{name}: warning is ΔE {de:.1} from {k} (floor {floor})");
+            }
+        }
+    }
+
+    /// meok and hanji have one set of keys, their palettes apart — change one, change the other.
+    #[test]
+    fn builtin_themes_have_the_same_keys() {
+        let keys = |src: &str| {
+            let t: toml::Table = toml::from_str(src).unwrap();
+            let mut k: Vec<String> = t.keys().filter(|k| *k != "palette").cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(SOURCES[1].1), keys(SOURCES[0].1), "hanji's keys aren't meok's");
+    }
+
     #[test]
     fn builtin_themes_parse_without_warnings() {
         for (n, _) in BUILTIN {

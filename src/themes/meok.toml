@@ -1,18 +1,20 @@
 # 먹 (meok) — tarae's default dark theme. Ink background + a single thread-coral accent.
-# Principle: use only one accent color, boldly. Syntax colors are desaturated so they don't compete; dimmed things
-# come in only three steps (dim·faint·surface). Format: see the header of theme.rs.
+# Principle: use only one accent color, boldly. The code's hues are ayu's family (orange keywords, blue types, green
+# strings, yellow functions, magenta constants) fitted to the ink — alive, never neon; dimmed things come in only
+# three steps (dim·faint·surface). Every text clears its floor (body 4.5:1, comment 4, dim 3, faint 2).
+# Format: see the header of theme.rs.
 
 "ui.background" = { bg = "ink" }
 "ui.text" = "paper"
 "ui.text.focus" = { fg = "paper_hi", bold = true }
-"ui.text.directory" = "sky"
+"ui.text.directory" = "blue"
 "ui.accent" = "coral"
 "ui.selection" = { bg = "sel" }
 "ui.selection.primary" = { bg = "sel_hi" }
 "ui.cursor" = { fg = "ink", bg = "coral_dim" }
 "ui.cursor.primary" = { fg = "ink", bg = "coral" }
-"ui.cursor.primary.insert" = { fg = "ink", bg = "sage" }
-"ui.cursor.primary.select" = { fg = "ink", bg = "lavender" }
+"ui.cursor.primary.insert" = { fg = "ink", bg = "green" }
+"ui.cursor.primary.select" = { fg = "ink", bg = "magenta" }
 "ui.cursor.match" = { bg = "surface_hi", bold = true }
 "ui.cursorline.primary" = { bg = "line" }
 "ui.linenr" = "faint"
@@ -20,8 +22,8 @@
 "ui.statusline" = { fg = "paper", bg = "ink" }
 "ui.statusline.inactive" = { fg = "dim", bg = "ink" }
 "ui.statusline.normal" = { fg = "ink", bg = "coral", bold = true }
-"ui.statusline.insert" = { fg = "ink", bg = "sage", bold = true }
-"ui.statusline.select" = { fg = "ink", bg = "lavender", bold = true }
+"ui.statusline.insert" = { fg = "ink", bg = "green", bold = true }
+"ui.statusline.select" = { fg = "ink", bg = "magenta", bold = true }
 "ui.bufferline" = { fg = "dim", bg = "ink" }
 "ui.bufferline.active" = { fg = "paper_hi", bg = "ink", bold = true }
 "ui.virtual" = "dim"
@@ -36,49 +38,49 @@
 "ui.help" = { fg = "paper", bg = "surface" }
 "ui.window" = "faint"
 
-"error" = "rose"
+"error" = "red"
 "warning" = "amber"
-"info" = "sky"
+"info" = "blue"
 "hint" = "dim"
-"diagnostic.error" = { underline = { color = "rose", style = "curl" } }
+"diagnostic.error" = { underline = { color = "red", style = "curl" } }
 "diagnostic.warning" = { underline = { color = "amber", style = "curl" } }
-"diagnostic.info" = { underline = { color = "sky", style = "curl" } }
+"diagnostic.info" = { underline = { color = "blue", style = "curl" } }
 "diagnostic.hint" = { underline = { color = "dim", style = "curl" } }
 "diagnostic.unnecessary" = { dim = true }
 "diagnostic.deprecated" = { crossed = true }
-"diff.plus" = "sage"
-"diff.minus" = "rose"
+"diff.plus" = "green"
+"diff.minus" = "red"
 "diff.delta" = "amber"
 
-"comment" = { fg = "comment", italic = true }
-"keyword" = "lavender"
-"keyword.control" = "lavender"
-"keyword.operator" = "lavender"
+"comment" = "comment"
+"keyword" = "orange"
+"keyword.control" = "orange"
+"keyword.operator" = "orange"
 "keyword.directive" = "teal"
-"function" = "sky"
-"function.builtin" = "sky"
+"function" = "yellow"
+"function.builtin" = "yellow"
 "function.macro" = "teal"
 "function.special" = "teal"
-"type" = "sand"
-"type.builtin" = "sand"
-"type.enum.variant" = "peach"
-"constructor" = "sand"
-"constant" = "peach"
-"constant.builtin" = "peach"
-"constant.numeric" = "peach"
-"constant.character" = "sage"
+"type" = "blue"
+"type.builtin" = "blue"
+"type.enum.variant" = "magenta"
+"constructor" = "blue"
+"constant" = "magenta"
+"constant.builtin" = "magenta"
+"constant.numeric" = "magenta"
+"constant.character" = "green"
 "constant.character.escape" = "teal"
-"string" = "sage"
+"string" = "green"
 "string.regexp" = "teal"
 "string.special" = "teal"
 "variable" = "paper"
-"variable.builtin" = { fg = "lavender", italic = true }
+"variable.builtin" = { fg = "orange", italic = true }
 "variable.parameter" = { fg = "paper", italic = true }
 "variable.other.member" = "paper"
 "attribute" = "sand"
 "namespace" = "paper"
 "label" = "teal"
-"tag" = "sky"
+"tag" = "blue"
 "operator" = "punct"
 "punctuation" = "punct"
 "special" = "coral"
@@ -87,33 +89,34 @@
 "markup.bold" = { bold = true }
 "markup.italic" = { italic = true }
 "markup.strikethrough" = { crossed = true }
-"markup.link.url" = { fg = "sky", underline = true }
-"markup.link.text" = "sky"
+"markup.link.url" = { fg = "blue", underline = true }
+"markup.link.text" = "blue"
 "markup.raw" = "sand"
 "markup.list" = "coral"
 "markup.quote" = { fg = "dim", italic = true }
 
 [palette]
-ink = "#101217"
-line = "#15181e"
+ink = "#0c0e12"
+line = "#13161b"
 surface = "#1a1d24"
 surface_hi = "#262a34"
 sel = "#232a38"
 sel_hi = "#2d3548"
-faint = "#3a3e49"
-guide = "#23262e"
+faint = "#545862"
+guide = "#21242b"
 dim = "#747884"
-comment = "#5f6472"
+comment = "#7d786e"
 punct = "#8d909a"
 paper = "#d6d2c8"
 paper_hi = "#f1ede4"
-coral = "#ef8a5a"
-coral_dim = "#9a6048"
+coral = "#f4805a"
+coral_dim = "#9a5a44"
+orange = "#f19e53"
+yellow = "#e6bd66"
+blue = "#72bdea"
+magenta = "#cda8f5"
+green = "#abd06a"
+teal = "#86cfc0"
 sand = "#e2c27f"
-lavender = "#b39cf2"
-sky = "#7fb2ec"
-sage = "#9bcf8e"
-peach = "#ec9f76"
-teal = "#78c8c8"
-rose = "#ec7a86"
-amber = "#e3b660"
+red = "#f0727e"
+amber = "#ffb52e"

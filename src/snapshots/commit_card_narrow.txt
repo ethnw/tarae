@@ -37,9 +37,9 @@
 01
 02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
-04     1111111111111111111pppppppppppppppppppppppppppppppppppppppp1
-05     1111111111111111111pppppppppppppppppppppppppppppppppppppppp1
-06     1111111111111111111pppppppppppppppppppppppppppppppppppppppp1
+04                        pppppppppppppppppppppppppppppppppppppppp
+05                        pppppppppppppppppppppppppppppppppppppppp
+06                        pppppppppppppppppppppppppppppppppppppppp
 07                        pppppppppppppppppppppppppppppppppppppppp
 08                        pppppppppppppppppppppppppppppppppppppppp
 09                        pppppppppppppppppppppppppppppppppppppppp
@@ -70,9 +70,9 @@
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02   A
 03   f
-04   f                     a BBBBBB BBBBBBB B BBBBB
-05
-06                           ddd dddddd dddd ddd ddd dddd dddd
+04   f f                   a BBBBBB BBBBBBB B BBBBB
+05     f
+06     f                     ddd dddddd dddd ddd ddd dddd dddd
 07   f                       dd ddddd dddddd
 08   f
 09   f                       dd ddddd
@@ -99,5 +99,5 @@
 30
 31  a TTTTTT                                dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

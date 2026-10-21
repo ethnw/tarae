@@ -35,16 +35,16 @@
 01 ppppppppppppppppppppppppppppp
 02 ppppppppppppppppppppppppppppp     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03 ppppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111111111111111
-05 ppppppppppppppppppppppppppppp     111111111111111111111111111111111111111111111111111111111111111111111111111111
-06 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp     111111111111111111111111111111111111111111111111111111111111111111111111111111
+04 ppppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppppp
+06 PPPPPPPPPPPPPPPPPPPPPPPPPPPPp
 07 ppppppppppppppppppppppppppppp
-08 ppppppppppppppppppppppppppppp 2222222222222222222222222222222222222222222222222222222222222222222222222222222222
-09 ppppppppppppppppppppppppppppp     333333333333333333333333333333333333333333333333333333333333333333333333333333
+08 ppppppppppppppppppppppppppppp 1111111111111111111111111111111111111111111111111111111111111111111111111111111111
+09 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222222222222222
 10 ppppppppppppppppppppppppppppp
-11 ppppppppppppppppppppppppppppp 2222222222222222222222222222222222222222222222222222222222222222222222222222222222
-12 ppppppppppppppppppppppppppppp     333333333333333333333333333333333333333333333333333333333333333333333333333333
-13 ppppppppppppppppppppppppppppp     333333333333333333333333333333333333333333333333333333333333333333333333333333
+11 ppppppppppppppppppppppppppppp 1111111111111111111111111111111111111111111111111111111111111111111111111111111111
+12 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222222222222222
+13 ppppppppppppppppppppppppppppp     222222222222222222222222222222222222222222222222222222222222222222222222222222
 14 ppppppppppppppppppppppppppppp
 15 ppppppppppppppppppppppppppppp
 16 ppppppppppppppppppppppppppppp
@@ -52,7 +52,7 @@
 18 ppppppppppppppppppppppppppppp
 19 ppppppppppppppppppppppppppppp
 20 ppppppppppppppppppppppppppppp
-21 ppppppppppppppppppppppppppppp 2222222222222222222222222222222222222222222222222222222222222222222222222222222222
+21 ppppppppppppppppppppppppppppp 1111111111111111111111111111111111111111111111111111111111111111111111111111111111
 22 ppppppppppppppppppppppppppppp
 23 ppppppppppppppppppppppppppppp
 24 ppppppppppppppppppppppppppppp
@@ -66,9 +66,9 @@
 01   ffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02   d ddddd  ggg ee               A
 03   f ff f ffffff d d dddddddd    f
-04                                 f
-05     dddf
-06 a f g ddddddd     w gg ee aa
+04                                 f f
+05     dddf                          f
+06 a f g ddddddd     w gg ee aa      f
 07   f f                ggg fff    f
 08   f                    gg ee     E
 09                                 fw
@@ -93,5 +93,5 @@
 28   DDDDD D D fff
 29  a TTTTTT   gg  ee                                                                       dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other  3=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary  1=other  2=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus

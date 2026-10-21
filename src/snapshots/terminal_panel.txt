@@ -29,9 +29,9 @@
 01
 02     ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03
-04     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-05     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
-06     11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+04
+05
+06
 07
 08
 09
@@ -54,9 +54,9 @@
 01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02   A                                                                                                f
 03   f                                                                                                f
-04   f                                                                                                f
-05                                                                                                    f
-06                                                                                                    f
+04   f f                                                                                              f
+05     f                                                                                              f
+06     f                                                                                              f
 07   f                                                                                                f
 08   f                                                                                                f
 09   f                                                                                                f
@@ -75,5 +75,5 @@
 22
 23  a TTTTTTTT                                                                  dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  1=other
+bg: c=ui.cursorline.primary  p=ui.popup
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

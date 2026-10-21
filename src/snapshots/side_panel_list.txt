@@ -29,9 +29,9 @@
 01 ppppppppppppppppppppppppppppppp
 02 ppppppppppppppppppppppppppppppp
 03 ppppppppppppppppppppppppppppppp                                            pppppppppppppppppppppppppppppppppppp
-04 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-05 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-06 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+04 ppppppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppppppp
+06 ppppppppppppppppppppppppppppppp
 07 ppppppppppppppppppppppppppppppp     ccccAccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 08 ppppppppppppppppppppppppppppppp
 09 ppppppppppppppppppppppppppppppp
@@ -40,7 +40,7 @@
 12 ppppppppppppppppppppppppppppppp
 13 ppppppppppppppppppppppppppppppp
 14 ppppppppppppppppppppppppppppppp
-15 ppppppppppppppppppppppppppppppp     2222222222222222222222222222222222222222222222222222222222222222222222222222
+15 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
 16 ppppppppppppppppppppppppppppppp
 17 ppppppppppppppppppppppppppppppp
 18 ppppppppppppppppppppppppppppppp
@@ -54,9 +54,9 @@
 01   ffffffffffffffffffffffffffff   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02     dddf                          f
 03   f                         d     f                                         w
-04 a f f w ff TTTTTT TTTTTTTTT T     f
-05   f f e fff
-06   f   ddf
+04 a f f w ff TTTTTT TTTTTTTTT T     f f
+05   f f e fff                         f
+06   f   ddf                           f
 07   f f                       d     A                                                            w
 08   f f f e fff                     f
 09                                   f
@@ -75,5 +75,5 @@
 22   DDDDD D fffffff
 23  a TTTTTT                                                                                dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other  2=other
+bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus

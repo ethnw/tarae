@@ -29,9 +29,9 @@
 01 ppppppppppppppppppppppppppppppp
 02 ppppppppppppppppppppppppppppppp     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 03 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPp
-04 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-05 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
-06 ppppppppppppppppppppppppppppppp     1111111111111111111111111111111111111111111111111111111111111111111111111111
+04 ppppppppppppppppppppppppppppppp
+05 ppppppppppppppppppppppppppppppp
+06 ppppppppppppppppppppppppppppppp
 07 ppppppppppppppppppppppppppppppp
 08 ppppppppppppppppppppppppppppppp
 09 ppppppppppppppppppppppppppppppp
@@ -54,9 +54,9 @@
 01   aaaaaaaaaaaaaaaaaaaaaaaaaaaa   ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02                                   A
 03 a   TTTT                          f
-04                                   f
-05
-06
+04                                   f f
+05                                     f
+06                                     f
 07                                   f
 08                                   f
 09                                   f
@@ -75,5 +75,5 @@
 22   DDD ffff  D fffff
 23  a TTTTTTT                                                                               dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected  1=other
+bg: c=ui.cursorline.primary  p=ui.popup  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus

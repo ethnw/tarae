@@ -430,36 +430,35 @@ mod tests {
     use super::*;
 
     /// The fade loses the same share of contrast in both built-in themes — light text on ink and dark text
-    /// on paper — and stays readable. Measured (WCAG ratio, before → after): meok text on ink 12.41 →
-    /// 11.08, on its surface 11.17 → 9.98, dim 4.25 → 3.90, faint 1.75 → 1.67; hanji text on paper 11.36 →
-    /// 10.20, on its surface 10.20 → 9.16, dim 3.13 → 2.89, faint 1.54 → 1.48 — 11–12% of the contrast
-    /// above 1 each.
+    /// on paper — and stays readable; the colours read from the themes themselves. Measured (WCAG ratio,
+    /// before → after, 2026-10-21's palettes): meok text on ink 12.80 → 11.42, on its surface 11.17 → 9.98, dim
+    /// 4.38 → 4.02, faint 2.71 → 2.51; hanji text on paper 11.36 → 10.20, on its surface 10.20 → 9.16, dim
+    /// 3.95 → 3.63, faint 2.64 → 2.45 — 11–12% of the contrast above 1 each.
     #[test]
     fn the_fade_keeps_the_same_share_of_contrast_in_both_themes() {
-        let hex = |s: &str| {
-            let v = u32::from_str_radix(s.trim_start_matches('#'), 16).unwrap();
-            [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+        let rgb = |c: Option<crossterm::style::Color>| match c {
+            Some(crossterm::style::Color::Rgb { r, g, b }) => [r, g, b],
+            other => panic!("a built-in theme's colour is a true colour: {other:?}"),
         };
-        // (meok: paper / dim / faint on ink and on surface; hanji: ink / dim / faint on paper and surface)
-        let cases = [
-            ("#d6d2c8", "#101217"),
-            ("#747884", "#101217"),
-            ("#3a3e49", "#101217"),
-            ("#d6d2c8", "#1a1d24"),
-            ("#34322d", "#f5f1e8"),
-            ("#8d887c", "#f5f1e8"),
-            ("#cbc4b4", "#f5f1e8"),
-            ("#34322d", "#ebe5d8"),
-        ];
-        for (fg, bg) in cases {
-            let (fg, bg) = (hex(fg), hex(bg));
-            let (before, after) = (contrast(fg, bg), contrast(fade(fg, bg, FADE), bg));
-            let lost = 1.0 - (after - 1.0) / (before - 1.0);
-            assert!((0.10..=0.15).contains(&lost), "{fg:?} on {bg:?}: {before:.2} → {after:.2} ({lost:.3})");
+        // (the text stays above these after the fade — WCAG AA for body text is 4.5)
+        for (name, text_after) in [("meok", 10.0), ("hanji", 9.0)] {
+            let t = crate::theme::load(name).unwrap();
+            let (fg, bg) = (|k: &str| rgb(t.get(k).fg), |k: &str| rgb(t.get(k).bg));
+            let (ground, surface) = (bg("ui.background"), bg("ui.popup"));
+            let cases = [
+                ("text", fg("ui.text"), ground),
+                ("dim", fg("ui.virtual"), ground),
+                ("faint", fg("ui.linenr"), ground),
+                ("text on its surface", fg("ui.text"), surface),
+            ];
+            for (what, fg, bg) in cases {
+                let (before, after) = (contrast(fg, bg), contrast(fade(fg, bg, FADE), bg));
+                let lost = 1.0 - (after - 1.0) / (before - 1.0);
+                assert!((0.10..=0.15).contains(&lost), "{name} {what}: {before:.2} → {after:.2} ({lost:.3})");
+            }
+            let after = contrast(fade(fg("ui.text"), ground, FADE), ground);
+            assert!(after > text_after, "{name}: text after the fade {after:.2}");
         }
-        // The text colours themselves: readable after (WCAG AA for body text is 4.5)
-        assert!(contrast(fade(hex("#d6d2c8"), hex("#101217"), FADE), hex("#101217")) > 10.0);
-        assert!(contrast(fade(hex("#34322d"), hex("#f5f1e8"), FADE), hex("#f5f1e8")) > 9.0);
     }
 
     #[test]

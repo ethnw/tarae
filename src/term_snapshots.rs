@@ -678,10 +678,8 @@ fn snapshot_split_vertical() {
     s.check("split_vertical");
 }
 
-/// Doc comments render as markdown (bold, code, list, heading, code block) while the cursor is elsewhere.
-#[test]
-fn snapshot_doc_comment_folded() {
-    const SRC: &str = r#"//! Tiny geometry helpers.
+/// A file with two doc-comment blocks (`//!`, `///`) and markdown in them: bold, code, a list, a heading, a code block.
+const POINT_RS: &str = r#"//! Tiny geometry helpers.
 
 /// A point on the **plane**.
 ///
@@ -707,10 +705,55 @@ impl Point {
     }
 }
 "#;
+
+/// Doc comments render as markdown (bold, code, list, heading, code block) while the cursor is elsewhere.
+#[test]
+fn snapshot_doc_comment_folded() {
     let mut s = Shot::new(100, 30);
-    s.file("src/point.rs", SRC);
+    s.file("src/point.rs", POINT_RS);
     s.keys("22gg");
     s.check("doc_comment_folded");
+}
+
+/// Keys into a folded doc block and out of it: the block the cursor is in has its bar in the accent, every other
+/// block's is faint; leaving it gives its bar back to faint (`draw_folded_row`'s `current`).
+#[test]
+fn the_doc_block_the_cursor_is_in_has_the_accent_bar() {
+    let mut s = Shot::new(100, 30);
+    s.file("src/point.rs", POINT_RS);
+    let accent = vt_color(s.ed.theme.get("ui.accent").fg).unwrap();
+    let faint = vt_color(s.ed.theme.get("ui.linenr").fg).unwrap();
+    // (each row's bar: the first `▎` in its first cells, and its colour)
+    let bars = |s: &mut Shot| -> Vec<(u16, vt100::Color)> {
+        let bytes = s.frame();
+        let mut p = vt100::Parser::new(s.h, s.w, 0);
+        p.process(&bytes);
+        let sc = p.screen();
+        (0..s.h)
+            .filter_map(|r| {
+                (0..8).find_map(|c| sc.cell(r, c).filter(|x| x.contents() == "▎").map(|x| (r, x.fgcolor())))
+            })
+            .collect()
+    };
+    s.keys("3gg");
+    let inside = bars(&mut s);
+    assert_eq!(inside.first(), Some(&(2, faint)), "the `//!` block, not the cursor's: {inside:?}");
+    let block: Vec<_> = inside.iter().filter(|(r, _)| (4..=11).contains(r)).collect();
+    assert_eq!(block.len(), 8, "the `///` block's rows: {inside:?}");
+    assert!(block.iter().all(|(_, c)| *c == accent), "the cursor's block in the accent: {inside:?}");
+    s.keys("22gg");
+    let outside = bars(&mut s);
+    assert!(!outside.is_empty() && outside.iter().all(|(_, c)| *c == faint), "every bar faint: {outside:?}");
+}
+
+/// The cursor inside a folded block (normal mode, one character: it stays folded): that block's bar in the
+/// accent, every other block's faint — the panel's tint gone, the bar alone says which block you're in.
+#[test]
+fn snapshot_doc_comment_current_block() {
+    let mut s = Shot::new(100, 30);
+    s.file("src/point.rs", POINT_RS);
+    s.keys("3gg");
+    s.check("doc_comment_current_block");
 }
 
 /// Error toast, frozen at full opacity (between fade-in and fade-out).
