@@ -223,8 +223,8 @@ pub fn route(
     }
 }
 
-/// `route`'s answer where sessions share this machine's loopback (no netns of the session's own: tier host, served by
-/// copies): a call it sends to this machine (`Machine`, `OwnAddress` — one of its own addresses lands on what
+/// `route`'s answer where sessions share this machine's loopback (no netns of the session's own: tier host): a call
+/// it sends to this machine (`Machine`, `OwnAddress` — one of its own addresses lands on what
 /// listens on every address, loopback's too) that would land on another session's socket (`anothers`, asked only
 /// then) is refused (step 8, D18) — and one whose socket's owner can't be told (`anothers`' Err) too, as `Untold`.
 /// With a netns of its own a session's loopback is its own: nothing to ask.

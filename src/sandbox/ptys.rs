@@ -7,7 +7,7 @@
 //! (`supervisor::pty_ioctl`) — so the `/dev/pts/N` it then opens is one its rules grant.
 //!
 //! tarae keeps its own master of each, so a pty the run let go is still that inode: while the run holds one, what
-//! its processes hold is looked at (`/proc/<pid>/fd`, as `copies` collects) — one none of them holds is emptied,
+//! its processes hold is looked at (`/proc/<pid>/fd`, the processes `below` its keeper) — one none of them holds is emptied,
 //! set as new and locked, and goes back to the pool (`settle` — judged only by a look begun after it was handed);
 //! one whose master the run closed while something of
 //! it still holds the other end is hung up as without tarae — tarae closes its master too — and is gone. So a run
@@ -388,11 +388,11 @@ pub fn tty_index(fdinfo: &str) -> Option<u32> {
     fdinfo.lines().find_map(|l| l.strip_prefix("tty-index:")).and_then(|v| v.trim().parse().ok())
 }
 
-/// What the processes below `tree` hold of ptys, by number (`copies::below`, each one's `/proc/<pid>/fd`: a
+/// What the processes below `tree` hold of ptys, by number (`below`, each one's `/proc/<pid>/fd`: a
 /// master names `ptmx`, its number from `fdinfo`; the other end names `/dev/pts/N`) — None where not every one
 /// could be read (then nothing is taken back).
 pub fn holders(tree: u32) -> Option<HashMap<u32, Held>> {
-    let (pids, complete) = super::copies::below(tree);
+    let (pids, complete) = below(tree);
     if !complete {
         return None;
     }
@@ -427,6 +427,69 @@ pub fn holders(tree: u32) -> Option<HashMap<u32, Held>> {
         }
     }
     Some(held)
+}
+
+/// What a failed read of a process's `/proc` says: `Gone` — it ended meanwhile (`ENOENT`, `ESRCH`), it holds
+/// nothing; else `Unreadable` — it may hold anything (a non-dumpable process's `fd` is refused, `EACCES`).
+#[derive(Debug, PartialEq)]
+enum Failed {
+    Gone,
+    Unreadable,
+}
+
+fn failed(e: &io::Error) -> Failed {
+    match e.raw_os_error() {
+        Some(libc::ENOENT | libc::ESRCH) => Failed::Gone,
+        _ => Failed::Unreadable,
+    }
+}
+
+/// The processes below `tree` (not itself), and whether every one's children could be read: by each thread's
+/// `children` (`/proc/<pid>/task/<tid>/children`) — or, where the kernel has none of those for `tree`
+/// (`CONFIG_PROC_CHILDREN`), by every process's parent.
+fn below(tree: u32) -> (Vec<u32>, bool) {
+    let children = |pid: u32| -> io::Result<Vec<u32>> {
+        let mut out = Vec::new();
+        for t in std::fs::read_dir(format!("/proc/{pid}/task"))?.flatten() {
+            match std::fs::read_to_string(t.path().join("children")) {
+                Ok(list) => out.extend(list.split_whitespace().filter_map(|p| p.parse::<u32>().ok())),
+                // (a thread that ended meanwhile)
+                Err(e) if failed(&e) == Failed::Gone => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    };
+    let Ok(first) = children(tree) else { return (by_parent(tree), true) };
+    let (mut out, mut next, mut complete) = (Vec::new(), first, true);
+    while let Some(pid) = next.pop() {
+        out.push(pid);
+        match children(pid) {
+            Ok(c) => next.extend(c),
+            Err(e) => complete &= failed(&e) == Failed::Gone,
+        }
+    }
+    (out, complete)
+}
+
+/// `below` from every process's parent (`/proc/<pid>/stat`'s fourth field).
+fn by_parent(tree: u32) -> Vec<u32> {
+    let mut parents: HashMap<u32, Vec<u32>> = HashMap::new();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        // (after the name's closing parenthesis: state, then the parent)
+        let ppid = stat.rsplit_once(')').and_then(|(_, r)| r.split_whitespace().nth(1)?.parse::<u32>().ok());
+        if let Some(ppid) = ppid {
+            parents.entry(ppid).or_default().push(pid);
+        }
+    }
+    let (mut out, mut next) = (Vec::new(), parents.get(&tree).cloned().unwrap_or_default());
+    while let Some(pid) = next.pop() {
+        out.push(pid);
+        next.extend(parents.get(&pid).cloned().unwrap_or_default());
+    }
+    out
 }
 
 #[cfg(test)]

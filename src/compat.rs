@@ -1204,11 +1204,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/sandbox/redirect.rs", "in fn session: no_rcvmark", HOOK),
     ("src/sandbox/supervisor.rs", "in fn kept_apart: if APART_OFF.load(Relaxed) == self.session {", HOOK),
     ("src/sandbox/supervisor.rs", "in fn routed: if p.resolvers.iter().any(|r| r.ip().to_canonical(", RECORD),
-    (
-        "src/sandbox/supervisor.rs",
-        r#"in fn serving: if std::env::var_os("TARAE_TEST_COPIES").is_some()"#,
-        SEAM,
-    ),
     ("src/sandbox/supervisor.rs", "in fn swapped_for: if let Some(pause) = p.swap_pause {", HOOK),
     ("src/sandbox/tier.rs", r#"in fn get: if std::env::var_os("TARAE_TEST_NO_NS").is_some() "#, SEAM),
     ("src/sandbox/tier.rs", r#"in fn get: if std::env::var_os("TARAE_TEST_NO_PID").is_some()"#, SEAM),
@@ -1547,6 +1542,14 @@ timeout = 60
     fn a_closed_runs_host_comes_to_the_driver_as_its_card() {
         let test = "compat::tests::a_closed_runs_host_comes_to_the_driver_as_its_card";
         if !sandboxed_here(test) || !on_path("curl") {
+            return;
+        }
+        // (tier offline — runs not served, `pidfd_getfd` refused under Docker's default profile: no socket reaches
+        // the proxy, so no card to see)
+        #[cfg(target_os = "linux")]
+        if let Some(why) = crate::sandbox::supervisor::unavailable() {
+            let line = format!("{}{test} — runs not served here: {why}\n", crate::test_results::SELF_SKIP);
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
             return;
         }
         let hold = crate::sandbox::proxy::Limits::default().hold;

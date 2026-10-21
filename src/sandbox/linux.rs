@@ -944,8 +944,7 @@ pub fn confine(
     serve: Result<(), String>,
 ) -> io::Result<Confine> {
     let ns = keeper.map_or(super::tier::Ns::NONE, |k| k.ns);
-    let copies = super::supervisor::copies();
-    let net = ns.run_net(serve.is_ok(), copies);
+    let net = ns.run_net(serve.is_ok());
     let mut r = ruleset_for(net, abi)?;
     if let Some(k) = keeper.filter(|k| k.ns.user) {
         session_devices(&mut r, &k.devices, k.ns.shm)?;
@@ -990,7 +989,6 @@ pub fn confine(
         super::guarantees::Guarantees::landlock(super::guarantees::Found {
             ns,
             served: c.serve.clone(),
-            copies,
             abi: c.abi,
             ptys: ptys.as_ref().map(|_| super::ptys::POOL),
             tproxy,
@@ -1011,7 +1009,7 @@ pub fn confine(
 pub(super) fn ruleset_for(net: RunNet, abi: u32) -> io::Result<Ruleset> {
     match net {
         RunNet::Own => Ruleset::new_own_network(abi),
-        RunNet::Served | RunNet::Routed | RunNet::Plain | RunNet::Copied => Ruleset::new(abi),
+        RunNet::Served | RunNet::Routed | RunNet::Plain => Ruleset::new(abi),
     }
 }
 

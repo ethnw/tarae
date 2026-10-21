@@ -2282,7 +2282,6 @@ mod tests {
         let g = Guarantees::landlock(Found {
             ns: Ns::session(true, true),
             served: Ok(()),
-            copies: false,
             abi: 8,
             ptys: None,
             tproxy: Ok(()),

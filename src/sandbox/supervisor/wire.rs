@@ -173,7 +173,7 @@ pub(super) fn netlink_reads(data: &[u8]) -> Result<(), String> {
 
 /// One `struct msghdr` of the caller's, read once: where it goes (if it names it), what it carries, and its
 /// control data — built by tarae: only the descriptors it passes (`SCM_RIGHTS`), taken as tarae's own
-/// (`Served::passed`), passing on what the run holds. Every other control message is refused (`Unsent::Control`):
+/// (`Caller::fd`, held in `fds` until it's sent), passing on what the run holds. Every other control message is refused (`Unsent::Control`):
 /// credentials (`SCM_CREDENTIALS`) tarae can't speak for, and no other type goes on as the run's bytes.
 pub(super) struct Msg {
     pub(super) name: Option<Vec<u8>>,

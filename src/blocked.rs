@@ -669,7 +669,6 @@ mod tests {
         ed.session.sandbox = Some(Guarantees::landlock(Found {
             ns: Ns::NONE,
             served: Ok(()),
-            copies: false,
             abi: 4,
             ptys: Some(4),
             tproxy: Err("no network namespace of its own".into()),

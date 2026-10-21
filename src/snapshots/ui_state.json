@@ -214,10 +214,32 @@
             "part": "files"
           },
           {
-            "part": "processes"
+            "part": "signals"
           },
           {
-            "part": "signals"
+            "how": "no socket",
+            "part": "loopback"
+          }
+        ],
+        "line": "tier offline · Landlock ABI 8 · loopback no socket · network no socket · shared processes, System V IPC, /dev/shm, terminals",
+        "namespaces": {
+          "net": false,
+          "netns": false,
+          "pid": false,
+          "shm": false,
+          "user": false
+        },
+        "network": {
+          "asked": false,
+          "listed": false,
+          "open": false,
+          "way": "no-socket"
+        },
+        "partial": false,
+        "shared": [
+          {
+            "how": "command lines, priority",
+            "part": "processes"
           },
           {
             "part": "ipc"
@@ -227,30 +249,10 @@
           },
           {
             "part": "ptys"
-          },
-          {
-            "how": "this machine's, other sessions' sockets refused",
-            "part": "loopback"
           }
         ],
-        "line": "tier own · Landlock ABI 8 · loopback this machine's, other sessions' sockets refused · network closed · shared nothing",
-        "namespaces": {
-          "net": false,
-          "netns": false,
-          "pid": true,
-          "shm": true,
-          "user": true
-        },
-        "network": {
-          "asked": false,
-          "listed": false,
-          "open": false,
-          "way": "copies"
-        },
-        "partial": false,
-        "shared": [],
-        "tier": "own",
-        "why": "served by tarae's copies of its sockets: pidfd_getfd refused"
+        "tier": "offline",
+        "why": "tarae can't serve its calls: pidfd_getfd refused (Docker's default profile) — --cap-add SYS_PTRACE serves the calls"
       }
     },
     {

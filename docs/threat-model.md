@@ -319,17 +319,14 @@ table is the code's — a test fails when they differ.
 |---|---|---|---|
 | own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
 | own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
 | own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| own without a PID namespace, by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
 | offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | host, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| host by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | host, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | offline, no namespaces | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | offline, no namespaces, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
@@ -671,7 +668,7 @@ Not Claude's, but a hostile repository reaches them:
 
 - **The supervisor** — `src/sandbox/supervisor.rs`: reads a run's arguments from `/proc/<tid>/mem` after
   `SECCOMP_IOCTL_NOTIF_ID_VALID`, decides on tarae's copy (`route.rs`), makes the call on the run's socket
-  (`pidfd_getfd`), never `CONTINUE`. By copies: `copies.rs`. Unix paths: `openat2`, no links.
+  (`pidfd_getfd`), never `CONTINUE`. Unix paths: `openat2`, no links.
 - **The proxy** — `src/sandbox/proxy.rs`, `proxy/parse`, `proxy/egress`, `proxy/upstream`, `redirect.rs` (TPROXY).
 - **The keeper's birth** — `src/sandbox/keeper.rs` (`clone3`, raw calls until exec), `channel.rs` (its request
   channel), `tier.rs` (the probe).

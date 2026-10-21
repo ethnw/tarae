@@ -48,6 +48,7 @@ files and decided each address it reached. It left four things open:
 | D-d | Link-local addresses (the cloud metadata servers among them), multicast and broadcast, and their IPv4-mapped and carried forms, are never reached (2026-10-07; D-c's port-53 exception gone in 6f) |
 | D-e | ~~Tier host goes out by the same swap~~ (2026-10-07) — superseded: tier host goes out by the proxy's variable and the pair (step 5; kept in 6f, F2) |
 | D-f | Abstract unix names are the session's own in its netns (bound and reached there); refused without one (2026-10-07) |
+| D-g | **No serving by copies** (2026-10-17): where `pidfd_getfd` is refused (Docker's default profile, no `CAP_SYS_PTRACE`) tarae can't serve a run's calls, and the session is tier offline, said with the way out (`guarantees::PIDFD_REFUSED`: `--cap-add SYS_PTRACE`). 6f′'s copies went: reopening a passed descriptor through `/proc/<tid>/fd/<n>` as tarae, with the flags read from `fdinfo` a moment before, let a thread that swapped the descriptor for an `O_PATH` of a file outside the sandbox receive it read-write, past Landlock; and its `accept`, signals and late close were tarae's emulation, not the kernel's. A session's namespaces always come with their netns (N1 went with it) |
 
 ## The shape
 
@@ -67,7 +68,7 @@ files and decided each address it reached. It left four things open:
 | **How many** | one for all sessions | one set per session (its policy, grants, report, log) | one per session, in every tier |
 | **Does** | parses CONNECT and the TLS ClientHello's SNI, resolves the name itself, checks every address, connects to the very address it checked, relays | takes each run's seccomp listener, reads the address, decides (`route::route`), and makes the call itself on the run's socket. Never `CONTINUE` | forks each run, reaps it, reports its status; owns what runs leave |
 | **Talks through** | a channel (`mpsc`) with the supervisor only (D23): in, an owned message per connection (the traffic end, the session's id, its rules as a read-only snapshot); out, `Refused` and log lines. No mutable state shared with the supervisor | the policy at run start, `Refused` out, the listener by descriptor (nothing else, so moving it into a process later, D21, is mechanical); to the proxy, the channel (D23) | the request channel (`SOCK_SEQPACKET`, `channel.rs`) |
-| **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd`, or by copies its own copy of every socket the run has (§By copies) | stdio from `/dev/null`, its channel's end; no capability |
+| **Holds** | the session's rules per socket | the run's listener; descriptors it takes with `pidfd_getfd` | stdio from `/dev/null`, its channel's end; no capability |
 
 **The supervisor needs nothing from tarae mid-run.** Its `Policy` is an `Arc` cloned when the run starts
 (`sandbox::spawn`, `supervisor::serve`). Grants take effect at the next run (`blocked.rs`), cards come before or
@@ -355,8 +356,7 @@ stay their guard. Abstract names are per netns: in `Routed` tarae binds and conn
 so a run reaches only its session's (D-f; this machine's listener on the same name isn't reached); in host they stay
 refused.
 
-**Where sessions share a loopback** (*built*, step 8, `owners.rs`; tier host, and every session served by copies — born
-without a netns), D18's rule: tarae makes every internet socket a run has, so one table (`owners::OWNERS`) holds each
+**Where sessions share a loopback** (*built*, step 8, `owners.rs`; tier host), D18's rule: tarae makes every internet socket a run has, so one table (`owners::OWNERS`) holds each
 socket's cookie (`SO_COOKIE`: 64-bit, never reused) against its session and its keeper, from the served `socket`
 (again at `bind`, `listen`, a connect and a send). A connect
 or an addressed send that `route` sends to this machine (`Machine`, `OwnAddress` — an own address lands on what
@@ -393,8 +393,7 @@ too: a UDP port 0 never joins a socket's port, the session's own neither — a p
 names it. A port it picks that another session's UDP socket is connected to is let go again — a disconnect unbinds a
 socket bound to port 0 (`udp_disconnect`) — and another asked for, four times at most, then refused and said
 (`supervisor::picked`): by chance one bind in tens of thousands, on purpose only by narrowing the range
-(`IP_LOCAL_PORT_RANGE`). By copies a port named or so narrowed that a closed socket's copy still holds is collected
-and tried again (`copied_again`), as before step 8.
+(`IP_LOCAL_PORT_RANGE`).
 
 A keeper's rows go when it does — ended by tarae, at once; died, or killed for not ending in time, as each socket
 goes (`Owners::let_go`, asked from 100 ms, doubling to 30 s, on a thread, for an hour at most — `LET_GO_FOR`: what
@@ -433,8 +432,7 @@ Ubuntu 24.04 327 µs against 222, colima 109 against 76; away, 219 against 209 a
 check: within the runs' spread) — a send that's never served (connected) 3–5 and 0.9 µs. The lookup is most of it. Not built, what would take it off a run that sends to one port again and
 again (statsd, a test's UDP server): its answer kept per port by the run's supervisor until any session's served
 bind, listen or made socket moves a tarae-wide count. `/proc` walks every connection of the namespace, so it's only
-the fallback. M8.2 (Debian 12, user namespaces served by copies — no netns; `TARAE_TEST_COPIES` makes the probe say
-copies): the rule holds. Accepted and said (user decision 10): the check and the call are two moments — a listener
+the fallback. Accepted and said (user decision 10): the check and the call are two moments — a listener
 can go and another come between them. macOS has no such rule (decision 9): Seatbelt opens `localhost:*` whole, so
 the report says that what listens on an opened port is reached whoever's it is. Pinned by
 `keeper::tests::two_sessions_cant_reach_each_others_sockets` (TCP and UDP, IPv4 and IPv6: refused, said, nothing
@@ -449,57 +447,15 @@ narrowed to it: refused, said, nothing taken in; the sender's own session takes 
 `addresses_overlap_as_the_kernel_compares_them`, `the_kernel_lists_a_ports_sockets_with_their_v6only`,
 `a_sweep_reads_the_kernels_list_with_the_table_let_go`.
 
-### By copies (*built*, 6f′, `copies.rs`, `target/sb/step6fprime-design.md`)
+### Where `pidfd_getfd` is refused (D-g)
 
-Where `pidfd_getfd` is refused (Docker's default profile, a container without `--cap-add SYS_PTRACE`), the supervisor
-can't take a run's socket to make a call on it. The probe (`supervisor::serving`) then answers `Serving::Copies`, not
-"can't serve": the session is born without a netns (every socket is tarae's; Docker refuses new namespaces anyway) and
-its runs are `RunNet::Copied` — tier host, said "served by tarae's own copies of their sockets".
-- **tarae makes every socket the run has** (`seccomp::Mode::Copied`): internet ones as in tier host, and also unix stream and
-  netlink route ones, `socketpair` and `accept`/`accept4`. Each is kept as a copy by inode before the run holds it
-  (`Copies::keep`); a call on descriptor `n` finds it by the inode `readlink /proc/<tid>/fd/<n>` names
-  (`socket:[…]`, `PTRACE_MODE_READ` only). Netlink keeps its routing-only rule.
-- **A socket tarae has no copy of** (handed in from outside the sandbox) is refused, `EPERM` and `network-bound`,
-  said "made outside tarae's sandbox … tarae serves only the sockets it made".
-- **A descriptor passed with `SCM_RIGHTS`**: a socket by its copy; a file or pipe opened again through
-  `/proc/<tid>/fd/<n>` with its `fdinfo` access flags (an open of its own: its offset isn't the run's); an eventfd,
-  epoll or pidfd (`anon_inode:`) can't be, and is refused, said.
-- **`accept`** is tarae's, on its copy of the listener: it waits as the run would (the same open socket's
-  `O_NONBLOCK`), up to the listener's `SO_RCVTIMEO` (`EAGAIN` after, as the kernel's), in 100 ms slices that look
-  for a signal the caller doesn't block. The connection's copy is kept and its peer's address written back. A
-  waiting accept holds one supervisor thread, as every slow call does.
-- **A signal during a served accept** ends it as the kernel's would where tarae can tell: one sent to the accepting
-  thread, or to a process of one thread, is answered `ERESTARTSYS` — the kernel then restarts the call after a
-  handler with `SA_RESTART` (tarae serves it anew) and fails it `EINTR` after one without; on a listener with its
-  own `SO_RCVTIMEO`, `EINTR` (the kernel's `sock_intr_errno`). Where it can't tell — a signal sent to a process with
-  other threads, which the kernel may have given to another — it waits one slice more; still pending, `EINTR`
-  whatever the handler (a spurious one after `SA_RESTART`: `ERESTARTSYS` reaching a thread with no signal to take
-  would be error 512); gone by then — another thread took it — the accept goes on, as the kernel's.
-  `by_copies_a_signal_ends_an_accept_as_the_kernels_would` pins the restart, `EINTR`, the timeout and a signal another
-  thread takes live; `a_process_signal_no_other_thread_takes_ends_the_wait_with_eintr` the last case.
-
-**The copies' cost: a late close.** While tarae holds a copy, the run's `close()` sends no FIN and a bound port stays
-bound. Copies are collected by scanning: while any is kept, a thread reads the descriptors of every process below the
-keeper (`/proc/<pid>/task/*/children`, else every process's parent), and a copy none held in `STRIKES` (2) scans in a
-row goes; a copy kept during a scan isn't struck by it. Never early:
-- a socket a served `sendmsg` passed is held by no process while the message waits in the receiver's queue, however
-  long; its copy is kept while the socket the message went on has anything unread (`SIOCOUTQ` — the kernel frees it
-  when the receiver reads the message, or drops it), up to 30 s (`IN_FLIGHT_MAX`), then collected as any;
-- a scan that can't read a process's descriptors or children (one that made itself non-dumpable: ssh-agent,
-  gpg-agent) strikes nothing — every copy waits until that process is gone. One that ended meanwhile holds nothing.
-
-Scans are paced by what the run does: 50 ms (`INTERVAL`) after a served call, a copy kept or a strike, doubling to
-1 s (`QUIET_MAX`) while nothing happens. So a close's FIN comes ≈ 100 ms late while the run is busy, up to ≈ 1 s after
-a quiet stretch. A port's release is lazy too: a bind that finds its port taken has the copies collected at once
-(`collect_now`, two scans) and, where a copy just went (that collection's, or the scanner's a moment before), tries
-again for up to 200 ms (`RELEASE_WAIT`, `Copies::bind_again`). The socket goes only with its last reference, and
-tarae's copy isn't always that: any process tarae starts holds every descriptor of tarae's from its fork until its
-exec is through. Seen under the test suite's load: the port free 63 µs after the copy went. Where no copy went, the
-port is someone else's and the bind fails at once.
-
-Measured on a Gradle build and its idle daemon (≈ 300–460 descriptors, a test-profile build): a scan takes 3–11 ms.
-At a fixed 50 ms that was 10–22% of a core, idle included; paced, 1.3% and 5.6% in the two builds and 0.8% idle
-(`measure_copies_scan`; the numbers in the design note).
+Docker's default profile refuses `pidfd_getfd` without `CAP_SYS_PTRACE` (a dev container started the usual way), so
+the supervisor can't take a run's socket to make a call on it. The probe (`supervisor::unavailable`) says so —
+`guarantees::PIDFD_REFUSED`, the way out with it — and the session is tier offline: its runs' filter is `Plain`, no
+socket at all but netlink's routing one (no network, no port on this machine, not even the project's unix sockets).
+The panel says it in two rows (`not served: pidfd_getfd refused · --cap-add SYS_PTRACE serves the calls`); Claude's
+report, `tarae state` and the log whole. With `--cap-add SYS_PTRACE` the session is served (tier host: Docker's
+profile refuses new user namespaces too).
 
 ## The egress proxy
 
@@ -560,9 +516,9 @@ or not, nothing goes (no rule names an address).
 
 | Tier | The keeper's namespaces | Supervisor | Beyond this machine, the network open (6f) | Leftovers owned by |
 |---|---|---|---|---|
-| **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said; served by copies, no net | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
-| **host** | none (no unprivileged user namespaces; or served by copies — Docker's default profile, §By copies) | serving (by copies: every socket tarae's) | the proxy's variable and the pair (6f's F2) | the keeper's tree |
-| **offline** | as own, or none | plain (Yama 2/3, inside another listener) | nothing: no socket at all but netlink | as own, or the keeper's tree |
+| **own** | user, net, ipc, pid, mnt (`/proc`, `devpts`, `/dev/shm`); where `/proc` can't be mounted fresh (Docker's masked `/proc`), no pid and no fresh `/proc` (D12) — processes shared, said | serving | with TPROXY (`tier::Probed.redirect`): the session's network — every TCP connect and every name asked taken by tarae, no proxy variable (6d, 6e, 6e′); without it: the proxy's variable and the pair, its own loopback kept (6f's F3) | the keeper's PID namespace: one kill (without one, the keeper's tree) |
+| **host** | none (no unprivileged user namespaces) | serving | the proxy's variable and the pair (6f's F2) | the keeper's tree |
+| **offline** | as own, or none | plain (Yama 2/3, inside another listener, `pidfd_getfd` refused — D-g) | nothing: no socket at all but netlink | as own, or the keeper's tree |
 
 The tier is what a user can tell apart: whether a command reaches the network at all (served or offline), and whether
 its loopback, IPC, `/dev/shm` and terminals are the session's own (own) or this machine's (host). The rest — a PID
@@ -587,17 +543,14 @@ truncating: a run can empty any file of the user's).
 |---|---|---|---|
 | own, TPROXY | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own by copies: the session's user namespace, no network one | tarae's proxy, by copies | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
 | own, the project in /dev/shm | TPROXY | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
 | own, its lo without an IPv6 address | TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own without a PID namespace, TPROXY | TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| own without a PID namespace, by copies | tarae's proxy, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
 | offline, the session's namespaces | no socket | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | no socket | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | host, tarae's proxy | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| host by copies | tarae's proxy, by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | host, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | offline, no namespaces | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | offline, no namespaces, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
@@ -727,8 +680,7 @@ the step's commit message. "Ran" is where the whole suite passed.
      (`198.18.0.0/15`, a /64 beside the session's IPv6 one), so no proxy variable is set. Raw TCP to a looked-up name
      and a name's SRV/TXT records each ask on a card of their own (6e+, §The egress proxy).
    - **The 5.14 floor** (6f): the swap's probe and `Out` went; tier C goes out by the proxy's variable and the pair.
-   - **By copies** (6f′, `copies.rs`, §By copies): where `pidfd_getfd` is refused (Docker's default profile) the
-     supervisor makes every socket a run has and keeps a copy. Tier C.
+   - **By copies** (6f′): built, then removed (D-g) — where `pidfd_getfd` is refused the session is offline.
    - **A cgroup per run** (6g, `cgroup.rs`): where the keeper has a delegated scope, so a rule can tell runs apart.
      Tested with `cargo xtask linux --userns --cgroup` (CONTRIBUTING: a throwaway VM only).
    - **tarae's AppArmor profile** (6h, `apparmor.rs`, `packaging/apparmor/tarae`): lifts Ubuntu's restriction for
@@ -748,13 +700,12 @@ the step's commit message. "Ran" is where the whole suite passed.
    - one log, each sandbox line naming its session, a busy one unable to push a quiet one's out;
    - many sessions measured (§Measured): the keepers dominate the memory, descriptors were the limit, so the editor
      raises its own and gives what it starts the old one back (`nofile.rs`).
-8. **The loopback rule** (D18; §Where sessions share a loopback, `owners.rs`). Tier C and every session served by
-   copies: a run reaches no other session's socket on this machine's loopback, nor binds onto its port — refused as
+8. **The loopback rule** (D18; §Where sessions share a loopback, `owners.rs`). Tier C: a run reaches no other session's socket on this machine's loopback, nor binds onto its port — refused as
    the kernel refuses (`ECONNREFUSED`, `EADDRINUSE`) and said by its port.
    - Tests: `two_sessions_cant_reach_each_others_sockets` (refused now in C), `a_bind_onto_another_sessions_port_is_refused`,
      `a_session_reaches_its_own_listener`, `the_users_listener_is_reached_where_opened`,
      `an_ended_sessions_sockets_leave_the_table`.
-   - Ran: Ubuntu 24.04, colima, and Debian 12 served by copies (`TARAE_TEST_COPIES`).
+   - Ran: Ubuntu 24.04 and colima.
 9. **Showing the tier** (D7, 9a–9f; §Showing it). `Guarantees`, then Claude's report, `TARAE_SANDBOX_STATUS`,
    `tarae state`, the panel's header and `:procs`, the profile's hint. Pinned by `sandbox_guarantees.txt`,
    `sandbox_report.txt`, `ui_state.json` and the panel's snapshots.

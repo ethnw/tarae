@@ -1,6 +1,6 @@
 //! Which session each internet socket of a run's is, where sessions share this machine's loopback (step 8, D18,
 //! `docs/design/sandbox-keeper.md` §Where sessions share a loopback). With no network namespace of the session's
-//! own — tier host, and every session served by copies — tarae makes every internet socket a run has
+//! own — tier host — tarae makes every internet socket a run has
 //! (`supervisor::socket`), so it knows each from the moment it exists — by its cookie (`SO_COOKIE`: 64-bit, never
 //! reused, the same number the kernel's own list gives each socket, `diag`). A connect or an addressed send
 //! to an opened loopback port looks up the sockets the kernel would deliver it to (`listener_at`, from the sockets

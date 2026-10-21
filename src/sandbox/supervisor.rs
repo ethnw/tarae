@@ -5,8 +5,7 @@
 //! user granted, each that one file.
 //!
 //! The safe form only: a call's address is read once from the caller's memory (`Caller::read`), decided on
-//! tarae's own copy, and the call is done by tarae — on the caller's own socket, taken with `pidfd_getfd` (or tarae's
-//! copy of it: `Serving::Copies`) —
+//! tarae's own copy, and the call is done by tarae — on the caller's own socket, taken with `pidfd_getfd` —
 //! with that copy; the caller gets the result. The kernel never goes on with a call tarae read (no
 //! `SECCOMP_USER_NOTIF_FLAG_CONTINUE`: the caller could change the address in between), so what the run
 //! writes there afterwards reaches nothing. A unix socket is opened by its real path without following a
@@ -27,10 +26,8 @@
 //! What it needs from the system (`unavailable` says what's missing): a seccomp listener (none inside
 //! another one's filter — a sandboxed tarae). Reading a run's memory takes what ptrace takes: under Yama's
 //! `ptrace_scope` 1 (the default on Ubuntu) a process that left tarae's tree — reparented away — gets every such
-//! call refused; at 2 without `CAP_SYS_PTRACE`, or 3, no run can be served (`yama_allows`). Where `pidfd_getfd` is
-//! refused (Docker's default filter, without `CAP_SYS_PTRACE`) it serves by copies (6f′, `Serving::Copies`): every
-//! socket the run has is tarae's to make — its unix and netlink ones, a `socketpair`'s, an `accept`'s too — and a
-//! copy of each kept (`copies.rs`), found by the inode the run's descriptor names.
+//! call refused; at 2 without `CAP_SYS_PTRACE`, or 3, no run can be served (`yama_allows`). Nor where `pidfd_getfd`
+//! is refused (Docker's default filter, without `CAP_SYS_PTRACE`: `guarantees::PIDFD_REFUSED`) — tier offline.
 
 use std::io;
 use std::mem::MaybeUninit;
@@ -55,44 +52,15 @@ use super::{Denial, Policy};
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;
 
-/// How tarae serves its runs' calls here (6f′).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Serving {
-    /// On the run's own descriptors, taken (`pidfd_getfd`).
-    Taken,
-    /// `pidfd_getfd` refused (Docker's default filter): on tarae's own copies of every socket the run has
-    /// (`RunNet::Copied`).
-    Copies,
-}
-
-/// How tarae serves its runs' calls here — or why it can't. Asked once (a worker's: it starts a thread).
-pub fn serving() -> Result<Serving, String> {
-    static HOW: std::sync::OnceLock<Result<Serving, String>> = std::sync::OnceLock::new();
-    HOW.get_or_init(|| {
-        // (a measurement's other way, on a machine that takes a run's sockets: served by copies — and so the
-        // session born without a netns, `tier::probe_with` — as where a filter refuses `pidfd_getfd`; M8.2)
-        #[cfg(test)]
-        if std::env::var_os("TARAE_TEST_COPIES").is_some() && probe().is_ok() {
-            return Ok(Serving::Copies);
-        }
-        probe()
-    })
-    .clone()
-}
-
-/// Why tarae can't serve its runs' calls here — None when it can.
+/// Why tarae can't serve its runs' calls here — None when it can. Asked once (a worker's: it starts a thread).
 pub fn unavailable() -> Option<String> {
-    serving().err()
-}
-
-/// Whether it serves by copies here (`Serving::Copies`).
-pub fn copies() -> bool {
-    serving() == Ok(Serving::Copies)
+    static WHY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    WHY.get_or_init(|| probe().err()).clone()
 }
 
 /// A listener on a filter of a short-lived thread's own (refused under another listener: `EBUSY`), a pidfd, and a
-/// descriptor of tarae's own taken through it — refused (a container's filter refuses `pidfd_getfd`): by copies.
-fn probe() -> Result<Serving, String> {
+/// descriptor of tarae's own taken through it (a container's filter refuses `pidfd_getfd`: no serving).
+fn probe() -> Result<(), String> {
     let listener = crate::event::thread("tarae-seccomp", || -> io::Result<()> {
         let mut allow = [libc::sock_filter {
             code: (libc::BPF_RET | libc::BPF_K) as u16,
@@ -128,22 +96,20 @@ fn probe() -> Result<Serving, String> {
 }
 
 /// The probe's answer from what it found: a listener of a thread's own (or why not — `EBUSY`: inside another
-/// supervisor's filter), a descriptor of tarae's own taken through its pidfd — refused (Docker's default filter
-/// refuses `pidfd_getfd`): served by copies, not "can't serve" — and Yama's word on reading a run's memory.
+/// supervisor's filter), a descriptor of tarae's own taken through its pidfd (or why not — refused: Docker's
+/// default filter refuses `pidfd_getfd` without `CAP_SYS_PTRACE`, `PIDFD_REFUSED`) — and Yama's word on reading a
+/// run's memory.
 fn decided(
     listener: io::Result<()>,
     taken: Result<io::Result<()>, String>,
     yama: Result<(), String>,
-) -> Result<Serving, String> {
+) -> Result<(), String> {
     listener.map_err(|e| match e.raw_os_error() {
         Some(libc::EBUSY) => "tarae itself runs under another supervisor's filter".to_string(),
         _ => format!("no seccomp listener: {e}"),
     })?;
-    let how = match taken? {
-        Ok(()) => Serving::Taken,
-        Err(_) => Serving::Copies,
-    };
-    yama.map(|()| how)
+    taken?.map_err(|_| super::guarantees::PIDFD_REFUSED.to_string())?;
+    yama
 }
 
 /// Whether Yama (`ptrace_scope`, absent: no Yama) lets tarae read its own runs' memory: 0 and 1 do (a run is
@@ -217,8 +183,6 @@ pub struct Served {
     /// The session's marks (6d), where its keeper has the session's network (TPROXY): what goes beyond is the run's
     /// own socket marked with its run's (`Route::Redirected`) — None: no such network, beyond is the proxy's pair.
     marks: Option<Arc<super::marks::Marks>>,
-    /// By copies (`RunNet::Copied`, 6f′): tarae's copy of every socket the run has — None: taken.
-    copies: Option<Arc<super::copies::Copies>>,
     /// The ptys its rules grant (3b, `linux::Confine::ptys`): what it gets in place of those it makes.
     ptys: Option<Arc<super::ptys::Ptys>>,
     /// Its keeper, below which its processes are (what they hold of its ptys: `ptys::holders`).
@@ -255,9 +219,9 @@ impl Served {
         self.net == RunNet::Routed
     }
 
-    /// Whether tarae made the run's internet sockets, bound to `lo` (tier host: served or by copies).
+    /// Whether tarae made the run's internet sockets, bound to `lo` (tier host).
     fn makes_sockets(&self) -> bool {
-        matches!(self.net, RunNet::Served | RunNet::Copied)
+        self.net == RunNet::Served
     }
 
     /// Whether a connect's or a send's work of step 8 is done for this run: where sessions share this machine's
@@ -270,66 +234,10 @@ impl Served {
         self.makes_sockets()
     }
 
-    /// The caller's socket `n` as tarae's own (the same open socket): taken (`pidfd_getfd`) — or, by copies,
-    /// tarae's copy of it, found by the inode its descriptor names (`/proc/<tid>/fd/<n>`: `socket:[…]`). One tarae has
-    /// no copy of — handed in from outside the sandbox — is refused, said.
-    fn sock(&self, c: &Caller, n: u64) -> Result<OwnedFd, i32> {
-        let Some(copies) = &self.copies else { return c.fd(n) };
-        // (the run's doing something: its copies scanned soon again — a close comes with calls around it)
-        copies.stir();
-        let link = c.link(n)?;
-        let ino = super::copies::socket_inode(&link).ok_or(libc::ENOTSOCK)?;
-        match copies.get(ino) {
-            Some(fd) => Ok(fd),
-            None => refuse(self, c, "network-bound", outside_copies()).and(Err(libc::EPERM)),
-        }
-    }
-
-    /// A descriptor the caller passes (`SCM_RIGHTS`) as tarae's own: taken — or, by copies, a socket's copy, and any
-    /// other file opened again through `/proc/<tid>/fd/<n>` with the access its descriptor has (its `fdinfo` flags):
-    /// the same file, an open one of its own (its offset isn't the caller's). One that can't be opened again — an
-    /// eventfd, an epoll, a pidfd (`anon_inode:`) — is refused, said.
-    fn passed(&self, c: &Caller, n: u64) -> Result<OwnedFd, i32> {
-        if self.copies.is_none() {
-            return c.fd(n);
-        }
-        let link = c.link(n)?;
-        if super::copies::socket_inode(&link).is_some() {
-            return self.sock(c, n);
-        }
-        if link.starts_with("anon_inode:") {
-            let why = format!(
-                "passing a descriptor ({link}) — by tarae's copies only a file, a pipe or a socket goes"
-            );
-            return refuse(self, c, "network-bound", why).and(Err(libc::EPERM));
-        }
-        c.reopen(n)
-    }
-
     /// Whether `ip` (beyond loopback) is one of this machine's own addresses, as read when the run's policy was
     /// made (`Policy::own_addresses`) — None where they couldn't be read: `route` refuses it.
     fn mine(&self, ip: std::net::IpAddr) -> Option<bool> {
         self.own_addresses.as_ref().map(|own| own.contains(&ip))
-    }
-
-    /// The sockets a message passed (`SCM_RIGHTS`, tarae's descriptors of them), sent on `via`: by copies, each kept
-    /// while the message may wait in the receiver's queue (`Copies::in_flight`) — files and pipes have no copy.
-    fn in_flight(&self, passed: &[OwnedFd], via: &OwnedFd) {
-        let Some(copies) = &self.copies else { return };
-        // (sockets only: a file's inode number is its own filesystem's, and may be a socket's too)
-        for fd in passed.iter().filter(|fd| sockopt(fd, libc::SO_TYPE).is_ok()) {
-            if let Ok(ino) = super::copies::inode(fd) {
-                copies.in_flight(ino, via);
-            }
-        }
-    }
-
-    /// A socket of tarae's the run is about to hold, its copy kept first (by copies; else nothing to keep).
-    fn keep(&self, fd: &OwnedFd) -> Result<(), i32> {
-        match &self.copies {
-            Some(c) => c.keep(fd).map_err(|e| errno(&e)),
-            None => Ok(()),
-        }
     }
 
     /// An internet socket the run holds — tarae made it, or a call tarae served just bound it or made it listen —
@@ -348,13 +256,6 @@ impl Served {
     }
 }
 
-/// What a socket tarae has no copy of is refused with (by copies).
-fn outside_copies() -> String {
-    "a socket made outside tarae's sandbox (handed in): with pidfd_getfd refused here, tarae serves only the \
-     sockets it made"
-        .into()
-}
-
 impl std::ops::Deref for Served {
     type Target = Policy;
     fn deref(&self) -> &Policy {
@@ -363,8 +264,7 @@ impl std::ops::Deref for Served {
 }
 
 /// The calls a supervisor answers, as its counts name them.
-const KINDS: [&str; 10] =
-    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "socketpair", "accept", "pty"];
+const KINDS: [&str; 8] = ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "pty"];
 
 fn kind(nr: i32) -> usize {
     match nr as libc::c_long {
@@ -374,9 +274,7 @@ fn kind(nr: i32) -> usize {
         libc::SYS_sendto => 3,
         libc::SYS_sendmsg => 4,
         libc::SYS_listen => 6,
-        libc::SYS_socketpair => 7,
-        libc::SYS_accept | libc::SYS_accept4 => 8,
-        libc::SYS_ioctl => 9,
+        libc::SYS_ioctl => 7,
         _ => 5,
     }
 }
@@ -476,10 +374,9 @@ pub fn totals() -> Totals {
 /// Starts the supervisor of one run, on a thread of its own made from the calling thread (unconfined: a
 /// thread a confined one made would be confined too, and its own calls would wait on itself). It waits for
 /// the run's listener (taken from the run's process: `sandbox::keeper`), then answers that run's calls until no
-/// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends. `net`: `Served`,
-/// `Routed` or `Copied` (`Served`). `marks`: the session's (6d), where its network takes what goes beyond. `tree`:
-/// its keeper's pid, below which its processes are (by copies: what's read for the sockets they hold, `copies.rs`),
-/// and serial (`owners`). `ptys`: its pool, where its filter hands over the way to a pty's other end (`pty_ioctl`).
+/// process of it is left, its refusals out on `refused`. The sender dropped unsent: it ends. `net`: `Served` or
+/// `Routed` (`Served`). `marks`: the session's (6d), where its network takes what goes beyond. `tree`: its
+/// keeper's pid, below which its processes are (what they hold of its ptys, `ptys::holders`), and serial (`owners`). `ptys`: its pool, where its filter hands over the way to a pty's other end (`pty_ioctl`).
 pub fn serve(
     policy: Arc<Policy>,
     net: RunNet,
@@ -507,7 +404,6 @@ pub fn serve(
         session,
         egress,
         marks,
-        copies: (net == RunNet::Copied).then(|| super::copies::Copies::new(tree)),
         ptys,
         tree,
         keeper,
@@ -531,7 +427,6 @@ pub fn serve(
             match n.data.nr as libc::c_long {
                 // (quick: answered here)
                 libc::SYS_socket => l.answer(n.id, socket(&l, &n, &policy)),
-                libc::SYS_socketpair => l.answer(n.id, socketpair(&l, &n, &policy)),
                 libc::SYS_bind => l.answer(n.id, bind(&l, &n, &policy)),
                 libc::SYS_listen => l.answer(n.id, listen(&l, &n, &policy)),
                 libc::SYS_ioctl => l.answer(n.id, pty_ioctl(&l, &n, &policy)),
@@ -583,7 +478,6 @@ fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
         libc::SYS_sendto => sendto(l, n, p),
         libc::SYS_sendmsg => sendmsg(l, n, p),
         libc::SYS_sendmmsg => sendmmsg(l, n, p),
-        libc::SYS_accept | libc::SYS_accept4 => accept(l, n, p),
         _ => Err(libc::ENOSYS),
     }
 }
@@ -714,39 +608,6 @@ impl Caller {
         let n = i32::try_from(n).map_err(|_| libc::EBADF)?;
         let link = std::fs::read_link(format!("/proc/{}/fd/{n}", self.tid)).map_err(|_| libc::EBADF)?;
         Ok(link.to_string_lossy().into_owned())
-    }
-
-    /// Its descriptor `n` — a file, a pipe — opened again by tarae through `/proc/<tid>/fd/<n>`, with the access its
-    /// descriptor has (`fdinfo`'s flags: read, write, append, `O_PATH`; its `O_NONBLOCK` set after — a pipe's write end
-    /// opened without waiting for a reader), close-on-exec, never creating or truncating.
-    fn reopen(&self, n: u64) -> Result<OwnedFd, i32> {
-        let n = i32::try_from(n).map_err(|_| libc::EBADF)?;
-        let info = std::fs::read(format!("/proc/{}/fdinfo/{n}", self.tid)).map_err(|_| libc::EBADF)?;
-        let flags =
-            proc_value(&info, "flags:").and_then(|f| i32::from_str_radix(f, 8).ok()).ok_or(libc::EBADF)?;
-        let keep = libc::O_ACCMODE | libc::O_APPEND | libc::O_PATH;
-        let open = (flags & keep) | libc::O_CLOEXEC | libc::O_NOCTTY | libc::O_NONBLOCK;
-        let path = std::ffi::CString::new(format!("/proc/{}/fd/{n}", self.tid)).map_err(|_| libc::EINVAL)?;
-        // SAFETY: a NUL-terminated path of ours; a descriptor it makes is ours.
-        let fd = unsafe { libc::open(path.as_ptr(), open) };
-        if fd < 0 {
-            return Err(errno(&io::Error::last_os_error()));
-        }
-        // SAFETY: just made.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        if flags & libc::O_NONBLOCK == 0 && flags & libc::O_PATH == 0 {
-            // SAFETY: plain calls on our own descriptor.
-            unsafe {
-                let now = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-                libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, now & !libc::O_NONBLOCK);
-            }
-        }
-        Ok(fd)
-    }
-
-    /// What signal waits for it (`pending`, from its `/proc/<tid>/status`).
-    fn pending(&self) -> Pending {
-        pending(&status_of(self.tid).unwrap_or_default())
     }
 
     /// The folder it works in (a relative socket path is from there).
@@ -954,18 +815,6 @@ fn alone_with(
     r
 }
 
-/// `bind` — and, by copies, again where its port was taken: that may be a closed socket's copy, kept until collected
-/// (collected now, tried again: `Copies::bind_again`) — a port named, or the only one the kernel may pick.
-fn copied_again(p: &Served, bind: impl Fn() -> Answer) -> Answer {
-    let r = bind();
-    match (&r, &p.copies) {
-        (Err(libc::EADDRINUSE), Some(copies)) => {
-            copies.bind_again(bind, |e| *e == libc::EADDRINUSE).unwrap_or(r)
-        }
-        _ => r,
-    }
-}
-
 /// How many ports the kernel is asked for at most (`picked`) before a UDP bind to port 0 is refused.
 const PICKS: usize = 4;
 
@@ -1031,7 +880,7 @@ fn bound_alone(p: &Served, c: &Caller, sock: &OwnedFd) -> Result<(), i32> {
     // SAFETY: the socket and an address of ours, live for the call.
     let bind = || result(unsafe { libc::bind(sock.as_raw_fd(), (&raw const a).cast(), len) } as isize);
     let unturned = |why| refuse_with(p, c, libc::EADDRINUSE, "network-bind", why);
-    match picked(p, c, sock, || copied_again(p, || alone(sock, bind, unturned))) {
+    match picked(p, c, sock, || alone(sock, bind, unturned)) {
         // (one bound meanwhile — another thread's call — is as bound as this would have made it)
         Ok(_) | Err(libc::EINVAL) => {}
         Err(e) => return Err(e),
@@ -1353,7 +1202,6 @@ fn swapped_for(
     // it's there (a connect to loopback, a bind, a listen) finds it put out of the session — never takes it for
     // the session's own, in tarae's namespace
     let new_ino = inode(&new)?;
-    p.keep(&new)?;
     p.owned(&new);
     let old = {
         let mut swapped = p.swapped.lock().unwrap_or_else(|e| e.into_inner());
@@ -1526,7 +1374,6 @@ fn proxied(
     let at = u32::try_from(fd).map_err(|_| libc::EBADF)?;
     // Known as tarae's before the run holds it (as `swapped_for`)
     let new_ino = inode(&run_end)?;
-    p.keep(&run_end)?;
     p.swapped.lock().unwrap_or_else(|e| e.into_inner()).insert(new_ino, Route::Proxy);
     if let Err(e) = l.add_fd(n.id, &run_end, Some(at), cloexec(c, fd)) {
         p.swapped.lock().unwrap_or_else(|e| e.into_inner()).remove(&new_ino);
@@ -1598,18 +1445,14 @@ fn pty_ioctl(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 
 /// `socket()` for an internet family: a stream or datagram socket (TCP, UDP — not raw, ICMP's, SCTP or
 /// MPTCP, none of a build's), made by tarae, bound to the loopback device, and put among the caller's
-/// descriptors. By copies (6f′) its unix stream and netlink routing sockets too (what the filter lets a run make
-/// — `seccomp::Mode::Copied`), each one's copy kept before the run holds it.
+/// descriptors.
 fn socket(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let [family, kind, protocol] = [0, 1, 2].map(|i| n.data.args[i] as i32);
     let flags = kind & (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC);
     let base = kind & !flags;
-    let copied = p.copies.is_some();
     let ok = match (family, base) {
         (libc::AF_INET | libc::AF_INET6, libc::SOCK_STREAM) => matches!(protocol, 0 | libc::IPPROTO_TCP),
         (libc::AF_INET | libc::AF_INET6, libc::SOCK_DGRAM) => matches!(protocol, 0 | libc::IPPROTO_UDP),
-        (libc::AF_UNIX, libc::SOCK_STREAM) => copied && protocol == 0,
-        (libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_DGRAM) => copied && protocol == libc::NETLINK_ROUTE,
         _ => false,
     };
     if !ok {
@@ -1623,70 +1466,14 @@ fn socket(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     }
     // SAFETY: just made.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    if matches!(family, libc::AF_INET | libc::AF_INET6) {
-        let lo = b"lo\0";
-        // SAFETY: the device's name and its length, live for the call.
-        let r = unsafe {
-            libc::setsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_BINDTODEVICE, lo.as_ptr().cast(), 3)
-        };
-        result(r as isize)?;
-    }
-    p.keep(&fd)?;
+    let lo = b"lo\0";
+    // SAFETY: the device's name and its length, live for the call.
+    let r = unsafe {
+        libc::setsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_BINDTODEVICE, lo.as_ptr().cast(), 3)
+    };
+    result(r as isize)?;
     p.owned(&fd);
     l.add_fd(n.id, &fd, None, flags & libc::SOCK_CLOEXEC != 0).map_err(|e| errno(&e))
-}
-
-/// `socketpair(AF_UNIX, kind, 0, sv)` by copies (6f′: the filter hands it to tarae only then): the pair made by
-/// tarae, each end's copy kept, both put among the caller's descriptors and their numbers written where it asked.
-fn socketpair(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
-    let [family, kind, protocol] = [0, 1, 2].map(|i| n.data.args[i] as i32);
-    let flags = kind & (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC);
-    let base = kind & !flags;
-    if family != libc::AF_UNIX
-        || !matches!(base, libc::SOCK_STREAM | libc::SOCK_DGRAM | libc::SOCK_SEQPACKET)
-        || protocol != 0
-    {
-        return Err(libc::EAFNOSUPPORT);
-    }
-    let c = Caller::open(l, n)?;
-    let mut fds = [0; 2];
-    let own = base | libc::SOCK_CLOEXEC | (flags & libc::SOCK_NONBLOCK);
-    // SAFETY: a two-int array the call fills; the descriptors it makes are ours.
-    if unsafe { libc::socketpair(family, own, 0, fds.as_mut_ptr()) } != 0 {
-        return Err(errno(&io::Error::last_os_error()));
-    }
-    // SAFETY: just made.
-    let ends = unsafe { [OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])] };
-    let cloexec = flags & libc::SOCK_CLOEXEC != 0;
-    let mut theirs = [0i32; 2];
-    for (end, at) in ends.iter().zip(&mut theirs) {
-        p.keep(end)?;
-        *at = l.add_fd(n.id, end, None, cloexec).map_err(|e| errno(&e))? as i32;
-    }
-    let mut out = theirs[0].to_ne_bytes().to_vec();
-    out.extend(theirs[1].to_ne_bytes());
-    c.write(n.data.args[3], &out)?;
-    Ok(0)
-}
-
-/// How long `accept` waits in one go on a listener that blocks, before it looks for a signal for the caller.
-const ACCEPT_SLICE: i32 = 100;
-
-/// The kernel's "interrupted — restart the call if the handler says so" (`include/linux/errno.h`, not uapi): a
-/// call that returns it with a signal pending is restarted after a handler with `SA_RESTART` (re-entering the filter:
-/// tarae serves it anew), and fails `EINTR` after one without. Only ever answered where the caller is sure to have
-/// the signal to take (`Pending::Its`): with none, it would reach the program as error 512.
-const ERESTARTSYS: i32 = 512;
-
-/// A signal waiting for a caller tarae waits for (`/proc/<tid>/status`: `SigPnd`, `ShdPnd`, `SigBlk`, `Threads`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pending {
-    None,
-    /// One the kernel woke this thread for: sent to it (`SigPnd`), or to its process where it's the only thread.
-    Its,
-    /// Its process's (`ShdPnd`, these signals) with other threads there — any of them that doesn't block it may be
-    /// the one the kernel woke.
-    Shared(u64),
 }
 
 /// The value of a `/proc` file's `key` line (`Tgid:` in `status`, `flags:` in `fdinfo`), trimmed: the first line
@@ -1702,127 +1489,6 @@ fn proc_value<'a>(text: &'a [u8], key: &str) -> Option<&'a str> {
 /// A thread's `/proc/<tid>/status`, as bytes (`proc_value` reads it).
 fn status_of(tid: i32) -> io::Result<Vec<u8>> {
     std::fs::read(format!("/proc/{tid}/status"))
-}
-
-/// `Pending` from a thread's `/proc/<tid>/status`; signals it blocks don't count.
-fn pending(status: &[u8]) -> Pending {
-    let field = |key: &str| proc_value(status, key);
-    let mask = |key: &str| field(key).and_then(|v| u64::from_str_radix(v, 16).ok()).unwrap_or(0);
-    let open = !mask("SigBlk:");
-    let (own, shared) = (mask("SigPnd:") & open, mask("ShdPnd:") & open);
-    let alone = field("Threads:").is_some_and(|t| t == "1");
-    match (own, shared) {
-        (0, 0) => Pending::None,
-        (0, s) if !alone => Pending::Shared(s),
-        _ => Pending::Its,
-    }
-}
-
-/// What a wait for the caller ends with when a signal interrupts it, as the kernel's socket waits answer
-/// (`sock_intr_errno`): `EINTR` where the socket has a timeout of its own (`SO_RCVTIMEO`: never restarted), else
-/// `ERESTARTSYS` — `EINTR` or restarted, as the caller's handler has it.
-fn interrupted(timed: bool) -> i32 {
-    if timed { libc::EINTR } else { ERESTARTSYS }
-}
-
-/// A wait's slice over with `pending` for its caller (`timed`: the socket has its own timeout), the process's
-/// signals pending at the last slice's end being `before`: wait on (Ok, the process's signals pending now) or end
-/// (the errno). Its own → `interrupted`. The process's, with other threads: one of them may take it — wait a slice;
-/// still pending then (the same signal), `EINTR`: tarae can't tell whether the kernel woke this thread for it.
-fn after_slice(pending: Pending, before: u64, timed: bool) -> Result<u64, i32> {
-    match pending {
-        Pending::Its => Err(interrupted(timed)),
-        Pending::Shared(s) if s & before != 0 => Err(libc::EINTR),
-        Pending::Shared(s) => Ok(s),
-        Pending::None => Ok(0),
-    }
-}
-
-/// A socket's `SO_RCVTIMEO` — None: none set (a blocking call waits for good).
-fn receive_timeout(fd: &OwnedFd) -> Result<Option<std::time::Duration>, i32> {
-    // SAFETY: an all-integer struct, zeroed, and its length for the call to fill.
-    let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
-    // SAFETY: the struct and its length, live for the call.
-    let r = unsafe {
-        libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&raw mut tv).cast(), &mut len)
-    };
-    result(r as isize)?;
-    let d = std::time::Duration::from_secs(tv.tv_sec as u64)
-        + std::time::Duration::from_micros(tv.tv_usec as u64);
-    Ok((!d.is_zero()).then_some(d))
-}
-
-/// `accept(fd, addr, len)` / `accept4(…, flags)` by copies (6f′): tarae accepts on its copy of the run's listener —
-/// waiting as the caller would (the same open socket's `O_NONBLOCK`, its `SO_RCVTIMEO`), in slices that look for a
-/// signal for it (a server waiting on its listener for a shutdown signal, a forking one's `SIGCHLD`) — the
-/// connection's copy kept, put among the caller's descriptors (its `SOCK_CLOEXEC`, `SOCK_NONBLOCK`), its peer's
-/// address written where it asked.
-///
-/// A signal ends the wait as the kernel's would where tarae can tell (`Pending::Its`): `ERESTARTSYS`
-/// (`interrupted`), so a handler with `SA_RESTART` sees its accept go on and one without sees `EINTR` — the
-/// kernel decides, from the handler. Where it can't — a signal sent to the process, with other threads that could
-/// be the one woken — it waits one slice more (one of them takes it: the accept goes on, as the kernel's would);
-/// still pending then, it ends with `EINTR` whatever the handler says (a spurious `EINTR` after an `SA_RESTART`
-/// handler, never error 512 reaching a thread with no signal to take).
-fn accept(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
-    let c = Caller::open(l, n)?;
-    let args = n.data.args;
-    let flags = if n.data.nr as libc::c_long == libc::SYS_accept4 { args[3] as i32 } else { 0 };
-    if flags & !(libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) != 0 {
-        return Err(libc::EINVAL);
-    }
-    let listener = p.sock(&c, args[0])?;
-    // SAFETY: plain call on our own descriptor.
-    let blocking = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK == 0;
-    // (its `SO_RCVTIMEO`, as the kernel's accept takes it: `EAGAIN` once it's past)
-    let by = receive_timeout(&listener)?.map(|d| std::time::Instant::now() + d);
-    // SAFETY: a zeroed address of the largest size, filled by the call.
-    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    // (the process's signals pending at the last slice's end)
-    let mut shared = 0;
-    let fd = loop {
-        if blocking {
-            let mut pfd = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-            // SAFETY: one live pollfd.
-            let r = unsafe { libc::poll(&mut pfd, 1, ACCEPT_SLICE) };
-            if r <= 0 {
-                // (gone: the caller's call ended — interrupted before 5.19's killable wait; nobody reads this)
-                if l.valid(n.id).is_err() {
-                    return Err(libc::EINTR);
-                }
-                shared = after_slice(c.pending(), shared, by.is_some())?;
-                if by.is_some_and(|by| std::time::Instant::now() >= by) {
-                    return Err(libc::EAGAIN);
-                }
-                continue;
-            }
-        }
-        let own = libc::SOCK_CLOEXEC | (flags & libc::SOCK_NONBLOCK);
-        // SAFETY: our listener, an address buffer and its length for the call to fill.
-        let fd = unsafe { libc::accept4(listener.as_raw_fd(), (&raw mut peer).cast(), &mut len, own) };
-        match fd {
-            fd if fd >= 0 => break fd,
-            _ => match errno(&io::Error::last_os_error()) {
-                // (another thread's accept took it: wait again)
-                libc::EAGAIN | libc::EINTR if blocking => continue,
-                e => return Err(e),
-            },
-        }
-    };
-    // SAFETY: just made.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    if args[1] != 0 && args[2] != 0 {
-        let room = u32::from_ne_bytes(c.read(args[2], 4)?.try_into().unwrap_or_default()) as usize;
-        let said = (len as usize).min(std::mem::size_of_val(&peer));
-        // SAFETY: the address the call filled, `said` bytes of it.
-        let bytes = unsafe { std::slice::from_raw_parts((&raw const peer).cast::<u8>(), said) };
-        c.write(args[1], &bytes[..said.min(room)])?;
-        c.write(args[2], &(said as u32).to_ne_bytes())?;
-    }
-    p.keep(&fd)?;
-    l.add_fd(n.id, &fd, None, flags & libc::SOCK_CLOEXEC != 0).map_err(|e| errno(&e))
 }
 
 /// `path` (absolute, real) opened without following any link on the way (`landlock::open_unlinked`) —
@@ -1872,7 +1538,7 @@ fn connect(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let addr = address(&c, args[1], args[2])?;
-    let sock = p.sock(&c, args[0])?;
+    let sock = c.fd(args[0])?;
     // (the proxy's address: connected here, through a pair of tarae's — `proxied`)
     if let (libc::AF_INET | libc::AF_INET6, Ok(Addr::Ip(to))) =
         (sockopt(&sock, libc::SO_DOMAIN)?, parse(&addr))
@@ -1895,7 +1561,7 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
     let addr = address(&c, args[1], args[2])?;
-    let sock = p.sock(&c, args[0])?;
+    let sock = c.fd(args[0])?;
     if p.swapped.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&inode(&sock)?) {
         let at = match parse(&addr) {
             Ok(Addr::Ip(a)) => format!("local:{a}"),
@@ -1969,9 +1635,9 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let r = match asked {
         Some(at) if at.port() == 0 && kind == libc::SOCK_DGRAM => {
             let unturned = |why| refuse_with(p, &c, libc::EADDRINUSE, "network-bind", why);
-            picked(p, &c, &sock, || copied_again(p, || alone(&sock, bound, unturned)))
+            picked(p, &c, &sock, || alone(&sock, bound, unturned))
         }
-        _ => copied_again(p, bound),
+        _ => bound(),
     };
     if r.is_ok() && matches!(parse(&to), Ok(Addr::Ip(a)) if a.ip().is_unspecified() && a.port() == 0) {
         p.any_port.lock().unwrap_or_else(|e| e.into_inner()).insert(inode(&sock)?);
@@ -1987,7 +1653,7 @@ fn bind(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 /// of tarae's namespace — listening on this machine's network, beyond the session — at a port of its picking.
 fn listen(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
-    let sock = p.sock(&c, n.data.args[0])?;
+    let sock = c.fd(n.data.args[0])?;
     if p.swapped.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&inode(&sock)?) {
         return refuse_with(
             p,
@@ -2120,7 +1786,7 @@ fn sendto(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let args = n.data.args;
     let flags = args[3] as i32;
     let addr = address(&c, args[4], args[5])?;
-    let sock = p.sock(&c, args[0])?;
+    let sock = c.fd(args[0])?;
     let datagram = whole(sockopt(&sock, libc::SO_TYPE)?);
     let (sock, to, _held) = destination(l, n, p, &c, (args[0], sock), addr)?;
     let data = payload(&c, args[1], args[2], datagram)?;
@@ -2174,17 +1840,15 @@ fn send_one(
     }
     // SAFETY: the header and all it points to are ours, live for the call.
     let r = unsafe { libc::sendmsg(sock.as_raw_fd(), &h, flags | libc::MSG_NOSIGNAL) };
-    if r >= 0 {
-        // (by copies: what it passed is held by no process until the receiver reads it — kept meanwhile)
-        p.in_flight(&m.fds, sock);
-    }
+    // (tarae's descriptors of what it passed, which its control names, held open until the send is done)
+    drop(m.fds);
     c.sigpipe(flags, result(r))
 }
 
-/// The caller's message at `at` (`read_msg`), each descriptor it passes taken as tarae's (`Served::passed`) — a
+/// The caller's message at `at` (`read_msg`), each descriptor it passes taken as tarae's (`Caller::fd`) — a
 /// control message of any other type refused, said.
 fn message(p: &Served, c: &Caller, at: u64, datagram: bool) -> Result<Msg, i32> {
-    read_msg(c, |fd| p.passed(c, fd as u64), at, datagram).or_else(|u| match u {
+    read_msg(c, |fd| c.fd(fd as u64), at, datagram).or_else(|u| match u {
         Unsent::Errno(e) => Err(e),
         Unsent::Control { level, kind } => {
             let why =
@@ -2198,7 +1862,7 @@ fn message(p: &Served, c: &Caller, at: u64, datagram: bool) -> Result<Msg, i32> 
 fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
-    let mut sock = p.sock(&c, args[0])?;
+    let mut sock = c.fd(args[0])?;
     let m = message(p, &c, args[1], whole(sockopt(&sock, libc::SO_TYPE)?))?;
     send_one((l, n), p, &c, (args[0], &mut sock), m, args[2] as i32)
 }
@@ -2209,7 +1873,7 @@ fn sendmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
 fn sendmmsg(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
     let c = Caller::open(l, n)?;
     let args = n.data.args;
-    let mut sock = p.sock(&c, args[0])?;
+    let mut sock = c.fd(args[0])?;
     let datagram = whole(sockopt(&sock, libc::SO_TYPE)?);
     let count = args[2].min(libc::UIO_MAXIOV as u64);
     let mut sent = 0;
@@ -2303,63 +1967,21 @@ mod tests {
         assert_eq!((get(libc::SO_REUSEADDR), get(libc::SO_REUSEPORT)), (1, 1), "turned back on");
     }
 
-    /// The probe (6f′): a listener and `pidfd_getfd` working → served on taken descriptors; `pidfd_getfd` refused
-    /// (Docker's default filter) → served by copies, not "can't serve"; no listener (inside another supervisor's
-    /// filter), no pidfd at all, or Yama refusing → can't serve, said — by copies too.
+    /// The probe: a listener and `pidfd_getfd` working → served; `pidfd_getfd` refused (Docker's default filter) →
+    /// can't serve, said with the way out (`PIDFD_REFUSED`); no listener (inside another supervisor's filter), no
+    /// pidfd at all, or Yama refusing → can't serve, said.
     #[test]
-    fn the_probe_serves_by_copies_where_pidfd_getfd_is_refused() {
+    fn the_probe_cant_serve_where_pidfd_getfd_is_refused() {
         let refused = || Err(io::Error::from_raw_os_error(libc::EPERM));
-        assert_eq!(decided(Ok(()), Ok(Ok(())), Ok(())), Ok(Serving::Taken));
-        assert_eq!(decided(Ok(()), Ok(refused()), Ok(())), Ok(Serving::Copies));
+        assert_eq!(decided(Ok(()), Ok(Ok(())), Ok(())), Ok(()));
+        let pidfd = Err(super::super::guarantees::PIDFD_REFUSED.to_string());
+        assert_eq!(decided(Ok(()), Ok(refused()), Ok(())), pidfd);
         let busy = Err(io::Error::from_raw_os_error(libc::EBUSY));
         assert!(decided(busy, Ok(refused()), Ok(())).is_err_and(|e| e.contains("another supervisor")));
         assert!(decided(Ok(()), Err("pidfd_open: no".into()), Ok(())).is_err());
         let yama = Err("Yama's ptrace_scope 3".to_string());
-        assert_eq!(decided(Ok(()), Ok(refused()), yama.clone()), yama.map(|()| Serving::Copies));
-    }
-
-    /// What a signal pending for a caller tarae waits for is (`pending`): one sent to its thread, or to its process
-    /// where it's the only thread, is surely the one the kernel woke it for (`Its` — `ERESTARTSYS` is safe); one sent
-    /// to a process with other threads may be another thread's to take (`Shared`); blocked ones don't count. A wait
-    /// on a socket with its own timeout ends `EINTR`, else `ERESTARTSYS` (`sock_intr_errno`).
-    #[test]
-    fn a_signal_is_the_callers_only_where_the_kernel_surely_woke_it() {
-        let status = |own: &str, shared: &str, blocked: &str, threads: u32| {
-            format!("Threads:\t{threads}\nSigPnd:\t{own}\nShdPnd:\t{shared}\nSigBlk:\t{blocked}\n")
-                .into_bytes()
-        };
-        let usr1 = "0000000000000200";
-        let none = "0000000000000000";
-        assert_eq!(pending(&status(none, none, none, 1)), Pending::None);
-        assert_eq!(pending(&status(usr1, none, none, 3)), Pending::Its, "sent to the thread");
-        assert_eq!(pending(&status(none, usr1, none, 1)), Pending::Its, "to the process, its only thread");
-        assert_eq!(
-            pending(&status(none, usr1, none, 2)),
-            Pending::Shared(0x200),
-            "another thread could take it"
-        );
-        assert_eq!(pending(&status(usr1, usr1, usr1, 1)), Pending::None, "blocked");
-        assert_eq!((interrupted(true), interrupted(false)), (libc::EINTR, ERESTARTSYS));
-    }
-
-    /// A served wait's slice, ended with a signal pending (`after_slice`): the caller's own ends it as the kernel's
-    /// socket wait would (`ERESTARTSYS`, or `EINTR` with a timeout of the socket's own); the process's, with other
-    /// threads, waits one slice for one of them to take it — gone by then, the wait goes on (the kernel gave it to
-    /// another thread: `by_copies_a_signal_ends_an_accept_as_the_kernels_would` sees that live) — and still pending,
-    /// ends with `EINTR`, whatever the handler: the one place tarae can't tell what the kernel would do.
-    #[test]
-    fn a_process_signal_no_other_thread_takes_ends_the_wait_with_eintr() {
-        let usr1 = 0x200;
-        assert_eq!(after_slice(Pending::Its, 0, false), Err(ERESTARTSYS));
-        assert_eq!(after_slice(Pending::Its, 0, true), Err(libc::EINTR));
-        assert_eq!(after_slice(Pending::Shared(usr1), 0, false), Ok(usr1), "a slice for another thread");
-        assert_eq!(after_slice(Pending::None, usr1, false), Ok(0), "taken elsewhere: the wait goes on");
-        assert_eq!(after_slice(Pending::Shared(usr1), usr1, false), Err(libc::EINTR), "still pending");
-        assert_eq!(
-            after_slice(Pending::Shared(0x400), usr1, false),
-            Ok(0x400),
-            "another signal: its own slice"
-        );
+        assert_eq!(decided(Ok(()), Ok(Ok(())), yama.clone()), yama);
+        assert_eq!(decided(Ok(()), Ok(refused()), yama), pidfd, "the descriptors' refusal said first");
     }
 
     /// A run's netlink send goes to the kernel only when every message in it is a read: an `RTM_GET…` (every
@@ -2420,7 +2042,7 @@ mod tests {
     /// A run names its threads as it likes (`PR_SET_NAME`: 15 bytes, a newline, `Tgid:`, a tab, a byte past
     /// ASCII, UTF-8 cut short), and that name is `status`'s first line: the kernel escapes its newlines there, so
     /// it never makes a line of its own, and writes its other bytes as they are — `status` read as `Caller::open`
-    /// reads it gives the thread's own `Tgid:` and `Pid:`, and `pending` reads it. 10,000 names, seeded, on a
+    /// reads it gives the thread's own `Tgid:` and `Pid:`. 10,000 names, seeded, on a
     /// thread of the test's own (only its name is set). V2-3's regression test: read as UTF-8, the file failed
     /// for a name cut inside a character (`wörker-éééé` at 15 bytes) and every call from the thread got `ESRCH`.
     #[test]
@@ -2448,10 +2070,9 @@ mod tests {
                 // SAFETY: a NUL-terminated name of ours; the call names this thread only.
                 unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
                 let status = status_of(tid);
-                let read =
-                    status.as_deref().map(|s| (proc_value(s, "Tgid:"), proc_value(s, "Pid:"), pending(s)));
+                let read = status.as_deref().map(|s| (proc_value(s, "Tgid:"), proc_value(s, "Pid:")));
                 let (t, p) = (tgid.to_string(), tid.to_string());
-                if !matches!(read, Ok((Some(a), Some(b), _)) if a == t && b == p) && wrong.len() < 10 {
+                if !matches!(read, Ok((Some(a), Some(b))) if a == t && b == p) && wrong.len() < 10 {
                     wrong.push(format!(
                         "{name:?}: {:?}",
                         read.map(|r| (r.0.map(str::to_string), r.1.map(str::to_string)))
@@ -4213,60 +3834,6 @@ mod tests {
             blocked.seen.iter().any(|d| d.process == "java" && d.plain().starts_with("connecting to port")),
             "{blocked:?}\n{said}"
         );
-    }
-
-    /// 6f′: what collecting the copies costs on a long-lived run — a Gradle build (a JDK and Gradle on PATH: the M5
-    /// image), twice, its daemon kept (no JVM options of the project's: one daemon both builds use, left running below
-    /// the keeper), then 3 s with the daemon idle — the scans' count, time and descriptors read, in each part. By copies
-    /// only (`cargo xtask linux --docker-default --image tarae-m5 test --bin tarae measure_copies_scan -- --ignored
-    /// --nocapture`): the interval (`copies::INTERVAL`) is picked from it.
-    #[test]
-    #[ignore = "a measurement (6f′): by hand, by copies, where Gradle is"]
-    fn measure_copies_scan() {
-        use super::super::copies::SCANS;
-        if !served("measure_copies_scan") || !super::copies() {
-            return;
-        }
-        let s = Scratch::new("copies-scan");
-        for (f, text) in [
-            ("settings.gradle", "rootProject.name = 'fixture'\n"),
-            ("build.gradle", "plugins { id 'java' }\n"),
-            (
-                "src/main/java/fx/Main.java",
-                "package fx;\npublic class Main { public static void main(String[] a) {} }\n",
-            ),
-        ] {
-            std::fs::create_dir_all(s.root.join(f).parent().unwrap()).unwrap();
-            std::fs::write(s.root.join(f), text).unwrap();
-        }
-        let now = || {
-            let r = |a: &AtomicU64| a.load(Relaxed);
-            (r(&SCANS.count), r(&SCANS.nanos), r(&SCANS.descriptors))
-        };
-        let said = |part: &str, (c0, n0, d0): (u64, u64, u64), (c1, n1, d1): (u64, u64, u64), secs: f64| {
-            let count = (c1 - c0).max(1);
-            println!(
-                "measure: copies scan · {part}: {} scans in {secs:.1} s ({:.1}/s), {:.0} µs each, {:.0} descriptors \
-                 each — {:.2}% of a core · longest so far {:.0} µs",
-                c1 - c0,
-                (c1 - c0) as f64 / secs,
-                (n1 - n0) as f64 / count as f64 / 1e3,
-                (d1 - d0) as f64 / count as f64,
-                (n1 - n0) as f64 / 1e9 / secs * 100.0,
-                SCANS.longest.load(Relaxed) as f64 / 1e3,
-            );
-        };
-        println!();
-        for build in 1..=2 {
-            let (at, before) = (std::time::Instant::now(), now());
-            let (ms, ok, out) = sandboxed(&s.root, "gradle --offline --console=plain build");
-            assert!(ok, "{out}");
-            said(&format!("build {build} ({ms} ms)"), before, now(), at.elapsed().as_secs_f64());
-        }
-        let before = now();
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        said("its daemon idle", before, now(), 3.0);
-        super::super::end_leftovers(Some(&s.root));
     }
 
     /// `sh -c script` in the project at `root` as Claude's runs are (`sandbox::policy` → `command` → `spawn`,

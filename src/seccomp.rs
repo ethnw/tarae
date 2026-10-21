@@ -57,17 +57,13 @@ const SOCK_FLAGS: u32 = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as u32;
 /// — inside the session's own network namespace, which holds only `lo` (`sandbox::keeper`) — its stream and
 /// datagram ones are the run's own: served, its calls that name an address still go to tarae, which routes
 /// them (`Routed`: `sandbox::route`); not served, they're its own too (`OwnNetwork`: the namespace is the
-/// lock). Raw ones are refused in both, and unix ones not served, which cross the namespace. `Copied` (6f′) is
-/// `Served` where tarae can't take a run's descriptors (`pidfd_getfd` refused: Docker's default profile): every socket
-/// the run has is tarae's to make — its unix and netlink ones, a `socketpair`'s, an `accept`'s too — so tarae keeps a
-/// copy of each (`supervisor::Copies`).
+/// lock). Raw ones are refused in both, and unix ones not served, which cross the namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Plain,
     Served,
     Routed,
     OwnNetwork,
-    Copied,
 }
 
 /// Where a check goes: on to the next, over the next few, or to one of the answers at the end.
@@ -100,8 +96,7 @@ enum Op {
 /// `ptys` (served only): the calls on the way to a pty's other end go to tarae too (`sandbox::ptys`).
 fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
     let nr = |n: libc::c_long| n as u32;
-    let served = matches!(mode, Mode::Served | Mode::Routed | Mode::Copied);
-    let copied = mode == Mode::Copied;
+    let served = matches!(mode, Mode::Served | Mode::Routed);
     let mut ops = native(arch);
     for n in [libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register] {
         ops.push(Op::Is(nr(n), To::Missing, To::Next));
@@ -124,12 +119,6 @@ fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
             Op::Load(arg_high(4)),
             Op::Is(0, To::Allow, To::Tarae),
         ]);
-        // (Copied: the sockets a `socketpair` and an `accept` make are tarae's too — it keeps a copy of each)
-        if copied {
-            for n in [libc::SYS_socketpair, libc::SYS_accept, libc::SYS_accept4] {
-                ops.push(Op::Is(nr(n), To::Tarae, To::Next));
-            }
-        }
         // A pty made from `/dev/ptmx` is unlocked, numbered or its other end opened through these first — tarae
         // puts one its rules grant in its place (an ioctl's request is an `unsigned int`: the low half is all
         // the kernel reads)
@@ -152,9 +141,7 @@ fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
             Op::Load(NR), // (back to the call's number for the next block)
         ]);
     }
-    // (Copied: tarae makes the run's unix and netlink sockets as it makes its internet ones)
-    let made = if copied { To::Tarae } else { To::Allow };
-    let unix_stream = if served { made } else { To::Refuse };
+    let unix_stream = if served { To::Allow } else { To::Refuse };
     ops.extend([
         Op::Is(nr(libc::SYS_socket), To::Next, To::Allow),
         Op::Load(arg_low(0)),
@@ -162,10 +149,10 @@ fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
         // socket on the machine, as `ss` does)
         Op::Is(libc::AF_NETLINK as u32, To::Next, To::Skip(2)),
         Op::Load(arg_low(2)),
-        Op::Is(libc::NETLINK_ROUTE as u32, made, To::Refuse),
+        Op::Is(libc::NETLINK_ROUTE as u32, To::Allow, To::Refuse),
     ]);
     match mode {
-        Mode::Served | Mode::Copied => ops.extend([
+        Mode::Served => ops.extend([
             Op::Is(libc::AF_INET as u32, To::Tarae, To::Next),
             Op::Is(libc::AF_INET6 as u32, To::Tarae, To::Next),
         ]),
@@ -318,7 +305,7 @@ impl Filter {
         let listener = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
         let tries: &[libc::c_ulong] = match self.mode {
             Mode::Plain | Mode::OwnNetwork => &[0],
-            Mode::Served | Mode::Routed | Mode::Copied => {
+            Mode::Served | Mode::Routed => {
                 &[listener | libc::SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, listener]
             }
         };
@@ -334,7 +321,7 @@ impl Filter {
                 let r = libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, flags, fprog);
                 if r >= 0 {
                     // (the listener comes close-on-exec: no run inherits it)
-                    let listens = matches!(self.mode, Mode::Served | Mode::Routed | Mode::Copied);
+                    let listens = matches!(self.mode, Mode::Served | Mode::Routed);
                     return Ok(listens.then(|| OwnedFd::from_raw_fd(r as i32)));
                 }
                 last = io::Error::last_os_error();
@@ -535,7 +522,7 @@ mod tests {
         eval_prog(&program(ARCH.unwrap(), mode, no_userns, false), call_arch, nr, args)
     }
 
-    /// 3b: with `ptys` (served, by copies too) the three calls on the way to a pty's other end go to tarae —
+    /// 3b: with `ptys` (served) the three calls on the way to a pty's other end go to tarae —
     /// whatever the request's high half, which the kernel doesn't read — and no other ioctl, nor any open; without
     /// it, or not served, they're the run's.
     #[test]
@@ -543,19 +530,18 @@ mod tests {
         let arch = ARCH.unwrap();
         let (allow, tarae) = (ALLOW, libc::SECCOMP_RET_USER_NOTIF);
         let ask = |mode, ptys, nr, args: &[u64]| eval_prog(&program(arch, mode, false, ptys), arch, nr, args);
-        for mode in [Mode::Served, Mode::Copied] {
-            for c in [libc::TIOCSPTLCK, libc::TIOCGPTN, libc::TIOCGPTPEER] {
-                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c, 0x1000]), tarae, "{mode:?} {c:#x}");
-                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c | 1 << 32, 0x1000]), tarae, "high half");
-                assert_eq!(ask(mode, false, libc::SYS_ioctl, &[3, c, 0x1000]), allow, "{mode:?} without");
-            }
-            for other in [libc::TIOCGWINSZ, libc::TCGETS, libc::TIOCSCTTY, libc::FIONREAD] {
-                assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, other]), allow, "{other:#x}");
-            }
-            assert_eq!(ask(mode, true, libc::SYS_openat, &[3, 0x1000, 2]), allow, "no open");
-            // (the blocks after it still see the call's number)
-            assert_eq!(ask(mode, true, libc::SYS_connect, &[3]), tarae);
+        let mode = Mode::Served;
+        for c in [libc::TIOCSPTLCK, libc::TIOCGPTN, libc::TIOCGPTPEER] {
+            assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c, 0x1000]), tarae, "{c:#x}");
+            assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, c | 1 << 32, 0x1000]), tarae, "high half");
+            assert_eq!(ask(mode, false, libc::SYS_ioctl, &[3, c, 0x1000]), allow, "without");
         }
+        for other in [libc::TIOCGWINSZ, libc::TCGETS, libc::TIOCSCTTY, libc::FIONREAD] {
+            assert_eq!(ask(mode, true, libc::SYS_ioctl, &[3, other]), allow, "{other:#x}");
+        }
+        assert_eq!(ask(mode, true, libc::SYS_openat, &[3, 0x1000, 2]), allow, "no open");
+        // (the blocks after it still see the call's number)
+        assert_eq!(ask(mode, true, libc::SYS_connect, &[3]), tarae);
         assert_eq!(ask(Mode::Plain, true, libc::SYS_ioctl, &[3, libc::TIOCGPTN]), allow, "not served");
     }
 
@@ -610,7 +596,7 @@ mod tests {
         let thread =
             (libc::CLONE_VM | libc::CLONE_FS | libc::CLONE_FILES | libc::CLONE_SIGHAND | libc::CLONE_THREAD)
                 as u64;
-        for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork, Mode::Copied] {
+        for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork] {
             let refused = |nr, args: &[u64]| eval_with(mode, true, arch, nr, args);
             assert_eq!(refused(libc::SYS_unshare, &[user]), EPERM, "{mode:?}");
             assert_eq!(refused(libc::SYS_unshare, &[user | libc::CLONE_NEWNET as u64 | (1 << 32)]), EPERM);
@@ -870,40 +856,5 @@ mod tests {
         }
         assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0x7fff_0000, 16]), tarae, "an address");
         assert_eq!(routed(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0, 0]), allow, "none");
-    }
-
-    /// 6f′, `Copied`: every socket the run has is tarae's to make — an internet one as served, and here its unix
-    /// stream and netlink routing ones, a `socketpair`'s and an `accept`'s too — so tarae holds a copy of each; what
-    /// served refuses stays refused (a unix datagram socket, netlink's other protocols, a raw packet socket); what
-    /// names an address goes to tarae as served.
-    #[test]
-    fn copied_makes_every_socket_tarae_s() {
-        let arch = ARCH.unwrap();
-        let (allow, eperm, tarae) = (ALLOW, EPERM, libc::SECCOMP_RET_USER_NOTIF);
-        let copied = |nr, args: &[u64]| eval_with(Mode::Copied, false, arch, nr, args);
-        let (inet, unix, netlink) = (libc::AF_INET as u64, libc::AF_UNIX as u64, libc::AF_NETLINK as u64);
-        let stream = (libc::SOCK_STREAM | libc::SOCK_CLOEXEC) as u64;
-        let (dgram, raw) = (libc::SOCK_DGRAM as u64, libc::SOCK_RAW as u64);
-        assert_eq!(copied(libc::SYS_socket, &[inet, stream]), tarae);
-        assert_eq!(copied(libc::SYS_socket, &[unix, stream]), tarae, "a unix stream socket: tarae's");
-        assert_eq!(copied(libc::SYS_socket, &[netlink, raw, 0]), tarae, "netlink's routing: tarae's");
-        assert_eq!(copied(libc::SYS_socket, &[netlink, raw, libc::NETLINK_SOCK_DIAG as u64]), eperm);
-        assert_eq!(copied(libc::SYS_socket, &[unix, dgram]), eperm, "a unix datagram socket");
-        assert_eq!(copied(libc::SYS_socket, &[libc::AF_PACKET as u64]), eperm);
-        for nr in [libc::SYS_socketpair, libc::SYS_accept, libc::SYS_accept4] {
-            assert_eq!(copied(nr, &[unix, stream]), tarae, "{nr}");
-        }
-        for nr in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
-        {
-            assert_eq!(copied(nr, &[3]), tarae, "{nr}");
-        }
-        assert_eq!(copied(libc::SYS_sendto, &[3, 0x1000, 9, 0, 0, 0]), allow, "no address");
-        assert_eq!(copied(libc::SYS_read, &[0]), allow);
-        // (served alone leaves those to the run: a `socketpair` and an `accept` its own)
-        let served = |nr, args: &[u64]| eval_with(Mode::Served, false, arch, nr, args);
-        assert_eq!(
-            [served(libc::SYS_socketpair, &[unix, stream]), served(libc::SYS_accept4, &[3])],
-            [allow; 2]
-        );
     }
 }

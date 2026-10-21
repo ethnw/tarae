@@ -89,9 +89,9 @@ The sandbox blocked nothing.
 ── a later run that failed
 The sandbox blocked nothing. [the rules]
 
-══ host by copies, ABI 11: the conversation's first run
+══ offline, pidfd_getfd refused (Docker's default profile), ABI 11: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Host namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
+Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed

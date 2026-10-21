@@ -861,7 +861,7 @@ the same rules — [what differs](#on-linux)). What you run yourself doesn't.
   run's, or `:sandbox-blocked`) lists what could open — over the list, what the session's last sandboxed run
   was kept from and shared (`tier host  loopback this machine's, other sessions' refused  shared processes, …`, or
   `sandbox Seatbelt …`), and what's missing in a few words, faint under it (`AppArmor blocks user
-  namespaces · copies: pidfd_getfd refused`; the whole reason is in Claude's report and `tarae state`). A narrow
+  namespaces · not served: pidfd_getfd refused`; the whole reason is in Claude's report and `tarae state`). A narrow
   panel gives its room by importance — what's shared, the loopback, the network, Landlock's ABI — each part whole
   where it fits (a long one that doesn't leaves room to shorter ones after it), and what's shared keeps its first
   items (`processes, signals +2`) before it goes; the tier always shows. Nothing blocked, the list says so. For a write, each folder from the one written in up
@@ -1024,8 +1024,6 @@ and terminals. How much of that a session gets is its tier:
 - **host**: no user namespaces — Ubuntu's restriction without tarae's profile, or a container's seccomp profile.
 - **offline**: tarae can't serve a command's sockets (below): a command reaches no network — with the session's
   namespaces its own loopback, without them no socket at all.
-- **By copies**: in a container without `CAP_SYS_PTRACE` (below), tarae serves sockets by copies, and the session
-  has no network of its own: its loopback is this machine's, with other sessions' sockets on it refused.
 
 What each case keeps apart from other sessions' commands, and what it shares with them, at Landlock ABI 6 and on
 macOS (Seatbelt). A test keeps this table equal to the code:
@@ -1035,17 +1033,14 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 |---|---|---|
 | own, TPROXY | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own, tarae's proxy | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
-| own by copies: the session's user namespace, no network one | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | nothing |
 | own, the project in /dev/shm | files (but the temp folders), processes, signals, System V IPC, terminals, loopback (its own) | /dev/shm |
 | own, its lo without an IPv6 address | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own, without an IPv6 address) | nothing |
 | own, the network closed | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | own without a PID namespace, TPROXY | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | own without a PID namespace, tarae's proxy | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
-| own without a PID namespace, by copies | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority) |
 | offline, the session's namespaces | files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own) | nothing |
 | offline, the session's namespaces without a PID one | files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own) | processes (command lines, priority) |
 | host, tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
-| host by copies | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | host, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | offline, no namespaces | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | offline, no namespaces, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
@@ -1064,8 +1059,8 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   too: Seatbelt can't tell whose a listener is. Claude's result says so.
 - **Getting namespaces.** Where Ubuntu's restriction is why, the sandbox panel says so faint under its header
   ("tarae's AppArmor profile would give own namespaces"), and its last row copies the step that installs the profile:
-  run it with `sudo`, then restart tarae. In a container, `--cap-add SYS_PTRACE` turns copies into the full way of
-  serving sockets.
+  run it with `sudo`, then restart tarae. In a container, `--cap-add SYS_PTRACE` takes a session from offline to
+  host.
 - **Where it's said.** Claude's result says the tier once a conversation, and again when it changes: what its
   commands are kept from and what they share. A command sees it in `TARAE_SANDBOX_STATUS` (`own:6`, `host:4`,
   or `seatbelt` on macOS). You see it over the sandbox panel's list (above) and on the keeper's row in `:procs`;
@@ -1117,25 +1112,12 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   connection that's neither TLS nor HTTP (ssh, a database client) can't go out yet. Elsewhere (macOS, Linux
   without that network) the commands' proxy variables name tarae's proxy, and the packs tell the tools that
   ignore them.
-- **In a container without `CAP_SYS_PTRACE`** (Docker's default), the filter refuses the call tarae takes a
-  command's socket with (`pidfd_getfd`), so tarae makes every socket the command has — its unix sockets and
-  `socketpair`s too, and the connections its servers accept — and keeps its own copy of each. Ports, unix
-  sockets in the project and the network work as elsewhere, with the session's commands on the container's
-  loopback (tier host). What it costs:
-  - a socket closed reaches its peer late (≈ 0.1 s while the command is busy, up to ≈ 1 s after a quiet spell),
-    as tarae lets its copy go only once no process holds the socket — and not at all while a process tarae
-    can't look into (ssh-agent, gpg-agent) runs among the command's; a port a command closed is free again for
-    its next bind of it (which may wait a moment, at most 0.2 s, for tarae to let it go)
-  - a signal to a multithreaded server waiting in `accept` can end the wait with `EINTR` even where its handler
-    asks for the call to be restarted
-  - a socket handed in from outside the sandbox, and an eventfd, epoll or pidfd passed between processes, are
-    refused, said in Claude's result
-  - tarae reads the command's descriptors on a timer while it holds copies (≈ 1% of a core for an idle Gradle
-    daemon)
-
-  `--cap-add SYS_PTRACE` (`runArgs` in `devcontainer.json`) gives the full way, with none of these.
 - **When tarae can't make a command's connections**, the command gets no socket at all — no port on this
-  machine, no unix socket, not even the project's — and Claude's result says why. That happens:
+  machine, no unix socket, not even the project's — and Claude's result says why (tier offline). That happens:
+  - in a container without `CAP_SYS_PTRACE` (Docker's default, a dev container started the usual way): its
+    filter refuses the call tarae takes a command's socket with (`pidfd_getfd`). For the network and this
+    machine's ports (a Gradle build, a test against a local server), add `"runArgs": ["--cap-add=SYS_PTRACE"]`
+    to `devcontainer.json` — the session's commands are then on the container's loopback (tier host)
   - with Yama's `ptrace_scope` at 2 (unless tarae holds `CAP_SYS_PTRACE`) or 3: tarae can't read a command's
     calls. At 1, the default on Ubuntu, a process has to stay below tarae — so tarae is the last parent of
     what its programs leave running (a *child subreaper*): a daemon that detached itself from a command comes

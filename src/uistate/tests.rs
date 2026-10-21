@@ -868,9 +868,10 @@ fn the_state_as_json_is_pinned() {
     // (its Claude had a turn: a request writing to the 1h cache, then the result — `usage.rs`)
     let u = &mut ed.session_by_id(id).unwrap().usage;
     usage_turn(u);
-    // (its runs' sandboxes: in front a Linux keeper served by copies, behind macOS's with ports open — 9d)
-    let copied = landlock_run(crate::sandbox::guarantees::Ns::session(false, true), true);
-    ed.session.sandbox = Some(copied);
+    // (its runs' sandboxes: in front a Linux keeper not served — pidfd_getfd refused —, behind macOS's with ports
+    // open — 9d)
+    let offline = landlock_run(crate::sandbox::guarantees::Ns::NONE, false);
+    ed.session.sandbox = Some(offline);
     ed.session_by_id(id).unwrap().sandbox =
         Some(crate::sandbox::guarantees::Guarantees::seatbelt(true, false));
     edit_review(&mut ed);
@@ -1699,13 +1700,12 @@ fn a_watcher_of_usage_hears_a_turn_and_the_cache_going_cold() {
     assert!(sessions.try_iter().next().is_none(), "a watcher of sessions isn't told what they cost");
 }
 
-/// A Landlock run's sandbox (ABI 8, served) in a keeper born with `ns` — by tarae's copies of its sockets where
-/// `copies` (`pidfd_getfd` refused).
-fn landlock_run(ns: crate::sandbox::guarantees::Ns, copies: bool) -> crate::sandbox::guarantees::Guarantees {
+/// A Landlock run's sandbox (ABI 8) in a keeper born with `ns`, `served` — or not: `pidfd_getfd` refused.
+fn landlock_run(ns: crate::sandbox::guarantees::Ns, served: bool) -> crate::sandbox::guarantees::Guarantees {
+    use crate::sandbox::guarantees::PIDFD_REFUSED;
     crate::sandbox::guarantees::Guarantees::landlock(crate::sandbox::guarantees::Found {
         ns,
-        served: Ok(()),
-        copies,
+        served: if served { Ok(()) } else { Err(PIDFD_REFUSED.into()) },
         abi: 8,
         ptys: None,
         tproxy: if ns.netns() { Ok(()) } else { Err("no network namespace of its own".into()) },
@@ -1740,7 +1740,7 @@ fn tarae_state_says_the_sandbox() {
         sandbox.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
     };
     // The first run: its keeper has every namespace (its own network: TPROXY)
-    let own = landlock_run(Ns::session(true, true), false);
+    let own = landlock_run(Ns::session(true, true), true);
     let line = "tier own · Landlock ABI 8 · loopback its own · network closed · shared nothing";
     watch::sandbox(&mut ed, own.clone());
     let e = events(&mut ed);
@@ -1767,16 +1767,17 @@ fn tarae_state_says_the_sandbox() {
     // A run like the last: nothing said
     watch::sandbox(&mut ed, own.clone());
     assert_eq!(events(&mut ed), Vec::<Value>::new());
-    // A keeper born with other namespaces — served by copies, no network namespace of its own (N1): one event
-    watch::sandbox(&mut ed, landlock_run(Ns::session(false, true), true));
+    // A keeper born with no namespaces and not served — pidfd_getfd refused: one event, offline, said why
+    watch::sandbox(&mut ed, landlock_run(Ns::NONE, false));
     let e = events(&mut ed);
     assert_eq!(e.len(), 1, "{e:?}");
     assert_eq!(
         (&e[0]["was"], &e[0]["tier"], &e[0]["namespaces"]["netns"]),
-        (&json!(line), &json!("own"), &json!(false))
+        (&json!(line), &json!("offline"), &json!(false))
     );
-    assert_eq!(e[0]["network"]["way"], "copies");
-    assert_eq!(e[0]["why"], "served by tarae's copies of its sockets: pidfd_getfd refused");
+    assert_eq!(e[0]["network"]["way"], "no-socket");
+    let why = format!("tarae can't serve its calls: {}", crate::sandbox::guarantees::PIDFD_REFUSED);
+    assert_eq!(e[0]["why"], why.as_str());
     // macOS: Seatbelt's (no tier, ABI or namespaces); a policy that opens ports, one event — its loopback shared
     watch::sandbox(&mut ed, Guarantees::seatbelt(false, false));
     assert_eq!(events(&mut ed).len(), 1);
@@ -1800,7 +1801,7 @@ fn tarae_state_says_the_sandbox() {
     // The text forms; Claude's level: its own session's, why included — not another's, not in the `ui:` line
     let id = ed.session_add(std::env::temp_dir().join("tarae-uistate-sandbox"));
     ed.session_by_id(id).unwrap().sandbox = Some(own);
-    ed.session.sandbox = Some(landlock_run(Ns::session(false, true), true));
+    ed.session.sandbox = Some(landlock_run(Ns::NONE, false));
     let mine = ed.session.sandbox.clone().unwrap();
     frame(&mut ed);
     ed.session_by_id(id).unwrap().sandbox = Some(Guarantees::seatbelt(false, false));
@@ -1808,7 +1809,7 @@ fn tarae_state_says_the_sandbox() {
     let seatbelt = "sandbox s1: Seatbelt · loopback none of its ports open · network closed · shared processes, \
                     System V shared memory, POSIX shared memory\n";
     assert!(text.contains(seatbelt), "{text}");
-    ed.session_by_id(id).unwrap().sandbox = Some(landlock_run(Ns::session(true, true), false));
+    ed.session_by_id(id).unwrap().sandbox = Some(landlock_run(Ns::session(true, true), true));
     let text = ed.ui_state().text();
     assert!(
         text.contains(&format!("sandbox s0: {}\n", mine.line()))
@@ -1936,8 +1937,8 @@ fn busy_scene() -> Editor {
     task_panel(&mut ed);
     light_card(&mut ed);
     weighty_card(&mut ed);
-    // (its runs' sandbox: a keeper served by copies — the longest line Claude's answer gets, a fallback's why with it)
-    ed.session.sandbox = Some(landlock_run(crate::sandbox::guarantees::Ns::session(false, true), true));
+    // (its runs' sandbox: a keeper not served — the longest line Claude's answer gets, a fallback's why with it)
+    ed.session.sandbox = Some(landlock_run(crate::sandbox::guarantees::Ns::NONE, false));
     ed.set_warning("src/term.rs changed on disk — reloaded");
     ed.set_status("check passed");
     frame(&mut ed);

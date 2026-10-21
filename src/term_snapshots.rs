@@ -3905,23 +3905,21 @@ fn blocked_npm_run(s: &mut Shot) {
     s.ed.session.task_run = Some(r);
 }
 
-/// Tier host, served by copies on colima (no user namespaces, Landlock ABI 4): every part of the state line there, and a
-/// fallback's why.
-fn host_by_copies() -> crate::sandbox::guarantees::Guarantees {
-    use crate::sandbox::guarantees::{Found, Guarantees, Ns};
+/// Tier offline in a container under Docker's default profile (no user namespaces, `pidfd_getfd` refused, Landlock
+/// ABI 4): the fallback's why, and how to get the calls served.
+fn offline_docker_default() -> crate::sandbox::guarantees::Guarantees {
+    use crate::sandbox::guarantees::{Found, Guarantees, Ns, PIDFD_REFUSED};
     Guarantees::landlock(Found {
         ns: Ns::NONE,
-        served: Ok(()),
-        copies: true,
+        served: Err(PIDFD_REFUSED.into()),
         abi: 4,
-        ptys: Some(4),
+        ptys: None,
         tproxy: Err("no network namespace of its own".into()),
         lo_missing: Vec::new(),
         short: Some(
-            "no user namespaces: AppArmor restricts them (kernel.apparmor_restrict_unprivileged_userns)"
-                .into(),
+            "a seccomp filter tarae runs under refuses new namespaces — Docker's default profile does".into(),
         ),
-        brief: Some("AppArmor blocks user namespaces".into()),
+        brief: Some("a seccomp filter blocks namespaces".into()),
         hint: None,
         network: false,
     })
@@ -3938,7 +3936,6 @@ fn host_restricted() -> crate::sandbox::guarantees::Guarantees {
     Guarantees::landlock(Found {
         ns: Ns::NONE,
         served: Ok(()),
-        copies: false,
         abi: 4,
         ptys: Some(4),
         tproxy: Err("no network namespace of its own".into()),
@@ -3961,7 +3958,6 @@ fn snapshot_sandbox_panel_tier() {
     let top = Guarantees::landlock(Found {
         ns: Ns::session(true, true),
         served: Ok(()),
-        copies: false,
         abi: 8,
         ptys: None,
         tproxy: Ok(()),
@@ -3973,7 +3969,7 @@ fn snapshot_sandbox_panel_tier() {
     });
     for (w, h) in [(120, 30), (60, 24)] {
         let scenes = [
-            ("fallback", Some(host_by_copies())),
+            ("fallback", Some(offline_docker_default())),
             ("hint", Some(host_restricted())),
             ("top", Some(top.clone())),
             ("empty", None),
@@ -4000,7 +3996,7 @@ fn snapshot_sandbox_panel_tier() {
 #[test]
 fn the_state_line_folds_its_least_important_part_first() {
     use crate::sandbox::guarantees::Guarantees;
-    let pairs = host_by_copies().panel_pairs();
+    let pairs = host_restricted().panel_pairs();
     let keys = |w: usize| -> Vec<&str> {
         super::fold_hints(&pairs, Guarantees::FOLD, w).iter().map(|p| p.0).collect()
     };

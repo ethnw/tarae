@@ -38,11 +38,6 @@ pub enum RunNet {
     Own,
     /// None (`Mode::Plain`); Landlock handles TCP and UDP.
     Plain,
-    /// Served where tarae can't take a run's descriptors (`pidfd_getfd` refused — Docker's default profile; 6f′):
-    /// tarae makes every socket the run has, its unix and netlink ones too, and keeps a copy of each
-    /// (`seccomp::Mode::Copied`, `supervisor::Copies`) — never in a network namespace (its sockets are tarae's). Landlock
-    /// handles TCP and UDP.
-    Copied,
 }
 
 impl Ns {
@@ -58,12 +53,10 @@ impl Ns {
         self.user && self.net
     }
 
-    /// How the internet sockets of a run of a keeper born with these go, `served` or not — by copies where tarae
-    /// can't take a run's descriptors (`copies`: every socket tarae's, whatever the namespaces) — decided once, in
+    /// How the internet sockets of a run of a keeper born with these go, `served` or not — decided once, in
     /// `linux::confine` (`Confine.net`).
-    pub fn run_net(self, served: bool, copies: bool) -> RunNet {
+    pub fn run_net(self, served: bool) -> RunNet {
         match (served, self.netns()) {
-            (true, _) if copies => RunNet::Copied,
             (true, true) => RunNet::Routed,
             (true, false) => RunNet::Served,
             (false, true) => RunNet::Own,
@@ -76,14 +69,17 @@ impl Ns {
     /// namespaces (`Plain`: no supervisor) keep this system's `/dev/pts`, said. One answer for its rules (`linux::confine`)
     /// and its filter (the keeper's run).
     pub fn serves_ptys(self, net: RunNet) -> bool {
-        !self.user && matches!(net, RunNet::Served | RunNet::Copied)
+        !self.user && net == RunNet::Served
     }
 }
 
-/// What the session's namespaces without a network one are (N1, 2026-10-14; only a keeper served by copies is born
-/// so): the keeper's own words, nothing of its runs — whether a run's loopback is kept from other sessions' is the
-/// run's (served or not), its guarantees' to say (the `Loopback` row).
-pub const NO_NETNS: &str = "no network namespace of its own: its loopback is this machine's";
+/// Why tarae can't serve its runs' calls where `pidfd_getfd` is refused (`supervisor::decided`) — the way out said
+/// with it. Then the session is tier offline: no network, no port on this machine, no unix socket.
+pub const PIDFD_REFUSED: &str =
+    "pidfd_getfd refused (Docker's default profile) — --cap-add SYS_PTRACE serves the calls";
+
+/// `PIDFD_REFUSED` in the sandbox panel's few words (`Guarantees.brief`): two parts, each a row where it's narrow.
+const PIDFD_REFUSED_BRIEF: &str = "not served: pidfd_getfd refused · --cap-add SYS_PTRACE serves the calls";
 
 /// A tier (§Tiers): whether the keeper has the session's namespaces, and whether tarae serves the runs' calls —
 /// what a user can tell apart. The rest (a PID namespace, how the network goes) is the rows' and `why`'s to say.
@@ -189,8 +185,6 @@ pub enum Way {
     Tproxy,
     /// To tarae's proxy, by the variable a run gets (macOS: at its own port).
     Proxy,
-    /// To tarae's proxy, every socket the run has made by tarae (6f′: `pidfd_getfd` refused).
-    Copies,
     /// Nowhere: not served (tier offline), a run makes no socket that leaves its namespace.
     NoSocket,
 }
@@ -201,7 +195,6 @@ impl Way {
         match self {
             Way::Tproxy => "tproxy",
             Way::Proxy => "proxy",
-            Way::Copies => "copies",
             Way::NoSocket => "no-socket",
         }
     }
@@ -246,7 +239,7 @@ pub struct Guarantees {
     /// What's missing — the probe's, the supervisor's, no TPROXY's, Landlock's — None where nothing is.
     pub why: Option<String>,
     /// The same in a few words, ` · ` between (the sandbox panel, 9e, under the tier): `AppArmor blocks user
-    /// namespaces · copies: pidfd_getfd refused` — `why` is the report's and `tarae state`'s.
+    /// namespaces · no TPROXY` — `why` is the report's and `tarae state`'s.
     pub brief: Option<String>,
     /// How the tier would go up — the profile's (9f, `Found.hint`); None elsewhere, and on macOS.
     pub hint: Option<Hint>,
@@ -261,8 +254,6 @@ pub struct Found {
     pub ns: Ns,
     /// Whether tarae serves its runs' calls — or why not (`supervisor::unavailable`).
     pub served: Result<(), String>,
-    /// Served by tarae's copies of a run's sockets (`supervisor::copies`).
-    pub copies: bool,
     pub abi: u32,
     /// Where its runs open only the ptys they make (3b, `Ns::serves_ptys`): how many at a time.
     pub ptys: Option<usize>,
@@ -281,7 +272,7 @@ pub struct Found {
     pub network: bool,
 }
 
-/// The loopback of a run served without a network namespace of its own (host, by copies): this machine's — another
+/// The loopback of a run served without a network namespace of its own (host): this machine's — another
 /// session's socket on it refused (step 8).
 const THEIRS_REFUSED: &str = "this machine's, other sessions' sockets refused";
 
@@ -324,7 +315,7 @@ impl Guarantees {
     /// A Landlock run's, from what its keeper is (`Found`).
     pub fn landlock(f: Found) -> Guarantees {
         let served = f.served.is_ok();
-        let net = f.ns.run_net(served, f.copies);
+        let net = f.ns.run_net(served);
         let tier = Tier::of(f.ns, served);
         let lo = match f.lo_missing.is_empty() {
             true => String::new(),
@@ -332,7 +323,7 @@ impl Guarantees {
         };
         let loopback = match net {
             RunNet::Routed | RunNet::Own => format!("its own{lo}"),
-            RunNet::Served | RunNet::Copied => THEIRS_REFUSED.to_string(),
+            RunNet::Served => THEIRS_REFUSED.to_string(),
             RunNet::Plain => "no socket".to_string(),
         };
         let pool = (!f.ns.user).then_some(f.ptys).flatten();
@@ -368,16 +359,12 @@ impl Guarantees {
         ];
         let way = match net {
             RunNet::Plain | RunNet::Own => Way::NoSocket,
-            RunNet::Copied => Way::Copies,
             RunNet::Routed | RunNet::Served if f.tproxy.is_ok() => Way::Tproxy,
             RunNet::Routed | RunNet::Served => Way::Proxy,
         };
         let mut why: Vec<String> = f.short.into_iter().collect();
         if let Err(w) = &f.served {
             why.push(format!("tarae can't serve its calls: {w}"));
-        }
-        if net == RunNet::Copied {
-            why.push("served by tarae's copies of its sockets: pidfd_getfd refused".into());
         }
         if let (Way::Proxy, Err(w), true) = (way, &f.tproxy, f.network) {
             why.push(format!("no TPROXY: {w}"));
@@ -387,11 +374,10 @@ impl Guarantees {
         }
         // (the same, each in a few words — the probe's own first; the tier is said beside it already)
         let mut brief: Vec<String> = f.brief.into_iter().collect();
-        if let Err(w) = &f.served {
-            brief.push(format!("not served: {w}"));
-        }
-        if net == RunNet::Copied {
-            brief.push("copies: pidfd_getfd refused".into());
+        match &f.served {
+            Err(w) if w == PIDFD_REFUSED => brief.push(PIDFD_REFUSED_BRIEF.into()),
+            Err(w) => brief.push(format!("not served: {w}")),
+            Ok(()) => {}
         }
         if let (Way::Proxy, Err(_), true) = (way, &f.tproxy, f.network) {
             brief.push("no TPROXY".into());
@@ -510,7 +496,7 @@ impl Guarantees {
         };
         // (served without a network namespace, in the panel: `THEIRS_REFUSED` in fewer words)
         let loopback = self.rows.iter().find(|r| r.part == Part::Loopback).map(|r| match self.by {
-            By::Landlock { net: RunNet::Served | RunNet::Copied, .. } if short => THEIRS_SHORT.to_string(),
+            By::Landlock { net: RunNet::Served, .. } if short => THEIRS_SHORT.to_string(),
             _ => r.how.clone(),
         });
         v.extend(loopback.map(|l| ("loopback", l)));
@@ -519,7 +505,6 @@ impl Guarantees {
             (_, false) => "closed",
             (Way::Tproxy, true) => "TPROXY",
             (Way::Proxy, true) => "tarae's proxy",
-            (Way::Copies, true) => "tarae's proxy, by copies",
         };
         let network = match (self.asks, self.listed, self.way) {
             (_, _, Way::NoSocket) | (false, false, _) => network.to_string(),
@@ -552,7 +537,7 @@ impl Guarantees {
 
     /// `tarae state`'s `sandbox` object of a session (9d, pinned by `ui_state.json`): what enforces it — the tier
     /// and Landlock's ABI (null on macOS: `by` `seatbelt`), the keeper's namespaces (`netns`: a network namespace
-    /// of the session's own — false where it's served by copies, N1) — how the network goes, each part kept apart
+    /// of the session's own) — how the network goes, each part kept apart
     /// or shared (`Part::key`, `how` where there's more to say), `why` what's missing, `hint` how it would get namespaces
     /// (9f: why, and the profile's step — whole; null where none), and the state `line`.
     pub fn json(&self) -> serde_json::Value {
@@ -631,7 +616,7 @@ impl Guarantees {
 impl Guarantees {
     /// The run's `TARAE_SANDBOX_STATUS` (9c, D7; decision 12): `<tier>:<Landlock ABI>` — `own:8`, colima's
     /// `host:4`; a partial ABI (below 3) is just its number, `offline:2` — and Seatbelt's `seatbelt`. The tier's name
-    /// only: served by copies is still its tier (N1), what it lacks is the state's to say.
+    /// only: what it lacks is the state's to say.
     pub fn status(&self) -> String {
         match self.by {
             By::Landlock { tier, abi, .. } => format!("{}:{abi}", tier.said()),
@@ -749,7 +734,6 @@ mod tests {
             Guarantees::landlock(Found {
                 ns: Ns::NONE,
                 served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
-                copies: false,
                 abi: 4,
                 ptys: None,
                 tproxy: Err("no network namespace of its own".into()),

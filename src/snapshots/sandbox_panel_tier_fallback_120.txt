@@ -4,8 +4,8 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                                    what the sandbox blocked  0/0
 03    ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-04     tier host  loopback this machine's, other sessions' refused  shared processes, signals, System V IPC, /dev/shm
-05     AppArmor blocks user namespaces · copies: pidfd_getfd refused
+04     tier offline  loopback no socket  network no socket  shared processes, signals, System V IPC, /dev/shm, terminals
+05     a seccomp filter blocks namespaces · not served: pidfd_getfd refused · --cap-add SYS_PTRACE serves the calls
 06
 07     the sandbox blocked nothing in that run
 08
@@ -66,8 +66,8 @@
 01
 02    A                                                                                    ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD ffff  DDDDDDDD ffff ffffffffff fffff fffffffff fffffff  DDDDDD ffffffffff ffffffff ffffff f ffff ffffffff
-05     ffffffff ffffff ffff ffffffffff f fffffff fffffffffff fffffff
+04     DDDD fffffff  DDDDDDDD ff ffffff  DDDDDDD ff ffffff  DDDDDD ffffffffff ffffffff ffffff f ffff fffffffff fffffffff
+05     f fffffff ffffff ffffff ffffffffff f fff fffffff fffffffffff fffffff f fffffffff ffffffffff ffffff fff fffff
 06
 07     fff fffffff fffffff fffffff ff ffff fff
 08

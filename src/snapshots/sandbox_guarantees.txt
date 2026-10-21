@@ -110,62 +110,6 @@ why: no TPROXY: this kernel has no nft_tproxy
 brief: no TPROXY
 hint: —
 report: —
-══ own by copies: the session's user namespace, no network one · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared files
-sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — files (any can be emptied: no truncating rule below ABI 3).
-why: served by tarae's copies of its sockets: pidfd_getfd refused; Landlock ABI 2: partial, every run asks
-brief: copies: pidfd_getfd refused · Landlock ABI 2: partial
-hint: —
-report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too.
-══ own by copies: the session's user namespace, no network one · ABI 3
-line: tier own · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does).
-══ own by copies: the session's user namespace, no network one · ABI 4
-line: tier own · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does).
-══ own by copies: the session's user namespace, no network one · ABI 5
-line: tier own · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does).
-══ own by copies: the session's user namespace, no network one · ABI 6
-line: tier own · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: —
-══ own by copies: the session's user namespace, no network one · ABI 7
-line: tier own · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: —
-══ own by copies: the session's user namespace, no network one · ABI 9
-line: tier own · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: —
-══ own by copies: the session's user namespace, no network one · ABI 11
-line: tier own · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared nothing
-sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — nothing.
-why: served by tarae's copies of its sockets: pidfd_getfd refused
-brief: copies: pidfd_getfd refused
-hint: —
-report: —
 ══ own, the project in /dev/shm · ABI 2
 line: tier own partial · Landlock ABI 2 · loopback its own · network TPROXY · shared files, /dev/shm
 sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3), /dev/shm.
@@ -446,62 +390,6 @@ why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc)
 brief: /proc is masked, no PID namespace · no TPROXY
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 2
-line: tier own partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared files, processes, signals
-sentence: Own namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused; Landlock ABI 2: partial, every run asks
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused · Landlock ABI 2: partial
-hint: —
-report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 3
-line: tier own · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals
-sentence: Own namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 4
-line: tier own · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals
-sentence: Own namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 5
-line: tier own · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals
-sentence: Own namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 6
-line: tier own · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes
-sentence: Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 7
-line: tier own · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes
-sentence: Own namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 9
-line: tier own · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes
-sentence: Own namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
-══ own without a PID namespace, by copies · ABI 11
-line: tier own · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes
-sentence: Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority).
-why: no PID namespace: /proc can't be mounted fresh here (Docker's masked /proc); served by tarae's copies of its sockets: pidfd_getfd refused
-brief: /proc is masked, no PID namespace · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them.
 ══ offline, the session's namespaces · ABI 2
 line: tier offline partial · Landlock ABI 2 · loopback its own · network no socket · shared files
 sentence: Offline, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — processes, signals (out of sight — within its session, reached below ABI 6), System V IPC, /dev/shm, terminals, loopback (its own); shared with them — files (any can be emptied: no truncating rule below ABI 3).
@@ -668,62 +556,6 @@ line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' s
 sentence: Host namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
 why: no user namespaces: kernel.unprivileged_userns_clone is 0; no TPROXY: no network namespace of its own
 brief: user namespaces are turned off · no TPROXY
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 2
-line: tier host partial · Landlock ABI 2 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared files, processes, signals, System V IPC, /dev/shm
-sentence: Host namespaces, partial (Landlock ABI 2): kept apart from other tarae sessions' commands — terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — files (any can be emptied: no truncating rule below ABI 3), processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused; Landlock ABI 2: partial, every run asks
-brief: user namespaces are turned off · copies: pidfd_getfd refused · Landlock ABI 2: partial
-hint: —
-report: This kernel's Landlock (ABI 2) can't keep a command's signals to its own processes (6 does). This kernel's Landlock (ABI 2) can't control truncating files: a command could empty any file of the user's — another session's too. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 3
-line: tier host · Landlock ABI 3 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 4
-line: tier host · Landlock ABI 4 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 5
-line: tier host · Landlock ABI 5 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, signals, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 5): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: This kernel's Landlock (ABI 5) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 6
-line: tier host · Landlock ABI 6 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 7
-line: tier host · Landlock ABI 7 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 7): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 9
-line: tier host · Landlock ABI 9 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 9): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
-hint: —
-report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
-══ host by copies · ABI 11
-line: tier host · Landlock ABI 11 · loopback this machine's, other sessions' sockets refused · network tarae's proxy, by copies · shared processes, System V IPC, /dev/shm
-sentence: Host namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), System V IPC, /dev/shm.
-why: no user namespaces: kernel.unprivileged_userns_clone is 0; served by tarae's copies of its sockets: pidfd_getfd refused
-brief: user namespaces are turned off · copies: pidfd_getfd refused
 hint: —
 report: Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time.
 ══ host, Ubuntu's restriction, no profile · ABI 2

@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 // (what a keeper's namespaces are, its tier and how a run's sockets go: pure, `guarantees.rs`'s — built everywhere)
-pub use super::guarantees::{NO_NETNS, Ns, RunNet, Tier};
+pub use super::guarantees::{Ns, RunNet, Tier};
 
 impl Ns {
     /// As `clone3`'s flags.
@@ -32,17 +32,15 @@ impl Ns {
         f
     }
 
-    /// In the log's words: `user net ipc pid mnt`, or `none` — and, in the session's namespaces without a network
-    /// one, what that leaves (`NO_NETNS`).
+    /// In the log's words: `user net ipc pid mnt`, or `none`.
     pub fn said(self) -> String {
         if !self.user {
             return "none".into();
         }
         let net = if self.net { " net" } else { "" };
         let pid = if self.pid { " pid" } else { "" };
-        let own = if self.net { String::new() } else { format!("; {NO_NETNS}") };
         let shm = if self.shm { "" } else { "; /dev/shm shared: the project or a place it writes is in it" };
-        format!("user{net} ipc{pid} mnt{own}{shm}")
+        format!("user{net} ipc{pid} mnt{shm}")
     }
 
     /// What process `pid` is in apart from tarae's own namespaces — each of its `/proc/<pid>/ns/` links against
@@ -60,10 +58,11 @@ impl Ns {
         Ns::of_apart(apart, shm)
     }
 
-    /// `of_pid` from which of `NS_LINKS` are apart from tarae's: the session's user namespace comes with its ipc and
-    /// mount ones (`clone_flags`), and a network or PID one only with it — anything else is no keeper's.
+    /// `of_pid` from which of `NS_LINKS` are apart from tarae's: the session's user namespace comes with its ipc,
+    /// mount and network ones (`clone_flags`; the probe always asks the network one), and a PID one only with it —
+    /// anything else is no keeper's.
     fn of_apart([user, ipc, mnt, net, pid]: [bool; 5], shm: bool) -> io::Result<Ns> {
-        if user != ipc || user != mnt || (!user && (net || pid)) {
+        if user != ipc || user != mnt || user != net || (!user && pid) {
             return Err(io::Error::other(format!(
                 "in namespaces no keeper is born with: apart from tarae's in {}",
                 apart_in([user, ipc, mnt, net, pid])
@@ -87,11 +86,6 @@ fn apart_in(apart: [bool; 5]) -> String {
 
 /// The links of `/proc/<pid>/ns/` an `Ns` stands for (`Ns::of_pid`), in `of_apart`'s order.
 const NS_LINKS: [&str; 5] = ["user", "ipc", "mnt", "net", "pid"];
-
-/// Why the probe asks no network namespace where tarae serves by copies (`Probed.short`) — the one place the log's
-/// line says it.
-const BY_COPIES: &str = "served by copies: every socket a run has is tarae's, so a network namespace of the \
-                         session's would hold none of them";
 
 /// What a keeper's birth failed at, before its exec — on its birth pipe as (code, errno), as a run's failure
 /// pipe has it.
@@ -460,7 +454,7 @@ pub struct Probed {
     pub ns: Ns,
     /// Why not all of them (no `pid`: D12's reason; none: why not) — None: all.
     pub short: Option<String>,
-    /// The same in a few words (`brief`; the sandbox panel's, 9e) — without served by copies, which the guarantees
+    /// The same in a few words (`brief`; the sandbox panel's, 9e) — without why it isn't served, which the guarantees
     /// say themselves.
     pub brief: Option<String>,
     /// Whether tarae serves its runs' calls here (`supervisor::unavailable`).
@@ -531,15 +525,9 @@ pub fn get() -> &'static Probed {
             Some(hint) => format!("{said} — {}", hint.said),
             None => said,
         };
-        // (with the session's namespaces `short` has said served by copies already: only why, then)
-        let why_copies =
-            "pidfd_getfd refused: Docker's default profile; --cap-add SYS_PTRACE gives the full way";
-        let said = match (p.served.is_ok() && super::supervisor::copies(), p.ns.user) {
-            (true, false) => {
-                format!("{said} — its runs served by tarae's own copies of their sockets ({why_copies})")
-            }
-            (true, true) => format!("{said} ({why_copies})"),
-            (false, _) => said,
+        let said = match &p.served {
+            Ok(()) => said,
+            Err(why) => format!("{said} — not served: {why}"),
         };
         crate::log::line("sandbox", "info", &said);
         // (Q5: the network's way and why, beside the tier)
@@ -610,18 +598,12 @@ fn probe() -> Probed {
         None => Ok(()),
         Some(why) => Err(why),
     };
-    probe_with(served, super::supervisor::copies(), tried)
+    probe_with(served, tried)
 }
 
-/// `probe` where serving is `served`, by `copies` or not, and a keeper's birth and run is `tried` (tests stand in).
-fn probe_with(
-    served: Result<(), String>,
-    copies: bool,
-    mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>,
-) -> Probed {
-    // (6f′: where tarae serves by its own copies, every socket is tarae's — a session netns would hold none of them)
-    let net = !copies;
-    let all = Ns::session(net, true);
+/// `probe` where serving is `served` and a keeper's birth and run is `tried` (tests stand in).
+fn probe_with(served: Result<(), String>, mut tried: impl FnMut(Ns, bool) -> Result<(), Failed>) -> Probed {
+    let all = Ns::session(true, true);
     let none = || Err("no network namespace".into());
     // (no namespaces: why, and the hint where Ubuntu's restriction is why — for the binary running)
     let without = |e: Failed| {
@@ -639,18 +621,12 @@ fn probe_with(
         (Err(Failed::Birth(e)), _) if e.step == BirthStep::Proc => {
             let seen = Seen::now(e);
             let (no_pid, few) = (why(&seen), brief(&seen));
-            match with_network(Ns::session(net, false), &mut tried) {
-                (Ok(()), network) => (Ns::session(net, false), Some(no_pid), Some(few), network, None),
+            match with_network(Ns::session(true, false), &mut tried) {
+                (Ok(()), network) => (Ns::session(true, false), Some(no_pid), Some(few), network, None),
                 (Err(e), _) => without(e),
             }
         }
         (Err(e), _) => without(e),
-    };
-    // (N1: served by copies the session's namespaces come without a network one — not all of them, so said why)
-    let short = match (copies && ns.user, short) {
-        (false, short) => short,
-        (true, None) => Some(BY_COPIES.to_string()),
-        (true, Some(why)) => Some(format!("{why}; {BY_COPIES}")),
     };
     let cgroups = match &redirect {
         Ok(()) => super::cgroup::conditions(&super::cgroup::facts()),
@@ -733,7 +709,7 @@ fn true_through(ns: Ns, redirect: bool) -> Result<(), Failed> {
         // (no Landlock here: the birth is what's probed — the sandbox itself is missing anyway)
         Err(_) => Ok(()),
         Ok(abi) => (|| {
-            let net = ns.run_net(false, false);
+            let net = ns.run_net(false);
             let mut rules = match net {
                 RunNet::Own => crate::landlock::Ruleset::new_own_network(abi)?,
                 _ => crate::landlock::Ruleset::new(abi)?,
@@ -795,7 +771,7 @@ mod tests {
             llm(true, vec![], true),
             llm(false, vec![8080], true),
         ];
-        let nses = [Ns::session(true, true), Ns::session(true, false), Ns::session(false, true), Ns::NONE];
+        let nses = [Ns::session(true, true), Ns::session(true, false), Ns::NONE];
         let ok = |yes: bool| if yes { Ok(()) } else { Err("not here".to_string()) };
         let (mut taken, mut cases) = (0, 0);
         for ns in nses {
@@ -862,33 +838,23 @@ mod tests {
     /// without `user` makes none (`clone_flags`).
     #[test]
     fn a_run_owns_its_network_only_in_a_namespace_made_for_it() {
-        assert_eq!(Ns::session(true, true).run_net(false, false), RunNet::Own);
-        assert_eq!(Ns::session(true, false).run_net(true, false), RunNet::Routed);
-        assert_eq!(Ns::session(false, true).run_net(false, false), RunNet::Plain, "no network namespace");
-        assert_eq!(Ns::session(false, true).run_net(true, false), RunNet::Served);
-        assert_eq!(
-            Ns { net: true, ..Ns::NONE }.run_net(false, false),
-            RunNet::Plain,
-            "net without user: none made"
-        );
-        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(true, false), RunNet::Served);
-        assert_eq!(Ns::NONE.run_net(true, false), RunNet::Served);
-        // (6f′: by copies wherever it's served — every socket tarae's, a netns or not; not served, as before)
-        assert_eq!(Ns::NONE.run_net(true, true), RunNet::Copied);
-        assert_eq!(Ns::session(true, true).run_net(true, true), RunNet::Copied);
-        assert_eq!(Ns::NONE.run_net(false, true), RunNet::Plain);
+        assert_eq!(Ns::session(true, true).run_net(false), RunNet::Own);
+        assert_eq!(Ns::session(true, false).run_net(true), RunNet::Routed);
+        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(false), RunNet::Plain, "net without user: none made");
+        assert_eq!(Ns { net: true, ..Ns::NONE }.run_net(true), RunNet::Served);
+        assert_eq!(Ns::NONE.run_net(true), RunNet::Served);
+        assert_eq!(Ns::NONE.run_net(false), RunNet::Plain);
     }
 
-    /// Served by copies (6f′), the probe asks for no network namespace at all — every socket a run has is tarae's,
-    /// a session netns would hold none of them — and the session gets none (nor the TPROXY network); served the
-    /// usual way, its first keeper is asked with one. (Keepers stood in for: what each was asked.)
+    /// The probe asks its first keeper with the session's netns and its network; the network's step refused, it
+    /// asks again without the network — never without the netns — and the session keeps it. Not served, the same
+    /// namespaces: tier offline. (Keepers stood in for: what each was asked.)
     #[test]
-    fn served_by_copies_the_probe_asks_no_network_namespace() {
-        let asked = |copies: bool| {
+    fn the_probe_always_asks_the_sessions_network_namespace() {
+        let asked = |served: Result<(), String>| {
             let mut asked = Vec::new();
-            let p = probe_with(Ok(()), copies, |ns: Ns, redirect| {
+            let p = probe_with(served, |ns: Ns, redirect| {
                 asked.push((ns.netns(), redirect));
-                // (the network's step refused: what the session's network would be isn't this test's)
                 match redirect {
                     true => Err(Failed::Birth(BirthError { step: BirthStep::Netns, errno: libc::EPERM })),
                     false => Ok(()),
@@ -896,17 +862,17 @@ mod tests {
             });
             (asked, p)
         };
-        let (by_copies, p) = asked(true);
-        assert_eq!(by_copies, [(false, false)], "one keeper, no netns, no network tried");
-        assert!(!p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
-        // (N1: the tier as `Tier::of` has it, and what's missing said — why, and what it leaves)
+        let (taken, p) = asked(Ok(()));
+        assert_eq!(
+            taken,
+            [(true, true), (true, false)],
+            "a netns and its network first, then the netns alone"
+        );
+        assert!(p.ns.netns() && p.redirect.is_err(), "{:?}", p.ns);
         assert_eq!(p.tier(), Tier::Own);
-        assert_eq!(p.short.as_deref(), Some(BY_COPIES), "not all of them, and why");
-        assert!(p.ns.said().ends_with(NO_NETNS), "{}", p.ns.said());
-        let (taken, p) = asked(false);
-        assert_eq!(taken[0], (true, true), "the usual way: a netns and its network first");
-        assert!(p.ns.netns());
-        assert!(!p.ns.said().contains(NO_NETNS), "{}", p.ns.said());
+        let (taken, p) = asked(Err(super::super::guarantees::PIDFD_REFUSED.into()));
+        assert_eq!(taken, [(true, true), (true, false)]);
+        assert_eq!(p.tier(), Tier::Offline);
     }
 
     /// A keeper is what its `/proc/<pid>/ns/` links say (`Ns::of_pid`), not what its birth asked: the session's user
@@ -917,7 +883,6 @@ mod tests {
     fn a_keeper_is_what_its_links_say() {
         let of = |apart: [bool; 5], shm: bool| Ns::of_apart(apart, shm).ok();
         assert_eq!(of([true; 5], true), Some(Ns::session(true, true)));
-        assert_eq!(of([true, true, true, false, true], true), Some(Ns::session(false, true)), "by copies");
         assert_eq!(of([true, true, true, true, false], true), Some(Ns::session(true, false)), "A");
         assert_eq!(
             of([true; 5], false),
@@ -926,6 +891,7 @@ mod tests {
         );
         assert_eq!(of([false; 5], true), Some(Ns::NONE), "none: no /dev/shm of its own either");
         for apart in [
+            [true, true, true, false, true],
             [true, false, true, true, true],
             [true, true, false, true, true],
             [false, true, true, false, false],
@@ -937,7 +903,7 @@ mod tests {
     }
 
     /// 9e: the panel's few words for each cause `why` tells apart — the cause named (AppArmor, seccomp, WSL, a masked
-    /// /proc), short enough for a 60-column panel's row with the next reason after it (`… · copies: …`), never its whole
+    /// /proc), short enough for a 60-column panel's row with the next reason after it (`… · no TPROXY`), never its whole
     /// reason.
     #[test]
     fn the_panel_says_why_in_a_few_words() {
@@ -979,7 +945,7 @@ mod tests {
     /// other's place); a run that failed or a keeper that didn't answer in their own few words. (Keepers stood in for.)
     #[test]
     fn the_probe_says_in_a_few_words_what_it_says_whole() {
-        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), false, |ns, _| fail(ns));
+        let probe = |fail: &dyn Fn(Ns) -> Result<(), Failed>| probe_with(Ok(()), |ns, _| fail(ns));
         let p = probe(&|_| Ok(()));
         assert_eq!((p.short, p.brief), (None, None), "every namespace: nothing to say");
         let proc = BirthError { step: BirthStep::Proc, errno: libc::EPERM };
@@ -1123,7 +1089,6 @@ mod tests {
             Guarantees::landlock(Found {
                 ns: Ns::NONE,
                 served: if served { Ok(()) } else { Err("Yama's ptrace_scope is 3".into()) },
-                copies: false,
                 abi: 4,
                 ptys: Some(4),
                 tproxy: Err("no network namespace of its own".into()),
@@ -1338,7 +1303,7 @@ mod tests {
             0
         );
         assert_eq!(Ns::session(true, true).said(), "user net ipc pid mnt");
-        assert_eq!(Ns::session(false, true).said(), format!("user ipc pid mnt; {NO_NETNS}"));
+        assert_eq!(Ns::session(true, false).said(), "user net ipc mnt");
         assert_eq!(
             [
                 (Ns::session(true, true), true),

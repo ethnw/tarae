@@ -72,8 +72,8 @@ from each other. Daemons such as Gradle's stay warm between runs.
 6. **The transparent proxy** — done (6c–6f′ on main). In tiers A+ and A, sockets tarae plants in the session's
    network take every connection and UDP datagram (TPROXY), marked per run and program. DNS is answered in the
    session with synthetic addresses, and no proxy variable is set. Raw TCP to a name and a name's SRV/TXT records
-   each ask on a card of their own. The supervisor is slimmed. Docker's default profile is served by copies in
-   tier C. Elsewhere step 5's per-run proxy stays.
+   each ask on a card of their own. The supervisor is slimmed. Docker's default profile (no `CAP_SYS_PTRACE`) is
+   offline. Elsewhere step 5's per-run proxy stays.
 7. **Sessions kept apart** — done. Tests that one session can't reach another's processes, sockets or files, on
    Linux in every tier and on macOS, and the fixes they found: a run's folder no other run can write, on macOS no
    signal or terminal outside a run's own. The keepers' memory with many sessions, measured; tarae's log names each

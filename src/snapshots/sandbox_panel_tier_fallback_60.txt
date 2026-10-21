@@ -4,12 +4,12 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                        what the sandbox blocked  0/0
 03    ──────────────────────────────────────────────────────
-04     tier host  shared processes, signals, System V IPC +1
-05     AppArmor blocks user namespaces
-06     copies: pidfd_getfd refused
-07
-08     the sandbox blocked nothing in that run
-09
+04     tier offline  shared processes, signals +3
+05     a seccomp filter blocks namespaces
+06     not served: pidfd_getfd refused
+07     --cap-add SYS_PTRACE serves the calls
+08
+09     the sandbox blocked nothing in that run
 10
 11
 12
@@ -54,12 +54,12 @@
 01
 02    A                        ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDD ffff  DDDDDD ffffffffff ffffffff ffffff f fff ff
-05     ffffffff ffffff ffff ffffffffff
-06     fffffff fffffffffff fffffff
-07
-08     fff fffffff fffffff fffffff ff ffff fff
-09
+04     DDDD fffffff  DDDDDD ffffffffff fffffff ff
+05     f fffffff ffffff ffffff ffffffffff
+06     fff fffffff fffffffffff fffffff
+07     fffffffff ffffffffff ffffff fff fffff
+08
+09     fff fffffff fffffff fffffff ff ffff fff
 10
 11
 12
