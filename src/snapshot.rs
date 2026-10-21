@@ -114,11 +114,20 @@ pub fn snap(root: &Path) -> Result<Tree, String> {
 }
 
 /// `to` as a copy of the checkout's own index (none yet: nothing to copy) — only what changed since it is
-/// hashed by the first snapshot.
+/// hashed by the first snapshot. Its time kept, read before the copy: git trusts an entry's stat only when the
+/// entry is older than the index it's in — one written in the index's own second it reads again ("racy") — and a
+/// copy stamped as it was made (std's copy on Linux; macOS's clones the file, its times kept) trusted them all: a
+/// change of the same size in that second, on a file system whose times move by the second, wasn't in the tree
+/// (flaky80). A copy older than its content: more read again, never fewer.
 fn seed(git_dir: &Path, to: &Path) -> Result<(), String> {
-    match std::fs::copy(git_dir.join("index"), to) {
+    let from = git_dir.join("index");
+    let then = std::fs::metadata(&from).and_then(|m| m.modified());
+    match std::fs::copy(&from, to) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("git's index: {e}")),
-        _ => Ok(()),
+        Err(_) => Ok(()),
+        Ok(_) => then
+            .and_then(|t| std::fs::File::options().write(true).open(to)?.set_modified(t))
+            .map_err(|e| format!("git's index, its time: {e}")),
     }
 }
 

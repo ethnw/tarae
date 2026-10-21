@@ -257,20 +257,42 @@ mod tests {
         let capped = run.join("capped");
         std::fs::create_dir(&capped).unwrap();
         start_capped(9_000_003, &capped, 2);
-        let ask = || crate::pty::asked(&socket(&capped), 24, 80);
-        assert!((0..5).all(|_| ask().is_ok()), "five in turn, past a cap of two");
+        let ask = || crate::pty::asked_with_node(&socket(&capped), 24, 80);
+        // (a pair is closed once its last copy is, anywhere: here that can be a moment after the drop — a fork of
+        // another test's holds every descriptor until its exec, and inside a sandboxed run the broker that handed
+        // it in closes its own just after; under load the ask came first, 3 runs in 50: flaky80. So the place is
+        // asked for once the pair's node is gone, as the broker reads it)
+        let closed = |node: Option<crate::pty::Node>| {
+            let node = node.expect("the broker names its pair");
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while still_open(&node) {
+                assert!(
+                    std::time::Instant::now() < end,
+                    "{} still open 10 s after its last close",
+                    node.0.display()
+                );
+                crate::event::sleep(Duration::from_millis(5));
+            }
+        };
+        let in_turn = |(master, slave, node)| {
+            drop((master, slave));
+            closed(node);
+        };
+        assert!((0..5).all(|_| ask().map(in_turn).is_ok()), "five in turn, past a cap of two");
         let mut held: Vec<_> = (0..2).map(|_| ask().unwrap()).collect();
         assert!(ask().is_err(), "a third while two are open");
-        let (master, slave) = held.pop().unwrap();
+        let (master, slave, node) = held.pop().unwrap();
         drop(master);
         assert!(ask().is_err(), "its slave still open");
         drop(slave);
+        closed(node);
         assert!(ask().is_ok(), "both ends closed: its place free");
         held.push(ask().unwrap());
-        let (master, slave) = held.pop().unwrap();
+        let (master, slave, node) = held.pop().unwrap();
         drop(slave);
         assert!(ask().is_err(), "its master still open");
         drop(master);
+        closed(node);
         assert!(ask().is_ok(), "both ends closed: its place free again");
         assert_eq!(end(9_000_003), (10, 3), "ten made, three refused");
     }

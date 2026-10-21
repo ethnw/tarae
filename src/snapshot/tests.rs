@@ -45,6 +45,26 @@ fn file(c: &[Change], dir: &Path, rel: &str) -> Change {
     c.iter().find(|c| c.path == dir.join(rel)).cloned().unwrap_or_else(|| panic!("{rel} in {c:#?}"))
 }
 
+/// The first snapshot reads again what git would in the checkout's own index: a file rewritten in the index's own
+/// second, its size and time as before (a file system whose times move by the second — Linux CI's; `trustctime`
+/// off stands in for its ctime in that second) is racy there, its stat not trusted — and in the copy the first
+/// snapshot starts from (flaky80: a copy stamped as it was made — std's on Linux; macOS's keeps the times —
+/// trusted it, and the review's diff left a changed `.env` out, 2 Linux runs in 7).
+#[test]
+fn a_change_in_the_indexs_own_second_is_in_the_first_tree() {
+    let dir = repo("racy");
+    git_in(&dir, &["config", "core.trustctime", "false"]);
+    let file = dir.join("src/a.txt");
+    let then = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let stamp = |p: &Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(then).unwrap();
+    stamp(&dir.join(".git/index"));
+    std::fs::write(&file, "one\nTWO\n").unwrap();
+    stamp(&file);
+    let tree = snap(&dir).unwrap();
+    let blob = |rev: &str| git(&dir, &["rev-parse", &format!("{rev}:src/a.txt")], None).unwrap();
+    assert_ne!(blob(&tree.id), blob("HEAD"), "the change is in the tree");
+}
+
 /// auditfix2 F9: `space u` putting back a file that isn't text writes through its folders by descriptor, as
 /// text does (`checkpoint::file`) — `bin/` swapped for a link to outside since the turn (what a sandboxed run
 /// can do): neither making the file again nor removing it reaches the folder the link leads to, and what's

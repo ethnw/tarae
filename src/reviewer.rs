@@ -2120,9 +2120,19 @@ mod tests {
             "usage": {"input_tokens": 10, "output_tokens": 5}})
     }
 
+    /// A fake's log: the file, or a board's folder of them (`fake_board`: one a process) one after another.
+    fn logged(log: &Path) -> String {
+        let Ok(files) = std::fs::read_dir(log) else {
+            return std::fs::read_to_string(log).unwrap_or_default();
+        };
+        let mut files: Vec<PathBuf> = files.map(|f| f.unwrap().path()).collect();
+        files.sort();
+        files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect()
+    }
+
     /// What tarae answered request `id` (from the fake's log).
     fn answer(log: &Path, id: &str) -> Value {
-        let sent = std::fs::read_to_string(log).unwrap_or_default();
+        let sent = logged(log);
         let line =
             sent.lines().find(|l| l.contains(&format!("\"request_id\":\"{id}\""))).unwrap_or_else(|| {
                 panic!("no answer to {id}: {sent}");
@@ -2572,7 +2582,7 @@ mod tests {
         }
         assert!(args.contains("--no-session-persistence"), "{args}");
         assert!(args.contains("--setting-sources  --"), "no settings loaded: {args}");
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let sent = logged(&log);
         assert!(!sent.contains("AUTHOR-ONLY-MARKER") && !sent.contains("author-c1"), "{sent}");
         assert!(sent.contains("+two") && sent.contains("+brand new"), "the diff went: {sent}");
         let c = ed.session.chat.as_ref().unwrap();
@@ -2915,8 +2925,11 @@ mod tests {
 
     // ── The board ──────────────────────────────────────────────────────────────────────
 
-    /// A fake claude for every member of a board in `dir`: each process's arguments appended to `args.log`,
-    /// every line it's sent to `stdin.log`; the message it's sent picks its steps — the first role whose
+    /// A fake claude for every member of a board in `dir`: each process's arguments in `args.log/<its pid>`,
+    /// every line it's sent in `stdin.log/<its pid>` (read whole by `logged`; folders made by the first one —
+    /// none there: no member started). A file each: sh's `printf` writes a long line in parts, and members
+    /// writing one file at once under load put one's line in the middle of another's (flaky80). The message it's
+    /// sent picks its steps — the first role whose
     /// markers (`(angle: tests)`, `(role: skeptic)`, a claim's words) are all in it — printed as `fake`'s are,
     /// each segment once the request before it is answered (request ids unique across the roles). Steps
     /// empty: it prints nothing and reads on until it's stopped.
@@ -2944,10 +2957,10 @@ mod tests {
         ed.config.llm.args = vec![
             "-c".into(),
             format!(
-                "printf '%s\\n' \"$0 $*\" >> '{}'; while read -r line; do printf '%s\\n' \"$line\" >> '{}'; \
-                 case \"$line\" in {cases}esac; done",
-                args.display(),
-                log.display()
+                "mkdir -p '{args}' '{log}'; printf '%s\\n' \"$0 $*\" > '{args}/'$$; \
+                 while read -r line; do printf '%s\\n' \"$line\" >> '{log}/'$$; case \"$line\" in {cases}esac; done",
+                args = args.display(),
+                log = log.display()
             ),
         ];
         (args, log)
@@ -3047,7 +3060,7 @@ mod tests {
             (&["correctness".to_string()][..], crate::board::Verdict::Confirmed, trace)
         );
         // The skeptic's message: the diff first (the same start as every member's), then the claim in its block
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let sent = logged(&log);
         let msg = sent.lines().find(|l| l.contains("(role: skeptic)")).unwrap();
         let (diff, claim) =
             (msg.find("+two").unwrap(), msg.find("1. [correctness] a.txt:2 — Line two").unwrap());
@@ -3653,7 +3666,7 @@ mod tests {
         ed.config.llm.args.extend(["--resume".into(), "author-c1".into()]);
         ed.config.llm.reviewer_billing = Some(Billing::Subscription);
         boarded(&mut ed, &repo);
-        let args = std::fs::read_to_string(&args).unwrap();
+        let args = logged(&args);
         let lines: Vec<&str> = args.lines().collect();
         assert_eq!(lines.len(), 3, "{args}");
         for l in &lines {
@@ -4012,7 +4025,7 @@ mod tests {
         ed.api_key_helper = Some("stand-in-helper".into());
         ed.session.billing = Billing::Api;
         boarded(&mut ed, &repo);
-        let got = std::fs::read_to_string(&args).unwrap();
+        let got = logged(&args);
         assert_eq!(got.lines().count(), 2, "{got}");
         for line in got.lines() {
             let at = line.find("--settings ").unwrap() + "--settings ".len();
@@ -4024,7 +4037,7 @@ mod tests {
                 "{line}"
             );
         }
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let sent = logged(&log);
         let asks: Vec<&str> = sent.lines().filter(|l| l.starts_with(r#"{"message""#)).collect();
         assert_eq!(asks.len(), 2);
         assert!(asks.iter().all(|a| a.contains(r#""ttl":"1h""#)), "{sent}");
@@ -4069,7 +4082,7 @@ mod tests {
         let b = ed.session.reviewer.as_ref().unwrap().board.as_deref().unwrap();
         assert_eq!((b.claims.len(), b.dropped_of(0)), (max, 2));
         assert!(board_notes(&ed).len() <= max, "never pinned");
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let sent = logged(&log);
         assert_eq!(sent.matches("not recorded — past your 5 and 5 more").count(), 2, "{sent}");
         assert!(report(&ed).unwrap().contains("2 more claims past its cap and 5 more unchecked — not kept"));
         assert_eq!(run_of(&ed, 0)["board"]["angles"][0]["dropped"], 2);

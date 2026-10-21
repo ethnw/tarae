@@ -215,8 +215,10 @@ pub struct DiskBatch {
     what: String,
     /// Its actions under way, each by its token (`disk_batch_start`): one ended is that one, never another's.
     open: Vec<u64>,
-    reloaded: usize,
-    deleted: usize,
+    /// Its files reloaded and deleted, each once, as last seen: a file git writes in steps (made empty, then
+    /// written) may come back twice in one action.
+    reloaded: Vec<DocId>,
+    deleted: Vec<DocId>,
     /// All ended: the disk round asked then — its result (or a later one's) says the line.
     after: Option<u64>,
     /// When the first began — one whose end never came (a run cut off) holds its session's toasts no longer than
@@ -298,7 +300,18 @@ impl Editor {
             move |ed: &mut Editor| {
                 // (a backstop round that found nothing is nothing to draw)
                 ed.unchanged = stats.is_empty();
-                ed.on_disk(stats);
+                // (a reload landed while this round looked — an earlier round's, handled first, which may have
+                // read a file half-written: what this one saw is looked at again at once, against what's held
+                // now, and a git action's line waits for that look — else its file's last reload came after the
+                // line, said on its own: flaky80)
+                if ed.on_disk(stats) && ed.disk_poll_gen == generation {
+                    ed.disk_poll(false);
+                    let again = ed.disk_poll_gen;
+                    for b in ed.disk_batch.iter_mut().filter(|b| b.after.is_some_and(|g| g <= generation)) {
+                        b.after = Some(again);
+                    }
+                    return;
+                }
                 ed.disk_batch_said(generation);
                 if ed.disk_poll_gen == generation {
                     ed.disk_poll(true);
@@ -307,7 +320,10 @@ impl Editor {
         });
     }
 
-    fn on_disk(&mut self, stats: Vec<Stat>) {
+    /// A round's stats applied — whether one was left because the document was reloaded or saved since the
+    /// round began, and its file isn't what the document now holds (`disk_poll` looks again).
+    fn on_disk(&mut self, stats: Vec<Stat>) -> bool {
+        let mut stale = false;
         // Buffers that are the file on disk again after a write from outside (Claude's edit landing, a
         // checkout): saved, as far as the language servers go — rust-analyzer checks on a save (held while
         // a burst of writes goes on, `lsp_saved_outside`)
@@ -320,6 +336,7 @@ impl Editor {
             // Saved (or reloaded) since the stat started — the change it saw may be our own write; or a save
             // of ours is being written right now
             if doc.disk != known || doc.saving > 0 {
+                stale |= doc.saving == 0 && now != doc.disk;
                 continue;
             }
             // Whatever it is, the write we were waiting for (if any) has happened
@@ -396,8 +413,9 @@ impl Editor {
         for (id, deleted) in counted {
             let sid = self.doc_session(id);
             if let Some(b) = self.disk_batch.iter_mut().find(|b| b.session == sid) {
-                (b.reloaded, b.deleted) =
-                    (b.reloaded + usize::from(!deleted), b.deleted + usize::from(deleted));
+                b.reloaded.retain(|d| *d != id);
+                b.deleted.retain(|d| *d != id);
+                if deleted { &mut b.deleted } else { &mut b.reloaded }.push(id);
             }
         }
         for (id, msg, warn) in said {
@@ -408,6 +426,7 @@ impl Editor {
         for id in saved {
             self.lsp_saved_outside(id);
         }
+        stale
     }
 
     /// The session document `id` is of (the one in front when none says so).
@@ -431,7 +450,15 @@ impl Editor {
             None => {
                 let (what, began) = (what.to_string(), crate::clock::now());
                 let open = vec![token];
-                let b = DiskBatch { session, what, open, reloaded: 0, deleted: 0, after: None, began };
+                let b = DiskBatch {
+                    session,
+                    what,
+                    open,
+                    reloaded: Vec::new(),
+                    deleted: Vec::new(),
+                    after: None,
+                    began,
+                };
                 self.disk_batch.push(b);
             }
         }
@@ -470,11 +497,11 @@ impl Editor {
         self.disk_batch = kept;
         for b in said {
             let mut parts = Vec::new();
-            if b.reloaded > 0 {
-                parts.push(format!("{} reloaded", crate::nav::count(b.reloaded, "file")));
+            if !b.reloaded.is_empty() {
+                parts.push(format!("{} reloaded", crate::nav::count(b.reloaded.len(), "file")));
             }
-            if b.deleted > 0 {
-                parts.push(format!("{} deleted on disk", b.deleted));
+            if !b.deleted.is_empty() {
+                parts.push(format!("{} deleted on disk", b.deleted.len()));
             }
             if parts.is_empty() {
                 continue;
@@ -1213,16 +1240,47 @@ mod tests {
         assert!(shown.contains(&"c.txt was deleted on disk — :w to write it back".to_string()), "{shown:?}");
         assert!(!shown.iter().any(|t| t.contains("reloaded from disk")), "{shown:?}");
         assert!(ed.messages.iter().any(|m| m.2 == "a.txt reloaded from disk · +1 lines"), "in :messages");
-        // (over: said as ever — a round that woke on the writes above may land first and end a `poll_once`: a
-        // second's round started after this write; seen under the full suite's load)
-        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
-        for _ in 0..3 {
-            poll_once(&mut ed);
-            if texts(&ed).iter().any(|t| t == "a.txt reloaded from disk · -1 lines") {
-                break;
-            }
+        // (over: said as ever — written whole, by a rename: a plain write is two steps, and the watch's round that
+        // woke on the first read the file empty under load — `-2 lines`, then `+1`: flaky80. Not covered here, and
+        // not fixed: outside a git action a plain write caught half-done still reloads the buffer empty and then
+        // whole, a toast each — the overtaken round's look again only holds a batch's line back)
+        std::fs::write(dir.join("a.new"), "one\n").unwrap();
+        std::fs::rename(dir.join("a.new"), dir.join("a.txt")).unwrap();
+        poll_once(&mut ed);
+        let reloads: Vec<String> =
+            texts(&ed).into_iter().filter(|t| t.contains("reloaded from disk")).collect();
+        assert_eq!(reloads, ["a.txt reloaded from disk · -1 lines"], "none of the action's said on its own");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A round whose look an earlier round's reload overtook — the watch's, begun before it and handled after it
+    /// began, which read a file git was writing in steps (made empty, then written) — looks again at once: the
+    /// buffer is the file's last text when the git action's line is said, the file counted once, and no reload of
+    /// it comes after the line on its own (flaky80: under load the line came with the buffer empty).
+    #[test]
+    fn a_look_an_earlier_reload_overtook_is_taken_again() {
+        let dir = crate::scratch::Scratch::new("disk-overtaken").into_path();
+        let mut ed = Editor::new(Config::default());
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        ed.open(&file).unwrap();
+        poll_once(&mut ed);
+        ed.disk_batch_start("rebase", 7);
+        std::fs::write(&file, "").unwrap();
+        // (the watch's round read it empty; its result held while git writes the file whole and ends)
+        let early = ed.events.recv_timeout(Duration::from_secs(5)).expect("the watch's round");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        ed.disk_batch_end(7);
+        ed.handle_event(early);
+        assert_eq!(ed.doc().text.to_string(), "", "the early round's reload");
+        while !ed.disk_batch.is_empty() {
+            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            ed.handle_event(ev);
         }
-        assert!(texts(&ed).iter().any(|t| t == "a.txt reloaded from disk · -1 lines"), "{:?}", texts(&ed));
+        assert_eq!(ed.doc().text.to_string(), "one\ntwo\n", "the line said once the file's last text is in");
+        let shown: Vec<String> = ed.toasts.iter().map(|t| t.text.clone()).collect();
+        assert!(shown.contains(&"rebase: 1 file reloaded".to_string()), "{shown:?}");
+        assert!(!shown.iter().any(|t| t.contains("reloaded from disk")), "{shown:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
