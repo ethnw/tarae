@@ -56,6 +56,8 @@ mod policy;
 pub mod ptys;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
+#[cfg(all(test, target_os = "macos"))]
+mod refused;
 pub mod route;
 pub mod runenv;
 #[cfg(target_os = "linux")]
