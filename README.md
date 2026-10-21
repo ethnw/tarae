@@ -1,14 +1,7 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-meok.png">
-    <img src="docs/screenshots/hero-hanji.png" width="100%" alt="tarae: Rust code with Claude's change, a new line for hours, waiting for y or n under review; the chat docked on the right, with two sessions' tabs over it and Claude's turn: it read lib.rs, ran cargo test in the sandbox (ok), and said both tests pass">
-  </picture>
-</p>
-
 <h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/seal-meok.svg">
-    <img src="docs/brand/seal-hanji.svg" width="60" alt="tarae's seal: a skein's thread unwinding into a cursor">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/mascot-meok.svg">
+    <img src="docs/brand/mascot-hanji.svg" width="160" alt="tarae's mascot: a ball of thread painted in ink, a brush slung across its back, its pink hand holding it; the brush's tip has just drawn the cursor, and tarae's seal is stamped at its lower left">
   </picture>
   <br>tarae
 </h1>
@@ -26,6 +19,13 @@
 </p>
 
 <p align="center"><sub>tarae (타래, "a skein") is written in itself, with Claude · early, v0.1: build from source</sub></p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-meok.png">
+    <img src="docs/screenshots/hero-hanji.png" width="100%" alt="tarae: Rust code with Claude's change, a new line for hours, waiting for y or n under review; the chat docked on the right, with two sessions' tabs over it and Claude's turn: it read lib.rs, ran cargo test in the sandbox (ok), and said both tests pass">
+  </picture>
+</p>
 
 ## Install
 
@@ -61,10 +61,3 @@ macOS or Linux (WSL on Windows), with rustup and a C compiler. Claude features n
 ([MIT](plugin-sdk/LICENSE-MIT), [Apache](plugin-sdk/LICENSE-APACHE)); db's test transcripts hold servers' bytes
 ([NOTICE](plugin-sdk/db/NOTICE)). Helix's query files stay MPL-2.0 ([NOTICE](runtime/queries/NOTICE)).
 Contributions need a signed [CLA](CONTRIBUTING.md#license-and-the-cla).
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/mascot-meok.svg">
-    <img src="docs/brand/mascot-hanji.svg" width="120" alt="tarae's mascot: a ball of thread painted in ink, a brush slung across its back, its pink hand holding it; the brush's tip has just drawn the cursor">
-  </picture>
-</p>
