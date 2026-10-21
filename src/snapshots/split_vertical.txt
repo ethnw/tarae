@@ -3,18 +3,18 @@
 00  tarae  ›  src  ›  demo.rs  ›  ƒ main
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02  ▎ src/demo.rs                                    │ ▎ src/demo.rs
-03   1 use std::collections::HashMap;               ▐│ 14 fn main() {
-04   2                                              ▐│ 15     let text = "the quick brown fox jumps
-05   3 ▎ Counts how often each word appears.        ▐│        over the lazy dog";
-06     ▎                                            ▐│ 16     let counts = word_counts(text);
-07     ▎ Words are split on whitespace; case is     ▐│ 17     println!("{} distinct words",
-08     ▎ kept.                                      ▐│        counts.len()); // 타래
-09   6 pub fn word_counts(text: &str) ->            ▐│ 18 }
-10     HashMap<&str, usize> {                       ▐│
-11   7     let mut counts = HashMap::new();          │                                                ▐
-12   8     for word in text.split_whitespace() {     │                                                ▐
-13   9     │   *counts.entry(word).or_insert(0) +=   │                                                ▐
-14         │   1;                                    │                                                ▐
+03   1 use std::collections::HashMap;               ▎│ 14 fn main() {
+04   2                                              ▎│ 15     let text = "the quick brown fox jumps
+05   3 ▎ Counts how often each word appears.        ▎│        over the lazy dog";
+06     ▎                                            ▎│ 16     let counts = word_counts(text);
+07     ▎ Words are split on whitespace; case is     ▎│ 17     println!("{} distinct words",
+08     ▎ kept.                                      ▎│        counts.len()); // 타래
+09   6 pub fn word_counts(text: &str) ->            ▎│ 18 }
+10     HashMap<&str, usize> {                       ▎│
+11   7     let mut counts = HashMap::new();          │                                                ▎
+12   8     for word in text.split_whitespace() {     │                                                ▎
+13   9     │   *counts.entry(word).or_insert(0) +=   │                                                ▎
+14         │   1;                                    │                                                ▎
 15  ● normal                                                                   rust   utf-8 LF   18:1
 ## bg · surface per cell, blank = ui.background
 00

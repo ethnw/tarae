@@ -6273,6 +6273,88 @@ fn a_group_names_its_members_one_lit() {
     assert!(!row(&s, 0).contains(" · ") && !row(&s, slot).contains(" · "), "{:?}", row(&s, slot));
 }
 
+/// Friction 92: under `lines` the code|chat boundary is one glyph on every row — the chat's line, nothing of a
+/// half block beside it (the scrollbar's thumb, a git or diagnostic mark on it, the cursor's row), wherever the
+/// cursor is.
+#[test]
+fn the_chats_edge_is_one_line_on_every_row() {
+    let (w, h) = (160u16, 45u16);
+    let mut s = Shot::new(w, h);
+    let text: String = (1..=400).map(|i| format!("let line_{i} = {i};\n")).collect();
+    s.file("src/demo.rs", &text);
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l");
+    for line in [1, 2, 20, 200, 400] {
+        s.ed.goto_line(line);
+        let p = cells(&s.frame(), w, h);
+        let sc = &s.ed.screen;
+        let (cx, end) = (sc.chat_x.unwrap(), sc.text_top + sc.body_h);
+        for y in 0..end {
+            let at = |x: usize| p.screen().cell(y as u16, x as u16).unwrap().contents().to_string();
+            assert_eq!(at(cx), "│", "line {line}, row {y}: the chat's line");
+            let beside = at(cx - 1);
+            let half = ["▌", "▐", "▄", "▀"].contains(&beside.as_str());
+            assert!(!half, "line {line}, row {y}: {beside:?} beside it");
+        }
+    }
+}
+
+/// A floating card never leaves the gutter's last cells beside its left edge: one that would start at or inside
+/// the gutter starts at the pane's edge, over the whole gutter, its right edge where it was — a removed row's `-`
+/// (the review's docs picture) or a number's digits never show against it. Under `lines` Claude's card's bottom row
+/// never sits on what's below it: a row of air, with the keys (its frame's line) or without (its answers).
+#[test]
+fn floating_cards_leave_nothing_against_their_edges() {
+    let (base, now) = five_and_thirty_added();
+    let long = "A remark long enough to make its card as wide as the pane lets it be, so its left edge comes near the \
+                gutter and has to decide where it starts.";
+    let mut met = 0;
+    for w in (84..132).step_by(2) {
+        let mut s = review_of(w, 30, &base, &now);
+        let path = s.ed.doc().path.clone().unwrap();
+        crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Author, long);
+        s.ed.goto_line(11);
+        s.keys("gl");
+        s.frame();
+        let Some((x, ..)) = s.ed.screen.note_card.get() else { continue };
+        let focused = s.ed.session.focus;
+        let &(_, pane, gutter, _) = s.ed.screen.panes.iter().find(|p| p.0 == focused).expect("the pane");
+        assert!(
+            x <= pane.x || x > pane.x + gutter,
+            "{w}: the card at {x}, the gutter {}..={}",
+            pane.x,
+            pane.x + gutter
+        );
+        met += usize::from(x == pane.x);
+    }
+    assert!(met > 0, "the case: a card that had to start over the gutter");
+    // Claude's card at the bottom, with the keys and without: a row of air over the status line
+    let mut s = Shot::new(100, 30);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    let what = crate::offer::What::Screen { call: crate::tools::Call::test(1) };
+    s.ed.push_offer(crate::offer::Offer::new(
+        "Claude asks".into(),
+        "As text, once.",
+        "",
+        String::new(),
+        what,
+    ));
+    for keys in ["", "i"] {
+        s.keys(keys);
+        s.frame();
+        let (_, y, _, h) = s.ed.screen.offer_card.expect("the card");
+        let below = s.ed.screen.text_top + s.ed.screen.body_h;
+        assert_eq!(
+            y + h + 1,
+            below,
+            "keys {:?}: its bottom row, a row of air, then the status line",
+            s.ed.card_has_keys()
+        );
+    }
+}
+
 /// D3: two cards never touch — the notification card keeps a row and two cells off another card's edge; with no
 /// such place it folds into the status line rather than land on it. Cards stacked behind the front one keep a row
 /// of air between their rows and its frame.

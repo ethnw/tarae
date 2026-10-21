@@ -6,31 +6,31 @@
 03   2
 04   3 ▎ Counts how often each word appears.
 05     ▎
-06     ▎ Words are split on whitespace; case is kept.
-07   6 pub fn word_counts(text: &str) -> HashMap╭─ Claude commits 3 files ───────────────────────────╮
-08   7     let mut counts = HashMap::new();     │ Parse the lockfile once per build                  │
-09   8     for word in text.split_whitespace() {│ The second read was the slow half of every check.  │
-10   9     │   *counts.entry(word).or_insert(0) │                                                    │
-11  10     }                                    │ On main:                                           │
-12  11     counts                               │   Cargo.toml      +1 −1  protected                 │
-13  12 }                                        │   src/check.rs    +3 −9                            │
-14  13                                          │   src/lock.rs   new +24                            │
-15  14 fn main() {                              │ Protected: a build or a tool runs it later,        │
-16  15     let text = "the quick brown fox jumps│ outside the sandbox.                               │
-17  16     let counts = word_counts(text);      │                                                    │
-18  17     println!("{} distinct words", counts.│ @@ -12,9 +12,3 @@ pub fn check(root: &Path) -> Res │
-19  18 }                                        │ -    let text = std::fs::read_to_string(root.join( │
-20                                              │ -    let lock = parse(&text)?;                     │
-21                                              │ +    let lock = crate::lock::once(root)?;          │
-22                                              │ -        let again = parse(&std::fs::read_to_strin │
-23                                              │ -        verify(p, &again)?;                       │
-24                                              │ … 1 more line — v shows it all                     │
-25                                              │                                                    │
-26                                              │ Staged and left out: README.md                     │
-27                                              │ src/check.rs: part of it was staged — the whole    │
-28                                              │ file goes in.                                      │
-29                                              │ No hooks run; nothing is pushed.                   │
-30                                              ╰─ y Commit · v See the diff · n Don't ──────────────╯
+06     ▎ Words are split on whitespace; case is ╭─ Claude commits 3 files ───────────────────────────╮
+07   6 pub fn word_counts(text: &str) -> HashMap│ Parse the lockfile once per build                  │
+08   7     let mut counts = HashMap::new();     │ The second read was the slow half of every check.  │
+09   8     for word in text.split_whitespace() {│                                                    │
+10   9     │   *counts.entry(word).or_insert(0) │ On main:                                           │
+11  10     }                                    │   Cargo.toml      +1 −1  protected                 │
+12  11     counts                               │   src/check.rs    +3 −9                            │
+13  12 }                                        │   src/lock.rs   new +24                            │
+14  13                                          │ Protected: a build or a tool runs it later,        │
+15  14 fn main() {                              │ outside the sandbox.                               │
+16  15     let text = "the quick brown fox jumps│                                                    │
+17  16     let counts = word_counts(text);      │ @@ -12,9 +12,3 @@ pub fn check(root: &Path) -> Res │
+18  17     println!("{} distinct words", counts.│ -    let text = std::fs::read_to_string(root.join( │
+19  18 }                                        │ -    let lock = parse(&text)?;                     │
+20                                              │ +    let lock = crate::lock::once(root)?;          │
+21                                              │ -        let again = parse(&std::fs::read_to_strin │
+22                                              │ -        verify(p, &again)?;                       │
+23                                              │ … 1 more line — v shows it all                     │
+24                                              │                                                    │
+25                                              │ Staged and left out: README.md                     │
+26                                              │ src/check.rs: part of it was staged — the whole    │
+27                                              │ file goes in.                                      │
+28                                              │ No hooks run; nothing is pushed.                   │
+29                                              ╰─ y Commit · v See the diff · n Don't ──────────────╯
+30
 31  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -72,31 +72,31 @@
 03   f
 04   f f
 05     f
-06     f
-07   f                                          ff TTTTTT TTTTTTT T TTTTT ffffffffffffffffffffffffffff
-08   f                                          f                                                    f
-09   f                                          f ddd dddddd dddd ddd ddd dddd dddd dd ddddd dddddd  f
-10   f                                          f                                                    f
-11  ff                                          f dd ddddd                                           f
-12  ff                                          f   wwwwwwwwww      ww ww  wwwwwwwww                 f
-13  ff                                          f   dddddddddddd    dd dd                            f
-14  ff                                          f   ddddddddddd   ddd ddd                            f
-15  ff                                          f wwwwwwwwww w wwwww ww w wwww wwww ww wwwwww        f
-16  ff                gggg ggggg ggggg ggg gggggf wwwwwww www wwwwwwww                               f
-17  ff                                          f                                                    f
-18  ff              ggg gggggggg gggggg         f dd ddddd ddddd dd ddd dd ddddddddddd dddddd dd ddd f
-19  ff                                          f e    eee eeee e eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee f
-20                                              f e    eee eeee e eeeeeeeeeeeeee                     f
-21                                              f g    ggg gggg g ggggggggggggggggggggggggg          f
-22                                              f e        eee eeeee e eeeeeeeeeeeeeeeeeeeeeeeeeeeee f
-23                                              f e        eeeeeeeee eeeeeeeee                       f
-24                                              f d d dddd dddd d d ddddd dd ddd                     f
-25                                              f                                                    f
-26                                              f dddddd ddd dddd dddd ddddddddd                     f
-27                                              f wwwwwwwwwwwww wwww ww ww www wwwwww w www wwwww    f
-28                                              f wwww wwww www                                      f
-29                                              f dd ddddd dddd ddddddd dd ddddddd                   f
-30                                              ff A        f A ddd ddd dddd f A ddddd fffffffffffffff
+06     f                                        ff TTTTTT TTTTTTT T TTTTT ffffffffffffffffffffffffffff
+07   f                                          f                                                    f
+08   f                                          f ddd dddddd dddd ddd ddd dddd dddd dd ddddd dddddd  f
+09   f                                          f                                                    f
+10   f                                          f dd ddddd                                           f
+11  ff                                          f   wwwwwwwwww      ww ww  wwwwwwwww                 f
+12  ff                                          f   dddddddddddd    dd dd                            f
+13  ff                                          f   ddddddddddd   ddd ddd                            f
+14  ff                                          f wwwwwwwwww w wwwww ww w wwww wwww ww wwwwww        f
+15  ff                                          f wwwwwww www wwwwwwww                               f
+16  ff                gggg ggggg ggggg ggg gggggf                                                    f
+17  ff                                          f dd ddddd ddddd dd ddd dd ddddddddddd dddddd dd ddd f
+18  ff              ggg gggggggg gggggg         f e    eee eeee e eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee f
+19  ff                                          f e    eee eeee e eeeeeeeeeeeeee                     f
+20                                              f g    ggg gggg g ggggggggggggggggggggggggg          f
+21                                              f e        eee eeeee e eeeeeeeeeeeeeeeeeeeeeeeeeeeee f
+22                                              f e        eeeeeeeee eeeeeeeee                       f
+23                                              f d d dddd dddd d d ddddd dd ddd                     f
+24                                              f                                                    f
+25                                              f dddddd ddd dddd dddd ddddddddd                     f
+26                                              f wwwwwwwwwwwww wwww ww ww www wwwwww w www wwwww    f
+27                                              f wwww wwww www                                      f
+28                                              f dd ddddd dddd ddddddd dd ddddddd                   f
+29                                              ff A        f A ddd ddd dddd f A ddddd fffffffffffffff
+30
 31  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

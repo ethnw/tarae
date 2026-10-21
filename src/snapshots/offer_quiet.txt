@@ -11,24 +11,24 @@
 08   7     let mut counts = HashMap::new();
 09   8     for word in text.split_whitespace() {
 10   9     │   *counts.entry(word).or_insert(0) += 1;
-11  10     }
-12  11     counts                           ╭─ Quiet: Claude's command ──────────────────────────────╮
-13  12 }                                    │ No output for 14 min, 0% CPU — Claude's command cargo  │
-14  13                                      │ xtask linux test in the task panel. Claude's turn      │
-15  14 fn main() {                          │ waits on it, and only you can stop it.                 │
-16  15     let text = "the quick brown fox j│                                                        │
-17  16     let counts = word_counts(text);  │ Its processes are connected to                         │
-18  17     println!("{} distinct words", cou│ ~/.colima/default/docker.sock — the work may be going  │
-19  18 }                                    │ on there: next to no CPU here doesn't mean it's stuck. │
-20                                          │                                                        │
-21                                          │ What each of its threads waits in is in its output now │
-22                                          │ (w), kept if you stop it:                              │
-23                                          │     pid 4242 · cargo xtask linux test · 1 thread       │
-24                                          │       cargo — waiting · 0.31 s CPU                     │
-25                                          │     pid 4250 · docker run --rm tarae-linux cargo test  │
-26                                          │         · 9 threads                                    │
-27                                          │       9 × docker — waiting · 0.12 s CPU                │
-28                                          ╰─ y Stop it · w What it waits on · n Keep waiting ──────╯
+11  10     }                                ╭─ Quiet: Claude's command ──────────────────────────────╮
+12  11     counts                           │ No output for 14 min, 0% CPU — Claude's command cargo  │
+13  12 }                                    │ xtask linux test in the task panel. Claude's turn      │
+14  13                                      │ waits on it, and only you can stop it.                 │
+15  14 fn main() {                          │                                                        │
+16  15     let text = "the quick brown fox j│ Its processes are connected to                         │
+17  16     let counts = word_counts(text);  │ ~/.colima/default/docker.sock — the work may be going  │
+18  17     println!("{} distinct words", cou│ on there: next to no CPU here doesn't mean it's stuck. │
+19  18 }                                    │                                                        │
+20                                          │ What each of its threads waits in is in its output now │
+21                                          │ (w), kept if you stop it:                              │
+22                                          │     pid 4242 · cargo xtask linux test · 1 thread       │
+23                                          │       cargo — waiting · 0.31 s CPU                     │
+24                                          │     pid 4250 · docker run --rm tarae-linux cargo test  │
+25                                          │         · 9 threads                                    │
+26                                          │       9 × docker — waiting · 0.12 s CPU                │
+27                                          ╰─ y Stop it · w What it waits on · n Keep waiting ──────╯
+28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -73,8 +73,8 @@
 08   f
 09   f
 10   f
-11  ff
-12  ff                                      ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffff
+11  ff                                      ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffff
+12  ff                                      f                                                        f
 13  ff                                      f                                                        f
 14  ff                                      f                                                        f
 15  ff                                      f                                                        f
@@ -82,15 +82,15 @@
 17  ff                                      f                                                        f
 18  ff              ggg gggggggg gggggg     f                                                        f
 19  ff                                      f                                                        f
-20                                          f                                                        f
-21                                          f dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd f
-22                                          f dddd dddd dd ddd dddd ddd                              f
-23                                          f     ddd dddd d ddddd ddddd ddddd dddd d d dddddd       f
-24                                          f       ddddd d ddddddd d dddd d ddd                     f
-25                                          f     ddd dddd d dddddd ddd dddd ddddddddddd ddddd dddd  f
-26                                          f         d d ddddddd                                    f
-27                                          f       d d dddddd d ddddddd d dddd d ddd                f
-28                                          ff A         f A dddd dd ddddd dd f A dddd ddddddd fffffff
+20                                          f dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd f
+21                                          f dddd dddd dd ddd dddd ddd                              f
+22                                          f     ddd dddd d ddddd ddddd ddddd dddd d d dddddd       f
+23                                          f       ddddd d ddddddd d dddd d ddd                     f
+24                                          f     ddd dddd d dddddd ddd dddd ddddddddddd ddddd dddd  f
+25                                          f         d d ddddddd                                    f
+26                                          f       d d dddddd d ddddddd d dddd d ddd                f
+27                                          ff A         f A dddd dd ddddd dd f A dddd ddddddd fffffff
+28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

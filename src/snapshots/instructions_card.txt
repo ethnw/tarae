@@ -20,15 +20,15 @@
 17  16     let counts = word_counts(text);
 18  17     println!("{} distinct words", counts.len()); // 타래
 19  18 }
-20
-21                                     ╭─ CLAUDE.md: the main checkout's changed ────────────────────╮
-22                                     │ The main checkout's CLAUDE.md changed since this            │
-23                                     │ session's copy, and so did this one. y takes the main       │
-24                                     │ checkout's changes here. 1 of them touches lines this       │
-25                                     │ session changed: it stays as it is here.                    │
-26                                     │                                                             │
-27                                     │ Claude reads it from its next start.                        │
-28                                     ╰─ y Take the main checkout's · v See them · n Keep this one ─╯
+20                                     ╭─ CLAUDE.md: the main checkout's changed ────────────────────╮
+21                                     │ The main checkout's CLAUDE.md changed since this            │
+22                                     │ session's copy, and so did this one. y takes the main       │
+23                                     │ checkout's changes here. 1 of them touches lines this       │
+24                                     │ session changed: it stays as it is here.                    │
+25                                     │                                                             │
+26                                     │ Claude reads it from its next start.                        │
+27                                     ╰─ y Take the main checkout's · v See them · n Keep this one ─╯
+28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -82,15 +82,15 @@
 17  ff
 18  ff              ggg gggggggg gggggg
 19  ff
-20
-21                                     ff TTTTTTTTTT TTT TTTT TTTTTTTTTT TTTTTTT fffffffffffffffffffff
-22                                     f ddd dddd dddddddddd ddddddddd ddddddd ddddd dddd            f
-23                                     f ddddddddd ddddd ddd dd ddd dddd dddd d ddddd ddd dddd       f
-24                                     f dddddddddd ddddddd ddddd d dd dddd ddddddd ddddd dddd       f
-25                                     f ddddddd dddddddd dd ddddd dd dd dd ddddd                    f
-26                                     f                                                             f
-27                                     f dddddd ddddd dd dddd ddd dddd dddddd                        f
-28                                     ff A                          f A ddd dddd f A dddd dddd ddd ff
+20                                     ff TTTTTTTTTT TTT TTTT TTTTTTTTTT TTTTTTT fffffffffffffffffffff
+21                                     f ddd dddd dddddddddd ddddddddd ddddddd ddddd dddd            f
+22                                     f ddddddddd ddddd ddd dd ddd dddd dddd d ddddd ddd dddd       f
+23                                     f dddddddddd ddddddd ddddd d dd dddd ddddddd ddddd dddd       f
+24                                     f ddddddd dddddddd dd ddddd dd dd dd ddddd                    f
+25                                     f                                                             f
+26                                     f dddddd ddddd dd dddd ddd dddd dddddd                        f
+27                                     ff A                          f A ddd dddd f A dddd dddd ddd ff
+28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

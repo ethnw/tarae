@@ -2,16 +2,16 @@
 ## text
 00  tarae  ›  src  ›  demo.rs  ›  ƒ word_counts
 01   3 ▎ Counts how often each word appears.
-02     ▎                                            ▐
-03     ▎ Words are split on whitespace; case is     ▐
-04     ▎ kept.                                      ▐
-05   6 pub fn word_counts(text: &str) ->            ▐
-06     HashMap<&str, usize> {                       ▐
-07   7     let mut counts = HashMap::new();         ▐
-08   8     for word in text.split_whitespace() {    ▐
-09   9     │   *counts.entry(word).or_insert(0) +=  ▐
-10         │   1;                                   ▐
-11  10     }                                        ▐
+02     ▎                                            ▎
+03     ▎ Words are split on whitespace; case is     ▎
+04     ▎ kept.                                      ▎
+05   6 pub fn word_counts(text: &str) ->            ▎
+06     HashMap<&str, usize> {                       ▎
+07   7     let mut counts = HashMap::new();         ▎
+08   8     for word in text.split_whitespace() {    ▎
+09   9     │   *counts.entry(word).or_insert(0) +=  ▎
+10         │   1;                                   ▎
+11  10     }                                        ▎
 12  11     counts
 13  12 }
 14  ● normal                  rust   utf-8 LF   8:8

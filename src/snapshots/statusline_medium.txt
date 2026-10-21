@@ -1,7 +1,7 @@
 # statusline_medium · 56x6 · theme meok · cursor 2:4
 ## text
 00  tarae  ›  src  ›  demo.rs
-01 ▎ 1 use std::collections::HashMap;   ● unresolved…  +1 ▐
+01 ▎ 1 use std::collections::HashMap;   ● unresolved…  +1 ▎
 02   2
 03   3 ▎ Counts how often each word appears.
 04     ▎

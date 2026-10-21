@@ -12,23 +12,23 @@
 09                              │
 10                              │
 11                              │
-12                              │
-13                              │                 ╭─ End tarae's review? ────────────────────────────────────────╮
-14                              │                 │ tarae's review · uncommitted · 0 of 1 viewed                 │
-15                              │                 │                                                              │
-16                              │                 │ 1 file not viewed                                            │
-17                              │                 │                                                              │
-18                              │                 │   src/demo.rs                                                │
-19                              │                 │                                                              │
-20                              │                 │ 1 high-risk change not looked at — it ends once each has had │
-21                              │                 │ a look (h goes to them, ]h the next, space v h on each):     │
-22                              │                 │   src/demo.rs:6                                              │
-23                              │                 │                                                              │
-24   ]g hunk  ]F file           │                 │ No board has read them: space v C has one read them first.   │
-25   space e files  ]u unviewed │                 │                                                              │
-26   space n comment            │                 │ Drafts stay. Opened again, its marks are kept: a file        │
-27   space v m viewed           │                 │ changed since asks only for its lines since.                 │
-28   space v q end              │                 ╰─ h Go to them · n Keep reviewing ────────────────────────────╯
+12                              │                 ╭─ End tarae's review? ────────────────────────────────────────╮
+13                              │                 │ tarae's review · uncommitted · 0 of 1 viewed                 │
+14                              │                 │                                                              │
+15                              │                 │ 1 file not viewed                                            │
+16                              │                 │                                                              │
+17                              │                 │   src/demo.rs                                                │
+18                              │                 │                                                              │
+19                              │                 │ 1 high-risk change not looked at — it ends once each has had │
+20                              │                 │ a look (h goes to them, ]h the next, space v h on each):     │
+21                              │                 │   src/demo.rs:6                                              │
+22                              │                 │                                                              │
+23                              │                 │ No board has read them: space v C has one read them first.   │
+24   ]g hunk  ]F file           │                 │                                                              │
+25   space e files  ]u unviewed │                 │ Drafts stay. Opened again, its marks are kept: a file        │
+26   space n comment            │                 │ changed since asks only for its lines since.                 │
+27   space v m viewed           │                 ╰─ h Go to them · n Keep reviewing ────────────────────────────╯
+28   space v q end              │
 29  ● normal   +1                                                                           rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -74,23 +74,23 @@
 09                              a
 10                              a
 11                              a
-12                              a
-13                              a                 ff TTT TTTTTTT TTTTTTT fffffffffffffffffffffffffffffffffffffffff
-14                              a                 f ddddddd dddddd d ddddddddddd d d dd d dddddd                 f
-15                              a                 f                                                              f
-16                              a                 f d dddd ddd dddddd                                            f
-17                              a                 f                                                              f
-18                              a                 f   ddddddddddd                                                f
-19                              a                 f                                                              f
-20                              a                 f w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www www f
-21                              a                 f w wwww ww wwww ww wwwww ww www wwwww wwwww w w ww wwwwww     f
-22                              a                 f   wwwwwwwwwwwww                                              f
-23                              a                 f                                                              f
-24   BB ffff  BB ffff           a                 f dd ddddd ddd dddd ddddd ddddd d d ddd ddd dddd dddd dddddd   f
-25   BBBBB B fffff  BB ffffffff a                 f                                                              f
-26   BBBBB B fffffff            a                 f dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd        f
-27   BBBBB B B ffffff           a                 f ddddddd ddddd dddd dddd ddd ddd ddddd dddddd                 f
-28   BBBBB B B fff              a                 ff A            f A dddd ddddddddd fffffffffffffffffffffffffffff
+12                              a                 ff TTT TTTTTTT TTTTTTT fffffffffffffffffffffffffffffffffffffffff
+13                              a                 f ddddddd dddddd d ddddddddddd d d dd d dddddd                 f
+14                              a                 f                                                              f
+15                              a                 f d dddd ddd dddddd                                            f
+16                              a                 f                                                              f
+17                              a                 f   ddddddddddd                                                f
+18                              a                 f                                                              f
+19                              a                 f w wwwwwwwww wwwwww www wwwwww ww w ww wwww wwww wwww www www f
+20                              a                 f w wwww ww wwww ww wwwww ww www wwwww wwwww w w ww wwwwww     f
+21                              a                 f   wwwwwwwwwwwww                                              f
+22                              a                 f                                                              f
+23                              a                 f dd ddddd ddd dddd ddddd ddddd d d ddd ddd dddd dddd dddddd   f
+24   BB ffff  BB ffff           a                 f                                                              f
+25   BBBBB B fffff  BB ffffffff a                 f dddddd ddddd dddddd dddddd ddd ddddd ddd ddddd d dddd        f
+26   BBBBB B fffffff            a                 f ddddddd ddddd dddd dddd ddd ddd ddddd dddddd                 f
+27   BBBBB B B ffffff           a                 ff A            f A dddd ddddddddd fffffffffffffffffffffffffffff
+28   BBBBB B B fff              a
 29  a TTTTTT   gg                                                                           dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  P=ui.menu.selected  A=ui.cursor.primary  1=other

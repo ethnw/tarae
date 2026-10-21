@@ -2,15 +2,15 @@
 ## text
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 use std::collections::HashMap;                                                                 ▐
-03   2                                                                                                ▐
-04   3 ▎ Counts how often each word appears.                                                          ▐
-05     ▎                                                                                              ▐
-06     ▎ Words are split on whitespace; case is kept.                                                 ▐
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
-08   7     let mut counts = HashMap::new();                                                           ▐
-09   8     for word in text.split_whitespace() {                                                      ▐
-10   9     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
+02   1 use std::collections::HashMap;                                                                 ▎
+03   2                                                                                                ▎
+04   3 ▎ Counts how often each word appears.                                                          ▎
+05     ▎                                                                                              ▎
+06     ▎ Words are split on whitespace; case is kept.                                                 ▎
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▎
+08   7     let mut counts = HashMap::new();                                                           ▎
+09   8     for word in text.split_whitespace() {                                                      ▎
+10   9     │   *counts.entry(word).or_insert(0) += 1;                                                 ▎
 11  10     }
 12  11     counts
 13  12 }
@@ -19,7 +19,7 @@
 16 ──────────────────────────────────┬─────────────────────────────────────────────────────────────────
 17   TESTS                           │ FAILURE  src/demo.rs:92                 ]x next  [x prev   1/2
 18   ● word_counts_splits       20ms │   - 09 the quick brown fox, row 9
-19 ▎ ▲ word_counts_distinct     20ms │   - 10 the quick brown fox, row 10                             ▐
+19 ▎ ▲ word_counts_distinct     20ms │   - 10 the quick brown fox, row 10                             ▎
 20   ▲ word_counts_empty        20ms │   - 11 the quick brown fox, row 11
 21                                   │   - 12 the quick brown fox, row 12
 22                                   │   - 13 the quick brown fox, row 13

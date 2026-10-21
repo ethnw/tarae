@@ -15,20 +15,20 @@
 12  11     counts
 13  12 }
 14  13
-15  14 fn main() {
-16  15     let text = "the quick brown fox jumps╭─ End fix-login? ───────────────────────────────────╮
-17  16     let counts = word_counts(text);      │ 2 commits not in main:                             │
-18  17     println!("{} distinct words", counts.│   a1b2c3d Parse hours too                          │
-19  18 }                                        │   9f8e7d6 Say the hours in the summary             │
-20                                              │ A squash merge on a forge looks unmerged here.     │
-21                                              │                                                    │
-22                                              │ Kept in main's target/sb/sessions/fix-login/:      │
-23                                              │   target/sb  14 files, 220 KB                      │
-24                                              │   CLAUDE.md  differs from main's                   │
-25                                              │                                                    │
-26                                              │ Removing both deletes fix-login too — its commits  │
-27                                              │ are on other branches.                             │
-28                                              ╰─ y Remove checkout · D Remove both · n Cancel ─────╯
+15  14 fn main() {                              ╭─ End fix-login? ───────────────────────────────────╮
+16  15     let text = "the quick brown fox jumps│ 2 commits not in main:                             │
+17  16     let counts = word_counts(text);      │   a1b2c3d Parse hours too                          │
+18  17     println!("{} distinct words", counts.│   9f8e7d6 Say the hours in the summary             │
+19  18 }                                        │ A squash merge on a forge looks unmerged here.     │
+20                                              │                                                    │
+21                                              │ Kept in main's target/sb/sessions/fix-login/:      │
+22                                              │   target/sb  14 files, 220 KB                      │
+23                                              │   CLAUDE.md  differs from main's                   │
+24                                              │                                                    │
+25                                              │ Removing both deletes fix-login too — its commits  │
+26                                              │ are on other branches.                             │
+27                                              ╰─ y Remove checkout · D Remove both · n Cancel ─────╯
+28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -77,20 +77,20 @@
 12  ff
 13  ff
 14  ff
-15  ff
-16  ff                gggg ggggg ggggg ggg gggggff TTT TTTTTTTTTT ffffffffffffffffffffffffffffffffffff
+15  ff                                          ff TTT TTTTTTTTTT ffffffffffffffffffffffffffffffffffff
+16  ff                gggg ggggg ggggg ggg gggggf                                                    f
 17  ff                                          f                                                    f
 18  ff              ggg gggggggg gggggg         f                                                    f
-19  ff                                          f                                                    f
-20                                              f d dddddd ddddd dd d ddddd ddddd dddddddd ddddd     f
-21                                              f                                                    f
-22                                              f dddd dd dddddd dddddddddddddddddddddddddddddd      f
-23                                              f   ddddddddd  dd dddddd ddd dd                      f
-24                                              f   ddddddddd  ddddddd dddd dddddd                   f
-25                                              f                                                    f
-26                                              f dddddddd dddd ddddddd ddddddddd ddd d ddd ddddddd  f
-27                                              f ddd dd ddddd ddddddddd                             f
-28                                              ff A                 f A dddddd dddd f A dddddd ffffff
+19  ff                                          f d dddddd ddddd dd d ddddd ddddd dddddddd ddddd     f
+20                                              f                                                    f
+21                                              f dddd dd dddddd dddddddddddddddddddddddddddddd      f
+22                                              f   ddddddddd  dd dddddd ddd dd                      f
+23                                              f   ddddddddd  ddddddd dddd dddddd                   f
+24                                              f                                                    f
+25                                              f dddddddd dddd ddddddd ddddddddd ddd d ddd ddddddd  f
+26                                              f ddd dd ddddd ddddddddd                             f
+27                                              ff A                 f A dddddd dddd f A dddddd ffffff
+28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

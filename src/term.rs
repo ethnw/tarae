@@ -1859,7 +1859,7 @@ fn draw_task_panel(
         }
         if bar.as_ref().is_some_and(|b| b.contains(&i)) {
             apply(out, faint)?;
-            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print("▐"))?;
+            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
         }
     }
     Ok(())
@@ -2561,7 +2561,7 @@ fn draw_test_panel(
             }
             if bar.as_ref().is_some_and(|b| b.contains(&i)) {
                 apply(out, faint)?;
-                queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print("▐"))?;
+                queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
             }
         }
         return Ok(());
@@ -2717,7 +2717,7 @@ fn draw_test_panel(
         }
         if bar.as_ref().is_some_and(|b| b.contains(&(i - 1))) {
             apply(out, faint)?;
-            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print("▐"))?;
+            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
         }
     }
     Ok(())
@@ -5036,9 +5036,18 @@ fn draw_scrollbar(
             s => ui.base.patch(ui.sign[s as usize]),
         };
         apply(out, st)?;
-        queue!(out, Print("▐"))?;
+        queue!(out, Print(thumb_glyph(ui)))?;
     }
     Ok(())
+}
+
+/// A scroll thumb's (or mark's) glyph: under `ui.edge = "lines"` a quarter block against the text's side, clear of
+/// a line beside it (a half block there read as a lump on the line — friction 92); under `"ground"` the half block.
+fn thumb_glyph(ui: &Ui) -> &'static str {
+    match ui.edge {
+        crate::theme::Edge::Lines => "▎",
+        crate::theme::Edge::Ground => "▐",
+    }
 }
 
 /// Blend two colors (truecolor only — None for named colors).
@@ -7426,7 +7435,7 @@ fn draw_completion(
         queue!(out, Spaces(width.saturating_sub(used + 1)))?;
         if scroll && thumb.contains(&row) {
             apply(out, Style { fg: ui.linenr.fg, ..card })?;
-            queue!(out, Print("▐"))?;
+            queue!(out, Print(thumb_glyph(ui)))?;
         } else {
             apply(out, card)?;
             queue!(out, Print(" "))?;
@@ -8122,8 +8131,11 @@ impl OfferCard {
                     Some(s) => 1 + card_rows(s, max_inner).len().min(2),
                     None => 0,
                 };
-                let room =
-                    lay.text_rows.saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows);
+                // (under `lines` a row of air under it too — `bottom` below)
+                let air = usize::from(framed(ui));
+                let room = lay
+                    .text_rows
+                    .saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows + air);
                 // (the card's rows with the question's lines `skip` left out — their warning and diff rows marked)
                 let build = |skip: &[usize], warn: &mut Vec<usize>, diff: &mut Vec<(usize, char)>| {
                     let mut v = vec![(title.clone(), false)];
@@ -8309,7 +8321,7 @@ impl OfferCard {
         };
         // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
-        let room = lay.text_rows.saturating_sub(buttons_h + 2 * pad + said.len());
+        let room = lay.text_rows.saturating_sub(buttons_h + 2 * pad + said.len() + usize::from(framed(ui)));
         let mut cut = 0;
         // (the cut row's forms all fit: the card keeps its width as it says another)
         let mut cut_floor = 0;
@@ -8417,8 +8429,10 @@ impl OfferCard {
         }
         let h = body_rows + inside + 2 * pad;
         let top = lay.text_top as usize;
-        let bottom = top + lay.text_rows;
-        // (its bottom edge is the half row of air over what's below — the slot, the status line)
+        // (its bottom edge is the half row of air over what's below — the slot, the status line; under `lines` a row
+        // of air, whether its bottom row is the frame's line or, without the keys, its answers: it never sits on
+        // what's below)
+        let bottom = top + lay.text_rows - usize::from(boxed);
         let y = bottom.checked_sub(h)?.max(top);
         let x = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
         // Back cards: one row each above the front card (as room allows, max three — beyond that "1/N" tells) —
@@ -13619,8 +13633,12 @@ fn float_geom_around(
     let y0 = if down { last + 1 } else { first - h };
     let x0 = (cx as usize).saturating_sub(2).min(right.saturating_sub(inner + 4)).max(left);
     // (an edge inside the gutter would leave the first digits of the numbers it covers beside it — `1▄▄`, read
-    // as a number: from the pane's edge then, over the whole gutter)
-    let x0 = if x0 > left && x0 < left + pane.gutter { left } else { x0 };
+    // as a number — and one right at the text's start the gutter's last cell, a removed row's `-` against its edge:
+    // from the pane's edge then, over the whole gutter, its right edge where it was)
+    let (x0, inner) = match x0 > left && x0 <= left + pane.gutter {
+        true => (left, inner + (x0 - left)),
+        false => (x0, inner),
+    };
     Some(FloatGeom { x0, y0, inner, h, max_rows, rows })
 }
 
@@ -14423,7 +14441,7 @@ fn draw_prompt(
         queue!(out, Spaces(width.saturating_sub(used + 1 + usize::from(framed(ui)))))?;
         if cands.len() > rows && thumb.contains(&row) {
             apply(out, Style { fg: ui.linenr.fg, ..card })?;
-            queue!(out, Print("▐"))?;
+            queue!(out, Print(thumb_glyph(ui)))?;
         } else {
             apply(out, card)?;
             queue!(out, Print(" "))?;

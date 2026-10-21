@@ -2,13 +2,13 @@
 ## text
 00  tarae  ›  card · Claude wants to run a script
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 Claude wants to run a script                                                                   ▐
-03   2                                                                                                ▐
-04   3 echo step 1                                                                                    ▐
-05   4 echo step 2                                                                                    ▐
-06   5 echo step 3                                                                                    ▐
-07   6 echo step 4                                                                                    ▐
-08   7 echo step 5                                                                                    ▐
+02   1 Claude wants to run a script                                                                   ▎
+03   2                                                                                                ▎
+04   3 echo step 1                                                                                    ▎
+05   4 echo step 2                                                                                    ▎
+06   5 echo step 3                                                                                    ▎
+07   6 echo step 4                                                                                    ▎
+08   7 echo step 5                                                                                    ▎
 09   8 echo step 6
 10   9 echo step 7
 11  10 echo step 8

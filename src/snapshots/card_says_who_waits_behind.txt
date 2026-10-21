@@ -20,15 +20,15 @@
 17  16     let counts = word_counts(text);
 18  17     println!("{} distinct words", counts.len()); // 타래
 19  18 }
-20
-21                                                   ▎ Claude asks to see the screen
-22
-23                                                ╭─ main · Claude asks to see the screen  1/2 · +1 ─╮
-24                                                │ As text, once.                                   │
-25                                                │                                                  │
-26                                                │ 2 more wait — 1 here, 1 in fix-login             │
-27                                                │ space I lists them                               │
-28                                                ╰─ y Once · a This chat · n No ────────────────────╯
+20                                                   ▎ Claude asks to see the screen
+21
+22                                                ╭─ main · Claude asks to see the screen  1/2 · +1 ─╮
+23                                                │ As text, once.                                   │
+24                                                │                                                  │
+25                                                │ 2 more wait — 1 here, 1 in fix-login             │
+26                                                │ space I lists them                               │
+27                                                ╰─ y Once · a This chat · n No ────────────────────╯
+28
 29  ● normal   main ▲3 waiting                                                  rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -51,8 +51,8 @@
 17
 18
 19
-20
-21                                                  111111111111111111111111111111111111111111111111
+20                                                  111111111111111111111111111111111111111111111111
+21
 22
 23
 24
@@ -84,13 +84,13 @@
 19  ff
 20
 21
-22
-23                                                ff TTTT T TTTTTT TTTT TT TTT TTT TTTTTT  ddd d dd ff
-24                                                f dd ddddd ddddd                                   f
-25                                                f                                                  f
-26                                                f d dddd dddd d d ddddd d dd ddddddddd             f
-27                                                f ddddd d ddddd dddd                               f
-28                                                ff A      f A dddd dddd f A dd fffffffffffffffffffff
+22                                                ff TTTT T TTTTTT TTTT TT TTT TTT TTTTTT  ddd d dd ff
+23                                                f dd ddddd ddddd                                   f
+24                                                f                                                  f
+25                                                f d dddd dddd d d ddddd d dd ddddddddd             f
+26                                                f ddddd d ddddd dddd                               f
+27                                                ff A      f A dddd dddd f A dd fffffffffffffffffffff
+28
 29  a TTTTTT   aaaa ww wwwwwww                                                  dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other

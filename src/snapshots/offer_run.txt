@@ -13,22 +13,22 @@
 10   9     │   *counts.entry(word).or_insert(0) += 1;
 11  10     }
 12  11     counts
-13  12 }
-14  13                                  ╭─ Claude wants to run — outside the sandbox ────────────────╮
-15  14 fn main() {                      │ git commit -m 'Count words: the words in the text, counted │
-16  15     let text = "the quick brown f│                                                            │
-17  16     let counts = word_counts(text│ Splits on whitespace, so "a  b" is two words, and keeps    │
-18  17     println!("{} distinct words",│ the counts in a map from word to how many times it came,   │
-19  18 }                                │ printed after the text.                                    │
-20                                      │                                                            │
-21                                      │ The tests cover the empty text and repeated words.'        │
-22                                      │                                                            │
-23                                      │ Its reason: git commit runs the hooks, which sign with the │
-24                                      │ key in your agent                                          │
-25                                      │                                                            │
-26                                      │ Outside the sandbox it runs with all your permissions —    │
-27                                      │ your files, your network — this once.                      │
-28                                      ╰─ y Run · n No ─────────────────────────────────────────────╯
+13  12 }                                ╭─ Claude wants to run — outside the sandbox ────────────────╮
+14  13                                  │ git commit -m 'Count words: the words in the text, counted │
+15  14 fn main() {                      │                                                            │
+16  15     let text = "the quick brown f│ Splits on whitespace, so "a  b" is two words, and keeps    │
+17  16     let counts = word_counts(text│ the counts in a map from word to how many times it came,   │
+18  17     println!("{} distinct words",│ printed after the text.                                    │
+19  18 }                                │                                                            │
+20                                      │ The tests cover the empty text and repeated words.'        │
+21                                      │                                                            │
+22                                      │ Its reason: git commit runs the hooks, which sign with the │
+23                                      │ key in your agent                                          │
+24                                      │                                                            │
+25                                      │ Outside the sandbox it runs with all your permissions —    │
+26                                      │ your files, your network — this once.                      │
+27                                      ╰─ y Run · n No ─────────────────────────────────────────────╯
+28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -75,8 +75,8 @@
 10   f
 11  ff
 12  ff
-13  ff
-14  ff                                  ff TTTTTT TTTTT TT TTT T TTTTTTT TTT TTTTTTT fffffffffffffffff
+13  ff                                  ff TTTTTT TTTTT TT TTT T TTTTTTT TTT TTTTTTT fffffffffffffffff
+14  ff                                  f                                                            f
 15  ff                                  f                                                            f
 16  ff                gggg ggggg ggggg gf                                                            f
 17  ff                                  f                                                            f
@@ -84,13 +84,13 @@
 19  ff                                  f                                                            f
 20                                      f                                                            f
 21                                      f                                                            f
-22                                      f                                                            f
-23                                      f ddd ddddddd ddd dddddd dddd ddd dddddd ddddd dddd dddd ddd f
-24                                      f ddd dd dddd ddddd                                          f
-25                                      f                                                            f
-26                                      f wwwwwww www wwwwwww ww wwww wwww www wwww wwwwwwwwwww w    f
-27                                      f wwww wwwwww wwww wwwwwww w wwww wwwww                      f
-28                                      ff A     f A dd ffffffffffffffffffffffffffffffffffffffffffffff
+22                                      f ddd ddddddd ddd dddddd dddd ddd dddddd ddddd dddd dddd ddd f
+23                                      f ddd dd dddd ddddd                                          f
+24                                      f                                                            f
+25                                      f wwwwwww www wwwwwww ww wwww wwww www wwww wwwwwwwwwww w    f
+26                                      f wwww wwwwww wwww wwwwwww w wwww wwwww                      f
+27                                      ff A     f A dd ffffffffffffffffffffffffffffffffffffffffffffff
+28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

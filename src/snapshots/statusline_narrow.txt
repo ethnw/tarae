@@ -1,7 +1,7 @@
 # statusline_narrow · 30x6 · theme meok · cursor 3:4
 ## text
 00  tarae  ›  src  ›  demo.rs
-01 ▎↑1 std::collections::HashMa ▐
+01 ▎↑1 std::collections::HashMa ▎
 02     p;   ● unresolved i…  +1
 03   2
 04   3 ▎ Counts how often each
