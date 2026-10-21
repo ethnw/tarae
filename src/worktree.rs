@@ -4735,4 +4735,77 @@ mod tests {
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// frictions28 S1: one bring card a session. The card a rebase leaves (`Rebased`), held for a high-risk
+    /// change, and a bring asked meanwhile were two cards side by side: the new one takes the old one's place,
+    /// graded against the looks made so far, its going said in the gone ring. A look frees the held card
+    /// itself — `y` and `p` back on it.
+    #[test]
+    fn one_bring_card_a_session_and_a_look_frees_the_held_one() {
+        let (repo, dir) = place("bring-one");
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "risky");
+        std::fs::write(wt.join("a.rs"), "fn a() {\n    unsafe { b() }\n}\n").unwrap();
+        git_in(&wt, &["add", "a.rs"]);
+        git_in(&wt, &["commit", "-qm", "risky"]);
+        let sid = ed.session.id;
+        let brings = |ed: &Editor| ed.offers.iter().filter(|o| o.bring_root() == Some(wt.as_path())).count();
+        // The card a rebase leaves (as `rebase_ended` pushes it): held
+        let rebased = |ed: &mut Editor| {
+            let m = crate::rebase::Moved {
+                root: wt.clone(),
+                name: "risky".into(),
+                branch: "risky".into(),
+                base: "main".into(),
+                moved: 0,
+                ahead: 1,
+            };
+            crate::codereview::push_bring_card(ed, sid, m.bring_card(None, true), wt.clone(), "main".into());
+        };
+        let (r, b) = ("Rebased risky onto main", "Bring risky into main");
+        rebased(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, r).is_some());
+        assert_eq!(card_in_sight(&mut ed), ['h', 'n']);
+        let first = card(&ed, r).unwrap().id;
+        // (S2: the state's line names every key held back, and why — from `Offer::answers_held`)
+        let s = ed.ui_state();
+        let line = s.text().lines().find(|l| l.starts_with(&format!("card#{first}"))).unwrap().to_string();
+        assert!(
+            line.contains(" · h go to them · n ") && line.contains(" · y p held: 1 high-risk change"),
+            "{line}"
+        );
+        assert_eq!(s.json()["cards"][0]["withheld"], json!(["y", "p"]));
+        // A bring asked while it waits: one card, still held (nothing looked at yet), the old one's going said
+        ed.session_bring("risky").unwrap();
+        settle_until(&mut ed, |ed| card(ed, b).is_some());
+        assert_eq!((brings(&ed), card(&ed, r).is_none()), (1, true), "{:?}", ed.offers);
+        assert!(card(&ed, b).unwrap().held.is_some());
+        let second = card(&ed, b).unwrap().id;
+        assert_eq!(card_in_sight(&mut ed), ['h', 'n']);
+        let gone = ed.ui_gone.iter().find(|g| g.id == format!("card#{first}")).map(|g| g.how.clone());
+        assert_eq!(gone, Some(format!("replaced by card#{second}")));
+        // The rebase's card again, in its place; then `h`, and a look there gives it `y` and `p`
+        rebased(&mut ed);
+        settle_until(&mut ed, |ed| card(ed, r).is_some());
+        assert_eq!(brings(&ed), 1);
+        assert_eq!(card_in_sight(&mut ed), ['h', 'n']);
+        feed(&mut ed, "h");
+        settle_until(&mut ed, |ed| {
+            let d = ed.doc();
+            ed.session.code_review.is_some()
+                && d.git_version == d.version()
+                && d.path.as_deref() == Some(wt.join("a.rs").as_path())
+        });
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        feed(&mut ed, "<space>vh");
+        assert!(card(&ed, r).is_some_and(|o| o.held.is_none()), "its yes is back: {}", said(&ed));
+        assert_eq!(card_in_sight(&mut ed), ['y', 'p', 'n']);
+        // A bring asked now: one card, graded against the look — not held
+        ed.session_bring("risky").unwrap();
+        settle_until(&mut ed, |ed| card(ed, b).is_some());
+        assert_eq!(brings(&ed), 1);
+        assert!(card(&ed, b).is_some_and(|o| o.held.is_none()));
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

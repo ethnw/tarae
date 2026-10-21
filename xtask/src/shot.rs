@@ -568,6 +568,7 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
     // The 1× cell
     let (cw1, ch1) = (fonts.regular.metrics('M', SIZE).advance_width as usize, (SIZE * 1.45) as usize);
     let (cw, ch, pad) = (cw1 * s, ch1 * s, PAD * s);
+    let baseline1 = baseline(&fonts.regular, ch1);
     let cell = |y: usize, x: usize| screen.cell(y as u16, x as u16);
     // The outer margin takes the edit view's background (the command line's last cell — no card covers it)
     let bg = cell(rows - 1, cols - 1).map_or(BG, |c| color(c.bgcolor(), BG));
@@ -638,10 +639,8 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
                 };
                 let font = fonts.face(face);
                 let (m, bitmap) = glyphs.entry((face, chr)).or_insert_with(|| font.rasterize(chr, size));
-                // ceil, as FreeType rounds a scaled ascender (PIL, the reference renders, used it) — the 1×
-                // baseline's, times the scale
-                let ascent = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| l.ascent).ceil() as usize;
-                let baseline = (py + (3 + ascent) * s) as i64;
+                // (the 1× baseline's, times the scale)
+                let baseline = (py + baseline1 * s) as i64;
                 let top = baseline - m.ymin as i64 - m.height as i64;
                 let left = pen.round() as i64 + m.xmin as i64;
                 for (i, a) in bitmap.iter().enumerate() {
@@ -664,6 +663,17 @@ fn render(screen: &vt100::Screen, fonts: &Fonts, s: usize) -> (usize, usize, Vec
         cv.rect(px, py, px + 2 * s, py + ch, fg);
     }
     (w, h, cv.px)
+}
+
+/// The 1× baseline, in pixels from the top of a cell `ch1` tall: `font`'s line (ascent, descent, line gap)
+/// centred in the cell, as a terminal places it (Ghostty, kitty) — one for every face of a row, a fallback's
+/// glyphs on it too. (frictions28: `3 + ascent` put it about 3 px low in a 21 px cell.)
+fn baseline(font: &fontdue::Font, ch1: usize) -> usize {
+    let at = font.horizontal_line_metrics(SIZE).map_or(SIZE, |l| {
+        let line = l.ascent - l.descent + l.line_gap;
+        (ch1 as f32 - line) / 2.0 + l.line_gap / 2.0 + l.ascent
+    });
+    at.round() as usize
 }
 
 fn save_png(path: &Path, w: usize, h: usize, px: &[u8]) -> Result<()> {
@@ -821,6 +831,18 @@ mod tests {
                 assert_eq!(two.2[i..i + 3], one.2[j..j + 3], "at ({x}, {y})");
             }
         }
+    }
+
+    /// The font's line sits in the middle of its cell: as much room above its ascent as below its descent,
+    /// within the pixel the baseline rounds to (frictions28: letters sat low). (Skipped without JetBrains Mono.)
+    #[test]
+    fn the_fonts_line_is_centred_in_the_cell() {
+        let Ok(f) = Fonts::load(1) else { return };
+        let ch1 = (SIZE * 1.45) as usize;
+        let l = f.regular.horizontal_line_metrics(SIZE).unwrap();
+        let b = baseline(&f.regular, ch1) as f32;
+        let (above, below) = (b - l.ascent, ch1 as f32 - b + l.descent);
+        assert!((above - below).abs() <= 1.0, "above {above}, below {below} (baseline {b} of {ch1})");
     }
 
     #[test]

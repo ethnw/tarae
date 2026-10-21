@@ -264,7 +264,11 @@ fn spawn(ed: &mut Editor, g: Gathered) {
     let sent =
         stdin.send(llm::initialize_message(&["tarae"])).and_then(|_| stdin.send(llm::user_message(&content)));
     if let Err(e) = sent {
-        llm::kill(child.id());
+        // (not `llm::kill`: no `pump` has it — ended and reaped here, off the main loop)
+        crate::event::thread("tarae-reap", move || {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
         return ed.set_error(format!("the reviewer: claude: {e}"));
     }
     let generation = GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -851,18 +851,27 @@ impl Offer {
     /// one list (`uistate.rs`). None while it's downloading. `quick`: the project has a quick preflight set
     /// (the bring card's `p` runs that one).
     pub fn answers(&self, quick: bool) -> Vec<(char, &'static str)> {
+        self.answers_held(quick).0
+    }
+
+    /// Its answers (`answers`) and the keys held back from them — `y`, and a bring's `p`, while its yes is held
+    /// (`held` says why): made in one place, so what a card offers and what it says it holds back agree
+    /// (frictions28: the state's line named `y` alone).
+    pub fn answers_held(&self, quick: bool) -> (Vec<(char, &'static str)>, Vec<char>) {
         let mut v = self.answers_all(quick);
         // (the cards like it, listed on it: `Y` runs each — cardburden 6)
         if !self.like.is_empty() && matches!(self.state, OfferState::Asking) {
             v.insert(1.min(v.len()), ('Y', "All listed"));
         }
+        let mut withheld = Vec::new();
         if self.held.is_some() && matches!(self.state, OfferState::Asking) {
-            v.retain(|a| !matches!(a.0, 'y' | 'p'));
+            withheld = v.iter().map(|a| a.0).filter(|k| matches!(k, 'y' | 'p')).collect();
+            v.retain(|a| !withheld.contains(&a.0));
             if self.highs().is_some() {
                 v.insert(0, ('h', "Go to them"));
             }
         }
-        v
+        (v, withheld)
     }
 
     /// Held for high-risk changes (#196): `h` goes to them — `Some(None)` in the review in front (its end
@@ -872,6 +881,16 @@ impl Offer {
         match &self.what {
             What::ReviewEnd { .. } => Some(None),
             What::Rebased(m) => Some(Some((m.root.clone(), m.base.clone()))),
+            _ => None,
+        }
+    }
+
+    /// The checkout a bring card is about — rebase first, changes in the way, bring, move up: one a session
+    /// (frictions28: a held card and a new bring's stood side by side).
+    pub fn bring_root(&self) -> Option<&std::path::Path> {
+        match &self.what {
+            What::Rebase(m) | What::Rebased(m) | What::UpTo(m) => Some(&m.root),
+            What::RebaseHeld(h) => Some(&h.moved.root),
             _ => None,
         }
     }
@@ -1165,6 +1184,28 @@ impl crate::editor::Editor {
         // or from work nobody's input started, waits its turn: #205)
         o.came = self.input_seq;
         o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
+        // One bring card a session: a new one takes the place of the one waiting for that checkout, wherever it
+        // waits — its going said (the gone ring: one card replaced); one whose bring is under way stays
+        if let Some(root) = o.bring_root().map(std::path::Path::to_path_buf) {
+            let same = |x: &Offer| x.bring_root() == Some(root.as_path());
+            let waiting: Vec<(u64, bool)> = std::iter::once(&self.session)
+                .chain(&self.sessions)
+                .flat_map(|l| &l.parked)
+                .chain(&self.offers)
+                .filter(|x| same(x))
+                .map(|x| (x.id, x.installing()))
+                .collect();
+            if waiting.iter().any(|w| w.1) {
+                return self.set_status("a bring of it is under way — its card says how it goes");
+            }
+            for (id, _) in waiting {
+                self.card_how(id, format!("replaced by card#{}", o.id));
+            }
+            self.offers.retain(|x| !same(x));
+            for l in std::iter::once(&mut self.session).chain(&mut self.sessions) {
+                l.parked.retain(|x| !same(x));
+            }
+        }
         // (the call it holds waits on it — watched until it's answered: `asking_sync`)
         if let Some(asker) = o.asker() {
             self.session.asking.push(Asking { card: o.id, asker, what: o.title.clone() });

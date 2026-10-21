@@ -2312,7 +2312,7 @@ pub fn card_highs(ed: &mut Editor) {
         }
         return;
     };
-    let looked = &ed.session.looked;
+    let looked = ed.offers.first().map_or(&ed.session.looked, |o| looked_for(ed, o));
     let left: Vec<Held> = held.into_iter().filter(|h| !h.looked_at(looked)).collect();
     if left.is_empty() {
         return ed.offer_refused("each high-risk change it named has had a look");
@@ -2334,6 +2334,21 @@ pub fn card_highs(ed: &mut Editor) {
     }
     ed.session.review_high = Some((id, left));
     start_in(ed, root, Some(base));
+}
+
+/// The looks held card `o` goes by: its session's — a bring's, the session whose checkout it brings; a
+/// review end's, its own — else the front's (frictions28: the front's freed, or held, another session's card).
+fn looked_for<'e>(
+    ed: &'e Editor,
+    o: &crate::offer::Offer,
+) -> &'e std::collections::HashSet<crate::risk::Key> {
+    let mut all = std::iter::once(&ed.session).chain(&ed.sessions);
+    let own = match (&o.what, o.bring_root()) {
+        (crate::offer::What::ReviewEnd { session, .. }, _) => all.find(|l| l.id == *session),
+        (_, Some(root)) => all.find(|l| l.root == root),
+        _ => None,
+    };
+    own.map_or(&ed.session.looked, |l| &l.looked)
 }
 
 /// Card `id` steps aside for what its `h` goes to — only once there's somewhere to go: a bar over the status
@@ -2986,10 +3001,17 @@ fn latest_looks(
 /// After a look: a card held for high-risk changes (the review's end, a bring — `Offer.gate`) whose every
 /// one has had a look since gets its yes back, saying so — the next `y` is an answer to it as it is now.
 pub fn held_sync(ed: &mut Editor) {
-    let looked = &ed.session.looked;
+    // (each against its own session's looks — up, or parked in any session)
+    let cards = || std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked).chain(&ed.offers);
+    let free: Vec<u64> = cards()
+        .filter(|o| o.held.is_some() && !o.gate.is_empty())
+        .filter(|o| o.gate.iter().all(|k| looked_for(ed, o).contains(k)))
+        .map(|o| o.id)
+        .collect();
     let mut freed = false;
-    for o in ed.offers.iter_mut().filter(|o| o.held.is_some() && !o.gate.is_empty()) {
-        if o.gate.iter().all(|k| looked.contains(k)) {
+    let parked = std::iter::once(&mut ed.session).chain(&mut ed.sessions).flat_map(|l| &mut l.parked);
+    for o in parked.chain(&mut ed.offers) {
+        if free.contains(&o.id) {
             o.held = None;
             o.warning = None;
             // (stepped aside for its `h`: up again with its letters)
@@ -4283,6 +4305,28 @@ mod tests {
     fn landed(ed: &Editor) -> bool {
         let d = ed.doc();
         ed.session.code_review.is_some() && d.review_base.is_some() && d.git_version == d.version()
+    }
+
+    /// frictions28 S1: a held card goes by its own session's looks — a bring's, the session whose checkout it
+    /// brings — not the front's: the same line looked at in the session in front leaves another's card held; a
+    /// look in its own frees it.
+    #[test]
+    fn a_held_card_goes_by_its_own_sessions_looks() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let root = PathBuf::from("/wt/risky");
+        let sid = ed.session_add(root.clone());
+        let key = crate::risk::key("a.rs", b'+', "    unsafe { b() }");
+        let (name, branch, base) = ("risky".to_string(), "risky".to_string(), "main".to_string());
+        let m = crate::rebase::Moved { root, name, branch, base, moved: 0, ahead: 1 };
+        let mut o = m.bring_card(None, true);
+        (o.held, o.gate) = (Some(held_said(1)), vec![key]);
+        ed.push_offer(o);
+        ed.session.looked.insert(key);
+        held_sync(&mut ed);
+        assert!(ed.offers[0].held.is_some(), "the front's look isn't its session's");
+        ed.sessions.iter_mut().find(|l| l.id == sid).unwrap().looked.insert(key);
+        held_sync(&mut ed);
+        assert!(ed.offers[0].held.is_none(), "its own session's look frees it");
     }
 
     /// A high-risk change (the Rust pack's `unsafe`) holds the review's end until a person looks at it: the

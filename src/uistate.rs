@@ -1056,9 +1056,11 @@ pub struct CardState {
     pub text: Vec<(String, &'static str)>,
     /// The warnings it says (`cardwarn.rs`), by id.
     pub warnings: Vec<String>,
-    /// Its yes held, and why (`Offer.held`: high-risk changes no one has looked at) — why `y` isn't among its
-    /// answers (frictions25 R8: a bring card offered `h n`, the reason only in its text).
+    /// Its yes held, and why (`Offer.held`: high-risk changes no one has looked at) — why `withheld` isn't among
+    /// its answers (frictions25 R8: a bring card offered `h n`, the reason only in its text).
     pub held: Option<String>,
+    /// The keys held back from its answers while it's held (`Offer::answers_held`: `y`, a bring's `p` too).
+    pub withheld: Vec<char>,
     /// It stepped aside for what its `h` went to (`Offer.aside`): its letters are the code's, `C-q` answers it.
     pub aside: bool,
 }
@@ -1200,6 +1202,7 @@ impl Editor {
         let quick = self.preflight_quick().is_some();
         let card = |o: &crate::offer::Offer, sid: crate::event::SessionId, up: &'static str| {
             let is_front = up == "front";
+            let (answers, withheld) = o.answers_held(quick);
             CardState {
                 id: format!("card#{}", o.id),
                 session: session_id(sid),
@@ -1207,7 +1210,7 @@ impl Editor {
                 kind: o.kind(),
                 title: o.title.clone(),
                 asks: asks(o),
-                answers: o.answers(quick),
+                answers,
                 state: match o.state {
                     crate::offer::OfferState::Asking => "asking",
                     crate::offer::OfferState::Installing(_) => "installing",
@@ -1235,6 +1238,7 @@ impl Editor {
                 text: text(o),
                 warnings: o.asked.as_ref().map(|a| a.warn.clone()).unwrap_or_default(),
                 held: o.held.clone(),
+                withheld,
                 aside: o.aside,
             }
         };
@@ -1365,7 +1369,9 @@ impl UiState {
                         "card": format!("card#{}", s.card), "answer": s.answer.to_string(), "at": s.at,
                         "unchanged": s.unchanged,
                     })),
-                    "held": c.held, "aside": c.aside,
+                    "held": c.held,
+                    "withheld": c.withheld.iter().map(char::to_string).collect::<Vec<_>>(),
+                    "aside": c.aside,
                 });
                 // (none at Claude's level: its `asks` is cut, and the text would be it whole)
                 if !c.text.is_empty() {
@@ -1517,9 +1523,10 @@ impl UiState {
             if !answers.is_empty() {
                 line += &format!(" · {}", answers.join(" · "));
             }
-            // (why `y` isn't among them — and a card stepped aside: its letters the code's)
-            if let Some(why) = &c.held {
-                line += &format!(" · y held: {why}");
+            // (which keys aren't among them, and why — and a card stepped aside: its letters the code's)
+            if let Some(why) = c.held.as_ref().filter(|_| !c.withheld.is_empty()) {
+                let keys: Vec<String> = c.withheld.iter().map(char::to_string).collect();
+                line += &format!(" · {} held: {why}", keys.join(" "));
             }
             if c.aside {
                 line += " · aside, C-q answers it";
