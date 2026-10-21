@@ -303,10 +303,11 @@ fn attached(pid: libc::pid_t) -> String {
 /// Step 7 on Seatbelt: two sessions' policies side by side, a run of each — from one, everything a process
 /// can do to another of the same user's, on its own child (the control), on the other session's run (its own
 /// `sandbox-exec`) and on tarae's stand-in (outside the sandbox, a process group of its own). Seatbelt's
-/// `same-sandbox` keeps signals, details and a debugger's attach in (`OWN_PROCESSES`, F2; the attach since this
-/// test found `lldb -p` reaching tarae's stand-in — a way to run anything outside the sandbox); the command line
-/// and the starting environment (`KERN_PROCARGS2`), and `setpriority`, no rule of Seatbelt's keeps — pinned as
-/// shared, and the report must say it (`RunEnv::said`'s first time; `MAC_SHARED`). The stand-ins are this test
+/// `same-sandbox` keeps signals, details and a debugger's attach in (`OWN_PROCESSES`, F2; `BASE` opens the run's
+/// own, as srt; the attach since this test found `lldb -p` reaching tarae's stand-in); the profile's default
+/// (macdeny) refuses `setpriority`, its own child's too (`system-sched`); the command line and the starting
+/// environment (`KERN_PROCARGS2`) are refused too — under the profile's default, `process-info-pidinfo`'s deny
+/// keeps them (before macdeny no rule did). The stand-ins are this test
 /// binary (no platform binary: what macOS refuses every debugger of a system program says nothing of the
 /// sandbox); they're signalled CONT only, attached and detached at once, and what a `setpriority` they were let
 /// do is checked on them from here. A refused attach the watch saw names a stand-in, never one of its own.
@@ -359,8 +360,6 @@ fn two_sessions_cant_reach_each_others_processes() {
     unsafe { libc::kill(their.pid as libc::pid_t, libc::SIGKILL) };
     crate::spawn::wait(their.pid).ok();
     // What the report says of what's left out of a run's environment, the first time
-    let env_said = mine.policy.run_env.said(&mut Vec::new(), Os::Mac).unwrap_or_default();
-    let report = mine.report();
     let g = super::seatbelt_guarantees(&mine.policy);
     mine.end();
     theirs.end();
@@ -369,26 +368,27 @@ fn two_sessions_cant_reach_each_others_processes() {
     let line = format!("tried: {said}\n  attaches refused, as said: {attaches:?}\n");
     let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
     assert!(tarae_alive && their_alive, "the stand-ins outlived the run: {line}");
-    // (attempt, on tarae's stand-in and the other session's run)
+    // (attempt, on tarae's stand-in and the other session's run; on its own child: through, or refused by the
+    // profile's default as well — the priority, a debugger's attach)
     let table = [
-        ("kill0", Refused),
-        ("cont", Refused),
-        ("info", Refused),
-        ("args", Shared),
-        ("env", Shared),
-        ("prio", Shared),
-        ("lldb", Refused),
+        ("kill0", Refused, true),
+        ("cont", Refused, true),
+        ("info", Refused, true),
+        ("args", Refused, true),
+        ("env", Refused, true),
+        ("prio", Refused, false),
+        ("lldb", Refused, true),
     ];
-    let said_of = |what: &str| match what {
-        "args" | "env" => env_said.ends_with(runenv::OTHERS_READ),
-        "prio" => report.contains("can lower their priority"),
-        _ => false,
-    };
+    let said_of = |_: &str| false;
     let mut wrong = Vec::new();
-    for (what, want) in table {
-        // The control: its own child, every attempt through
-        if got[&*format!("own-{what}")] != "ok" {
-            wrong.push(format!("its own child: {what} not ok — the try reaches nothing"));
+    for (what, want, own) in table {
+        // The control: its own child, every attempt through but what the default refuses its own too
+        match (got[&*format!("own-{what}")] == "ok", own) {
+            (false, true) => wrong.push(format!("its own child: {what} not ok — the try reaches nothing")),
+            (true, false) => {
+                wrong.push(format!("its own child: {what} ok — the profile's default let it through"))
+            }
+            _ => {}
         }
         for who in ["their", "tarae"] {
             let verdict = if got[&*format!("{who}-{what}")] == "ok" { Shared } else { Refused };
@@ -505,8 +505,10 @@ fn sysv_attached(key: libc::key_t, made: bool) -> io::Result<()> {
 /// Each is made by this test where a run of the other session's would make it (Seatbelt's rules are on
 /// places and names, never on who made one). The trying run reaches its own of each first: a try that
 /// reaches nothing would pass — the opened port is the closed one's control. A port the user opens is this
-/// machine's (no loopback of a session's own on macOS) — shared, and the report says so; shared memory, POSIX
-/// and System V, no rule of Seatbelt's keeps apart — shared, and said (`MAC_SHARED`). Harmless: every
+/// machine's (no loopback of a session's own on macOS) — shared, and the report says so; POSIX shared memory
+/// `BASE` opens (as srt) and no rule tells whose a name is — shared, and said (`MAC_SHARED`); System V's the
+/// profile's default refuses (macdeny) — its own too, so there the control is the refusal heard by the watch
+/// (`ipc-sysv-shm`). Harmless: every
 /// listener and segment is this test's own, and nothing is sent. (The sessions in `/private/tmp`: a socket's
 /// path has 104 bytes, and a run's folder under a checkout's `target/` is past it. A unix socket there is still
 /// refused but in the run's own folder and project — `unix_sockets_only_in_the_run_and_the_project`.)
@@ -556,7 +558,12 @@ fn two_sessions_cant_reach_each_others_sockets() {
         port(&open),
         port(&closed),
     );
+    let w = Watch::start(mine.policy.tag.as_deref().expect("a run's tag"));
+    std::thread::sleep(WATCH_READY);
     let said = mine.helper("sockets", &[("TARAE_OWN", &own), ("TARAE_TO", &to)]);
+    std::thread::sleep(WATCH_LAST * 2);
+    let blocked = w.blocked();
+    w.finish();
     // SAFETY: this test's own name and segment, made above.
     unsafe {
         libc::close(fd);
@@ -572,10 +579,17 @@ fn two_sessions_cant_reach_each_others_sockets() {
     let line = format!("tried: {said}\n  report: {report}\n");
     let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
     let mut wrong = Vec::new();
-    for what in ["checkout", "run", "posix", "sysv"] {
+    for what in ["checkout", "run", "posix"] {
         if got[&*format!("own-{what}")] != "ok" {
             wrong.push(format!("its own {what}: not ok — the try reaches nothing"));
         }
+    }
+    // (its own System V segment: refused too — the try reached the sandbox, its refusal heard)
+    if got["own-sysv"] == "ok" {
+        wrong.push("its own sysv: ok — the profile's default let it through".into());
+    }
+    if !blocked.seen.iter().any(|d| d.op == "ipc-sysv-shm") {
+        wrong.push("its own sysv: no ipc-sysv-shm refusal heard — the try reaches nothing".into());
     }
     let table = [
         ("checkout", Refused),
@@ -583,7 +597,7 @@ fn two_sessions_cant_reach_each_others_sockets() {
         ("tcp-open", Shared),
         ("tcp-closed", Refused),
         ("posix", Shared),
-        ("sysv", Shared),
+        ("sysv", Refused),
     ];
     let said_of = |what: &str| match what {
         // (step 8, decision 9: another session's listener on an opened port is reached here, and said)
@@ -591,9 +605,7 @@ fn two_sessions_cant_reach_each_others_sockets() {
             report.contains(&format!("this machine's ports {}", port(&open)))
                 && report.contains("another tarae session's commands' too")
         }
-        "posix" | "sysv" => {
-            report.contains("shares System V and POSIX shared memory with other sessions' commands")
-        }
+        "posix" => report.contains("shares POSIX shared memory with other sessions' commands"),
         _ => false,
     };
     for (what, want) in table {

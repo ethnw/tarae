@@ -272,10 +272,16 @@
             "part": "files"
           },
           {
+            "part": "processes"
+          },
+          {
             "part": "signals"
+          },
+          {
+            "part": "ipc"
           }
         ],
-        "line": "sandbox Seatbelt · loopback the ports it opens, whoever's · network closed · shared processes, System V shared memory, POSIX shared memory, loopback",
+        "line": "sandbox Seatbelt · loopback the ports it opens, whoever's · network closed · shared POSIX shared memory, loopback",
         "namespaces": null,
         "network": {
           "asked": false,
@@ -285,13 +291,6 @@
         },
         "partial": false,
         "shared": [
-          {
-            "how": "command lines, starting environments, priority",
-            "part": "processes"
-          },
-          {
-            "part": "ipc"
-          },
           {
             "part": "shm"
           },

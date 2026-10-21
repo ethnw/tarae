@@ -4,7 +4,7 @@
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 02    ›                                                                what the sandbox blocked  5/5
 03    ──────────────────────────────────────────────────────────────────────────────────────────────
-04     sandbox Seatbelt  shared processes, System V shared memory, POSIX shared memory
+04     sandbox Seatbelt  loopback none of its ports open  network closed  shared POSIX shared memory
 05
 06   ▎ ◦ allow writing in /private/tmp/tarae-shot-blocked/npm-cache              …/_cacache/index-v5
 07     ◦ allow writing in /private/tmp/tarae-shot-blocked              …/npm-cache/_cacache/index-v5
@@ -66,7 +66,7 @@
 01
 02    A                                                                ffff fff fffffff fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-04     DDDDDDD ffffffff  DDDDDD ffffffffff ffffff f ffffff fffffff fffff ffffff ffffff
+04     DDDDDDD ffffffff  DDDDDDDD ffff ff fff fffff ffff  DDDDDDD ffffff  DDDDDD fffff ffffff ffffff
 05
 06   a d TTTTT TTTTTTT TT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT              ddddddddddddddddddd
 07     d                                                               ddddddddddddddddddddddddddddd

@@ -772,11 +772,12 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
         _ => Vec::new(),
     };
     // (in Seatbelt's words too where the plain ones name no target: `opening apps` is a mach service; an asks
-    // entry's hosts refused on their cards are what it measures)
+    // entry's hosts refused on their cards are what it measures; what every run is refused by design is never an
+    // entry's cause — the tools go on without it, macdeny measured)
     let denials: Vec<String> = seen
         .iter()
         .chain(&said)
-        .filter(|d| !(entry.asks && d.op == "network-host"))
+        .filter(|d| !(entry.asks && d.op == "network-host") && !d.by_design())
         .map(|d| match d.plain() == d.shown() {
             true => d.reported(),
             false => format!("{} — {}", d.reported(), d.shown()),

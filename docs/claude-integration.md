@@ -618,6 +618,14 @@ review) and run that.
 What Claude runs, with `run` and `run_tests`, runs in a sandbox (macOS: Seatbelt; Linux: Landlock and seccomp,
 the same rules — [what differs](#on-linux)). What you run yourself doesn't.
 
+- On macOS the sandbox denies by default, as Anthropic's sandbox-runtime does: besides the files and the network
+  below, a command may ask the system only what the toolchains were measured asking — your user name and groups,
+  the machine's and the system's facts, logging, the global preferences (locale, languages) — and nothing else:
+  no other service (Spotlight, the disks', the network's settings, the process list — `pgrep`), no System V
+  shared memory (POSIX's is shared, as everywhere on macOS), no process's priority, a debugger only on its own
+  processes. Certificates' trust service only where the network reaches a host as
+  the command starts (Go needs it for TLS). Refusals a tool goes on without are said calmly when it passes.
+
 - It can write in the project, except the paths in `llm.sandbox-protect` and what runs later outside the
   sandbox or sets how things run, wherever it sits in the project and in any case. Every language pack lists
   its own (`protect` in its `pack.toml`), and every pack's apply in every project, whatever its languages (a
@@ -1033,10 +1041,10 @@ macOS (Seatbelt). A test keeps this table equal to the code:
 | host, Ubuntu's restriction, no profile | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | offline, no namespaces | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | offline, no namespaces, Ubuntu's restriction, no profile | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| Seatbelt, no port open, the network closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports open, the network closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
-| Seatbelt, no port open, the network open | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports and the network open | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network closed | files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open) | POSIX shared memory |
+| Seatbelt, ports open, the network closed | files (but the temp folders), processes, signals, System V shared memory | POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network open | files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open) | POSIX shared memory |
+| Seatbelt, ports and the network open | files (but the temp folders), processes, signals, System V shared memory | POSIX shared memory, loopback (the ports it opens, whoever's) |
 <!-- /tiers -->
 
 - In every tier the temp folders are shared, and every session reads the repository's other checkouts. A

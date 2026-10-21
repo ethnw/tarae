@@ -669,16 +669,15 @@ fn the_guarantees_say_each_tier() {
         ("Seatbelt, no port open, the network open", false, true),
         ("Seatbelt, ports and the network open", true, true),
     ] {
-        let mut shared = vec![Processes, Ipc, Shm];
-        if ports {
-            shared.push(Loopback);
-        }
+        // (macdeny: the profile's default keeps processes and System V's shared memory — POSIX's is shared, as
+        // srt's, and the ports a policy opens)
+        let shared = if ports { vec![Shm, Loopback] } else { vec![Shm] };
         all.push((label.to_string(), None, Guarantees::seatbelt(ports, network), shared));
     }
     // (C1b: the open network's default — the hosts listed, others asked; a head that keeps it out of the docs' tier
     // tables, which are about tiers)
     let listed = Guarantees::seatbelt(false, true).listing(true);
-    all.push(("the network open, hosts listed (Seatbelt)".into(), None, listed, vec![Processes, Ipc, Shm]));
+    all.push(("the network open, hosts listed (Seatbelt)".into(), None, listed, vec![Shm]));
     let mut out = String::new();
     let mut wrong = Vec::new();
     for (label, tier, g, mut want) in all {

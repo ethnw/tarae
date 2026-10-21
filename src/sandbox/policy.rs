@@ -165,18 +165,36 @@ impl Policy {
         }
     }
 
-    /// The Seatbelt profile. Paths aren't in it: they're `-D` parameters (`params`), so no path can change
-    /// what it says. Every deny carries the run's tag (`tag`) — the only text from outside, and tarae's own.
+    /// The Seatbelt profile: denied by default (macdeny, as srt's), then what every run may do (`BASE`) and these
+    /// rules. Paths aren't in it: they're `-D` parameters (`params`), so no path can change what it says. Every
+    /// deny carries the run's tag (`tag`) — the only text from outside, and tarae's own.
     #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
     pub fn profile(&self) -> String {
         let with = self.tag.as_ref().map(|t| format!(" (with message \"{t}\")")).unwrap_or_default();
         let deny = |rule: &str| format!("(deny {rule}{with})\n");
-        let mut p = String::from("(version 1)\n(allow default)\n");
-        // (A hard link needs these write rules to allow its source too — Seatbelt's own
+        // The network open goes beyond this machine only through tarae's proxy, at the run's own port (step 5d:
+        // another run's isn't reached — M3d); the port is a number tarae made, never text from outside
+        let proxied = self.proxy.as_ref().filter(|_| self.network).map(|r| r.port);
+        // Denied by default, as srt's profile is (macdeny): every refusal carries the run's tag, so the watch
+        // sees it. Then what every run may do (`BASE`), and trust's service where the run goes beyond this
+        // machine as it starts — a host the user says yes to during the run (its card) gets it from the next run,
+        // as a registry's caches do
+        let e = &self.egress;
+        let beyond = proxied.is_some() && (e.any || !e.hosts.is_empty() || !e.answered.is_empty());
+        let mut p = String::from("(version 1)\n");
+        p.push_str(&deny("default"));
+        for (rule, _) in BASE {
+            p.push_str(&format!("(allow {rule})\n"));
+        }
+        if beyond {
+            p.push_str(&format!("(allow {TRUSTD})\n"));
+        }
+        // Reads are open but where the rules below close them (srt's too). Writes are where these allow them
+        // (a hard link needs these write rules to allow its source too — Seatbelt's own
         // `forbidden-link-priv<file-write*>`, measured 2026-10-04, `target/sb/p1-links2.sh` — so a run can't
         // link a file from outside into the project, nor give a kept one a second name to write through: no
         // `file-link` rule of its own is needed)
-        p.push_str(&deny("file-write*"));
+        p.push_str("(allow file-read*)\n");
         let protect: String =
             (0..self.protect.len()).map(|i| format!(" (require-not (subpath (param \"P{i}\")))")).collect();
         p.push_str(&format!("(allow file-write* (require-all (subpath (param \"ROOT\")){protect}))\n"));
@@ -198,6 +216,12 @@ impl Policy {
             p.push_str(&deny("file-read-data file-read-xattr (subpath (param \"HOME\"))"));
             p.push_str(&format!(
                 "(allow file-read-data file-read-xattr (subpath (param \"ROOT\")){run}{dirs}{files}{reads})\n"
+            ));
+            // …and the global preferences (locale, languages) Apple's libraries read in every tool — cargo,
+            // rustup, the JVM, Node, curl: CoreFoundation reads their plists itself, cfprefsd being out of reach (it
+            // hands out every domain the profile lets it: `user-preference-read`) — this domain only (macdeny)
+            p.push_str(&format!(
+                "(allow file-read-data (require-all (subpath (param \"HOME\")) {GLOBAL_PREFERENCES}))\n"
             ));
         }
         // After the allows, so these win. The names a run keeps off, below the project's root however deep
@@ -244,19 +268,17 @@ impl Policy {
             ));
         }
         p.push_str(&devices_rule());
-        // The terminals: closed, read and write, but where the project's grant opens them (`TERMINALS`). After
-        // every file allow, so none opens them
+        // The terminals: closed, read and write, and no pty made, but where the project's grant opens them
+        // (`TERMINALS`, `/dev/ptmx`, srt's `allowPty`). After every file allow, so none opens them
         match self.terminals {
-            true => p.push_str(&format!("(allow file-write* (regex #\"{TERMINALS}\"))\n")),
+            true => p.push_str(&format!(
+                "(allow pseudo-tty)\n(allow file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\"))\n"
+            )),
             false => p.push_str(&deny(&format!("file-read-data file-write* (regex #\"{TERMINALS}\")"))),
         }
-        // The network open goes beyond this machine only through tarae's proxy, at the run's own port (step 5d:
-        // another run's isn't reached — M3d); the port is a number tarae made, never text from outside
-        let proxied = self.proxy.as_ref().filter(|_| self.network).map(|r| r.port);
         let open: String =
             self.ports.iter().chain(&proxied).map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();
         // Listening stays open (a test's own server); connecting, only where it's allowed
-        p.push_str(&deny("network*"));
         p.push_str("(allow network-bind network-inbound (local ip \"localhost:*\"))\n");
         if self.localhost {
             p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
@@ -289,6 +311,9 @@ impl Policy {
         // processes — another run under the same profile isn't (spike M7.3, `target/sb/f2-spike.sh`). Its child,
         // group and grandchild stay signalable (`make -j`, a test runner ending its workers); tarae, another
         // session's run, the user's shell don't. (Arguments and environment aren't kept by these: spike 2)
+        // (each denied here though the profile denies by default: its default doesn't cover a process's details —
+        // `proc_pidinfo` of tarae's was let through under it, measured: `apart::two_sessions_cant_reach_each_
+        // others_processes`)
         for rule in OWN_PROCESSES {
             p.push_str(&deny(rule));
             p.push_str(&format!("(allow {rule} (target same-sandbox))\n"));

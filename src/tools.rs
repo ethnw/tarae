@@ -4025,8 +4025,7 @@ fn env_left_out(
     if chat.env_said.0 != chat.conversation {
         chat.env_said = (chat.conversation.clone(), Vec::new());
     }
-    let os = crate::sandbox::Os::HOST;
-    let new = e.said(&mut chat.env_said.1, os).map(|s| format!("\n{s}\n")).unwrap_or_default();
+    let new = e.said(&mut chat.env_said.1).map(|s| format!("\n{s}\n")).unwrap_or_default();
     format!("{new}{named}")
 }
 

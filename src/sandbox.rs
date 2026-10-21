@@ -29,6 +29,8 @@
 // (step 7's two sessions side by side on Seatbelt — Linux's are the keeper's)
 #[cfg(all(test, target_os = "macos"))]
 mod apart;
+#[cfg(all(test, target_os = "macos"))]
+mod macdeny_measure;
 // (the profile and its hint: plain text, built everywhere — said on Linux)
 pub mod apparmor;
 #[cfg(target_os = "linux")]
@@ -339,15 +341,16 @@ impl Guard {
                 b.quiet.push(q);
             }
         }
-        // (compat B4: a run that passed, refused nothing but a look-up of LaunchServices — node's, at its start —
-        // isn't told as blocked: refused by design, nothing opens it, and the run did without it. Only all of
-        // what was refused, counted whole; a failed run lists it as ever: it may be why)
+        // (compat B4, macdeny: a run that passed, refused nothing but what every run is refused by design — a
+        // look-up of LaunchServices, node's at its start; cargo's of the network's settings — isn't told as
+        // blocked: nothing opens it, and the run did without it. Only all of what was refused, counted whole; a
+        // failed run lists it as ever: it may be why)
         let apps = passed
             && b.failed.is_none()
             && o.total == 0
             && !b.seen.is_empty()
             && b.distinct == b.seen.len()
-            && b.seen.iter().all(Denial::opens_apps);
+            && b.seen.iter().all(Denial::by_design);
         if (self.watch().is_none() || p.files_unwatched()) && b.total == 0 && o.total == 0 {
             // (nothing watched: a refusal shows only in the output — the rules are how Claude reads it)
             return (with_apart(format!("{ps}{rules}{unwatched}")), false, Vec::new());
@@ -382,7 +385,9 @@ impl Guard {
             }
             s.push_str(&p.output_says(&o, b.total > 0));
             let all_seen: Vec<Denial> = b.seen.iter().chain(&o.seen).cloned().collect();
-            let (kept, all) = self.kept(&all_seen);
+            // (what's refused by design is listed, never what makes the rest something to open)
+            let designed: Vec<Denial> = all_seen.iter().filter(|d| !d.by_design()).cloned().collect();
+            let (kept, all) = self.kept(&designed);
             s.push_str(&kept);
             s.push_str(&quiet_said(&b).unwrap_or_default());
             s.push_str(ps);
@@ -413,8 +418,9 @@ impl Guard {
                 );
             }
             // (step 8: another session's port, or one whose can't be told — no grant opens it, so nothing to
-            // point at; nor beyond this machine past the proxy)
-            let openable = |d: &&Denial| d.op != SESSION_OP && d.op != UNTOLD_OP && d.op != DIRECT_OP;
+            // point at; nor beyond this machine past the proxy; nor what every run is refused by design — macdeny)
+            let openable =
+                |d: &&Denial| d.op != SESSION_OP && d.op != UNTOLD_OP && d.op != DIRECT_OP && !d.by_design();
             let open: Vec<Denial> = all_seen.iter().filter(openable).filter(|_| !all).cloned().collect();
             let openable = all_seen.iter().any(|d| openable(&d));
             if (!all && openable) || b.distinct > b.seen.len() || o.distinct > o.seen.len() {
@@ -1584,7 +1590,20 @@ impl Denial {
     pub fn terminal(&self) -> bool {
         let open =
             matches!(self.op.as_str(), "file-read-data" | "file-write-data" | "file-write-create" | EITHER);
-        open && is_terminal(Path::new(&self.target))
+        (open && (is_terminal(Path::new(&self.target)) || self.made_pty())) || self.op == "pseudo-tty"
+    }
+
+    /// Whether it's a pty the run makes, refused (`/dev/ptmx`, `pseudo-tty`): the terminals grant's too.
+    fn made_pty(&self) -> bool {
+        self.target == "/dev/ptmx" || self.op == "pseudo-tty"
+    }
+
+    /// Whether it's refused in every run by design and tools go on without it: LaunchServices (`opens_apps`),
+    /// the services `BY_DESIGN` names, a file system's control call (`fsctl` — bsdtar's, tarae's tests').
+    pub fn by_design(&self) -> bool {
+        self.opens_apps()
+            || (self.op == "mach-lookup" && BY_DESIGN.iter().any(|(s, _)| *s == self.target))
+            || self.op == "system-fsctl"
     }
 
     /// A look-up of LaunchServices (`NO_WAY_OUT`'s): how a program opens an app, a file or a URL in one —
@@ -1602,10 +1621,14 @@ impl Denial {
         let op = self.op.as_str();
         // (a pty the run made, or the user's: Seatbelt can't tell them apart — the grant opens them all)
         if self.terminal() {
+            let what = match self.made_pty() {
+                true => "making a terminal (a pty)".to_string(),
+                false => format!("opening the terminal {t}"),
+            };
             return format!(
-                "opening the terminal {t} — every terminal is closed to a run, the ones it makes too (expect, \
-                 script, a pty test): macOS's sandbox can't tell them from the user's; the run's panel (space m \
-                 s) lets this project's commands open terminals"
+                "{what} — every terminal is closed to a run, the ones it makes too (expect, script, a pty test): \
+                 macOS's sandbox can't tell them from the user's; the run's panel (space m s) lets this project's \
+                 commands open terminals"
             );
         }
         match op {
@@ -1737,6 +1760,17 @@ impl Denial {
             "mach-lookup" if self.opens_apps() => "opening apps".into(),
             "mach-lookup" if t.starts_with("com.apple.pasteboard.") => "the clipboard".into(),
             "mach-lookup" if KEYCHAIN.contains(&t.as_str()) => "the keychain".into(),
+            "mach-lookup" => match BY_DESIGN.iter().find(|(s, _)| *s == t) {
+                Some((_, what)) => format!("{what} ({t})"),
+                None => format!("the service {t}"),
+            },
+            "sysctl-read" => format!("reading the system's {t}"),
+            "sysctl-write" => format!("setting the system's {t}"),
+            "ipc-sysv-shm" | "ipc-sysv-sem" | "ipc-sysv-msg" => {
+                "System V shared memory or semaphores — closed to a run (POSIX's semaphores stay open)".into()
+            }
+            "system-sched" => format!("another process's priority ({t})"),
+            "system-fsctl" => format!("a file system's control call {t}"),
             _ => self.shown(),
         }
     }
@@ -1836,18 +1870,29 @@ fn quiet_said(b: &Blocked) -> Option<String> {
     })
 }
 
-/// The report's line for a run that passed and was refused only a look-up of LaunchServices (`opens_apps`):
-/// whose, and that nothing opens it.
+/// The report's line for a run that passed and was refused only what every run is by design (`by_design`):
+/// whose, what, and that nothing opens it.
 fn apps_said(seen: &[Denial]) -> String {
     let mut who: Vec<&str> = seen.iter().map(|d| d.process.as_str()).filter(|p| !p.is_empty()).collect();
+    crate::sorting::sort(&mut who);
     who.dedup();
     let who = match who.is_empty() {
         true => "a process".to_string(),
         false => who.join(", "),
     };
+    if seen.iter().all(Denial::opens_apps) {
+        return format!(
+            "The sandbox blocked only {who}'s look-up of LaunchServices (opening apps) — refused in every run by \
+             design, nothing opens it — and the run passed without it. "
+        );
+    }
+    let mut what: Vec<String> = seen.iter().map(Denial::plain).collect();
+    crate::sorting::sort(&mut what);
+    what.dedup();
     format!(
-        "The sandbox blocked only {who}'s look-up of LaunchServices (opening apps) — refused in every run by \
-         design, nothing opens it — and the run passed without it. "
+        "The sandbox blocked only what every run is refused by design — {} ({who}) — nothing opens it, and \
+         the run passed without it. ",
+        what.join(", ")
     )
 }
 
@@ -2775,17 +2820,123 @@ pub fn key_named_in(root: &Path, path: &Path) -> bool {
         && !folders.iter().any(|p| outputs().iter().any(|o| *p == o.as_str()))
 }
 
-/// Device files every program writes to (`/dev/null`, `/dev/ptmx` — a pty test hangs without it: measured), as
-/// the profile's filters (`devices_rule`): (filter, its argument). Not the terminals (`TERMINALS`).
+/// Device files every program writes to and asks (`ioctl`) — `/dev/null`, dyld's `/dev/dtracehelper` at every
+/// start — as the profile's filters (`devices_rule`): (filter, its argument). Not the terminals (`TERMINALS`) nor
+/// `/dev/ptmx`: a pty is the terminals grant's.
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
-const DEVICES: [(&str, &str); 6] = [
+const DEVICES: [(&str, &str); 5] = [
     ("literal", "/dev/null"),
     ("literal", "/dev/zero"),
     ("literal", "/dev/tty"),
-    ("literal", "/dev/ptmx"),
     ("literal", "/dev/dtracehelper"),
     ("subpath", "/dev/fd"),
 ];
+
+/// What every run may do besides files and the network (macdeny, 2026-10-17): the profile denies by default, as
+/// Anthropic's sandbox-runtime does, and these are its allows — each with what needed it, measured
+/// (`target/sb/macdeny-plan.md` §3, `macdeny_measure.rs`). A row goes in for a tool that failed without it, or
+/// for what every process asks as it starts (refused, it'd be a line in every report); never a whole operation
+/// that reaches past the run (`mach-lookup`, `sysctl-read`, `iokit-open`, `user-preference-read`) — names only
+/// (`every_base_rule_says_why_and_names_no_wildcard`). The services kept from every run stay denied after it
+/// (`kept_services`, `NO_WAY_OUT`).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+const BASE: &[(&str, &str)] = &[
+    ("process-exec* process-fork", "every run starts its shell and the tool, and they theirs"),
+    (
+        "sysctl-read (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.osvariant_status\") \
+         (sysctl-name \"kern.iossupportversion\") (sysctl-name \"kern.bootargs\") (sysctl-name \"hw.ephemeral_storage\") \
+         (sysctl-name \"security.mac.lockdown_mode_state\") (sysctl-name \"kern.hostname\") (sysctl-name \"kern.ngroups\")",
+        "every process reads these as it starts (`/usr/bin/true`), bash the last two",
+    ),
+    (
+        "sysctl-read (sysctl-name \"hw.ncpu\") (sysctl-name \"hw.activecpu\") (sysctl-name \"hw.memsize\") \
+         (sysctl-name \"hw.pagesize\") (sysctl-name \"hw.pagesize_compat\") (sysctl-name \"hw.machine\") \
+         (sysctl-name \"hw.cpufamily\") (sysctl-name \"hw.cpufrequency\") (sysctl-name \"hw.cachelinesize_compat\") \
+         (sysctl-name \"machdep.cpu.brand_string\") (sysctl-name-prefix \"hw.optional.\")",
+        "the machine's CPUs, memory and features: Rust, Go, Node, the JVM, Python, clang, git as they start",
+    ),
+    (
+        "sysctl-read (sysctl-name \"hw.physicalcpu\") (sysctl-name \"hw.physicalcpu_max\") (sysctl-name \"hw.logicalcpu\") \
+         (sysctl-name \"hw.logicalcpu_max\") (sysctl-name \"hw.l1icachesize\") (sysctl-name \"hw.l1dcachesize\") \
+         (sysctl-name \"hw.l2cachesize\") (sysctl-name \"hw.l3cachesize\") (sysctl-name-prefix \"hw.perflevel\") (sysctl-name \"sysctl.proc_native\") (sysctl-name \"vm.swapusage\") \
+         (sysctl-name \"kern.memorystatus_level\") (sysctl-name \"kern.memorystatus_vm_pressure_level\")",
+        "cores, caches and memory pressure: tarae's own memory check (its tests), rust-analyzer, marksman",
+    ),
+    (
+        "sysctl-read (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.version\") \
+         (sysctl-name \"kern.argmax\") (sysctl-name \"kern.maxfilesperproc\") (sysctl-name \"kern.willshutdown\") \
+         (sysctl-name \"kern.grade_cputype\")",
+        "the system's version and limits: `uname`, clang, rustup, Go, Node, the JVM, xargs",
+    ),
+    (
+        "sysctl-write (sysctl-name \"kern.grade_cputype\")",
+        "Apple's `/usr/bin/java` sets it before it finds a JDK: without it \"Unable to locate a Java Runtime\" (Gradle)",
+    ),
+    (
+        "sysctl-read (sysctl-name-prefix \"net.routetable.\")",
+        "this machine's interfaces (`getifaddrs`): Python's and Node's name lookups, the JVM, git",
+    ),
+    (
+        "system-info (info-type \"vfs.disk-space\") (info-type \"net.link.addr\")",
+        "a disk's free space (cargo, cp, git, the JVM, Python) and the interfaces' addresses (`getifaddrs`)",
+    ),
+    (
+        "mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") \
+         (global-name \"com.apple.system.opendirectoryd.membership\")",
+        "the user's name, home and groups (`getpwuid`): `id`, cargo, git, clang, xcrun, the JVM",
+    ),
+    (
+        "mach-lookup (global-name \"com.apple.logd\") (global-name \"com.apple.diagnosticd\") \
+         (global-name \"com.apple.system.notification_center\")",
+        "logging and notifications from Apple's libraries: harmless, and refused they'd be a line in every report",
+    ),
+    (
+        "ipc-posix-shm",
+        "POSIX shared memory: the notifications' page Apple's libraries read, Python's \
+         `multiprocessing.shared_memory` and others — shared with other processes (no rule tells whose a name is), as srt",
+    ),
+    ("ipc-posix-sem", "Python's `multiprocessing` locks (named semaphores)"),
+    (
+        "process-info* (target same-sandbox)",
+        "the run's own processes' details (`lsof -p`, a debugger) — others' stay denied by `OWN_PROCESSES` after",
+    ),
+    (
+        "system-debug (target same-sandbox)",
+        "debugserver's attach to the run's own child (`lldb -p`: \"no such process\" without it; srt's \
+         `mach-priv-task-port` same-sandbox is `OWN_PROCESSES`' allow here, and doesn't attach alone — measured)",
+    ),
+    (
+        "system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2))",
+        "the kernel's control socket Python's name lookups open (`getaddrinfo`, twice each) — sends nothing out",
+    ),
+];
+
+/// The global preferences' plists — in `~/Library/Preferences` and its `ByHost` — as the profile's filter, by
+/// name (the profile holds no path: it goes with `HOME`).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+const GLOBAL_PREFERENCES: &str =
+    "(regex #\"/Library/Preferences/(ByHost/)?\\.GlobalPreferences[^/]*\\.plist$\")";
+
+/// The services every run is refused that tools go on without (macdeny, measured: compat's stacks, tarae's own
+/// tests) — a run that passed refused only these, or LaunchServices (`NO_WAY_OUT`), isn't told as blocked
+/// (`Denial::by_design`): (service, in words).
+const BY_DESIGN: [(&str, &str); 9] = [
+    ("com.apple.SystemConfiguration.configd", "the network's settings"),
+    ("com.apple.SystemConfiguration.DNSConfiguration", "the resolver's settings"),
+    ("com.apple.CoreServices.coreservicesd", "Launch Services' server"),
+    ("com.apple.DiskArbitration.diskarbitrationd", "the disks' server"),
+    ("com.apple.metadata.mds", "Spotlight"),
+    ("com.apple.analyticsd", "Apple's analytics"),
+    ("com.apple.distributed_notifications@Uv3", "notifications to other apps"),
+    ("com.apple.sysmond", "the process list (pgrep, top)"),
+    ("com.apple.FSEvents", "the disk's file events (Gradle's watching: it polls instead)"),
+];
+
+/// Certificates' trust service: Go (and what else verifies TLS with Security.framework) asks it, through tarae's
+/// proxy too — its tunnel leaves TLS to the run. It fetches revocation and issuers itself, outside the sandbox,
+/// so only a run that reaches beyond this machine gets it (as srt's `enableWeakerNetworkIsolation`).
+#[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
+const TRUSTD: &str = "mach-lookup (global-name \"com.apple.trustd.agent\")";
 
 /// macOS's terminals — the user's shells', tarae's own, other sessions' runs' — closed to a run, read and write
 /// (3c): Seatbelt matches paths and a pty a run makes is one of these names too (reused, lowest free first),
@@ -2805,7 +2956,7 @@ pub fn is_terminal(path: &Path) -> bool {
 #[cfg_attr(target_os = "linux", allow(dead_code))] // (Seatbelt's — its tests run everywhere)
 fn devices_rule() -> String {
     let filters: String = DEVICES.iter().map(|(f, a)| format!(" ({f} \"{a}\")")).collect();
-    format!("(allow file-write*{filters})\n")
+    format!("(allow file-write* file-ioctl{filters})\n")
 }
 
 /// The device places a run writes (`Policy::write_places`): the files and folders the platform's rules name
@@ -3013,14 +3164,11 @@ fn probe_now() -> Availability {
     if !cfg!(target_os = "macos") {
         return Availability::Missing("this system has no sandbox tarae can use yet".into());
     }
-    let out = Command::new(SANDBOX_EXEC)
-        .args([
-            "-p",
-            "(version 1)(allow default)(deny file-write* (literal \"/tarae-probe\"))",
-            "/usr/bin/true",
-        ])
-        .stdin(Stdio::null())
-        .output();
+    // (as every run's profile starts: a macOS where that can't start a program says so here, not at each run)
+    let base: String = BASE.iter().map(|(rule, _)| format!("(allow {rule})")).collect();
+    let profile = format!("(version 1)(deny default){base}(allow file-read*)");
+    let out =
+        Command::new(SANDBOX_EXEC).args(["-p", &profile, "/usr/bin/true"]).stdin(Stdio::null()).output();
     match out {
         Ok(o) if o.status.success() => Availability::Ready,
         Ok(o) => Availability::Missing(missing_why(&String::from_utf8_lossy(&o.stderr))),
@@ -4555,8 +4703,8 @@ mod tests {
         // (the profile's device rule as it was written by hand)
         assert_eq!(
             devices_rule(),
-            "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
-             (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))\n"
+            "(allow file-write* file-ioctl (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") \
+             (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))\n"
         );
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&cache).ok();
@@ -6192,7 +6340,7 @@ mod tests {
         assert!(!text.contains("/Users/u"), "{text}");
         assert!(text.contains("(require-not (subpath (param \"P0\")))"));
         assert!(text.contains("(subpath (param \"W3\"))") && !text.contains("W4"));
-        assert!(text.contains("(deny network*)") && text.contains("(deny appleevent-send)"));
+        assert!(text.starts_with("(version 1)\n(deny default)\n") && text.contains("(deny appleevent-send)"));
         // The caches kept after the allows, and cargo's own files in them let through after that
         let kept = "(deny file-write* (subpath (param \"K0\")) (subpath (param \"K1\")) (subpath (param \"C0\")) \
                     (subpath (param \"C1\")))";
@@ -6210,8 +6358,10 @@ mod tests {
         let open = Policy::for_project(&Env { network: true, ..env(root) });
         let text = open.profile();
         assert!(!text.contains("(param \"C0\")"), "{text}");
-        // (the open network goes out through tarae's proxy: every connect but the opened ones denied — step 5d)
-        assert!(text.contains("(deny network*)"), "{text}");
+        // (the open network goes out through tarae's proxy: every connect but the opened ones denied — step 5d,
+        // by the default since macdeny)
+        assert!(text.starts_with("(version 1)\n(deny default)\n"), "{text}");
+        assert!(!text.contains("(allow network-outbound (remote ip \"*"), "{text}");
         assert!(
             text.contains("(deny network-outbound (remote unix-socket))"),
             "sockets stay guarded: {text}"
@@ -6314,7 +6464,12 @@ mod tests {
         let keys = "(deny file-read-data file-read-xattr (require-all (subpath (param \"ROOT\"))";
         let reads: Vec<&str> = text
             .lines()
-            .filter(|l| l.contains("file-read") && !l.contains(TERMINALS) && !l.starts_with(keys))
+            .filter(|l| {
+                l.contains("file-read")
+                    && !l.contains(TERMINALS)
+                    && !l.starts_with(keys)
+                    && *l != "(allow file-read*)"
+            })
             .collect();
         assert!(reads.is_empty() && !text.contains("HOME"), "{text}");
         assert!(none.reads_allow(Path::new("/Users/u/.ssh/id")), "not confined without a home");
@@ -8192,6 +8347,135 @@ mod tests {
         assert!(g.report_with(&out, Told::default(), true).blocked);
     }
 
+    /// macdeny: the services refused by design that tools go on without (`BY_DESIGN` — cargo's look-up of the
+    /// network's settings, the JVM's of the disks' server) and a file system's control call are said calmly in a
+    /// run that passed, each in its words; one service not on the list is blocked as ever.
+    #[test]
+    fn a_run_refused_only_by_design_is_calm_when_it_passed() {
+        let p = Policy { tag: Some("t.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let looked = |process: &str, target: &str| Denial {
+            process: process.into(),
+            op: "mach-lookup".into(),
+            target: target.into(),
+        };
+        let w = Watch::quiet("t.");
+        w.record(looked("cargo", "com.apple.SystemConfiguration.configd"));
+        w.record(looked("java", "com.apple.DiskArbitration.diskarbitrationd"));
+        w.record(Denial {
+            process: "bsdtar".into(),
+            op: "system-fsctl".into(),
+            target: "(_IO \"A\" 4)".into(),
+        });
+        let g = Guard::In(Box::new(Policy { watch: Some(w.clone()), ..p.clone() }));
+        let r = g.report_with(&[], Told::default(), true);
+        assert!(!r.blocked && r.open.is_empty(), "{}", r.text);
+        assert!(
+            r.text.starts_with(
+                "The sandbox blocked only what every run is refused by design — a file system's control call \
+                 (_IO \"A\" 4), the disks' server (com.apple.DiskArbitration.diskarbitrationd), the network's \
+                 settings (com.apple.SystemConfiguration.configd) (bsdtar, cargo, java) — nothing opens it, and the \
+                 run passed without it. "
+            ),
+            "{}",
+            r.text
+        );
+        assert!(
+            g.report_with(&[], Told::default(), false).blocked,
+            "a failed run lists them: they may be why"
+        );
+        w.record(looked("x", "com.apple.other"));
+        let r = g.report_with(&[], Told::default(), true);
+        assert!(r.blocked && r.text.contains("  the service com.apple.other (mach-lookup, x)"), "{}", r.text);
+    }
+
+    /// macdeny: denied by default, as srt's profile is — the first rule after the version, with the run's tag,
+    /// and every deny after it carries the tag too, so the watch reads each refusal as the run's.
+    #[test]
+    fn the_profile_denies_by_default() {
+        let p =
+            Policy { tag: Some("tarae-1-2.".into()), ..Policy::for_project(&env(Path::new("/Users/u/p"))) };
+        let text = p.profile();
+        assert!(text.starts_with("(version 1)\n(deny default (with message \"tarae-1-2.\"))\n"), "{text}");
+        assert!(!text.contains("(allow default"), "{text}");
+        for l in text.lines().filter(|l| l.starts_with("(deny")) {
+            assert!(l.ends_with(" (with message \"tarae-1-2.\"))"), "untagged: {l}");
+        }
+        // (the base right after it, in its order)
+        let base: String = BASE.iter().map(|(rule, _)| format!("(allow {rule})\n")).collect();
+        assert!(text.contains(&format!("(deny default (with message \"tarae-1-2.\"))\n{base}")), "{text}");
+    }
+
+    /// Nothing allowed just in case: every `BASE` row says what needed it, and none opens a whole operation that
+    /// reaches past the run — services, the system's settings, IOKit, preferences, the network — nor one of the
+    /// services kept from every run (the keychain, the clipboard, LaunchServices, cfprefsd — which hands out any
+    /// domain —, trust's service but where the network goes, the ones refused by design).
+    #[test]
+    fn every_base_rule_says_why_and_names_no_wildcard() {
+        let whole =
+            ["mach-lookup", "sysctl-read", "sysctl-write", "iokit-open", "user-preference-read", "network"];
+        let kept =
+            ["SecurityServer", "securityd", "pasteboard", "launchservicesd", "lsd.", "cfprefsd", "trustd"];
+        for (rule, why) in BASE {
+            assert!(!why.trim().is_empty(), "{rule}: no why");
+            let op = rule.split_whitespace().next().unwrap();
+            assert!(
+                !whole.iter().any(|w| op.starts_with(w)) || rule.contains('('),
+                "a whole operation: {rule}"
+            );
+            // (what reaches another process: only the run's own — srt's `same-sandbox`)
+            let processes = ["process-info", "mach-priv", "signal", "mach-task", "system-debug"];
+            assert!(
+                !processes.iter().any(|w| op.starts_with(w)) || rule.ends_with(" (target same-sandbox)"),
+                "another process: {rule}"
+            );
+            assert!(!rule.contains("global-name-prefix") && !rule.contains("iokit"), "{rule}");
+            assert!(!rule.contains("user-preference") && !rule.contains("network"), "{rule}");
+            assert!(!kept.iter().any(|k| rule.contains(k)), "a kept service: {rule}");
+            assert!(!BY_DESIGN.iter().any(|(s, _)| rule.contains(s)), "refused by design: {rule}");
+            assert!(!rule.contains("procargs"), "other processes' command lines: {rule}");
+            assert!(
+                !rule.contains("ipc-sysv") && !rule.contains("system-sched"),
+                "another's memory, priority"
+            );
+        }
+    }
+
+    /// Trust's service only where the run reaches beyond this machine as it starts: the network open with a host
+    /// it may reach (any, the settings' hosts, an answer kept) and its port to the proxy — never with the network
+    /// closed (every host asked), nor without a port.
+    #[test]
+    fn trustd_only_where_the_network_goes() {
+        let p = Policy::for_project(&Env { network: true, ..env(Path::new("/Users/u/p")) });
+        let port = Some(proxy::RunPort::new(0).unwrap());
+        let has = |p: &Policy| p.profile().contains(&format!("(allow {TRUSTD})"));
+        let mut any = Policy { proxy: port.clone(), ..p.clone() };
+        any.egress.any = true;
+        assert!(has(&any));
+        let mut answered = Policy { proxy: port.clone(), ..p.clone() };
+        answered.egress = Default::default();
+        answered.egress.answered = vec![("crates.io".into(), 443)];
+        assert!(has(&answered));
+        let mut asked = Policy { proxy: port.clone(), ..p.clone() };
+        asked.egress = proxy::egress::Egress { closed: true, ..Default::default() };
+        assert!(!has(&asked), "every host asked: none reached as it starts");
+        assert!(!has(&Policy { proxy: None, ..any.clone() }), "no port to the proxy");
+        assert!(!has(&Policy { network: false, ..any }), "the network off");
+    }
+
+    /// A pty only with the terminals grant (srt's `allowPty`): without it no `pseudo-tty` and `/dev/ptmx` closed to
+    /// writes, the terminals denied; with it all three open.
+    #[test]
+    fn ptys_only_with_the_terminals_grant() {
+        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let closed = p.profile();
+        assert!(!closed.contains("pseudo-tty") && !closed.contains("/dev/ptmx"), "{closed}");
+        assert!(closed.contains(&format!("(deny file-read-data file-write* (regex #\"{TERMINALS}\"))")));
+        let open = Policy { terminals: true, ..p }.profile();
+        assert!(open.contains(&format!(
+            "(allow pseudo-tty)\n(allow file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\"))\n"
+        )));
+    }
+
     /// A quiet write is quiet only at its place for the home on this system — macOS's `~/Library/Application
     /// Support/go/telemetry`, Linux's where `XDG_CONFIG_HOME` puts it (else `~/.config`): the same tail in the
     /// project, elsewhere in home or in the other system's form is a denial like any, named in the report.
@@ -8570,8 +8854,22 @@ mod tests {
             plain("mach-priv-task-port", "others [tarae(4242)]"),
             "attaching to tarae (4242) — outside the run's own processes"
         );
+        // What the profile's default refuses (macdeny): a service by name, a refused-by-design one in words, the
+        // system's settings, a pty the run makes (the terminals grant's), System V, another's priority
+        assert_eq!(plain("mach-lookup", "com.apple.other"), "the service com.apple.other");
+        assert_eq!(
+            plain("mach-lookup", "com.apple.SystemConfiguration.configd"),
+            "the network's settings (com.apple.SystemConfiguration.configd)"
+        );
+        assert_eq!(plain("sysctl-read", "kern.procargs2.4"), "reading the system's kern.procargs2.4");
+        assert_eq!(plain("sysctl-write", "kern.x"), "setting the system's kern.x");
+        assert!(
+            plain("file-write-data", "/dev/ptmx").starts_with("making a terminal (a pty) — every terminal")
+        );
+        assert!(plain("pseudo-tty", "").starts_with("making a terminal (a pty)"));
+        assert!(plain("ipc-sysv-shm", "").starts_with("System V shared memory"));
+        assert_eq!(plain("system-sched", "pgrp [sleep(5)]"), "another process's priority (pgrp [sleep(5)])");
         // As Seatbelt says it, where there are no plainer words
-        assert_eq!(plain("mach-lookup", "com.apple.other"), "mach-lookup com.apple.other");
         assert_eq!(plain("network-outbound", "remote:*:x"), "network-outbound remote:*:x");
         // Linux's supervisor names the address: this machine's by port, another as it is
         assert_eq!(plain("network-outbound", "remote:127.0.0.1:9"), "connecting to port 9");
@@ -8787,6 +9085,120 @@ mod tests {
             assert_eq!(&got[..n], b"tarae-marker");
         }
         std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// For real, on macOS (macdeny): a run under the deny-default profile does what the tools measured did —
+    /// starts and signals its child, finds the user's name, reads the system's settings through libc, asks
+    /// `/dev/null` (an ioctl), reads the global preferences as outside, takes Python's semaphores and name
+    /// lookups, starts Apple's `java` where there's a JDK — and is refused what the base doesn't hold: `sysctl(8)`'s
+    /// name lookup, the process list (`pgrep`), a pty without the grant, another program's System V segment and
+    /// its priority (both the test's own: a key of its pid's, a `sleep`, removed after). Every refusal is heard
+    /// through the watch with the run's tag, and nothing else is refused — so a `BASE` row taken out fails it
+    /// (`target/sb/macdeny/break.sh`).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn what_the_default_refuses_and_the_base_lets_through() {
+        let test = "sandbox::tests::what_the_default_refuses_and_the_base_lets_through";
+        if skipped_inside(test) {
+            return;
+        }
+        let scratch = crate::scratch::Scratch::new("sb-macdeny");
+        let root = profile_path(&scratch);
+        let mut p = policy(&root, &crate::llm::LlmConfig::default(), &[]).unwrap();
+        p.watch = watch_for(&p);
+        std::thread::sleep(watch_wait(&p));
+        let sh = |script: &str| {
+            let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
+            let o = c.current_dir(&root).stdin(Stdio::null()).output().unwrap();
+            let said =
+                format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), said)
+        };
+        let outside = |program: &str, args: &[&str]| Command::new(program).args(args).output().unwrap();
+        // Processes: a child started, signalled, waited for
+        let (ok, said) = sh("sleep 5 & kill $! && wait $!; test $? -gt 128");
+        assert!(ok, "{said}");
+        // The user's name, as outside (opendirectoryd's libinfo)
+        let name = String::from_utf8_lossy(&outside("/usr/bin/id", &["-un"]).stdout).trim().to_string();
+        assert_eq!(sh("id -un"), (true, format!("{name}\n")));
+        // The system's settings through libc yes; sysctl(8)'s own name lookup isn't in the base
+        let (ok, said) = sh("getconf _NPROCESSORS_ONLN");
+        assert!(ok && said.trim().parse::<u32>().is_ok(), "{said}");
+        assert!(!sh("/usr/sbin/sysctl -n hw.ncpu").0);
+        // A device asked (FIONREAD): /dev/null answers as itself, not refused
+        let fionread = "open my $f, \"<\", \"/dev/null\" or die; my $n = pack(\"L\", 0); \
+                        print ioctl($f, 0x4004667f, $n) ? \"answered\" : \"$!\"";
+        let (_, said) = sh(&format!("perl -e '{fionread}'"));
+        assert!(!said.contains("not permitted"), "{said}");
+        // The system's version (`uname`'s sysctls)
+        let (ok, said) = sh("uname -sr");
+        assert!(ok && said.starts_with("Darwin "), "{said}");
+        // The global preferences, as outside
+        let global = outside("/usr/bin/defaults", &["read", "-g"]).status.success();
+        assert_eq!(sh("defaults read -g > /dev/null").0, global);
+        // Refused: the keychain and the clipboard (nothing pasted is kept; the item looked up doesn't exist), the
+        // process list, a pty without the grant
+        assert!(!sh("pbpaste > /dev/null").0);
+        assert!(!sh("security find-generic-password -s tarae-macdeny-no-such-item > /dev/null 2>&1").0);
+        assert!(!sh("pgrep -x launchd").0);
+        assert!(!sh("/usr/bin/script -q /dev/null /usr/bin/true").0);
+        // Another program's System V segment and its priority: the test's own
+        let key = 0x7a4d_0000 + (std::process::id() & 0xffff);
+        let made = outside(
+            "/usr/bin/perl",
+            &[
+                "-e",
+                &format!(
+                    "use IPC::SysV qw(IPC_CREAT S_IRUSR S_IWUSR); print shmget({key}, 64, IPC_CREAT|S_IRUSR|S_IWUSR) // die"
+                ),
+            ],
+        );
+        let segment = String::from_utf8_lossy(&made.stdout).trim().to_string();
+        assert!(!sh(&format!("perl -e 'shmget({key}, 0, 0) // exit 7'")).0, "another's segment");
+        let mut sleeping = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        assert!(!sh(&format!("renice +1 -p {}", sleeping.id())).0, "another's priority");
+        sleeping.kill().ok();
+        sleeping.wait().ok();
+        let rm = format!("use IPC::SysV qw(IPC_RMID); shmctl({segment}, IPC_RMID, 0) or die");
+        assert!(outside("/usr/bin/perl", &["-e", &rm]).status.success(), "the test's segment removed");
+        // Python's semaphores and name lookups, Apple's java — where they are
+        if outside("/bin/sh", &["-c", "command -v python3"]).status.success() {
+            let lock = "import multiprocessing as m; l = m.Lock(); l.acquire(); l.release(); \
+                        from multiprocessing import shared_memory as s; b = s.SharedMemory(create=True, size=64); \
+                        b.close(); b.unlink()";
+            let names = "import socket; socket.getaddrinfo(\"localhost\", 80); socket.if_nameindex()";
+            let (ok, said) = sh(&format!("python3 -c '{lock}; {names}'"));
+            assert!(ok, "{said}");
+        }
+        if outside("/usr/libexec/java_home", &[]).status.success() {
+            let (ok, said) = sh("java -version");
+            assert!(ok, "{said}");
+        }
+        std::thread::sleep(WATCH_LAST + std::time::Duration::from_millis(500));
+        let seen = p.watch.as_ref().unwrap().blocked().seen;
+        let has = |op: &str, target: &str| seen.iter().any(|d| d.op == op && d.target.contains(target));
+        assert!(has("sysctl-read", "sysctl."), "the default's refusal, heard by its tag: {seen:?}");
+        assert!(has("mach-lookup", "com.apple.sysmond") && has("ipc-sysv-shm", ""), "{seen:?}");
+        assert!(has("system-sched", "") && seen.iter().any(Denial::terminal), "{seen:?}");
+        assert!(
+            has("mach-lookup", "com.apple.pasteboard.") && has("mach-lookup", "com.apple.SecurityServer")
+        );
+        let expected = |d: &Denial| {
+            (d.op == "sysctl-read" && d.target.starts_with("sysctl."))
+                || d.target.starts_with("com.apple.pasteboard.")
+                || KEYCHAIN.contains(&d.target.as_str())
+                || ["ipc-sysv-shm", "system-sched"].contains(&d.op.as_str())
+                || d.target == "com.apple.sysmond"
+                || d.terminal()
+                || d.by_design()
+                // (today's rules, not the base's: the resolver's socket and getaddrinfo's sorting connect — the
+                // network's; the JVM's perf data in temp, which a project there doesn't get)
+                || d.target == "/private/var/run/mDNSResponder"
+                || (d.op == "network-outbound" && d.target.is_empty())
+                || (d.op.starts_with("file-write") && d.target.contains("/hsperfdata_"))
+        };
+        let other: Vec<&Denial> = seen.iter().filter(|d| !expected(d)).collect();
+        assert!(other.is_empty(), "refused besides: {other:?}");
     }
 
     /// Whether the real-sandbox tests of files named like keys run here — else the test says it skips itself and
@@ -10913,7 +11325,14 @@ mod tests {
         {
             let (r, blocked, _) = watched(&format!("warm{i}"), args);
             assert!(r.status.success(), "cargo {args:?}: {}", said(&r));
-            assert_eq!(blocked.total, 0, "cargo {args:?} was denied: {:?}", blocked.seen);
+            // (but what every run is refused by design — cargo's look-ups of the network's settings, Launch
+            // Services' server, the disks', Spotlight, notifications: it goes on without them)
+            let other: Vec<&Denial> = blocked.seen.iter().filter(|d| !d.by_design()).collect();
+            assert!(
+                other.is_empty() && blocked.distinct == blocked.seen.len(),
+                "cargo {args:?} was denied: {:?}",
+                blocked.seen
+            );
         }
         assert_ne!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), unformatted, "fmt wrote");
         let after = listing(&home);
@@ -10940,7 +11359,7 @@ mod tests {
         let under = |d: &str| home.join(d).display().to_string();
         let denied = |b: &Blocked, d: &str| {
             eprintln!("{d}: the kernel reported {} denials", b.total);
-            b.seen.iter().all(|s| s.target.starts_with(&under(d)))
+            b.seen.iter().filter(|s| !s.by_design()).all(|s| s.target.starts_with(&under(d)))
         };
         assert!(denied(&blocked, "registry/src"), "{:?} — {}", blocked.seen, said(&r));
         for words in
@@ -11238,8 +11657,7 @@ mod tests {
         let said =
             format!("token={};path={}", probe["token"].as_str().unwrap(), probe["path"].as_str().unwrap());
         std::fs::write(dir.join("probe"), said).unwrap();
-        std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new(), Os::HOST).unwrap_or_default())
-            .unwrap();
+        std::fs::write(dir.join("said"), p.run_env.said(&mut Vec::new()).unwrap_or_default()).unwrap();
     }
 
     /// 9c: inside a sandboxed run `TARAE_SANDBOX_STATUS` is its tier — Linux: `<tier>:<ABI>` as the run's guarantees

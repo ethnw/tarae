@@ -292,14 +292,11 @@ const PROCESSES_SAID: &str = " Here a command sees this system's processes — a
      user's others: it can read their command lines and lower their priority, never their environment, nor trace \
      them.";
 
-/// What Seatbelt can't keep apart (step 7, the user's decision 2026-10-10: shared, and said): shared memory, POSIX and
-/// System V — no rule names who made a segment — and `setpriority`, which no operation guards
-/// (`process-info-setcontrol` doesn't: measured). Other processes' command lines and starting environments
-/// (`KERN_PROCARGS2`) are in the processes row's words, and said again once a conversation
-/// (`runenv::OTHERS_READ`). Pinned by `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
-const MAC_SHARED: &str = " Here a command shares System V and POSIX shared memory with other sessions' commands \
-     and the user's other programs — it can read and write what they keep there — and can lower their priority \
-     (renice): macOS's sandbox has no rule for either.";
+/// What Seatbelt can't keep apart and the profile opens (as srt's): POSIX shared memory — no rule names who made a
+/// name. (System V's and `setpriority` its default refuses, a run's own too: macdeny.) Pinned by
+/// `apart::two_sessions_cant_reach_each_others_sockets`.
+const MAC_SHARED: &str = " Here a command shares POSIX shared memory with other sessions' commands and the user's \
+     other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.";
 
 /// Where a Seatbelt policy opens this machine's ports: what listens on them is reached whoever's it is (step 8, user
 /// decision 9: Linux refuses another session's listener there, macOS's sandbox can't tell whose one is).
@@ -388,9 +385,13 @@ impl Guarantees {
         }
     }
 
-    /// A Seatbelt run's: what it keeps (`OWN_PROCESSES`: signals, details, a debugger's attach) and shares
-    /// (`MAC_SHARED`) — and this machine's ports, where `ports` (the policy opens some: llm.sandbox-ports,
-    /// -localhost), whoever listens on them.
+    /// A Seatbelt run's: what it keeps (`OWN_PROCESSES`: signals, details, a debugger's attach — and under the
+    /// profile's default, other processes' command lines and starting environments, `KERN_PROCARGS2`; the default
+    /// itself: System V's shared memory and every process's priority, `ipc-sysv-*`, `system-sched`, its own too;
+    /// macdeny, measured) and shares: POSIX shared memory (`BASE` opens it, as srt — no rule tells whose a name
+    /// is: `MAC_SHARED`) and this machine's ports, where `ports` (the policy opens some: llm.sandbox-ports,
+    /// -localhost), whoever listens on them. Pinned by `apart::two_sessions_cant_reach_each_others_{processes,
+    /// sockets}`.
     pub fn seatbelt(ports: bool, network: bool) -> Guarantees {
         let loopback = if ports { "the ports it opens, whoever's" } else { "none of its ports open" };
         Guarantees {
@@ -398,9 +399,9 @@ impl Guarantees {
             ns: None,
             rows: vec![
                 Row::new(Part::Files, true, "but the temp folders"),
-                Row::new(Part::Processes, false, "command lines, starting environments, priority"),
+                Row::new(Part::Processes, true, ""),
                 Row::new(Part::Signals, true, ""),
-                Row::new(Part::Ipc, false, ""),
+                Row::new(Part::Ipc, true, ""),
                 Row::new(Part::Shm, false, ""),
                 Row::new(Part::Loopback, !ports, loopback),
             ],
@@ -620,12 +621,12 @@ impl Guarantees {
     /// What its runs share, in the report's words (said after the sentence: `told`): Landlock below
     /// ABI 6, the processes in sight without a PID namespace of the session's own, this system's System V IPC,
     /// `/dev/shm` and terminals without the session's namespaces (served, only the terminals it makes), `/dev/shm`
-    /// alone where the session has none of its own; Seatbelt's shared memory and priority, and the ports it opens.
+    /// alone where the session has none of its own; Seatbelt's ports it opens.
     pub fn shared_said(&self) -> String {
         let shared = |p: Part| self.kept(p) == Some(false);
         let abi = match self.by {
             By::Seatbelt => {
-                let mem = if shared(Part::Ipc) || shared(Part::Shm) { MAC_SHARED } else { "" };
+                let mem = if shared(Part::Shm) { MAC_SHARED } else { "" };
                 let ports = if shared(Part::Loopback) { MAC_PORTS } else { "" };
                 return format!("{mem}{ports}");
             }

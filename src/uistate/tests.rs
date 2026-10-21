@@ -1805,8 +1805,8 @@ fn tarae_state_says_the_sandbox() {
     frame(&mut ed);
     ed.session_by_id(id).unwrap().sandbox = Some(Guarantees::seatbelt(false, false));
     let text = ed.ui_state().text();
-    let seatbelt = "sandbox s1: Seatbelt · loopback none of its ports open · network closed · shared processes, \
-                    System V shared memory, POSIX shared memory\n";
+    let seatbelt = "sandbox s1: Seatbelt · loopback none of its ports open · network closed · shared POSIX shared \
+                    memory\n";
     assert!(text.contains(seatbelt), "{text}");
     ed.session_by_id(id).unwrap().sandbox = Some(landlock_run(Ns::session(true, true), true));
     let text = ed.ui_state().text();

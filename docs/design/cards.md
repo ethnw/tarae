@@ -14,8 +14,9 @@ that are left come too often to read: the user counted 20–40 per 30 minutes ac
 and tarae's log shows at least 48 in the busiest half hour today (§1). A person answers that many
 without reading them, so they protect nothing.
 
-The parser has to judge safety because **the sandbox doesn't confine reads**. The profile is
-`(allow default)` plus a deny on writes (`src/sandbox.rs:591-592`). Any command can read `~/.ssh` and
+The parser has to judge safety because **the sandbox doesn't confine reads**. The profile was
+`(allow default)` plus a deny on writes (since 2026-10-17 it denies by default, as srt's —
+`Policy::profile`). Any command can read `~/.ssh` and
 print it, and its output goes to Claude. So tarae has to work out *where a command reads* before it
 runs. That's the job that keeps growing.
 
@@ -353,7 +354,7 @@ in tarae (covered by project trust, unchanged).
 | A run poisons a crate in `~/.cargo/registry/src` | **suspected open** | `registry/src` write-closed while the network is closed (P1, measured); P1b: all of `registry/` (index, cache, src) and `git/` (db, checkouts), but cargo's lock, last-use and `CACHEDIR.TAG` files and its one file-sync mark (measured) |
 | Claude widens its own grants | can't write `$state`, `~/.config/tarae`, `.tarae.toml` (trust-gated) | the same + `.tarae.local.toml`. A grant needs a card; the card states the effect, Claude's reason is secondary; `n` sticks; ≤ 3 per turn |
 | Exfiltration over the network | closed by default; **`localhost:*` opens every local service** (this repo's `.tarae.toml` sets it) | unchanged, but stated on the `:granted` list as a default. Recommend per-port for this repo (the tests only need their own port-0 listeners) |
-| Clipboard, keychain via mach services (`allow default`) | open: `pbpaste`, `security find-generic-password` for items whose ACL trusts `/usr/bin/security` | measure in P2; deny `com.apple.pasteboard.*` and the security server lookups if the toolchains don't need them |
+| Clipboard, keychain via mach services (`allow default` then; denied by default since 2026-10-17) | open: `pbpaste`, `security find-generic-password` for items whose ACL trusts `/usr/bin/security` | measure in P2; deny `com.apple.pasteboard.*` and the security server lookups if the toolchains don't need them |
 | Deleting the user's work in the checkout | a card for `rm`; open through any check's code | snapshot and undo (§3.4) |
 | Card fatigue | 40–80/h, answered by reflex | 1–3/h, each about something new |
 | Resource abuse (disk fill, fork bomb, servers that never end) | open through checks | the same; the lineup and `:procs` (stray child, busy) show it, and stopping the run ends it |

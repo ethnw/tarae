@@ -61,7 +61,9 @@ sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.m
 
 ## 1. Claude's commands (runs)
 
-One sandbox per command on macOS (Seatbelt, `sandbox-exec`). On Linux each session has a *keeper*: a process
+One sandbox per command on macOS (Seatbelt, `sandbox-exec`): denied by default, as Anthropic's sandbox-runtime's
+profile is (2026-10-17) — what every run may ask the system besides files and the network is one table, `BASE` in
+`src/sandbox.rs`, each row with the tool that needed it (measured: compat's stacks, tarae's own tests). On Linux each session has a *keeper*: a process
 that forks every command, born in the session's own namespaces where the system allows; each command gets
 Landlock and seccomp of its own, and tarae decides every call that names an address. How much of that a session
 gets is its **tier** (own, host or offline, §1.8). The rules are the same on both systems; the kernel features differ.
@@ -207,15 +209,20 @@ Kept:
   `sandbox::runenv::tests::credentials_in_passed_families_and_options_stay_out` ·
   `sandbox::tests::a_fake_token_never_reaches_a_sandboxed_run`
 - macOS: the keychain and the clipboard aren't reached (`com.apple.SecurityServer`, `securityd`, the pasteboard).
-  test: `sandbox::golden::the_policy_is_pinned` (rule only — no test runs a keychain lookup under the profile)
+  test: `sandbox::tests::what_the_default_refuses_and_the_base_lets_through` (a look-up of each, refused)
+- macOS: no service, system setting or preference outside `BASE` — every mach service but the user's name and
+  groups, logging and notifications; sysctls but the machine's and the system's facts; no IOKit; preferences only the
+  global domain's plists (cfprefsd is out of reach: it hands out any domain the profile lets it). Trust's service
+  only where the network reaches a host as the run starts (G26).
+  test: `sandbox::tests::what_the_default_refuses_and_the_base_lets_through` ·
+  `sandbox::tests::every_base_rule_says_why_and_names_no_wildcard` · `sandbox::tests::trustd_only_where_the_network_goes`
+- macOS: your other processes' starting environments and command lines aren't read (`KERN_PROCARGS2`): under the
+  deny-default profile `process-info-pidinfo`'s deny keeps them, a run's own still read. (Linux: environments
+  never — test: `landlock::tests::a_confined_run_reads_no_environment_outside_it`; command lines of the processes it
+  sees, §1.9.)
+  test: `sandbox::apart::two_sessions_cant_reach_each_others_processes`
 
 Not kept:
-- **macOS: your other processes' starting environments and command lines.** A run can read them for any process
-  of yours: tarae's, your shell's, another session's runs. No Seatbelt rule closes it (measured on macOS 27). A
-  token you export in your shell is within reach. Claude is told once a conversation, with the names left out, to
-  ask you rather than read them. Keep tokens in files tarae never reads, or the keychain.
-  (Linux: environments never — test: `landlock::tests::a_confined_run_reads_no_environment_outside_it`; command
-  lines of the processes it sees, §1.9.)
 - **A token inside a file that isn't named like a key** and isn't a known tool's settings: `config/prod.yml`
   with a password in it is an ordinary project file.
 - **cargo's `credentials.toml`** isn't read, but cargo takes no copy without it: the report says so in cargo's
@@ -327,10 +334,10 @@ table is the code's — a test fails when they differ.
 | host, Ubuntu's restriction, no profile | tarae's proxy | files (but the temp folders), signals, terminals (only those it makes), loopback (this machine's, other sessions' sockets refused) | processes (command lines, priority), System V IPC, /dev/shm |
 | offline, no namespaces | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
 | offline, no namespaces, Ubuntu's restriction, no profile | no socket | files (but the temp folders), signals, loopback (no socket) | processes (command lines, priority), System V IPC, /dev/shm, terminals |
-| Seatbelt, no port open, the network closed | closed | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports open, the network closed | closed | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
-| Seatbelt, no port open, the network open | tarae's proxy | files (but the temp folders), signals, loopback (none of its ports open) | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory |
-| Seatbelt, ports and the network open | tarae's proxy | files (but the temp folders), signals | processes (command lines, starting environments, priority), System V shared memory, POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network closed | closed | files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open) | POSIX shared memory |
+| Seatbelt, ports open, the network closed | closed | files (but the temp folders), processes, signals, System V shared memory | POSIX shared memory, loopback (the ports it opens, whoever's) |
+| Seatbelt, no port open, the network open | tarae's proxy | files (but the temp folders), processes, signals, System V shared memory, loopback (none of its ports open) | POSIX shared memory |
+| Seatbelt, ports and the network open | tarae's proxy | files (but the temp folders), processes, signals, System V shared memory | POSIX shared memory, loopback (the ports it opens, whoever's) |
 <!-- /tiers -->
 
 Every "kept apart" cell is shown by these (each runs two sessions with stand-ins and tries each channel):
@@ -346,10 +353,10 @@ Every "kept apart" cell is shown by these (each runs two sessions with stand-ins
 
 Below Landlock ABI 6 a run can signal its own session's other commands; at ABI 2 files are shared too.
 
-Not kept — said, not closed: what each tier's "Shared" column lists. Without the session's namespaces, and always on macOS, shared memory
-(SysV, POSIX) is reachable: a run can read and write what another session's commands — or your other programs —
-keep there. On macOS a loopback port it may reach is reached whoever listens there: Seatbelt can't tell whose a
-listener is.
+Not kept — said, not closed: what each tier's "Shared" column lists. Without the session's namespaces shared memory
+(SysV, POSIX) is reachable, and on macOS POSIX's (System V's is refused there, a run's own too: G27): a run can read
+and write what another session's commands — or your other programs — keep there. On macOS a loopback port it may
+reach is reached whoever listens there: Seatbelt can't tell whose a listener is.
 
 ### 1.7 Git
 
@@ -422,8 +429,9 @@ Kept:
   test: `sandbox::golden::the_policy_is_pinned` (rule only)
 
 Not kept:
-- **Command lines and priority**: visible and lowerable (renice) where processes are shared — macOS, and Linux
-  without a PID namespace of the session's (host, and own or offline where `/proc` is masked). macOS: starting environments too (§1.4).
+- **Command lines and priority**: visible and lowerable (renice) where processes are shared — Linux without a PID
+  namespace of the session's (host, and own or offline where `/proc` is masked). (macOS: neither — the profile's
+  default refuses `setpriority`, a run's own too, and §1.4.)
 - **tarae parses what a run sends** — the supervisor reads a run's call arguments from its memory, the proxy
   parses its requests — inside tarae's own process. A bug there is a bug in tarae: a panic ends the editor
   (`panic = "abort"`), a memory-safety bug would own it. Rust, with seeded parser loops
@@ -642,8 +650,8 @@ Not Claude's, but a hostile repository reaches them:
 | G2 | Your own Claude `allow` rules and plugins apply in the chat | they're yours; claude reads them itself | said |
 | G3 | Reads outside home are open | programs need `/usr`, `/opt`; no list | said |
 | G4 | Network on = exfiltration to the packs' registries and the hosts you said yes to; with hosts `"*"`, to any host | registries take uploads; `"*"` favours builds that fetch from anywhere | said; narrowed by C1b (the default was any host); a list narrows more |
-| G5 | macOS: other processes' environments and command lines | no Seatbelt rule | said to Claude and you |
-| G6 | macOS: shared memory, renice, loopback whoever's | no Seatbelt rule | said |
+| G5 | macOS: other processes' environments and command lines | no Seatbelt rule under `(allow default)` | closed: the deny-default profile (2026-10-17) keeps them (test: `sandbox::apart::two_sessions_cant_reach_each_others_processes`) |
+| G6 | macOS: POSIX shared memory, loopback whoever's | no rule names who made a POSIX name (srt allows it too); Seatbelt names ports by `localhost` only | said; System V's and renice closed by the deny-default profile (G27) |
 | G7 | macOS: LAN addresses' risky ports with the network on | Seatbelt names ports by `localhost` only | open; the proxy could check |
 | G8 | macOS: a leftover without its tag isn't ended | no subreaper | said; stays sandboxed |
 | G9 | Linux without namespaces: processes, SysV IPC, `/dev/shm` shared; without a PID namespace: processes | no namespaces there | said; the AppArmor profile gives own namespaces |
@@ -652,7 +660,7 @@ Not Claude's, but a hostile repository reaches them:
 | G12 | The supervisor and proxy parse hostile input inside tarae | threads (D19) | fuzzing; a confined process (D21); a review |
 | G13 | rust-analyzer runs `build.rs`/proc macros untrusted | not tied to trust | later |
 | G14 | The temp folders are shared | D16 | said |
-| G15 | Keychain/Apple Events/LaunchServices denials are pinned, not shown | no behaviour test | the must-be-refused suite |
+| G15 | Apple Events/LaunchServices denials are pinned, not shown | no behaviour test | the must-be-refused suite; the keychain's and the clipboard's are tried (`sandbox::tests::what_the_default_refuses_and_the_base_lets_through`) |
 | G16 | Landlock rules are shown on the kernels CI and the test machines have | kernels differ | the suite on several kernels |
 | G17 | claude's own git reads a repository's config (`core.fsmonitor` …) | it's claude's, not tarae's | measured: its git didn't run the fsmonitor that a plain `git status` there runs (2.1.296) |
 | G18 | `llm.sandbox = false` runs Claude's commands unconfined with no card | your choice, said in the title | said; a project needs your trust to set it |
@@ -660,6 +668,8 @@ Not Claude's, but a hostile repository reaches them:
 | G20 | claude inherited `SSH_AUTH_SOCK`: the agent signed with your keys for it | claude runs as you (G1) | narrowed: no claude tarae starts gets `SSH_AUTH_SOCK` (test: `llm::tests::every_claude_tarae_starts_has_no_ssh_agent`); left: an agent socket claude finds on its own is reached |
 | G21 | Claude Code's auto-memory (`~/.claude/projects/<project>/memory/`) was read unasked, shared by every checkout | inside claude's own folder | closed: tarae starts every claude with auto memory off (test: `llm::tests::every_claude_tarae_starts_has_its_memory_off`); left: claude's own code could still read it, as G1 |
 | G23 | macOS: a folder renamed into the project carries protected names past their deny — Seatbelt checks a rename's two paths, not what's in it: a run makes `x/` in temp holding `build.rs`/`Cargo.toml`/`.cargo/`, then moves it to the project as `crates/x` | no Seatbelt rule for a folder's contents on rename | caught after the run, asked before anything runs it, as G10 (§1.2: new files, ignored folders' names, names past 5,000 new files, links, repositories); left: an ignored folder that was there before, what a leftover makes later, no git checkout, your tests and `:restart`'s build |
+| G26 | macOS: where the network reaches a host as the run starts, trust's service (`com.apple.trustd.agent`) is reachable, and it fetches revocation lists and issuers itself, outside tarae's proxy | Go's TLS (and Security.framework's) asks it: without it `x509: OSStatus -26276`, measured | only then (as srt's `enableWeakerNetworkIsolation`), never with every host asked; left: a run can make it fetch a URL a certificate names |
+| G27 | macOS: System V shared memory and `setpriority` are refused a run's own too, and a System V segment it makes can't be removed — `shmget` isn't checked, `shmctl(IPC_RMID)` is refused (measured: the probe's 4 KB segment stayed) | the deny-default profile, as srt's (it allows neither); a segment's key doesn't say whose it is | said; a tool that needs either (a SysV user, `renice`) fails in the sandbox — a `BASE` row only with a measured need |
 
 ## 5. For a reviewer: where to start
 
