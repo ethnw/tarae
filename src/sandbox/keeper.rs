@@ -915,12 +915,17 @@ impl Keeper {
             no_userns,
             ptys,
             shut: covers
-                .filter(|c| !c.keys.is_empty())
+                .filter(|c| !c.keys.is_empty() || !c.loose.is_empty())
                 .and_then(|c| c.shut.as_ref())
                 .map(|s| channel::Covered { dev: s.dev, ino: s.ino, path: bytes(s.path.as_os_str()) }),
             covers: covers
                 .iter()
                 .flat_map(|c| &c.keys)
+                .map(|k| channel::Covered { dev: k.dev, ino: k.ino, path: bytes(k.path.as_os_str()) })
+                .collect(),
+            loose: covers
+                .iter()
+                .flat_map(|c| &c.loose)
                 .map(|k| channel::Covered { dev: k.dev, ino: k.ino, path: bytes(k.path.as_os_str()) })
                 .collect(),
             seals: covers
@@ -2033,21 +2038,38 @@ struct Exec {
 struct Covering {
     shut: Option<(CString, u64, u64)>,
     keys: Vec<(CString, u64, u64)>,
+    loose: Vec<(CString, u64, u64)>,
     seals: Vec<(CString, u64, u64)>,
     pins: Vec<(CString, u64, u64)>,
     uid_map: CString,
     gid_map: CString,
     last_cap: libc::c_ulong,
+    /// Test builds: the one file the child removes between opening it and mounting over it — the two-deep test's own,
+    /// in its own scratch folder (`gone_in_the_window`), none for any other run.
+    #[cfg(test)]
+    gone_in_the_window: Option<CString>,
+}
+
+/// Test builds: the file of the two-deep test's window case — in the scratch folder its run's project is in
+/// (`tarae-sb-keys-two-deep-<pid>-<n>/project`, `scratch::Scratch`), at `granted/a/b/gone-in-the-window.pem`, a real path; none for any other run.
+#[cfg(test)]
+fn gone_in_the_window(run: &channel::Run) -> Option<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    let cwd = std::path::Path::new(std::ffi::OsStr::from_bytes(&run.cwd));
+    let scratch = std::fs::canonicalize(cwd.parent()?).ok()?;
+    let ours = scratch.file_name()?.to_string_lossy().starts_with("tarae-sb-keys-two-deep-");
+    let at = scratch.join("granted/a/b/gone-in-the-window.pem");
+    ours.then(|| CString::new(at.as_os_str().as_bytes()).ok()).flatten()
 }
 
 impl Covering {
     fn of(run: &channel::Run) -> Option<Covering> {
-        if run.covers.is_empty() && run.seals.is_empty() {
+        if run.covers.is_empty() && run.loose.is_empty() && run.seals.is_empty() {
             return None;
         }
         let c = |s: &[u8]| CString::new(s).unwrap_or_default();
         // (keys need the shut file — `channel::valid_run` holds a run to it)
-        let shut = match (&run.shut, run.covers.is_empty()) {
+        let shut = match (&run.shut, run.covers.is_empty() && run.loose.is_empty()) {
             (Some(s), false) => Some((c(&s.path), s.dev, s.ino)),
             (None, true) => None,
             _ => return None,
@@ -2061,11 +2083,14 @@ impl Covering {
         Some(Covering {
             shut,
             keys: run.covers.iter().map(|k| (c(&k.path), k.dev, k.ino)).collect(),
+            loose: run.loose.iter().map(|k| (c(&k.path), k.dev, k.ino)).collect(),
             seals: run.seals.iter().map(|s| (c(&s.path), s.dev, s.ino)).collect(),
             pins: run.pins.iter().map(|s| (c(&s.path), s.dev, s.ino)).collect(),
             uid_map: c(format!("{uid} {uid} 1\n").as_bytes()),
             gid_map: c(format!("{gid} {gid} 1\n").as_bytes()),
             last_cap,
+            #[cfg(test)]
+            gone_in_the_window: gone_in_the_window(run),
         })
     }
 }
@@ -2209,22 +2234,39 @@ unsafe fn cover(c: &Covering) -> Result<(), i32> {
         for (path, dev, ino) in &c.seals {
             seal(path, *dev, *ino, true)?;
         }
-        for (path, dev, ino) in &c.keys {
+        // (the keys outside the project, `loose` — D-i: where every program writes, `/tmp`: one gone since the walk,
+        // or another file at its name now, is left — a key made since, found by the next run's walk; the run starts)
+        let all = c.keys.iter().map(|k| (k, true)).chain(c.loose.iter().map(|k| (k, false)));
+        for ((path, dev, ino), must) in all {
             let mut how: libc::open_how = std::mem::zeroed();
             how.flags = (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
             how.resolve = libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
             let size = std::mem::size_of::<libc::open_how>();
             let key = libc::syscall(libc::SYS_openat2, libc::AT_FDCWD, path.as_ptr(), &raw const how, size);
             if key < 0 {
+                if !must {
+                    continue;
+                }
                 return Err(errno());
             }
             let key = key as libc::c_int;
+            // (the test of the window below: the two-deep test's own loose key, in its own scratch folder, is
+            // removed once opened, as another program in `/tmp` may — that one file, its path whole)
+            #[cfg(test)]
+            if let Some(gone) =
+                c.gone_in_the_window.as_ref().filter(|g| !must && g.as_bytes() == path.as_bytes())
+            {
+                libc::unlink(gone.as_ptr());
+            }
             let mut st: libc::stat = std::mem::zeroed();
             let same = libc::fstat(key, &mut st) == 0
                 && st.st_mode & libc::S_IFMT == libc::S_IFREG
                 && (st.st_dev as u64, st.st_ino as u64) == (*dev, *ino);
             if !same {
                 libc::close(key);
+                if !must {
+                    continue;
+                }
                 return Err(libc::ESTALE);
             }
             // (the shut file through no link, and only the one tarae checked — swapped since, it fails as a key does)
@@ -2278,7 +2320,9 @@ unsafe fn cover(c: &Covering) -> Result<(), i32> {
             let e = errno();
             libc::close(tree);
             libc::close(key);
-            if !done {
+            // (a loose key removed since it was opened: the kernel mounts on no file that's gone — ENOENT — and
+            // there's nothing left at its name to read)
+            if !done && !(e == libc::ENOENT && !must) {
                 return Err(e);
             }
         }

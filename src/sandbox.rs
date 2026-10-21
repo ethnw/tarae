@@ -339,7 +339,11 @@ impl Guard {
         if ps.is_some() {
             said.retain(|d| d.target != PS);
         }
-        let ps = ps.unwrap_or_default();
+        // (a hidden key the run couldn't write, remove or rename is said as hidden — D-i; its refusal stays listed,
+        // the panel's "that file only" being what lets runs use it)
+        let (hidden, _) = hidden_keys_said(output, &p.hidden_keys(), p.from());
+        let ps_hidden = format!("{}{hidden}", ps.unwrap_or_default());
+        let ps = ps_hidden.as_str();
         let mut o = Blocked::default();
         for d in p.merge_made(&mut b.seen, said) {
             o.add(d);
@@ -856,7 +860,7 @@ impl Guard {
                 // (7a, 7b — names from the data, `secretnames`; what a file made beside one does on Linux is
                 // `linux::unread_said`'s, in the notes)
                 // (macOS: in the places outside a grant or a default opened too — Landlock only grants, so Linux
-                // closes them in the project alone)
+                // closes them in the project, and outside it only tier own's mounts do: `linux::outside_said`)
                 let keys = match (p.keys.is_some(), !p.supervised) {
                     (true, true) => {
                         " In the project, the repository's other checkouts, the temp folders and what the user let it \
@@ -3380,6 +3384,51 @@ fn paths_in(line: &str, root: &Path) -> Vec<PathBuf> {
         .map(folded)
         .filter(|p| !p.starts_with("/dev"))
         .collect()
+}
+
+/// What the report says when the output shows a file named like a key its run's mounts hid (`hidden`,
+/// `Policy::hidden_keys`: 7d, D-i) refused what only that mount refuses — a removal or rename ("Device or resource
+/// busy") or a write over it ("Read-only file system": `>` regenerating a key an earlier run left) — on a line
+/// naming it: each named (a few, then how many more), that it's hidden, that the run's panel lets runs use it (that
+/// file only: the walk leaves it out then) and that once the user removes it the next run's walk finds it gone.
+/// Nothing where there's none. The refusal itself is still listed as the panel's to open. Any OS: the output alone.
+pub(crate) fn hidden_keys_said(
+    output: &[(bool, String)],
+    hidden: &[PathBuf],
+    from: &Path,
+) -> (String, Vec<PathBuf>) {
+    const SAID: usize = 3;
+    let mut busy: Vec<PathBuf> = Vec::new();
+    let mounts = |l: &str| ["resource busy", "read-only file system"].iter().any(|w| l.contains(w));
+    for (_, l) in output.iter().filter(|(_, l)| mounts(&l.to_ascii_lowercase())) {
+        for real in paths_in(l, from).into_iter().chain(named_in(l, from)) {
+            if hidden.contains(&real) && !busy.contains(&real) {
+                busy.push(real);
+            }
+        }
+    }
+    let mut named: Vec<String> = busy.iter().take(SAID).map(|k| crate::allow::tilde(k)).collect();
+    if busy.len() > SAID {
+        named.push(format!("{} more", busy.len() - SAID));
+    }
+    let text = match busy.len() {
+        0 => String::new(),
+        1 => format!(
+            "{} is named like a key, so every run's mounts hide it while it's there: a run can't read, write, \
+             remove or rename it (Permission denied, Read-only file system, Device or resource busy). If the \
+             command needs it, tell the user: the run's panel lets runs use that file only, or they can remove it \
+             — the next run's walk then finds it gone.\n",
+            named[0]
+        ),
+        _ => format!(
+            "{} are named like keys, so every run's mounts hide them while they're there: a run can't read, \
+             write, remove or rename them (Permission denied, Read-only file system, Device or resource busy). If \
+             the command needs them, tell the user: the run's panel lets runs use each file, or they can remove \
+             them — the next run's walk then finds them gone.\n",
+            named.join(", ")
+        ),
+    };
+    (text, busy)
 }
 
 /// The relative names a line of output gives files by — quoted (`'src/x'`, `‘x’`, `"x"`), `sh`'s `cannot
@@ -10758,6 +10807,51 @@ mod tests {
         assert!(p.said_in_output(&allowed, &[]).is_empty(), "the rules let it write there");
     }
 
+    /// D-i: a file named like a key its run's mounts hid that the output says it couldn't remove or rename (busy) or
+    /// write over (read-only) is said as hidden — named, the panel's to open, gone for the next run's walk once the
+    /// user removes it — by its path or by a name from where the run ran; never one not hidden, nor one on a line
+    /// saying neither. A few named, then how many more. (Any OS: the output alone; on Linux the report adds it — the
+    /// two-deep test, tier own.)
+    #[test]
+    fn a_hidden_key_the_run_couldnt_change_is_said() {
+        let from = Path::new("/w/g/a");
+        let key = from.join("id_rsa");
+        let hidden = vec![key.clone(), from.join("b.pem")];
+        let out = |lines: &[String]| lines.iter().map(|l| (false, l.clone())).collect::<Vec<_>>();
+        let busy = |what: &str| format!("{what}: Device or resource busy");
+        let (said, named) =
+            hidden_keys_said(&out(&[busy("rm: cannot remove '/w/g/a/id_rsa'")]), &hidden, from);
+        assert_eq!(named, std::slice::from_ref(&key));
+        assert!(
+            said.starts_with("/w/g/a/id_rsa is named like a key, so every run's mounts hide it"),
+            "{said}"
+        );
+        assert!(said.contains("the run's panel lets runs use that file only"), "{said}");
+        assert!(said.contains("they can remove it — the next run's walk then finds it gone"), "{said}");
+        // (written over: `>` regenerating it — the read-only mount)
+        let line = "sh: 1: cannot create /w/g/a/id_rsa: Read-only file system".to_string();
+        assert_eq!(hidden_keys_said(&out(&[line]), &hidden, from).1, std::slice::from_ref(&key));
+        // (by its name from where the run ran: mv's)
+        let (_, named) = hidden_keys_said(&out(&[busy("mv: cannot move 'b.pem' to 'c.pem'")]), &hidden, from);
+        assert_eq!(named, [from.join("b.pem")]);
+        // (never: one not hidden; a hidden one on a line not saying busy)
+        for line in
+            [busy("rm: cannot remove '/w/g/a/other.pem'"), "cat: /w/g/a/id_rsa: Permission denied".into()]
+        {
+            assert_eq!(
+                hidden_keys_said(&out(std::slice::from_ref(&line)), &hidden, from),
+                (String::new(), vec![])
+            );
+        }
+        // (a few, then how many more)
+        let many: Vec<PathBuf> = (0..5).map(|i| from.join(format!("k{i}.pem"))).collect();
+        let lines: Vec<String> =
+            many.iter().map(|k| busy(&format!("rm: cannot remove '{}'", k.display()))).collect();
+        let (said, named) = hidden_keys_said(&out(&lines), &many, from);
+        assert_eq!(named, many);
+        assert!(said.contains("/w/g/a/k2.pem, 2 more are named like keys"), "{said}");
+    }
+
     /// A name a call's refusal gives bare — Go's `open fx: permission denied` — is read too, from the folder the run
     /// ran in (compat B11: `go build`'s binary, "the report names no cause"); not a word that isn't after a call.
     #[test]
@@ -12146,6 +12240,172 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn says_one(err: &str, said: &[&str]) -> bool {
         said.iter().any(|s| err.contains(s))
+    }
+
+    /// For real, on Linux (D-i, sandbox D2 A): the files named like keys in a place outside the project a run reads
+    /// are found afresh before each run. A key made two folders down in a granted folder after a first run — the
+    /// place's and the folder between them keep their times (question 4's premise: a cache by the place's own mtime
+    /// would never look again) — is hidden from the next run by a mount, as the project's are (tier own): refused,
+    /// its text not read, the report saying it's hidden, the run's key rule closing it (its panel offers that file);
+    /// one the walk found and gone before the run starts doesn't keep it from starting.
+    /// In tiers host and offline nothing closes it outside the project: read, and nothing says it's hidden.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_key_made_two_deep_in_a_key_place_after_a_run_is_covered_on_the_next_run() {
+        use std::os::unix::fs::MetadataExt;
+        let test = "a_key_made_two_deep_in_a_key_place_after_a_run_is_covered_on_the_next_run";
+        if !keys_tested_here(test) {
+            return;
+        }
+        let (t, root) = key_files("two-deep");
+        let g = std::fs::canonicalize(&t).unwrap().join("granted");
+        std::fs::create_dir_all(g.join("a/b")).unwrap();
+        std::fs::write(g.join("a/b/note.txt"), "a note\n").unwrap();
+        let p = Policy::for_project(&Env {
+            root: root.clone(),
+            key_places: vec![g.clone()],
+            run_env: run_env_here(),
+            ..Env::default()
+        });
+        let run = |p: &Policy| confined(Policy { run: RunDir::new().ok(), ..p.clone() });
+        let first = run(&p);
+        let own = matches!(&first.confine, Some(Ok(c)) if !c.covers.keys.is_empty());
+        // (tier own as root has no mounts of the run's own — said, the key left readable as in host)
+        let tier = match &first.confine {
+            Some(Ok(c)) => c.tier(),
+            _ => "none",
+        };
+        if let Ok(want) = std::env::var("TARAE_EXPECT_TIER") {
+            assert_eq!(tier, want.trim(), "{test}: the tier its runs go at");
+        }
+        let (ok, out, err) =
+            sh_confined(&first, &root, &format!("cat '{}'", g.join("a/b/note.txt").display()));
+        assert!(ok && out.contains("a note"), "the first run reads the folder: {out} {err}");
+        // (the key made after it, two folders down: neither the place's nor the folder between's times move)
+        let stamps = |d: &Path| {
+            let m = std::fs::metadata(d).unwrap();
+            (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
+        };
+        let before = (stamps(&g), stamps(&g.join("a")));
+        let key = g.join("a/b/id_rsa");
+        std::fs::write(&key, "tarae-fake-token").unwrap();
+        assert_eq!((stamps(&g), stamps(&g.join("a"))), before, "a key two deep changed its place's times");
+        let next = run(&p);
+        let (ok, out, err) = sh_confined(&next, &root, &format!("cat '{}'", key.display()));
+        let Some(Ok(c)) = &next.confine else { panic!("the next run's rules: {:?}", next.confine) };
+        let said = linux::covers_said(c);
+        match own {
+            true => {
+                assert!(!ok && !out.contains("tarae-fake-token"), "read on the next run: {out} {err}");
+                assert!(err.contains(KEY_DENIED), "{err}");
+                // (the temp folders are key places too: other files named like keys there may be hidden with it)
+                assert!(c.outside.covered.contains(&key), "{:?}", c.outside);
+                assert!(
+                    said.contains(" found before it started in the places outside the project"),
+                    "{said}"
+                );
+                let closed = matches!(next.key_rule(&key), Some(policy::KeyRule::Closed(_)));
+                assert!(closed, "the run's key rule closes it: its panel offers that file");
+                // (hidden, it can't be removed by the run either — as the project's: busy. A run that may write the
+                // key's folder: a write grant there, still a key place — else Landlock refuses the removal first
+                // (`p` can't write here: the scratch folder holds the project, so `/tmp` isn't a write place))
+                let writable = Policy::for_project(&Env {
+                    root: root.clone(),
+                    key_places: vec![g.clone()],
+                    write: vec![g.display().to_string()],
+                    run_env: run_env_here(),
+                    ..Env::default()
+                });
+                assert!(
+                    writable.writes_allow(&key) && writable.key_places.contains(&g),
+                    "the fixture's premise"
+                );
+                let rm = run(&writable);
+                let (ok, _, err) = sh_confined(&rm, &root, &format!("rm -f '{}'", key.display()));
+                assert!(
+                    !ok && err.contains("busy") && key.exists(),
+                    "a hidden key removed by the run: {err}"
+                );
+                // (and its report says so: named, hidden for the run, gone for the next once the user removes it)
+                let lines: Vec<(bool, String)> = err.lines().map(|l| (false, l.to_string())).collect();
+                let r = Guard::In(Box::new(rm.clone())).report_with(&lines, Told::default(), false);
+                let named = format!(
+                    "{} is named like a key, so every run's mounts hide it",
+                    crate::allow::tilde(&key)
+                );
+                assert!(r.text.contains(&named) && r.text.contains("next run's walk"), "{}", r.text);
+                // (the refusal stays listed for the run's panel — the denials it reads from the output, as
+                // `blocked_run` does — and its choice for it is that file only, by the run's key rule: what lets runs
+                // use it)
+                let denials = rm.said_in_output(&lines, &[]);
+                let caps = crate::caps::Caps { root: root.clone(), ..Default::default() };
+                let choices = crate::blocked::choices_by(&denials, &caps, Some(&rm.key_rules()));
+                let that_file = choices.iter().any(|c| c.grant == crate::allow::Grant::Key(key.clone()));
+                assert!(r.blocked && that_file, "{denials:?} {choices:?}");
+                // (one found by the walk and gone before the run started — `/tmp` is everyone's: the run starts —;
+                // one swapped for another file since — that one's new since the walk, the next run's to find: the
+                // run starts and reads it; and one removed between the child's opening it and its mount over it: no
+                // file left to mount on)
+                let cases = [
+                    ("gone.pem", "before the run"),
+                    ("swapped.pem", "swapped"),
+                    ("gone-in-the-window.pem", "in the window"),
+                ];
+                for (name, at) in cases {
+                    let gone = g.join("a/b").join(name);
+                    std::fs::write(&gone, "tarae-fake-token").unwrap();
+                    let then = run(&p);
+                    let Some(Ok(tc)) = &then.confine else { panic!("{at}: {:?}", then.confine) };
+                    assert!(tc.outside.covered.contains(&gone), "{at}: the walk found it: {:?}", tc.outside);
+                    let (read, want) = match name {
+                        "gone.pem" => {
+                            std::fs::remove_file(&gone).unwrap();
+                            (g.join("a/b/note.txt"), "a note")
+                        }
+                        "swapped.pem" => {
+                            let new = g.join("a/b/new.txt");
+                            std::fs::write(&new, "new since the walk").unwrap();
+                            std::fs::rename(&new, &gone).unwrap();
+                            (gone.clone(), "new since the walk")
+                        }
+                        _ => (g.join("a/b/note.txt"), "a note"),
+                    };
+                    let (ok, out, err) = sh_confined(&then, &root, &format!("cat '{}'", read.display()));
+                    assert!(ok && out.contains(want), "a key gone {at} stopped the run: {out} {err}");
+                    match name {
+                        "swapped.pem" => std::fs::remove_file(&gone).unwrap(),
+                        _ => assert!(!gone.exists(), "{at}: the test build's child removes it once opened"),
+                    }
+                }
+                // (a project with no keys of its own and no folder for its run: the keys outside left open and said
+                // why — never that files named like keys are closed by their folders' rules, nothing being closed; the
+                // protected names' own sentence about their folders' rules is main's seal wording, said regardless)
+                let empty = std::fs::canonicalize(&t).unwrap().join("keyless");
+                std::fs::create_dir_all(&empty).unwrap();
+                let bare = confined(Policy::for_project(&Env {
+                    root: empty,
+                    key_places: vec![g.clone()],
+                    run_env: run_env_here(),
+                    ..Env::default()
+                }));
+                let Some(Ok(b)) = &bare.confine else { panic!("no run folder: {:?}", bare.confine) };
+                let said = linux::covers_said(b);
+                let keys_closed = "Files named like keys are closed by their folders' rules";
+                assert!(b.split_why.is_none() && !said.contains(keys_closed), "{said}");
+                let open =
+                    b.outside.open.iter().any(|(k, why)| *k == key && why.contains("no folder of its own"));
+                assert!(open && said.contains("stays readable"), "{:?} {said}", b.outside);
+            }
+            false => {
+                assert!(
+                    ok && out.contains("tarae-fake-token"),
+                    "host, offline: nothing closes it: {out} {err}"
+                );
+                assert!(c.outside == linux::Outside::default() && !said.contains("found before it started"));
+                assert_eq!(next.key_rule(&key), None);
+            }
+        }
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// For real, on Linux where a run's keeper is in a user namespace (7d): its folders whole, a file is made,

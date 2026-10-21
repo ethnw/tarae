@@ -28,6 +28,7 @@
 //! `UNGRANTED`): tarae makes those calls for it.
 
 use std::io;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -131,6 +132,10 @@ pub struct Confine {
     pub closed_whole: Vec<PathBuf>,
     /// The keys with a name outside the project (`There.unseen`), relative to it — said.
     pub unseen: Vec<PathBuf>,
+    /// The files named like keys in the places outside the project its runs read (`Policy::key_places`), where its
+    /// child mounts (tier own, D-i): those hidden by mounts as the project's are, those left open, and the folders
+    /// the walk didn't reach (`outside_keys`).
+    pub outside: Outside,
     /// The fileless folders under protected ones, made again after a run (`Kept`).
     pub kept: Arc<Kept>,
     /// The session's keeper, which forks the run (`sandbox::confined` finds or makes it) — None until then.
@@ -156,7 +161,7 @@ impl Confine {
     #[cfg(test)]
     pub fn rules_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         assert!(
-            self.covers.keys.is_empty() && self.covers.seals.is_empty(),
+            self.covers.keys.is_empty() && self.covers.loose.is_empty() && self.covers.seals.is_empty(),
             "these rules come with files hidden or sealed by mounts: start_confined"
         );
         self.rules.fd()
@@ -206,6 +211,7 @@ impl PartialEq for Confine {
             && self.seal_why == other.seal_why
             && self.elsewhere == other.elsewhere
             && self.unseen == other.unseen
+            && self.outside == other.outside
             && Arc::ptr_eq(&self.made, &other.made)
             && Arc::ptr_eq(&self.kept, &other.kept)
             && Arc::ptr_eq(&self.rules, &other.rules)
@@ -586,7 +592,7 @@ pub fn covers_said(c: &Confine) -> String {
             if places.len() == 1 { "es" } else { "" }
         ),
     };
-    let how = match (c.covers.keys.is_empty(), &c.split_why) {
+    let how = match (c.covers.keys.is_empty() && c.covers.loose.is_empty(), &c.split_why) {
         (true, Some(why)) => format!(
             " Files named like keys are closed by their folders' rules here, not hidden by mounts of the run's own: \
              {why}."
@@ -633,7 +639,80 @@ pub fn covers_said(c: &Confine) -> String {
         ),
         (true, None) => String::new(),
     };
-    format!("{how}{sealed}{elsewhere}{holes}{whole}{unseen}")
+    format!("{how}{sealed}{elsewhere}{holes}{whole}{unseen}{}", outside_said(&c.outside))
+}
+
+/// What the report says of the files named like keys in the places outside the project a run reads (D-i): how many
+/// its mounts hide, each left readable and why, and the folders not looked through past `WALK_MAX` — nothing
+/// where there's none.
+pub fn outside_said(o: &Outside) -> String {
+    const SAID: usize = 3;
+    let covered = match o.covered.len() {
+        0 => String::new(),
+        n => format!(
+            " {n} {} found before it started in the places outside the project it reads (the repository's other \
+             checkouts, the temp folders, what the user let it read or write) {} hidden by mounts too if still \
+             there as found — one gone or replaced since isn't.",
+            if n == 1 { "file named like a key" } else { "files named like keys" },
+            if n == 1 { "is" } else { "are" }
+        ),
+    };
+    let mut open: String = o
+        .open
+        .iter()
+        .take(SAID)
+        .map(|(k, why)| format!(" {} is named like a key and stays readable: {why}.", crate::allow::tilde(k)))
+        .collect();
+    if o.open.len() > SAID {
+        open += &format!(" So do {} more files named like keys outside the project.", o.open.len() - SAID);
+    }
+    let unwalked = match o.unwalked.as_slice() {
+        [] => String::new(),
+        folders => {
+            let mut named: Vec<String> =
+                folders.iter().take(SAID).map(|d| format!("{}/", crate::allow::tilde(d))).collect();
+            if folders.len() > SAID {
+                named.push(format!("{} more folders", folders.len() - SAID));
+            }
+            format!(
+                " The places outside the project it reads hold more than the {} entries looked through before a \
+                 command: {} weren't, and a file named like a key there stays readable.",
+                crate::features::thousands(WALK_MAX as u64),
+                named.join(", ")
+            )
+        }
+    };
+    let mounts = match o.mounts.as_slice() {
+        [] => String::new(),
+        at => {
+            let mut named: Vec<String> =
+                at.iter().take(SAID).map(|d| format!("{}/", crate::allow::tilde(d))).collect();
+            if at.len() > SAID {
+                named.push(format!("{} more", at.len() - SAID));
+            }
+            format!(
+                " Another filesystem mounted below the places outside the project it reads, or a place on one that can \
+                 hang (a network's, FUSE's), isn't looked through before a command (one that hangs would hold every \
+                 run): {} — a file named like a key there stays readable.",
+                named.join(", ")
+            )
+        }
+    };
+    let mut failed: String = o
+        .failed
+        .iter()
+        .take(SAID)
+        .map(|(d, why)| {
+            format!(
+                " {}/ wasn't looked through before a command ({why}): a file named like a key there stays readable.",
+                crate::allow::tilde(d)
+            )
+        })
+        .collect();
+    if o.failed.len() > SAID {
+        failed += &format!(" Nor were {} more folders.", o.failed.len() - SAID);
+    }
+    format!("{covered}{open}{unwalked}{mounts}{failed}")
 }
 
 /// More entries than this in the folders on the way down from a mount to a hole's path through it, and the mount is
@@ -854,6 +933,281 @@ pub struct There {
     pub unseen: Vec<PathBuf>,
 }
 
+/// The most entries the walk of the key places outside the project reads before a run (`outside_keys`, D-i): past
+/// it the run starts, the folders not reached named in its report. Measured (`perf_a_walk_of_the_key_places`, Linux
+/// 7.0 on the GCP VM, warm, the `perf` profile): 2.18 µs an entry — 20,011 of them 43.7 ms, about what a run in tier
+/// own takes to start (~39 ms); a checkout of tarae (2,314 files, 250 folders) 4.8 ms, 1,000 files 2.8 ms, an empty
+/// `/tmp` 14 µs (`target/sb/sandbox-d2-walk.md`). Every run walks afresh (user decision 2026-10-20, request 3's question 4):
+/// nothing kept from one run to the next, so a key made anywhere below a place since is found.
+pub const WALK_MAX: usize = 20_000;
+
+/// The files named like keys outside the project a run's child hides (D-i), found before each run (`outside_keys`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Outside {
+    /// Hidden by mounts, real paths.
+    pub covered: Vec<PathBuf>,
+    /// Found but left readable, and why each (past `COVERS_MAX`'s room, another mount reaching it, the run has no
+    /// mounts of its own).
+    pub open: Vec<(PathBuf, String)>,
+    /// The folders the walk didn't reach (past `WALK_MAX`), in the order it would have.
+    pub unwalked: Vec<PathBuf>,
+    /// Another filesystem mounted below a place, not walked into, and a place on one that can hang (`Walked.mounts`).
+    pub mounts: Vec<PathBuf>,
+    /// The places and folders not looked through, and why (`Walked.failed`).
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// The files named like keys (`key_named_below` its place) in the places outside the project runs read
+/// (`Policy::key_places`) but those the user opened (`opened`), at most `max` entries read; the folders not reached
+/// past it, in the order they would have been. First what no run writes (the repository's other checkouts, the read
+/// grants), then what runs write (`Policy::write_places`: the temp folders, the write grants, one inside a place of
+/// the first) — each breadth-first over its places at once, the cap over both: a run that fills `/tmp` can't stop
+/// the next one's walk before the keys it can't put there (a read grant inside a place runs write is one they write:
+/// they could fill it themselves). As `there` walks: files only, links not followed, not in tools' output nor
+/// `.git/objects`; not in the project (a place holding it: its own walk), the run's own folder, nor a toolchain's
+/// install (`key_spared`, read whatever their names). Nor into another filesystem mounted below a place (`mounts`,
+/// the mount points the run's own table has), nor a place on a filesystem that can hang (`remote`, `CAN_HANG`): a hung or
+/// slow one (NFS, sshfs) would hold every run's start — those are named instead, as is a folder it couldn't open or
+/// read. Real paths.
+pub fn outside_keys(
+    p: &Policy,
+    opened: &[PathBuf],
+    mounts: &[PathBuf],
+    remote: &[PathBuf],
+    max: usize,
+) -> Walked {
+    use std::collections::VecDeque;
+    let run = p.run.as_ref().map(|d| d.path().to_path_buf());
+    let skipped = |d: &Path| {
+        d.starts_with(&p.root)
+            || run.as_ref().is_some_and(|r| d.starts_with(r))
+            || p.key_spared.iter().any(|s| d.starts_with(s))
+    };
+    let enters = |dir: &Path, name: &std::ffi::OsStr| {
+        let objects = name == "objects" && dir.file_name().is_some_and(|d| d == ".git");
+        !objects && !super::outputs().iter().any(|o| name == o.as_str())
+    };
+    let writes: Vec<PathBuf> = p.write_places().into_iter().filter(|w| !skipped(w) && w.is_dir()).collect();
+    let written = |d: &Path| writes.iter().any(|w| d.starts_with(w));
+    let mut places: Vec<&PathBuf> = p.key_places.iter().collect();
+    crate::sorting::by_key(&mut places, |k| k.components().count());
+    let mut roots: Vec<&PathBuf> = Vec::new();
+    for k in places {
+        if !roots.iter().any(|r| k.starts_with(r)) && !skipped(k) {
+            roots.push(k);
+        }
+    }
+    let (late, early): (Vec<&PathBuf>, Vec<&PathBuf>) = roots.into_iter().partition(|r| written(r));
+    // (a folder runs write inside a place no run writes: the first walk leaves it to the second, from its place)
+    let mut inside: Vec<(&Path, PathBuf)> = Vec::new();
+    for w in &writes {
+        let Some(r) = early.iter().copied().find(|r| w.starts_with(r) && w != *r) else { continue };
+        let mut on_the_way = w.ancestors().take_while(|a| *a != r.as_path());
+        let entered = on_the_way.all(|a| a.parent().zip(a.file_name()).is_some_and(|(d, n)| enters(d, n)));
+        if entered && !writes.iter().any(|o| o != w && w.starts_with(o)) {
+            inside.push((r.as_path(), w.clone()));
+        }
+    }
+    let mut late: Vec<(&Path, PathBuf)> =
+        late.into_iter().map(|k| (k.as_path(), k.to_path_buf())).chain(inside).collect();
+    crate::sorting::by_key(&mut late, |(_, d)| d.components().count());
+    // (each folder opened from the descriptor of the folder its walk starts at — `from`, opened through no link —
+    // beneath it, through no link and on no other mount: one swapped for a link since it was listed, to `/`, home
+    // or a hung mount, isn't walked)
+    let mut froms: Vec<PathBuf> = Vec::new();
+    let mut groups: [VecDeque<(&Path, usize, PathBuf)>; 2] = Default::default();
+    let starts = early
+        .into_iter()
+        .map(|k| (0, k.as_path(), k.to_path_buf()))
+        .chain(late.into_iter().map(|(k, d)| (1, k, d)));
+    for (g, place, dir) in starts {
+        froms.push(dir.clone());
+        groups[g].push_back((place, froms.len() - 1, dir));
+    }
+    let mut walked = Walked::default();
+    // (a place whose deepest mount is a filesystem that can hang — `CAN_HANG`'s list, any FUSE — isn't opened at
+    // all: one that hangs would hold every run's start; named with the mounts not walked. Local ones — tmpfs,
+    // ext4, overlay, btrfs, a checkout's bind mount — are walked)
+    let on_remote = |d: &Path| {
+        let holding = mounts.iter().filter(|m| d.starts_with(m)).max_by_key(|m| m.components().count());
+        holding.is_some_and(|m| remote.contains(m))
+    };
+    let mut roots: Vec<Option<OwnedFd>> = Vec::new();
+    for f in &froms {
+        roots.push(match on_remote(f) {
+            true => {
+                walked.mounts.push(f.clone());
+                None
+            }
+            false => open_place(f).map_err(|e| walked.failed.extend(not_opened(f, &e))).ok(),
+        });
+    }
+    let mut read = 0usize;
+    for g in 0..groups.len() {
+        while let Some((place, from, dir)) = groups[g].pop_front() {
+            let Some(root) = roots[from].as_ref() else { continue };
+            let rel = dir.strip_prefix(&froms[from]).unwrap_or(Path::new(""));
+            let folder = match open_beneath(root.as_fd(), rel) {
+                Ok(fd) => fd,
+                // (another filesystem mounted there since, or not in the table: named)
+                Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                    walked.mounts.push(dir);
+                    continue;
+                }
+                // (a link now — a swap since it was listed isn't followed — or unreadable: named; gone: nothing there)
+                Err(e) => {
+                    walked.failed.extend(not_opened(&dir, &e));
+                    continue;
+                }
+            };
+            let entries = match std::fs::read_dir(format!("/proc/self/fd/{}", folder.as_raw_fd())) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    walked.failed.push((dir, e.to_string()));
+                    continue;
+                }
+            };
+            for e in entries.flatten() {
+                // (a folder the cap stops in is named too: what it holds past there wasn't read)
+                if read >= max {
+                    groups[g].push_front((place, from, dir));
+                    walked.unwalked = groups.into_iter().flatten().map(|(_, _, d)| d).collect();
+                    return walked;
+                }
+                read += 1;
+                let path = dir.join(e.file_name());
+                let first = g == 0;
+                let entered =
+                    |path: &Path| enters(&dir, &e.file_name()) && !skipped(path) && !(first && written(path));
+                // (a mount point is another filesystem: named, never touched — not even for its type, which is asked
+                // of it where its folder's filesystem gives none)
+                if mounts.contains(&path) {
+                    if entered(&path) {
+                        walked.mounts.push(path);
+                    }
+                    continue;
+                }
+                // (the entry's own type, from its folder)
+                let Ok(t) = e.file_type() else { continue };
+                if t.is_dir() {
+                    if entered(&path) {
+                        groups[g].push_back((place, from, path));
+                    }
+                } else if t.is_file() && super::key_named_below(place, &path) && !opened.contains(&path) {
+                    walked.keys.push(path);
+                }
+            }
+        }
+    }
+    walked
+}
+
+/// The filesystems that can hang (D-i): a place whose deepest mount is one isn't walked before a run (`on_remote` in
+/// `outside_keys`) — the network's (NFS, SMB/CIFS, 9p, Ceph, GlusterFS, AFS) by their mount table types, and any
+/// FUSE (`fuse`, `fuseblk`, every `fuse.*`): a FUSE filesystem is whatever program serves it, so one not known is
+/// taken as one that can hang. Every other type (tmpfs, ext4, xfs, overlay, btrfs, a bind mount) is walked.
+const CAN_HANG: [&str; 9] = ["nfs", "nfs4", "cifs", "smb3", "smbfs", "9p", "ceph", "glusterfs", "afs"];
+
+/// A folder the walk couldn't open, and why — none for one gone since it was listed (nothing's there), nor for one
+/// the user may not open (another user's or root's 0700 folders in `/tmp`, `systemd-private-*`): a run is the user
+/// with fewer rights, so it can't read that either, and naming them would be every report's noise.
+fn not_opened(dir: &Path, e: &io::Error) -> Option<(PathBuf, String)> {
+    match e.raw_os_error() {
+        Some(libc::ENOENT | libc::EACCES | libc::EPERM) => None,
+        Some(libc::ELOOP | libc::ENOTDIR) => Some((dir.to_path_buf(), "a link now, not followed".into())),
+        _ => Some((dir.to_path_buf(), e.to_string())),
+    }
+}
+
+/// The mount points in mount table `table` whose filesystem can hang (`CAN_HANG`, any FUSE).
+fn remote_points(table: &str) -> Vec<PathBuf> {
+    let remote = |l: &&str| {
+        let fstype = l.split_once(" - ").and_then(|(_, rest)| rest.split(' ').next()).unwrap_or("");
+        CAN_HANG.contains(&fstype) || fstype.starts_with("fuse")
+    };
+    table.lines().filter(remote).flat_map(|l| mounts(l).into_iter().map(|(_, _, at)| at)).collect()
+}
+
+/// A folder the walk of the key places starts at (`outside_keys`, D-i), opened to read through no link at all — a
+/// place is a real path, so a link on the way is one swapped in since.
+fn open_place(at: &Path) -> io::Result<OwnedFd> {
+    openat2_dir(libc::AT_FDCWD, at, libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS)
+}
+
+/// `rel` below the folder `root` holds open (empty: that folder) opened to read — beneath it, through no link and
+/// on no other mount (`RESOLVE_BENEATH`, `NO_SYMLINKS`, `NO_MAGICLINKS`, `NO_XDEV`; D-i): a folder the walk listed
+/// and swapped for a link since (ELOOP, ENOTDIR) or another filesystem mounted on the way (EXDEV) isn't walked.
+fn open_beneath(root: BorrowedFd<'_>, rel: &Path) -> io::Result<OwnedFd> {
+    let rel = if rel.as_os_str().is_empty() { Path::new(".") } else { rel };
+    let resolve = libc::RESOLVE_BENEATH
+        | libc::RESOLVE_NO_SYMLINKS
+        | libc::RESOLVE_NO_MAGICLINKS
+        | libc::RESOLVE_NO_XDEV;
+    openat2_dir(root.as_raw_fd(), rel, resolve)
+}
+
+/// A folder opened to read by `openat2` from `at` with `resolve`, close-on-exec, the last name no link.
+fn openat2_dir(at: libc::c_int, path: &Path, resolve: u64) -> io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: a zeroed plain-data struct, then filled.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64;
+    how.resolve = resolve;
+    let size = std::mem::size_of::<libc::open_how>();
+    // SAFETY: the path and the struct live for the call; a descriptor it makes is ours.
+    let fd = unsafe { libc::syscall(libc::SYS_openat2, at, c.as_ptr(), &raw const how, size) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: just made, owned by nothing else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
+}
+
+/// What the walk of the key places outside the project found (`outside_keys`, D-i).
+#[derive(Debug, Default)]
+pub struct Walked {
+    /// The files named like keys, real paths.
+    pub keys: Vec<PathBuf>,
+    /// The folders not reached past the cap, in the order they would have been.
+    pub unwalked: Vec<PathBuf>,
+    /// Another filesystem mounted below a place, not walked into, and a place on one that can hang (`CAN_HANG`).
+    pub mounts: Vec<PathBuf>,
+    /// The places and folders it couldn't open or read, and why: a link now, unreadable.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// The keys found outside the project (`outside_keys`, D-i) placed in a run's mounts, in the walk's order: hidden
+/// while `room` lasts (`COVERS_MAX` past the project's keys, seals and pins), each as it is now (`Cover::of`); left
+/// open and said why where another mount of its filesystem reaches it (`through`: there it would be read — the
+/// project's keys make the run's mounts give way instead, `elsewhere`) or past the room. One gone since the walk is
+/// in neither: nothing's there to hide or to say.
+fn place_outside(
+    found: Vec<PathBuf>,
+    mut room: usize,
+    through: impl Fn(&Path) -> Option<PathBuf>,
+) -> (Vec<Cover>, Vec<(PathBuf, String)>) {
+    let (mut loose, mut open) = (Vec::new(), Vec::new());
+    for k in found {
+        let why = match (through(&k), room) {
+            (Some(at), _) => {
+                format!("{} reaches it through another mount of its filesystem", crate::allow::tilde(&at))
+            }
+            (None, 0) => format!("past the {COVERS_MAX} files a run's mounts hide"),
+            (None, _) => {
+                if let Some(cover) = Cover::of(&k) {
+                    loose.push(cover);
+                    room -= 1;
+                }
+                continue;
+            }
+        };
+        open.push((k, why));
+    }
+    (loose, open)
+}
+
 /// The most files named like keys a run's child hides by mounts (7d, `Covers`): past it, they're closed as 7b closes
 /// them, its folders split. (Measured in `many_keys_are_hidden_at_once` on Debian 12, 6.1, in tier own, a test build, the
 /// fastest of five: a project of 1,024 keys run hiding them took 108 ms, the same closing none 39 ms — about 70 µs a
@@ -874,6 +1228,9 @@ pub struct Covers {
     /// The shut file, and which file it was when checked (the child mounts only that one).
     pub shut: Option<Cover>,
     pub keys: Vec<Cover>,
+    /// The files named like keys outside the project it hides (D-i, `Outside`) — one gone or swapped since the walk
+    /// is left and the run starts: where every program writes (`/tmp`) that's no reason to stop it.
+    pub loose: Vec<Cover>,
     /// The project's protected entries its child binds read-only over themselves (compat B9, `Covers::sealed`) —
     /// the project then one rule, its folders taking new files; none: each folder holding one closed as `grant`
     /// closes it.
@@ -890,6 +1247,17 @@ pub struct Cover {
     pub path: PathBuf,
     pub dev: u64,
     pub ino: u64,
+}
+
+impl Cover {
+    /// The file `k` as it is now — none where it's gone or isn't a file. The child opens each through no link at
+    /// all: its folder's real path.
+    fn of(k: &Path) -> Option<Cover> {
+        use std::os::unix::fs::MetadataExt;
+        let m = k.symlink_metadata().ok().filter(|m| m.file_type().is_file())?;
+        let path = std::fs::canonicalize(k.parent()?).ok()?.join(k.file_name()?);
+        Some(Cover { path, dev: m.dev(), ino: m.ino() })
+    }
 }
 
 impl Covers {
@@ -920,18 +1288,11 @@ impl Covers {
         if !m.file_type().is_file() || m.len() != 0 || m.mode() & 0o7777 != 0 || m.uid() != uid {
             return Err(io::Error::other(format!("{} isn't tarae's shut file", shut.display())));
         }
-        // (the child opens each through no link at all: its folder's real path)
-        let keys = keys
-            .iter()
-            .filter_map(|k| {
-                let m = k.symlink_metadata().ok().filter(|m| m.file_type().is_file())?;
-                let path = std::fs::canonicalize(k.parent()?).ok()?.join(k.file_name()?);
-                Some(Cover { path, dev: m.dev(), ino: m.ino() })
-            })
-            .collect();
+        let keys = keys.iter().filter_map(|k| Cover::of(k)).collect();
         Ok(Covers {
             shut: Some(Cover { path: shut, dev: m.dev(), ino: m.ino() }),
             keys,
+            loose: Vec::new(),
             seals: Vec::new(),
             pins: Vec::new(),
         })
@@ -1162,29 +1523,45 @@ pub(super) fn confine_in(
         Some(_) => Vec::new(),
         None => ways,
     };
+    // (D-i: where its child mounts — tier own — and its mount table was read, the files named like keys in the
+    // places outside the project it reads, found afresh before each run, at most `WALK_MAX` entries looked at, no
+    // other filesystem below a place entered; hidden as the project's are, after them, its seals and pins, as room
+    // is left)
+    let Walked { keys: outside_found, unwalked, mounts: beside, failed } =
+        match (&own.mounts, &p.keys, &table) {
+            (Some(Ok(())), Some(opened), Some(t)) => {
+                let points: Vec<PathBuf> = t.iter().map(|(_, _, at)| at.clone()).collect();
+                let remote = own.table.as_deref().map(remote_points).unwrap_or_default();
+                outside_keys(p, opened, &points, &remote, WALK_MAX)
+            }
+            _ => Walked::default(),
+        };
     let mut elsewhere: Vec<PathBuf> = ways.iter().map(|(at, _)| at.clone()).collect();
     crate::sorting::sort(&mut elsewhere);
     elsewhere.dedup();
     // (7d: hidden by mounts in the run's own mount namespace where it can have one — its folders whole then; else
     // split as 7b, and where mounts could have been, why not)
-    let decided: Option<Result<Covers, String>> = match (&own.mounts, keys.is_empty()) {
-        (None, _) | (_, true) => None,
-        (Some(Err(why)), false) => Some(Err(why.clone())),
-        (Some(Ok(())), false) => Some(match (&own.table, elsewhere.first(), &p.run) {
-            (None, _, _) => Err("the mount table its commands see couldn't be read".to_string()),
-            (_, Some(other), _) => Err(format!(
-                "{} reaches them through another mount of their filesystem (closed there too)",
-                other.display()
-            )),
-            (_, None, None) => Err("it has no folder of its own".to_string()),
-            (_, None, Some(run)) => Covers::of(&keys, run.path()).map_err(|e| e.to_string()),
-        }),
-    };
-    let (covers, split_why) = match decided {
+    let decided: Option<Result<Covers, String>> =
+        match (&own.mounts, keys.is_empty() && outside_found.is_empty()) {
+            (None, _) | (_, true) => None,
+            (Some(Err(why)), false) => Some(Err(why.clone())),
+            (Some(Ok(())), false) => Some(match (&own.table, elsewhere.first(), &p.run) {
+                (None, _, _) => Err("the mount table its commands see couldn't be read".to_string()),
+                (_, Some(other), _) => Err(format!(
+                    "{} reaches them through another mount of their filesystem (closed there too)",
+                    other.display()
+                )),
+                (_, None, None) => Err("it has no folder of its own".to_string()),
+                (_, None, Some(run)) => Covers::of(&keys, run.path()).map_err(|e| e.to_string()),
+            }),
+        };
+    let (covers, why_not) = match decided {
         Some(Ok(c)) => (Some(c), None),
         Some(Err(why)) => (None, Some(why)),
         None => (None, None),
     };
+    // (the project's keys split as 7b only where it has some: those outside are only left open, each said why)
+    let split_why = why_not.clone().filter(|_| !keys.is_empty());
     match covers.is_some() {
         true => keys.clear(),
         // (each key's paths through other mounts closed as it is: every folder on the way to it there gets its rule
@@ -1295,6 +1672,33 @@ pub(super) fn confine_in(
         Ok(s) => (s, None),
         Err(why) => (Default::default(), Some(why)),
     };
+    let mut outside = Outside { unwalked, mounts: beside, failed, ..Default::default() };
+    let mut covers = covers;
+    match covers.as_mut() {
+        Some(c) => {
+            let room = COVERS_MAX.saturating_sub(c.keys.len() + c.loose.len() + seals.len() + pins.len());
+            let through =
+                |k: &Path| table.as_ref().and_then(|t| ways_through(t, k).into_iter().next()).map(|w| w.0);
+            let (loose, open) = place_outside(outside_found, room, through);
+            outside.covered = loose.iter().map(|k| k.path.clone()).collect();
+            outside.open = open;
+            c.loose.extend(loose);
+        }
+        None => {
+            // (the project's keys reached through another mount: its runs have no mounts of their own then — those
+            // outside left open, said so; the project's "closed there too" is theirs only)
+            let why = match (elsewhere.first(), why_not) {
+                (Some(other), _) => format!(
+                    "the project's own files named like keys are reached through another mount ({}), so its runs \
+                     have no mounts of their own to hide it",
+                    crate::allow::tilde(other)
+                ),
+                (None, Some(why)) => why,
+                (None, None) => "its run has no mounts of its own".into(),
+            };
+            outside.open = outside_found.into_iter().map(|k| (k, why.clone())).collect();
+        }
+    }
     let sealed = !seals.is_empty();
     let made = match make_first && !sealed {
         true => make(to_make(&p.root, &found, &crate::packs::made_beside())),
@@ -1366,6 +1770,7 @@ pub(super) fn confine_in(
         holes_elsewhere,
         closed_whole,
         unseen: unseen.iter().map(|k| k.strip_prefix(&p.root).unwrap_or(k).to_path_buf()).collect(),
+        outside,
         kept: Arc::new(kept),
         keeper: None,
         rules: Arc::new(r),
@@ -1960,10 +2365,12 @@ mod tests {
                 std::fs::write(at.join(f), "tarae-fake-token").unwrap();
             }
         }
-        let p = Policy {
-            run: crate::sandbox::RunDir::new().ok(),
-            ..Policy::for_project(&Env { root: bound.clone(), ..Default::default() })
-        };
+        // (and a key in a place outside the project its runs read — D-i)
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("id_rsa"), "tarae-fake-token").unwrap();
+        let env = Env { root: bound.clone(), key_places: vec![outside.clone()], ..Default::default() };
+        let p = Policy { run: crate::sandbox::RunDir::new().ok(), ..Policy::for_project(&env) };
         let table = format!(
             "1 0 0:50 / / rw - overlay overlay rw\n2 1 0:50 {} {} rw - overlay overlay rw\n",
             real.display(),
@@ -1995,6 +2402,22 @@ mod tests {
             );
         }
         assert!(rule(&real.join("src")).is_some_and(|a| a & landlock::READ_FILE != 0), "beside it, read");
+        // The key outside: left open, said why in its own words — nothing closes it there
+        let why: Vec<&str> = c
+            .outside
+            .open
+            .iter()
+            .filter(|(k, _)| *k == outside.join("id_rsa"))
+            .map(|w| w.1.as_str())
+            .collect();
+        assert!(
+            why.len() == 1
+                && why[0]
+                    .starts_with("the project's own files named like keys are reached through another mount"),
+            "{:?}",
+            c.outside
+        );
+        assert!(!why[0].contains("closed there too") && c.outside.covered.is_empty(), "{why:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2195,6 +2618,249 @@ mod tests {
             times[times.len() / 2]
         );
         let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+    }
+
+    /// D-i: the walk of the key places outside the project (`outside_keys`) — breadth-first over every place, at most
+    /// so many entries: a key at a place's top and one a folder down are found though a big folder beside them is
+    /// past the cap, and that folder is named as not walked; with room, the key deep in it is found too. Never
+    /// looked in: tools' output, `.git/objects`, a toolchain's install (`key_spared`), the project; a link isn't
+    /// followed; a file the user opened isn't one. Its own place only — never `/tmp` whole.
+    #[test]
+    fn the_walk_of_the_key_places_is_breadth_first_within_its_cap() {
+        let t = std::fs::canonicalize(crate::scratch::Scratch::new("sb-outside-walk").into_path()).unwrap();
+        let (g, elsewhere) = (t.join("granted"), t.join("elsewhere"));
+        let put = |rel: &str| {
+            let at = g.join(rel);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, "tarae-fake-token").unwrap();
+            at
+        };
+        let (near, one) = (put("near.pem"), put("a/one.pem"));
+        for i in 0..40 {
+            put(&format!("big/f{i}.txt"));
+        }
+        let far = put("big/deep/far.pem");
+        // (never: tools' output, `.git/objects`, a toolchain's install, the project)
+        for rel in ["node_modules/pkg/x.pem", ".git/objects/ab/k.pem", "spared/s.pem", "proj/inner.pem"] {
+            put(rel);
+        }
+        let opened = put("opened.pem");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("linked.pem"), "tarae-fake-token").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, g.join("link")).unwrap();
+        let p = Policy {
+            key_places: vec![g.clone()],
+            key_spared: vec![g.join("spared")],
+            ..Policy::for_project(&Env { root: g.join("proj"), ..Default::default() })
+        };
+        let opened = std::slice::from_ref(&opened);
+        // (with room: everything named like a key where runs read, nothing else)
+        let Walked { keys: all, unwalked, .. } = outside_keys(&p, opened, &[], &[], WALK_MAX);
+        let mut got = all.clone();
+        crate::sorting::sort(&mut got);
+        let mut want = vec![near.clone(), one.clone(), far.clone()];
+        crate::sorting::sort(&mut want);
+        assert_eq!(got, want, "everything named like a key in the place, but what runs read anyway");
+        assert!(unwalked.is_empty(), "{unwalked:?}");
+        // (past the cap: the top and a folder down found — breadth-first — the big folder named)
+        let top = std::fs::read_dir(&g).unwrap().count();
+        let Walked { keys: some, unwalked, .. } = outside_keys(&p, opened, &[], &[], top + 5);
+        assert!(some.contains(&near) && some.contains(&one), "{some:?}");
+        assert!(!some.contains(&far), "past the cap: {some:?}");
+        assert!(unwalked.contains(&g.join("big")), "the folder the cap stopped in, named: {unwalked:?}");
+        assert!(!unwalked.contains(&g.join("node_modules")) && !unwalked.contains(&g.join("spared")));
+        // (a place inside another is walked once, as part of it)
+        let twice = Policy { key_places: vec![g.clone(), g.join("a")], ..p.clone() };
+        assert_eq!(
+            outside_keys(&twice, opened, &[], &[], WALK_MAX).keys.iter().filter(|k| **k == one).count(),
+            1
+        );
+        // (another filesystem mounted below a place — a mount point in the run's table — isn't entered: named)
+        let big = g.join("big");
+        let w = outside_keys(&p, opened, std::slice::from_ref(&big), &[], WALK_MAX);
+        assert!(w.keys.contains(&near) && !w.keys.contains(&far) && w.mounts == [big.clone()], "{w:?}");
+        let said = outside_said(&Outside { mounts: w.mounts, ..Default::default() });
+        assert!(said.contains("isn't looked through before a command") && said.contains("/big/"), "{said}");
+        // (a place on a network's or FUSE's filesystem isn't opened at all, named with why — by the mount holding
+        // it in the table, the deepest; a local one below it isn't that)
+        let table = format!(
+            "1 0 0:50 / / rw - ext4 /dev/sda rw\n2 1 0:51 / {} rw - nfs4 h:/x rw\n3 1 0:52 / /mnt/s rw - fuse.sshfs u@h:/ rw\n\
+             4 1 0:53 / {} rw - ext4 /dev/sdb rw\n",
+            g.display(),
+            g.join("a").display()
+        );
+        let remote = remote_points(&table);
+        assert_eq!(remote, [g.clone(), PathBuf::from("/mnt/s")]);
+        let points: Vec<PathBuf> = mounts(&table).into_iter().map(|(_, _, at)| at).collect();
+        let w = outside_keys(&p, opened, &points, &remote, WALK_MAX);
+        assert!(w.keys.is_empty() && w.mounts == [g.clone()] && w.failed.is_empty(), "{w:?}");
+        let inner = Policy { key_places: vec![g.join("a")], ..p.clone() };
+        assert_eq!(
+            outside_keys(&inner, opened, &points, &remote, WALK_MAX).keys,
+            std::slice::from_ref(&one),
+            "a local mount in it"
+        );
+        // (a place that's a link now: named, not followed)
+        let linked = t.join("linked-place");
+        std::os::unix::fs::symlink(&g, &linked).unwrap();
+        let at_link = Policy { key_places: vec![linked.clone()], ..p.clone() };
+        let w = outside_keys(&at_link, opened, &[], &[], WALK_MAX);
+        assert!(
+            w.keys.is_empty() && w.failed == [(linked.clone(), "a link now, not followed".into())],
+            "{w:?}"
+        );
+        let said = outside_said(&Outside { failed: w.failed, ..Default::default() });
+        assert!(said.contains("wasn't looked through before a command (a link now, not followed)"), "{said}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// D-i: what no run writes is walked to its end before what runs write — a run that fills a place it writes
+    /// (`/tmp`) past the cap can't keep the next run's walk from a key in another checkout behind it, though that
+    /// place is the shallower; nor from one beside a folder it writes inside that checkout. What the cap stopped is
+    /// named, the report giving the cap as the docs do.
+    #[test]
+    fn a_place_runs_write_is_walked_after_those_they_dont() {
+        let t = std::fs::canonicalize(crate::scratch::Scratch::new("sb-outside-order").into_path()).unwrap();
+        let (tmp, checkout) = (t.join("tmp"), t.join("deeper/checkout"));
+        let fill = |d: &Path| {
+            std::fs::create_dir_all(d).unwrap();
+            for i in 0..60 {
+                std::fs::write(d.join(format!("f{i}.txt")), "").unwrap();
+            }
+        };
+        fill(&tmp);
+        fill(&checkout.join("out"));
+        std::fs::create_dir_all(checkout.join("a")).unwrap();
+        let key = checkout.join("a/id_rsa");
+        std::fs::write(&key, "tarae-fake-token").unwrap();
+        let p = Policy {
+            key_places: vec![tmp.clone(), checkout.clone()],
+            write: vec![tmp.clone(), checkout.join("out")],
+            files: Vec::new(),
+            runs: None,
+            ..Policy::for_project(&Env { root: t.join("project"), ..Default::default() })
+        };
+        // (the checkout's own entries and its `a/`'s, then the cap: inside what runs write)
+        let Walked { keys, unwalked, .. } = outside_keys(&p, &[], &[], &[], 10);
+        assert_eq!(keys, vec![key], "the checkout's key before the place runs fill");
+        assert!(unwalked.contains(&tmp) && unwalked.contains(&checkout.join("out")), "{unwalked:?}");
+        let said = outside_said(&Outside { unwalked, ..Default::default() });
+        assert!(said.contains("more than the 20,000 entries"), "{said}");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// D-i: the walk opens each folder beneath the folder it started at, through no link and on no other mount
+    /// (`open_beneath`): one listed and swapped for a link since — the link itself, or a folder through it — isn't
+    /// opened, nor a path past where it started; a place that's a link now isn't either (`open_place`).
+    #[test]
+    fn a_folder_swapped_for_a_link_isnt_walked_into() {
+        let t =
+            std::fs::canonicalize(crate::scratch::Scratch::new("sb-outside-beneath").into_path()).unwrap();
+        let (g, elsewhere) = (t.join("granted"), t.join("elsewhere"));
+        std::fs::create_dir_all(g.join("a/b")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("b")).unwrap();
+        let root = open_place(&g).unwrap();
+        assert!(open_beneath(root.as_fd(), Path::new("")).is_ok(), "the place itself");
+        assert!(open_beneath(root.as_fd(), Path::new("a/b")).is_ok(), "a folder below it");
+        // (`a` swapped for a link to elsewhere, which has a `b` too, after the walk listed it)
+        std::fs::rename(g.join("a"), t.join("a-was")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, g.join("a")).unwrap();
+        for rel in ["a", "a/b", "../elsewhere"] {
+            assert!(open_beneath(root.as_fd(), Path::new(rel)).is_err(), "{rel}: opened through the link");
+        }
+        std::os::unix::fs::symlink(&elsewhere, t.join("place-link")).unwrap();
+        assert!(open_place(&t.join("place-link")).is_err(), "a place that's a link now");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// D-i: a folder the walk couldn't open is named with why (`not_opened`) — but not one gone since it was listed,
+    /// nor one the user may not open (another user's 0700 folder in `/tmp`: a run can't read it either).
+    #[test]
+    fn a_folder_the_walk_cant_open_is_named_unless_nothing_could_be_read_there() {
+        let dir = Path::new("/tmp/x");
+        let why = |errno| not_opened(dir, &io::Error::from_raw_os_error(errno)).map(|(_, why)| why);
+        for quiet in [libc::ENOENT, libc::EACCES, libc::EPERM] {
+            assert_eq!(why(quiet), None, "{quiet}");
+        }
+        assert_eq!(why(libc::ELOOP).as_deref(), Some("a link now, not followed"));
+        assert_eq!(why(libc::ENOTDIR).as_deref(), Some("a link now, not followed"));
+        assert!(why(libc::EIO).is_some_and(|w| !w.is_empty()), "an error of its own: named");
+    }
+
+    /// D-i: the keys found outside the project placed in a run's mounts (`place_outside`): hidden while the room
+    /// lasts, in the walk's order, each as it is now; one another mount of its filesystem reaches left open and
+    /// said, whatever the room; past the room left open and said; one gone since the walk in neither list.
+    #[test]
+    fn the_keys_outside_are_hidden_as_room_is_left_and_the_rest_said() {
+        use std::os::unix::fs::MetadataExt;
+        let t = std::fs::canonicalize(crate::scratch::Scratch::new("sb-outside-place").into_path()).unwrap();
+        let key = |name: &str| {
+            let at = t.join(name);
+            std::fs::write(&at, "tarae-fake-token").unwrap();
+            at
+        };
+        let (a, b, c, reached) = (key("a.pem"), key("b.pem"), key("c.pem"), key("reached.pem"));
+        let gone = t.join("gone.pem");
+        let through = |k: &Path| (k == reached.as_path()).then(|| PathBuf::from("/mnt/other"));
+        let found = vec![a.clone(), gone.clone(), reached.clone(), b.clone(), c.clone()];
+        let (loose, open) = place_outside(found, 2, through);
+        let hidden: Vec<&Path> = loose.iter().map(|k| k.path.as_path()).collect();
+        assert_eq!(
+            hidden,
+            [a.as_path(), b.as_path()],
+            "as room is left, in the walk's order; the gone one takes none"
+        );
+        let m = std::fs::metadata(&a).unwrap();
+        assert_eq!((loose[0].dev, loose[0].ino), (m.dev(), m.ino()), "the file as it is now");
+        let said: Vec<(&Path, &str)> = open.iter().map(|(k, why)| (k.as_path(), why.as_str())).collect();
+        let reached_why = "/mnt/other reaches it through another mount of its filesystem".to_string();
+        let past = format!("past the {COVERS_MAX} files a run's mounts hide");
+        assert_eq!(said, [(reached.as_path(), reached_why.as_str()), (c.as_path(), past.as_str())]);
+        assert!(!open.iter().any(|(k, _)| *k == gone), "gone since the walk: nothing to say");
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    /// What finding the files named like keys in the places outside the project costs each run in tier own before it
+    /// starts (D-i, `outside_keys`): a place of `WALK_MAX` entries — 200 folders of 99 files — and the walk stopped
+    /// at the cap; medians of 11. What `WALK_MAX` is set by.
+    #[test]
+    fn perf_a_walk_of_the_key_places() {
+        if crate::test_results::unoptimized("sandbox::linux::tests::perf_a_walk_of_the_key_places") {
+            return;
+        }
+        let t = std::fs::canonicalize(crate::scratch::Scratch::new("sb-perf-outside").into_path()).unwrap();
+        let g = t.join("granted");
+        for d in 0..200 {
+            let dir = g.join(format!("d{}/s{}", d / 20, d % 20));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..99 {
+                std::fs::write(dir.join(format!("f{f}.txt")), "").unwrap();
+            }
+        }
+        std::fs::write(g.join("d3/s4/id_rsa"), "tarae-fake-token").unwrap();
+        let p = Policy {
+            key_places: vec![g.clone()],
+            ..Policy::for_project(&Env { root: t.join("project"), ..Default::default() })
+        };
+        let time = |max: usize| {
+            let mut ms: Vec<f64> = (0..11)
+                .map(|_| {
+                    let at = std::time::Instant::now();
+                    std::hint::black_box(outside_keys(&p, &[], &[], &[], max));
+                    at.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            ms[ms.len() / 2]
+        };
+        let (whole, capped) = (time(usize::MAX), time(WALK_MAX));
+        let line = format!(
+            "the walk of the key places (20,011 entries in 210 folders): {whole:.2} ms whole, {capped:.2} ms at the \
+             cap of {WALK_MAX} — {:.2} µs an entry; medians of 11\n",
+            whole * 1000.0 / 20_011.0
+        );
+        let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+        std::fs::remove_dir_all(&t).ok();
     }
 
     /// What the report says of the folders new files can't be read in (7b): each, the project's own as its top

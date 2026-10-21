@@ -755,7 +755,7 @@ fn columns(heading: &str, head: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 /// `1,204`.
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {

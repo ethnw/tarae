@@ -266,9 +266,16 @@ Kept:
   folder (its `TMPDIR`), and nowhere wider closes them, so a toolchain's folders in home stay readable — Claude's
   Read too. Outside home Claude's Read asks for one wherever it is; runs read one there that's in no place they
   close ("not kept" in §1.3). tarae's own tools (search, read, the message's context) still leave out every file named like
-  a key outside the project by its name. Linux's runs close them in the project only (Landlock only grants);
-  Claude's Read goes by the rule as designed there too. Inside those places a toolchain's own files read: an
-  install the packs name (pyenv's, conda's, rbenv's, asdf's and mise's installs) and what's below an install's
+  a key outside the project by its name. Linux's runs close them in the project, and in tier own in those places
+  too: found afresh before each run, at most 20,000 entries looked through (`linux::WALK_MAX`) — the places no run
+  writes (other checkouts, read grants) first, so filling `/tmp` can't hide those from the walk — and hidden by a
+  mount of the run's own as the project's are ([D-i](design/sandbox-keeper.md#decisions)) — so, as the project's,
+  the run can't write, remove or rename one (read-only, busy: an `rm -rf` of a folder in `/tmp` holding one
+  fails, which macOS lets through; so does a test regenerating one with `>`); the run's report names it, says it's
+  hidden, that the run's panel lets runs use that file only and that once the user removes it the next run's walk
+  finds it gone (`sandbox::hidden_keys_said`); tiers host and offline
+  close them in the project only (Landlock only grants). Claude's Read goes by the rule as designed there too.
+  Inside those places a toolchain's own files read: an install the packs name (pyenv's, conda's, rbenv's, asdf's and mise's installs) and what's below an install's
   packages as its layout has them (`lib/python3*/site-packages`, `lib/ruby/gems`, `lib/ruby/3.*` — never a bare
   `gems`, a monorepo's own) as below tools' output; CA bundles by a `ca` name (`cacert.pem`, `ca-bundle.pem`,
   `tls-ca-bundle.pem`) outside the project — in it they're closed as any `*.pem` — and not `cert.pem`, often a
@@ -279,7 +286,12 @@ Kept:
   `sandbox::tests::every_user_of_the_key_rule_gives_one_answer` ·
   `sandbox::tests::files_named_like_keys_are_closed_where_a_grant_or_a_default_opened_outside` ·
   `sandbox::tests::keys_close_in_a_main_checkout_above_and_a_folder_opened_for_writing_ca_bundles_read` ·
-  `sandbox::tests::a_key_in_a_granted_place_outside_is_closed_and_a_ca_bundle_reads` (macOS)
+  `sandbox::tests::a_key_in_a_granted_place_outside_is_closed_and_a_ca_bundle_reads` (macOS) ·
+  `sandbox::tests::a_key_made_two_deep_in_a_key_place_after_a_run_is_covered_on_the_next_run` (Linux, every tier) ·
+  `sandbox::linux::tests::the_walk_of_the_key_places_is_breadth_first_within_its_cap` ·
+  `sandbox::linux::tests::a_place_runs_write_is_walked_after_those_they_dont` ·
+  `sandbox::linux::tests::the_keys_outside_are_hidden_as_room_is_left_and_the_rest_said` (Linux) ·
+  `sandbox::tests::a_hidden_key_the_run_couldnt_change_is_said`
 - Settings a tool reads that hold a token (git's `extraHeader`, Go's env, pip's index URL, `~/.npmrc`) are read
   from a copy without the token lines.
   test: `sandbox::tests::settings_holding_a_token_are_read_from_copies` ·
@@ -306,9 +318,22 @@ Kept:
 
 Not kept:
 - **Linux: a file named like a key in a place outside the project a run reads** — a folder you granted, another
-  checkout, the temp folders: Landlock only grants, so a name can't be closed inside a granted folder; in the
-  project its folders are granted entry by entry around each key (`linux::there`), outside they aren't yet.
-  Claude's own reads ask there as on macOS.
+  checkout, the temp folders. Tiers host and offline: Landlock only grants, so a name can't be closed inside a
+  granted folder; in the project its folders are granted entry by entry around each key (`linux::there`), outside
+  they aren't. Tier own hides those found before the run, but not: one made while it runs (found before the next);
+  one past the 20,000 entries looked through (the folders not reached named in its report); one past the 1,024 a
+  run's mounts hide, the project's and its protected names' first (named); one another mount of its filesystem
+  reaches (named); one on another filesystem mounted below such a place, which the walk doesn't enter (a hung NFS
+  or sshfs mount would hold every run — named); one in a place on a filesystem that can hang (NFS, SMB/CIFS, 9p,
+  Ceph, GlusterFS, AFS, any FUSE — `linux::CAN_HANG`), not walked for the same reason (named); one in a folder the walk couldn't open or read — swapped for a link since it was listed, an
+  error of its own (named; not a folder the user may not open, which the run can't read either); one in a read grant inside a place runs write, which they could
+  fill past the cap themselves; every key outside where the project's own keys are reached through another mount
+  (the run then has no mounts of its own — said); a hard link to one under another name (outside the project only names are looked at); one known
+  only by what's in it; one a run going at the same time moves, with a folder holding it, while the next looks for
+  it or before its mounts are made (the walk doesn't see it there, or its mount finds it gone and the run starts —
+  where every program writes, `/tmp`, a key gone mustn't stop it). The other way round, as a cost rather than a
+  hole: a key a run made itself in `/tmp` is hidden from every later run, which can't remove it then — only the
+  user can; letting a run remove a key it made itself there may come later. Claude's own reads ask there as on macOS.
 - **A token inside a file that isn't named like a key** and isn't a known tool's settings: `config/prod.yml`
   with a password in it is an ordinary project file.
 - **cargo's `credentials.toml`** isn't read, but cargo takes no copy without it: the report says so in cargo's

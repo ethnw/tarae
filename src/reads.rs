@@ -1110,8 +1110,9 @@ pub(crate) fn caps_for(
 }
 
 /// `caps` with the runs' rule for the files named like keys a run would have now (`sandbox::key_rules_for`), as
-/// macOS's profile has it on every system — Linux's runs don't close them outside the project yet (Landlock only
-/// grants), the rule Claude's reads go by is the one designed. A worker's: it looks at the toolchains' folders.
+/// macOS's profile has it on every system — Linux's runs close them outside the project only in tier own, by the
+/// mounts that hide what's found before each run (D-i; Landlock only grants), the rule Claude's reads go by is the
+/// one designed. A worker's: it looks at the toolchains' folders.
 pub fn with_key_rules(
     mut caps: crate::caps::Caps,
     llm: &crate::llm::LlmConfig,

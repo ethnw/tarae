@@ -746,7 +746,7 @@ mod tests {
             (Grant::Read("/h/.ssh/config".into()), Scope::Once),
             (Grant::Read("/h/.config/gh".into()), Scope::Once),
             (Grant::Key("/p/.env".into()), Scope::Once),
-            // (a file named like a key opened as a place — Linux's runs don't close the name: once, as a key; one
+            // (a file named like a key opened as a place — Linux's runs close the name only in tier own: once, as a key; one
             // below an install's packages isn't one — review)
             (Grant::Read("/opt/x/.env".into()), Scope::Once),
             (Grant::Read("/opt/x/lib/python3.12/site-packages/a.pem".into()), Scope::Always),

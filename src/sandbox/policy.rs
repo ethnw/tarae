@@ -59,6 +59,7 @@ pub struct KeyRules {
     run: Option<PathBuf>,
     write: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    covered: Vec<PathBuf>,
 }
 
 impl KeyRules {
@@ -78,6 +79,7 @@ impl KeyRules {
             run: self.run.as_deref(),
             write: &self.write,
             files: &self.files,
+            covered: &self.covered,
         }
     }
 
@@ -107,7 +109,8 @@ impl KeyRules {
     }
 
     /// The rule as designed, whatever the system enforces: macOS's profile's (Linux's Landlock only grants, so it
-    /// closes none outside the project yet) — what Claude's reads go by (`reads::key_closed`).
+    /// closes outside the project only what tier own's mounts hide — D-i — and tiers host and offline none) — what
+    /// Claude's reads go by (`reads::key_closed`).
     pub fn designed(self) -> KeyRules {
         KeyRules { supervised: false, ..self }
     }
@@ -124,6 +127,9 @@ struct KeyView<'a> {
     run: Option<&'a Path>,
     write: &'a [PathBuf],
     files: &'a [PathBuf],
+    /// Linux tier own: the files named like keys outside the project its run's mounts hid (`linux::Outside`, D-i) —
+    /// closed, the rest there not.
+    covered: &'a [PathBuf],
 }
 
 impl KeyView<'_> {
@@ -141,8 +147,11 @@ impl KeyView<'_> {
         if real.starts_with(self.root) {
             return key_named_in(self.root, real).then(|| KeyRule::Closed(self.root.to_path_buf()));
         }
-        // (Linux: Landlock only grants — nothing closes them outside the project; the run's own folder, its
-        // `TMPDIR`, only it writes: what's there is its own)
+        // (Linux: Landlock only grants — outside the project only what its run's mounts hid is closed (tier own,
+        // D-i); the run's own folder, its `TMPDIR`, only it writes: what's there is its own)
+        if self.supervised && self.covered.iter().any(|c| c == real) {
+            return self.places.iter().find(|k| real.starts_with(k)).map(|k| KeyRule::Closed(k.clone()));
+        }
         if self.supervised
             || self.spared.iter().any(|s| real.starts_with(s))
             || self.run.is_some_and(|d| real.starts_with(d))
@@ -253,7 +262,8 @@ pub struct Policy {
     pub keys: Option<Vec<PathBuf>>,
     /// The places outside the project a grant or a default opened — the repository's other checkouts, what the
     /// user let Claude read (`Env::key_places`), the temp folders — where the files named like keys are closed
-    /// as in the project (macOS's profile; Landlock only grants, so Linux doesn't close them there). Never in the
+    /// as in the project (macOS's profile; Landlock only grants, so on Linux only tier own's mounts hide them there,
+    /// found before each run — `linux::outside_keys`, D-i). Never in the
     /// project (its own rule — a place holding it leaves it out), never wider: a CA bundle elsewhere is read. Real
     /// paths.
     pub key_places: Vec<PathBuf>,
@@ -843,7 +853,27 @@ impl Policy {
             run: self.run.as_ref().map(|d| d.path().to_path_buf()),
             write: self.write.clone(),
             files: self.files.clone(),
+            covered: self.covered().to_vec(),
         }
+    }
+
+    /// Linux: every file named like a key its run's mounts hid — the project's (7d) and those outside it (D-i) —
+    /// which the run can't write, remove or rename (`sandbox::hidden_keys_said`). Real paths; none elsewhere.
+    pub fn hidden_keys(&self) -> Vec<PathBuf> {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return c.covers.keys.iter().chain(&c.covers.loose).map(|k| k.path.clone()).collect();
+        }
+        Vec::new()
+    }
+
+    /// Linux: the files named like keys outside the project its run's mounts hid (tier own, `linux::Outside`, D-i).
+    fn covered(&self) -> &[PathBuf] {
+        #[cfg(target_os = "linux")]
+        if let Some(Ok(c)) = &self.confine {
+            return &c.outside.covered;
+        }
+        &[]
     }
 
     fn key_view(&self) -> KeyView<'_> {
@@ -857,6 +887,7 @@ impl Policy {
             run: self.run.as_ref().map(|d| d.path()),
             write: &self.write,
             files: &self.files,
+            covered: self.covered(),
         }
     }
 

@@ -104,6 +104,8 @@ pub struct Run {
     pub shut: Option<Covered>,
     /// The files named like keys its child hides, in a mount namespace of its own, before its rules.
     pub covers: Vec<Covered>,
+    /// Those outside the project (D-i, `linux::Covers::loose`): one gone or swapped since is left, the run started.
+    pub loose: Vec<Covered>,
     /// The project's protected entries its child binds read-only over themselves, in that namespace, before the
     /// keys' covers (compat B9, `linux::Covers::seals`): files or folders.
     pub seals: Vec<Covered>,
@@ -249,6 +251,7 @@ pub fn encode(msg: &Msg) -> Result<Vec<u8>, Refused> {
             b.extend([net, r.held as u8, r.no_userns as u8, r.ptys as u8]);
             list(&mut b, &r.shut.iter().map(Covered::item).collect::<Vec<_>>())?;
             list(&mut b, &r.covers.iter().map(Covered::item).collect::<Vec<_>>())?;
+            list(&mut b, &r.loose.iter().map(Covered::item).collect::<Vec<_>>())?;
             list(&mut b, &r.seals.iter().map(Covered::item).collect::<Vec<_>>())?;
             list(&mut b, &r.pins.iter().map(Covered::item).collect::<Vec<_>>())?;
             valid_run(r)?;
@@ -325,12 +328,12 @@ fn valid_run(r: &Run) -> Result<(), Refused> {
     }
     // (the child takes them as they are: absolute, each a C string; the shut file with covers, and only then)
     let absolute = |s: &[u8]| s.first() == Some(&b'/') && !nul(s);
-    let shut = match (&r.shut, r.covers.is_empty()) {
+    let shut = match (&r.shut, r.covers.is_empty() && r.loose.is_empty()) {
         (None, true) => true,
         (Some(s), false) => absolute(&s.path),
         _ => false,
     };
-    if !shut || r.covers.iter().chain(&r.seals).chain(&r.pins).any(|c| !absolute(&c.path)) {
+    if !shut || r.covers.iter().chain(&r.loose).chain(&r.seals).chain(&r.pins).any(|c| !absolute(&c.path)) {
         return Err(Refused("a covered or sealed file or the shut file not an absolute path"));
     }
     Ok(())
@@ -432,6 +435,7 @@ pub fn decode(b: &[u8], fds: usize) -> Result<Msg, Refused> {
                     _ => return Err(Refused("more than one shut file")),
                 },
                 covers: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
+                loose: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
                 seals: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
                 pins: r.list()?.iter().map(|c| Covered::of_item(c)).collect::<Result<_, _>>()?,
             };
@@ -588,6 +592,11 @@ mod tests {
                 shut: held.then(|| Covered { dev: 9, ino: 1 << 33, path: b"/tmp/i/shut".to_vec() }),
                 covers: match held {
                     true => vec![Covered { dev: 1 << 40, ino: 7, path: b"/tmp/project/.env".to_vec() }],
+                    false => Vec::new(),
+                },
+                // (keys outside the project on one only)
+                loose: match held {
+                    true => vec![Covered { dev: 2, ino: 1 << 34, path: b"/tmp/granted/a/b/id_rsa".to_vec() }],
                     false => Vec::new(),
                 },
                 // (sealed entries on the own network's only — with covers and without)

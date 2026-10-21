@@ -1165,6 +1165,12 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn child: tests",
         "a flag checked in the forked child (no allocation): the same code",
     ),
+    (
+        "src/sandbox/keeper.rs",
+        "in fn cover: if let Some(gone) =",
+        "the two-deep test's window case: the child removes one file only when the run's project is in that test's \
+         own scratch folder (`tarae-sb-keys-two-deep-…`) — compat's runs never are, so it's never set: the same code",
+    ),
     ("src/sandbox/keeper.rs", "in fn heard: Msg", RECORD),
     ("src/sandbox/keeper.rs", "in fn heard: s.exits.push(status);", RECORD),
     (
@@ -1179,6 +1185,11 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ),
     ("src/sandbox/keeper.rs", "in fn number: if let Some(info) = s.fdinfo {", HOOK),
     ("src/sandbox/keeper.rs", "in fn number: if let Some(d) = s.number_after {", HOOK),
+    (
+        "src/sandbox/keeper.rs",
+        "in fn of: gone_in_the_window",
+        "none unless the run's project is in the two-deep test's own scratch folder: compat's never are",
+    ),
     ("src/sandbox/keeper.rs", "in fn of: leak", SEAM),
     ("src/sandbox/keeper.rs", "in fn ready_in: if let Some(began) = slow {", HOOK),
     ("src/sandbox/keeper.rs", "in fn ready_in: slow", HOOK),
