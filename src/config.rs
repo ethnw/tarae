@@ -882,7 +882,7 @@ Z = ["move_line_down", ":sh touch marker"]
             }
         }
         let mut trusted = Store::default();
-        trusted.answer(&project, c.project.as_ref().unwrap().hash, true);
+        trusted.answer(crate::trust::Kind::Tarae, &project, c.project.as_ref().unwrap().hash, true, 0);
         let (t, _) = load(None, &trusted);
         assert!(t.editor.llm.run_allow == ["make"] && none_set(&t), "trusted: still refused");
         fs::write(&user, format!("[llm]\n{yours_only}")).unwrap();
@@ -939,7 +939,7 @@ Z = ["move_line_down", ":sh touch marker"]
         };
         let (c, _) = load(None, &Store::default());
         let mut trusted = Store::default();
-        trusted.answer(&project, c.project.as_ref().unwrap().hash, true);
+        trusted.answer(crate::trust::Kind::Tarae, &project, c.project.as_ref().unwrap().hash, true, 0);
         let (t, w) = load(None, &trusted);
         assert_eq!(typed(&t, "Y"), ["sh true"], "a trusted project's other `:` binding runs");
         for seq in ["X", "space Z", "W"] {
@@ -1010,7 +1010,7 @@ Z = ["move_line_down", ":sh touch marker"]
             p.items
         );
         let mut store = Store::default();
-        store.answer(&project, p.hash, true);
+        store.answer(crate::trust::Kind::Tarae, &project, p.hash, true, 0);
         let (t, _) = load(&store);
         assert_eq!(
             (names(&t.editor.preflight), names(&t.editor.preflight_local)),
@@ -1088,7 +1088,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert!(p.items.iter().any(|(k, v)| k == "editor.restart-build" && v == "\"touch marker\""));
         // Trusted for what it says now: all of it applies
         let mut store = Store::default();
-        store.answer(&path, p.hash, true);
+        store.answer(crate::trust::Kind::Tarae, &path, p.hash, true, 0);
         let (t, _) = load_from(None, Some(path.clone()), &store);
         assert_eq!(t.project.as_ref().unwrap().state, State::Trusted);
         assert_eq!(t.editor.restart_build, "touch marker");
@@ -1106,7 +1106,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(a.project.as_ref().unwrap().state, State::Ask);
         assert_eq!(a.editor.restart_binary, "");
         // Ignored: held back, not asked
-        store.answer(&path, a.project.as_ref().unwrap().hash, false);
+        store.answer(crate::trust::Kind::Tarae, &path, a.project.as_ref().unwrap().hash, false, 0);
         let (i, _) = load_from(None, Some(path.clone()), &store);
         assert_eq!(i.project.as_ref().unwrap().state, State::Ignored);
         assert_eq!(i.editor.restart_build, "");
@@ -1153,7 +1153,7 @@ Z = ["move_line_down", ":sh touch marker"]
         assert_eq!(p.state, State::Ask);
         assert!(p.items.iter().any(|(k, v)| k == "llm.sandbox-upstream" && v == "\"none\""), "{:?}", p.items);
         let mut store = Store::default();
-        store.answer(&path, p.hash, true);
+        store.answer(crate::trust::Kind::Tarae, &path, p.hash, true, 0);
         let (t, _) = load_from(None, Some(path.clone()), &store);
         // The policy each config makes, the network on, tarae's environment naming a proxy
         let root = path.parent().unwrap();

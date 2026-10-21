@@ -1,22 +1,98 @@
-//! `:granted` — what Claude may do here without asking (card model P4, cardauto piece 7; plan §2.2): the defaults
-//! first, then the user's answers by how long they last — always (kept for the project), this session, this chat —
-//! each with where it comes from and when it was answered. `d` takes an answer back (`Editor::sandbox_disallow`:
-//! the next run and the next read ask again, and Claude hears it with the next message); a default isn't an answer
-//! to take back, and its row says so. The chat's title says how many answers there are (`› 3 granted`: `count`).
+//! `:granted` — what you've let through here (card model P4, cardauto piece 7; plan §2.2; sandbox UX piece E): the
+//! defaults first, then your answers to Claude's asks by how long they last — always (kept for this checkout), this
+//! session, this chat —, then the trust answers kept for every checkout of the repository (tarae's project
+//! settings, Claude's settings, git's own commands, a hook), the plugins' approvals and the packs' preflight told —
+//! each with where it applies and when it was answered. `d` takes an answer back: Claude's through
+//! `Editor::sandbox_disallow` (the next run and the next read ask again, and Claude hears it with the next message);
+//! a trust answer is forgotten (`trust::forget`), what it let run held back at once and its card asking at the next
+//! look (`trust_taken`); a plugin's through `plugin_revoke`. A default isn't an answer to take back, and its row
+//! says so. Answers kept for the repository's other checkouts are counted on a faint last row, not used here. The
+//! chat's title says how many of Claude's answers there are (`› 3 granted`: `count`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::allow::{Allowed, Grant};
 use crate::caps::{Caps, Source, Why};
 use crate::editor::Editor;
 use crate::picker::{Action, Item, Picker};
+use crate::trust::{Kind, Place};
 
 /// The list's kind (`features::PICKERS`) and title.
 pub const KIND: &str = "granted";
 /// What its input row says, faint (nothing is typed: its letters are keys).
-pub const SAID: &str = "what Claude may do without asking";
+pub const SAID: &str = "what you've let through";
 /// After the defaults, when there's no answer.
-const NONE_PAST: &str = "nothing granted past the defaults yet";
+const NONE_PAST: &str = "nothing let through past the defaults yet";
+
+/// What `d` takes back on a row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Taken {
+    /// Claude's answer — as `:sandbox-disallow` takes it.
+    Grant(String),
+    /// A trust answer, kept at its place.
+    Trust(Kind, Place),
+    /// A plugin's approvals (`:plugin-revoke`).
+    Plugin(String),
+    /// The packs' preflight told: the lines kept for it (`preflight::told_kept`).
+    Preflight(Vec<String>),
+    /// The session's no-sandbox card's `s` (`Session.no_sandbox`).
+    NoSandbox,
+}
+
+/// What the list shows past Claude's answers — read on a worker (`More::look`).
+#[derive(Clone, Debug, Default)]
+pub struct More {
+    /// The session runs Claude's commands without a sandbox, unasked.
+    pub no_sandbox: bool,
+    /// Whether the checkout is a repository's (the trust answers are kept for all its checkouts).
+    pub repository: bool,
+    pub trusted: Vec<crate::trust::Trusted>,
+    /// (plugin, what it may do).
+    pub plugins: Vec<(String, String)>,
+    /// The lines kept for the packs' preflight in this clone.
+    pub preflight: Vec<String>,
+    /// Answers kept for the repository's other checkouts, not used here.
+    pub elsewhere: usize,
+}
+
+/// Where `More` is read from, taken on the main thread.
+struct Look {
+    root: PathBuf,
+    no_sandbox: bool,
+    trust: Option<PathBuf>,
+    allow: Option<PathBuf>,
+    plugins: Option<PathBuf>,
+    /// The preflight told file, and the steps yours add (None: the project lists its own — no packs' defaults).
+    preflight: Option<(PathBuf, Vec<crate::preflight::Step>)>,
+}
+
+impl More {
+    /// A worker's: it reads the stores.
+    fn look(l: &Look) -> More {
+        let common = crate::allow::common_dir(&l.root);
+        let trusted = crate::trust::Store::read(l.trust.as_deref()).trusted_in(common.as_deref(), &l.root);
+        let plugins = l.plugins.as_deref().map(crate::plugin::approved).unwrap_or_default();
+        let preflight = l.preflight.as_ref().map_or_else(Vec::new, |(kept, yours)| {
+            let steps = [crate::packs::preflight(&l.root).steps, yours.clone()].concat();
+            crate::preflight::told_kept(kept, &l.root, &steps)
+        });
+        let here = crate::sandbox::profile_path(&l.root);
+        let elsewhere = common.as_ref().map_or(0, |c| {
+            let store = crate::allow::Store::read(l.allow.as_deref());
+            let others = store.projects().filter(|(p, _)| *p != here);
+            let ours = others.filter(|(p, _)| crate::allow::common_dir(p).as_ref() == Some(c));
+            ours.map(|(_, a)| a.grants().len()).sum()
+        });
+        More {
+            no_sandbox: l.no_sandbox,
+            repository: common.is_some(),
+            trusted,
+            plugins,
+            preflight,
+            elsewhere,
+        }
+    }
+}
 /// A default's row, once `d` was pressed on it.
 const NOT_YOURS: &str = "a default — no answer of yours to take back";
 
@@ -61,13 +137,30 @@ fn when(at: Option<u64>, now: u64) -> String {
     }
 }
 
-/// The list's rows: the defaults `caps` found (with why), then the answers with their times — kept for the project
-/// (`kept`), this session's, this chat's — each once, under the longest it lasts, newest first; the session's hosts
-/// (the proxy's, until you quit) with this session's.
+/// A trust answer's group heading, before where it applies.
+fn kind_heading(k: Kind) -> &'static str {
+    match k {
+        Kind::Tarae => "tarae's project settings",
+        Kind::Claude => "Claude's settings",
+        Kind::Git => "git's own commands",
+        Kind::Hook => "git hooks",
+    }
+}
+
+/// An answer's row: `d` takes it back.
+fn answer(label: String, hint: String, taken: Taken) -> Item {
+    Item { label, action: Action::Granted(Some(taken)), hint, glyph: Some(("•", "ui.virtual")) }
+}
+
+/// The list's rows: the defaults `caps` found (with why), then Claude's answers with their times — kept for the
+/// checkout (`kept`), this session's, this chat's — each once, under the longest it lasts, newest first; the
+/// session's hosts (the proxy's, until you quit) and its no-sandbox `s` with this session's; then `more`: the trust
+/// answers by kind, the plugins, the preflight told, and what's kept for other checkouts.
 pub fn items(
     caps: &Caps,
     [kept, session, chat]: [&Allowed; 3],
     hosts: &[(String, u16)],
+    more: &More,
     now: u64,
 ) -> Vec<Item> {
     let mut out = vec![heading("by default")];
@@ -95,23 +188,25 @@ pub fn items(
     }
     let mut seen: Vec<Grant> = Vec::new();
     let mut answered = 0;
-    for (title, a) in [("always", kept), ("this session", session), ("this chat", chat)] {
+    for (title, a) in [(ALWAYS, kept), ("this session", session), ("this chat", chat)] {
         let mut rows: Vec<(u64, Item)> = Vec::new();
         for g in a.grants() {
             if seen.contains(&g) {
                 continue;
             }
             let at = a.granted.get(&g).copied();
-            let (label, hint, action) = (label(&g), when(at, now), Action::Granted(Some(taken_as(&g))));
-            rows.push((at.unwrap_or(0), Item { label, action, hint, glyph: Some(("•", "ui.virtual")) }));
+            rows.push((at.unwrap_or(0), answer(label(&g), when(at, now), Taken::Grant(taken_as(&g)))));
             seen.push(g);
         }
         if title == "this session" {
             for (h, p) in hosts {
                 let label = format!("reach {h}:{p}");
-                let action = Action::Granted(Some(crate::hosts::listed(h, *p)));
-                let hint = "you · until you quit".into();
-                rows.push((0, Item { label, action, hint, glyph: Some(("•", "ui.virtual")) }));
+                let taken = Taken::Grant(crate::hosts::listed(h, *p));
+                rows.push((0, answer(label, "you · until you quit".into(), taken)));
+            }
+            if more.no_sandbox {
+                let label = NO_SANDBOX.into();
+                rows.push((0, answer(label, "you · until you quit".into(), Taken::NoSandbox)));
             }
         }
         if rows.is_empty() {
@@ -124,11 +219,50 @@ pub fn items(
         answered += rows.len();
         out.extend(rows.into_iter().map(|(_, i)| i));
     }
+    // The trust answers: for every checkout of the repository (outside one, the project's)
+    let shared = if more.repository { "every checkout" } else { "this project" };
+    let mut kind = None;
+    for t in &more.trusted {
+        if kind != Some(t.kind) {
+            kind = Some(t.kind);
+            out.extend([heading(""), heading(&format!("{} · {shared}", kind_heading(t.kind)))]);
+        }
+        let mut hint = when(Some(t.at), now);
+        if t.versions > 1 {
+            hint.push_str(&format!(" · {} versions", t.versions));
+        }
+        // (the file alone: its heading says what it runs)
+        out.push(answer(t.place.shown(&caps.root), hint, Taken::Trust(t.kind, t.place.clone())));
+        answered += 1;
+    }
+    if !more.plugins.is_empty() {
+        out.extend([heading(""), heading("plugins · everywhere")]);
+        for (name, what) in &more.plugins {
+            out.push(answer(format!("{name}: {what}"), "you".into(), Taken::Plugin(name.clone())));
+        }
+        answered += more.plugins.len();
+    }
+    if !more.preflight.is_empty() {
+        out.extend([heading(""), heading(&format!("preflight · {shared}"))]);
+        out.push(answer(PREFLIGHT.into(), "you".into(), Taken::Preflight(more.preflight.clone())));
+        answered += 1;
+    }
     if answered == 0 {
         out.extend([heading(""), heading(NONE_PAST)]);
     }
+    if more.elsewhere > 0 {
+        let n = more.elsewhere;
+        out.extend([heading(""), heading(&format!("{n} more kept for other checkouts — not used here"))]);
+    }
     out
 }
+
+/// Claude's kept answers' heading: they're the checkout's (`sandbox.json` by its real path).
+const ALWAYS: &str = "always · this checkout";
+/// The session's no-sandbox `s`, as its row says it.
+const NO_SANDBOX: &str = "run without a sandbox";
+/// The packs' preflight told, as its row says it (the card said they run the project's code).
+const PREFLIGHT: &str = "run the packs' default steps";
 
 /// How many answers the list has — the chat's `› N granted`: what the session's last `Caps` has past the
 /// defaults (each once), and its hosts.
@@ -153,10 +287,23 @@ impl Editor {
     fn granted_list(&mut self, again: bool) {
         let basis = self.caps_basis();
         let hosts = self.session.hosts.clone();
+        let look = Look {
+            root: self.session.root.clone(),
+            no_sandbox: self.session.no_sandbox == Some(crate::tools::NoSandbox::Unasked),
+            trust: self.trust_path.clone(),
+            allow: self.allow_path.clone(),
+            plugins: self.plugin_approvals_store(),
+            preflight: (self.config.preflight.is_empty())
+                .then(|| {
+                    self.session.preflight_kept.clone().map(|k| (k, self.config.preflight_local.clone()))
+                })
+                .flatten(),
+        };
         self.events.jobs().spawn(move || {
             let caps = basis.build();
-            let items =
-                items(&caps, [&basis.kept(), &basis.session, &basis.chat], &hosts, crate::allow::now_s());
+            let more = More::look(&look);
+            let answers = [&basis.kept(), &basis.session, &basis.chat];
+            let items = items(&caps, answers, &hosts, &more, crate::allow::now_s());
             move |ed: &mut Editor| ed.granted_open(items, again)
         });
     }
@@ -184,29 +331,112 @@ impl Editor {
         }
     }
 
-    /// A letter in the list: `j`/`k` move, `d` takes the answer in hand back — on a default, its row says why
-    /// nothing goes.
+    /// A letter in the list: the list panels' moves (`key::list_move`), `d` takes the answer in hand back — on a
+    /// default, its row says why nothing goes.
     pub(crate) fn granted_key(&mut self, c: char) {
         let Some(p) = self.picker.as_mut() else { return };
+        let key = crate::key::Key::plain(crate::key::Code::Char(c));
+        if let Some(m) = crate::key::list_move(key) {
+            return match m {
+                crate::key::ListMove::By(by) => p.move_by(by),
+                m => p.select_near(m.from(p.selected, p.len())),
+            };
+        }
         match c {
-            'j' => p.move_by(1),
-            'k' => p.move_by(-1),
             'd' => match p.current().map(|i| i.action.clone()) {
-                Some(Action::Granted(Some(what))) => {
-                    if let Err(e) = self.sandbox_disallow(&what) {
-                        return self.set_error(e);
+                Some(Action::Granted(Some(taken))) => {
+                    if let Err(e) = self.granted_take(taken) {
+                        self.set_error(e);
                     }
-                    self.granted_list(true);
                 }
                 Some(Action::Granted(None)) => p.set_current_hint(NOT_YOURS),
                 _ => {}
             },
-            _ => self.key_unused(
-                crate::key::Key::plain(crate::key::Code::Char(c)),
-                "the list of grants",
-                "d takes an answer back, j and k move",
-            ),
+            _ => self.key_unused(key, "the list of grants", "d takes an answer back, j and k move"),
         }
+    }
+
+    /// `d` on an answer: taken back, the list made again (a store's write first, where there's one).
+    fn granted_take(&mut self, taken: Taken) -> Result<(), String> {
+        match taken {
+            Taken::Grant(what) => self.sandbox_disallow(&what)?,
+            Taken::Plugin(name) => self.plugin_revoke(&name)?,
+            Taken::NoSandbox => {
+                self.session.no_sandbox = None;
+                self.set_status("Without a sandbox, each run asks again");
+            }
+            Taken::Preflight(keys) => {
+                self.preflight_told.remove(&self.session.root);
+                let Some(kept) = self.session.preflight_kept.clone() else { return Ok(()) };
+                self.events.jobs().spawn(move || {
+                    let r = crate::preflight::told_forget(&kept, &keys);
+                    move |ed: &mut Editor| {
+                        match r {
+                            Ok(()) => ed.set_status("The packs' preflight asks again before it runs"),
+                            Err(e) => ed.set_error(format!("couldn't take it back: {e}")),
+                        }
+                        ed.granted_list(true);
+                    }
+                });
+                return Ok(());
+            }
+            Taken::Trust(kind, place) => {
+                self.trust_take(kind, place);
+                return Ok(());
+            }
+        }
+        self.granted_list(true);
+        Ok(())
+    }
+
+    /// A trust answer taken back: forgotten in the store (on a worker), then what it let run follows — tarae's
+    /// project settings held back, each chat whose claude runs with Claude's settings started again without them,
+    /// tarae's git with the repository's own commands held (its store's answers and kept resolves dropped there,
+    /// after the write: a resolve between reads the store as it is then); a hook's next action asks (it reads the
+    /// store each time). Each card asks again at the next look — `:project-trust`, `:claude-settings`,
+    /// `:git-trust` ask now.
+    fn trust_take(&mut self, kind: Kind, place: Place) {
+        let store = self.trust_path.clone();
+        let project = self.project_trust.as_ref().map(|p| p.file.clone());
+        let chats: Vec<(crate::event::SessionId, PathBuf)> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter_map(|s| Some((s.id, s.chat.as_ref()?.settings.seen.as_ref()?.file.clone())))
+            .collect();
+        self.events.jobs().spawn(move || {
+            let r = store.as_deref().map_or(Ok(()), |s| crate::trust::forget(s, &place));
+            if kind == Kind::Git {
+                crate::gitrepo::forget_trust(&place);
+            }
+            let here = |f: &Path| crate::trust::place_of(f) == place;
+            let project = kind == Kind::Tarae && project.is_some_and(|f| here(&f));
+            let chats: Vec<_> = chats.into_iter().filter(|(_, f)| kind == Kind::Claude && here(f)).collect();
+            move |ed: &mut Editor| {
+                if let Err(e) = r {
+                    return ed.set_error(format!("couldn't take it back: {e}"));
+                }
+                ed.trust_taken(kind, project, chats.into_iter().map(|(id, _)| id).collect());
+                ed.granted_list(true);
+            }
+        });
+    }
+
+    /// The running state follows a trust answer taken back (`trust_take`): `project` — the open project's
+    /// `.tarae.toml` was it; `chats` — the sessions whose chat read those Claude settings.
+    fn trust_taken(&mut self, kind: Kind, project: bool, chats: Vec<crate::event::SessionId>) {
+        if project {
+            self.project_trust_forgotten();
+        }
+        for id in chats {
+            self.with_session(id, crate::claudetrust::forgotten);
+        }
+        self.set_status(match kind {
+            Kind::Tarae => {
+                "Taken back — the project's settings are held back; its card asks at the next look"
+            }
+            Kind::Claude => "Taken back — Claude runs without the project's settings; their card asks again",
+            Kind::Git => "Taken back — tarae's git holds this repository's commands; its card asks again",
+            Kind::Hook => "Taken back — the hook is asked about before it runs again",
+        });
     }
 }
 
@@ -282,12 +512,13 @@ mod tests {
         open(&mut ed);
         let labels: Vec<String> = rows(&ed).into_iter().map(|r| r.0).collect();
         let at = |l: &str| labels.iter().position(|x| x == l).unwrap_or_else(|| panic!("{l} in {labels:?}"));
-        assert!(at("always") < at("this session") && at("this session") < at("this chat"), "{labels:?}");
+        assert!(at(ALWAYS) < at("this session") && at("this session") < at("this chat"), "{labels:?}");
         // The kept one, its write held back: the next run already hasn't it
         let pick = |ed: &mut Editor, what: String| {
             let p = ed.picker.as_mut().unwrap();
-            p.select_where(|a| *a == Action::Granted(Some(what.clone())));
-            assert_eq!(p.current().map(|i| &i.action), Some(&Action::Granted(Some(what))));
+            let taken = Action::Granted(Some(Taken::Grant(what)));
+            p.select_where(|a| *a == taken);
+            assert_eq!(p.current().map(|i| &i.action), Some(&taken));
         };
         pick(&mut ed, shown(&kept));
         {
@@ -328,7 +559,7 @@ mod tests {
         assert_eq!(labels[..2], ["by default".to_string(), format!("read {}", said(&root))]);
         assert_eq!(labels.last().map(String::as_str), Some(NONE_PAST));
         assert!(
-            !labels.iter().any(|l| ["always", "this session", "this chat"].contains(&l.as_str())),
+            !labels.iter().any(|l| [ALWAYS, "this session", "this chat"].contains(&l.as_str())),
             "{labels:?}"
         );
     }
@@ -396,11 +627,11 @@ mod tests {
         let at = |l: &str| rows.iter().position(|r| r.0 == l).unwrap_or_else(|| panic!("{l} in {rows:?}"));
         let root_row = format!("read {}", crate::allow::tilde(&root));
         assert_eq!(rows[at(&root_row)].1, "this checkout");
-        assert!(at("by default") < at(&root_row) && at(&root_row) < at("always"));
+        assert!(at("by default") < at(&root_row) && at(&root_row) < at(ALWAYS));
         let terminals = "open terminals, yours too";
         assert_eq!(rows[at(terminals)].1, "you · just now");
         assert_eq!(rows.iter().filter(|r| r.0 == terminals).count(), 1, "once, under always: {rows:?}");
-        assert!(at("always") < at(terminals) && at(terminals) < at("this session"));
+        assert!(at(ALWAYS) < at(terminals) && at(terminals) < at("this session"));
         assert!(at("this session") < at("write in /t/w") && at("write in /t/w") < at("this chat"));
         assert!(at("this chat") < at("connect to port 8080"));
         assert_eq!(count(&ed.session), 3, "the chip's count: the answers, each once");
@@ -427,6 +658,59 @@ mod tests {
         key(&mut ed, 'x');
         let said = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
         assert!(said.contains("does nothing in the list of grants"), "{said}");
+    }
+
+    /// Piece E: a hook's kept yes, the packs' preflight told and the session's no-sandbox `s` are each listed —
+    /// outside a repository, for this project — and `d` on each makes the next look ask: the hook's answer gone from
+    /// the store, the told line gone (and since tarae started), the no-sandbox card's answer gone. Other letters move
+    /// as in every list panel.
+    #[test]
+    fn a_hook_the_preflight_and_no_sandbox_are_listed_and_taken_back() {
+        let s = crate::scratch::Scratch::new("granted-more");
+        let (mut ed, root, _) = editor(&s);
+        let trust = s.path().join("trust.json");
+        ed.trust_path = Some(trust.clone());
+        let hook = root.join(".githooks/pre-commit");
+        crate::trust::record(trust.clone(), Kind::Hook, hook.clone(), [7; 32], true).unwrap();
+        ed.session.no_sandbox = Some(crate::tools::NoSandbox::Unasked);
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        let told = s.path().join("preflight-told");
+        let steps = crate::packs::preflight(&root).steps;
+        assert!(!steps.is_empty(), "the packs' steps for a Cargo project");
+        let line = crate::preflight::told_key(&root, &steps).expect("a clone told apart");
+        std::fs::write(&told, format!("other\n{line}\n")).unwrap();
+        ed.session.preflight_kept = Some(told.clone());
+        ed.preflight_told.insert(root.clone());
+        open(&mut ed);
+        let listed = rows(&ed);
+        let at =
+            |l: &str| listed.iter().position(|r| r.0 == l).unwrap_or_else(|| panic!("{l} in {listed:?}"));
+        let no_sandbox = NO_SANDBOX;
+        assert!(at("this session") < at(no_sandbox));
+        assert!(at("git hooks · this project") < at(".githooks/pre-commit"));
+        assert!(at("preflight · this project") < at(PREFLIGHT));
+        assert!(listed[at(".githooks/pre-commit")].1.starts_with("you · "), "{listed:?}");
+        assert!(!listed.iter().any(|r| r.0 == NONE_PAST));
+        // `G` goes to the last row, `g` to the first answer-or-default
+        key(&mut ed, 'G');
+        let p = ed.picker.as_ref().unwrap();
+        assert!(matches!(p.current().map(|i| &i.action), Some(Action::Granted(Some(Taken::Preflight(_))))));
+        let take = |ed: &mut Editor, f: &dyn Fn(&Taken) -> bool| {
+            let p = ed.picker.as_mut().unwrap();
+            p.select_where(|a| matches!(a, Action::Granted(Some(t)) if f(t)));
+            key(ed, 'd');
+        };
+        take(&mut ed, &|t| matches!(t, Taken::NoSandbox));
+        assert_eq!(ed.session.no_sandbox, None, "the card asks before the next run");
+        until(&mut ed, "the list again", |ed| !rows(ed).iter().any(|r| r.0 == no_sandbox));
+        take(&mut ed, &|t| matches!(t, Taken::Trust(Kind::Hook, _)));
+        until(&mut ed, "the hook taken back", |_| {
+            crate::trust::Store::read(Some(&trust)).state(&hook, [7; 32]) == crate::trust::State::Ask
+        });
+        take(&mut ed, &|t| matches!(t, Taken::Preflight(_)));
+        until(&mut ed, "the told line gone", |_| std::fs::read_to_string(&told).unwrap() == "other\n");
+        assert!(!ed.preflight_told.contains(&root), "nor kept since tarae started");
+        until(&mut ed, "the list again", |ed| rows(ed).iter().any(|r| r.0 == NONE_PAST));
     }
 
     /// The schema step (plan §2.2): a kept read a default covers now — here, in the checkout — is dropped from

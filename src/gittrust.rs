@@ -182,7 +182,7 @@ impl Editor {
         if let Some(path) = self.trust_path.clone() {
             let (config, digest) = (ask.config.clone(), ask.digest);
             self.events.jobs().spawn(move || {
-                let r = crate::trust::record(path, config, digest, trusted);
+                let r = crate::trust::record(path, crate::trust::Kind::Git, config, digest, trusted);
                 move |ed: &mut Editor| {
                     if let Err(e) = r {
                         ed.set_error(format!("couldn't keep the answer: {e}"));

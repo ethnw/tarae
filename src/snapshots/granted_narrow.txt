@@ -2,7 +2,7 @@
 ## text
 00
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-02      what Claude may do without asking     granted  12/12
+02      what you've let through               granted  20/20
 03    ──────────────────────────────────────────────────────
 04     by default
 05     ◦ read /private/tmp…shot-granted/tarae  this checkout
@@ -12,15 +12,15 @@
 09     ◦ read /private/…0/lib/rustlib/src  a toolchain's own
 10     ◦ read outside home        not others' homes, volumes
 11
-12     always
+12     always · this checkout
 13   ▎ • reach registry.npmjs.org:443          you · 5 h ago
 14     • write in /private/tm…ed/npm-cache  you · 3 days ago
 15
 16     this session
 17     • connect to port 5432                  you · 2 h ago
 18     • reach db.example.com:5432      you · until you quit
-19
-20     this chat
+19     • run without a sandbox          you · until you quit
+20
 21   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 22
 23  ▐ PICKER ▌  d take it back  j k move  esc close       1:1
@@ -52,7 +52,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00
 01
-02      ffff ffffff fff ff fffffff ffffff     fffffff  fffff
+02      ffff ffffff fff fffffff               fffffff  fffff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
 04     ff fffffff
 05     f                                       dddd dddddddd
@@ -62,15 +62,15 @@
 09     f                                   d ddddddddddd ddd
 10     f                          ddd ddddddd dddddd ddddddd
 11
-12     ffffff
+12     ffffff f ffff ffffffff
 13   a d TTTTT TTTTTTTTTTTTTTTTTTTTTT          ddd d d d ddd
 14     d                                    ddd d d dddd ddd
 15
 16     ffff fffffff
 17     d                                       ddd d d d ddd
 18     d                                ddd d ddddd ddd dddd
-19
-20     ffff ffff
+19     d                                ddd d ddddd ddd dddd
+20
 21
 22
 23  a BBBBBB a  D ffff ff ffff  D D ffff  DDD fffff       TTT

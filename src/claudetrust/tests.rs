@@ -314,7 +314,8 @@ fn your_own_local_file_isnt_asked_about_and_answers_are_kept() {
     assert_eq!(seen.state, State::Ask, "the repository's: asks");
     assert_eq!(seen.file, root.join(PROJECT), "kept under the project file's place");
     let store = root.join("trust.json");
-    crate::trust::record(store.clone(), seen.file.clone(), seen.digest().unwrap(), false).unwrap();
+    let claude = crate::trust::Kind::Claude;
+    crate::trust::record(store.clone(), claude, seen.file.clone(), seen.digest().unwrap(), false).unwrap();
     assert_eq!(look(&root, Some(&store), None, |_| false, |_| None).state, State::Ignored);
     std::fs::write(root.join(LOCAL), r#"{"apiKeyHelper": "printf changed"}"#).unwrap();
     assert_eq!(look(&root, Some(&store), None, |_| false, |_| None).state, State::Ask, "changed: asks again");
@@ -368,7 +369,14 @@ fn a_change_answered_before_restarts_claude_without_a_card() {
     // The next version, held back before (in this repository's store)
     let next = r#"{"env": {"SECOND_ZQ7": "1"}}"#;
     let hash = scan(&[file(PROJECT, next)]).unwrap().hash;
-    crate::trust::record(root.join("trust.json"), root.join(PROJECT), hash, false).unwrap();
+    crate::trust::record(
+        root.join("trust.json"),
+        crate::trust::Kind::Claude,
+        root.join(PROJECT),
+        hash,
+        false,
+    )
+    .unwrap();
     std::fs::remove_file(root.join("argv")).unwrap();
     std::fs::write(root.join(PROJECT), next).unwrap();
     until(&mut ed, "the restart with the new overrides", |ed| {

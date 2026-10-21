@@ -317,6 +317,14 @@ today).
   the whole picture and not only the exceptions. Empty: `nothing granted past the defaults — Claude's
   commands can read <checkout>, …` (faint, first row).
 
+**One list (sandbox UX piece E, 2026-10-17):** the trust answers join it — `trust.json` keeps each answer's
+kind and time — by kind, for every checkout of the repository, then the plugins' approvals and the packs'
+preflight told; the no-sandbox `s` with this session's; the answers `sandbox.json` keeps for the repository's
+other checkouts counted on a faint last row (`always` is the checkout's). `d` on a trust answer forgets its
+trusted versions and the running state follows (`granted::trust_take`): never left half-trusted. srt keeps no
+answers to take back — its policy is a settings file you edit (`~/.srt-settings.json`, or `--settings`; its
+README, "Configuration").
+
 **Revoked:** `d` or Enter on a row (a default row says it can't be taken back here). A revoke
 applies to the next run, because policies are built per run (`with_allowed`, `tools.rs:1574`), and
 to the next Read at once. Claude hears it with the next message (`checkpoints.tell`: *"The user took

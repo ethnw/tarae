@@ -2,7 +2,7 @@
 ## text
 00                                                                claude                         ready
 01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     ────────────────────────────────────
-02      what Claude may do without asking       granted  6/6
+02      what you've let through                 granted  6/6
 03    ──────────────────────────────────────────────────────
 04     by default
 05   ▎ ◦ read /private/tmp…shot-granted/tarae  this checkout
@@ -12,7 +12,7 @@
 09     ◦ read /private/…0/lib/rustlib/src  a toolchain's own
 10     ◦ read outside home        not others' homes, volumes      It reads the whole project,
 11                                                                starting from demo.rs.
-12     nothing granted past the defaults yet
+12     nothing let through past the defaults yet
 13                                                                tab for a suggestion
 14                                                                › Explain what this file does
 15                                                                › Where is this used across the pro…
@@ -64,7 +64,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                                dddddd                         fffff
 01                                                                ffffffffffffffffffffffffffffffffffff
-02      ffff ffffff fff ff fffffff ffffff       fffffff  fff
+02      ffff ffffff fff fffffff                 fffffff  fff
 03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
 04     ff fffffff
 05   a f TTTT TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT  dddd dddddddd
@@ -74,7 +74,7 @@
 09     f                                   d ddddddddddd ddd
 10     f                          ddd ddddddd dddddd ddddddd      dd ddddd ddd ddddd dddddddd
 11                                                                dddddddd dddd dddddddd
-12     fffffff fffffff ffff fff ffffffff fff
+12     fffffff fff fffffff ffff fff ffffffff fff
 13                                                                DDD fff f ffffffffff
 14                                                                f ddddddd dddd dddd dddd dddd
 15                                                                f ddddd dd dddd dddd dddddd ddd dddd

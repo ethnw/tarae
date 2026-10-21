@@ -471,6 +471,11 @@ impl Store {
         self.projects.get(project).cloned().unwrap_or_default()
     }
 
+    /// Every project's kept answers, by its real path.
+    pub fn projects(&self) -> impl Iterator<Item = (&Path, &Allowed)> {
+        self.projects.iter().map(|(p, a)| (p.as_path(), a))
+    }
+
     pub fn to_json(&self) -> String {
         // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
         let mut projects = serde_json::Map::new();

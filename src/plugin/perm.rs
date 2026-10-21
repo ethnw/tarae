@@ -274,7 +274,30 @@ pub(super) fn target(c: &Connect) -> String {
     if c.host.contains(':') { format!("[{}]:{}", c.host, c.port) } else { format!("{}:{}", c.host, c.port) }
 }
 
+/// Each plugin's approvals kept at `path`, as `:granted` lists them: (plugin, what it may do).
+pub(crate) fn approved(path: &Path) -> Vec<(String, String)> {
+    let n = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    load(Some(path))
+        .into_iter()
+        .filter_map(|(plugin, a)| {
+            let mut what = a.granted;
+            if !a.hosts.is_empty() {
+                what.push(format!("reach {}", n(a.hosts.len(), "host")));
+            }
+            if !a.files.is_empty() {
+                what.push(format!("read {} more", n(a.files.len(), "file")));
+            }
+            (!what.is_empty()).then(|| (plugin, what.join(", ")))
+        })
+        .collect()
+}
+
 impl Editor {
+    /// Where the plugins' approvals are kept — None: no plugins, or none kept (tests).
+    pub(crate) fn plugin_approvals_store(&self) -> Option<PathBuf> {
+        self.plugins.as_ref()?.perm_store.clone()
+    }
+
     /// Changes the approvals: on what's kept now (another tarae may have changed it), then kept.
     fn approvals_change(&mut self, f: impl FnOnce(&mut BTreeMap<String, Approval>)) -> std::io::Result<()> {
         let Some(p) = &mut self.plugins else { return Ok(()) };

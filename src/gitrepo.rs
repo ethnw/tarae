@@ -200,6 +200,15 @@ pub fn answered(config: &Path, digest: Digest, trusted: bool) {
     submodules().entries.retain(|(_, r)| !r.about(config));
 }
 
+/// What a repository's config file at `place` runs taken back (`:granted`'s `d`, on a worker — after the store's
+/// write): its answers since tarae started forgotten and its kept entries resolved again — held, the card asks.
+pub fn forget_trust(place: &crate::trust::Place) {
+    let of = |c: &Path| crate::trust::place_of(c) == *place;
+    ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(c, ..)| !of(c));
+    repos().entries.retain(|(_, r)| !r.about_place(place));
+    submodules().entries.retain(|(_, r)| !r.about_place(place));
+}
+
 /// Whether what a repository (its `config` file) runs (`digest`) was answered since tarae started — a resolve
 /// that asked, told before the answer and landing after it, puts no card up again. Reads no file.
 pub fn answered_since(config: &Path, digest: Digest) -> bool {
@@ -602,6 +611,11 @@ impl Repo {
     /// Whether `config` is its own config file, or one of its submodules' (any depth, checked out or not).
     fn about(&self, config: &Path) -> bool {
         self.config_file() == config || self.below().any(|b| b.about(config))
+    }
+
+    /// `about` for a trust answer's place (`trust::place_of` its config file's).
+    fn about_place(&self, place: &crate::trust::Place) -> bool {
+        crate::trust::place_of(&self.config_file()) == *place || self.below().any(|b| b.about_place(place))
     }
 
     /// Itself and its submodules, any depth, checked out or not — the ones whose own commands wait for a

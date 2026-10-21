@@ -183,6 +183,99 @@ fn yes_trusts_each_part_in_its_own_store_and_a_change_asks_its_part_alone() {
     assert_eq!(ed.offers[0].title, crate::trust::TITLE);
 }
 
+/// Piece E: `:granted` lists each part trusted — for every checkout of the repository — and `d` takes each back:
+/// what it let run follows at once (tarae's settings held back, the chat's claude started again with Claude's held
+/// back, tarae's git holding the repository's commands), and the next look asks (the store has no answer).
+#[test]
+fn granted_takes_each_part_back_and_what_it_let_run_follows() {
+    use crate::granted::Taken;
+    use crate::trust::Kind;
+    let (mut ed, root) = checkout("granted", None);
+    all_three(&mut ed, &root);
+    let What::RepoTrust { parts, .. } = ed.offers[0].what.clone() else { panic!("{:?}", kinds(&ed)) };
+    ed.offer_accept();
+    let seen = ed.session.chat.as_ref().and_then(|c| c.settings.seen.clone()).unwrap();
+    let kept_at: Vec<(PathBuf, crate::trust::Digest)> = parts
+        .iter()
+        .map(|p| match &p.what {
+            What::ProjectTrust { hash } => (root.join(".tarae.toml"), *hash),
+            What::ClaudeSettings { hash } => (seen.file.clone(), *hash),
+            What::GitTrust(a) => (a.config.clone(), a.digest),
+            _ => unreachable!(),
+        })
+        .collect();
+    for (file, hash) in &kept_at {
+        until(&mut ed, "each answer kept", |ed| kept(ed, file, *hash) == State::Trusted);
+    }
+    let held = "\"apiKeyHelper\":\"\"";
+    let argv = || std::fs::read_to_string(root.join("argv")).unwrap_or_default();
+    until(&mut ed, "claude with them", |ed| {
+        ed.session.chat.as_ref().is_some_and(|c| c.running()) && !argv().contains(held)
+    });
+    assert_eq!(ed.config.restart_build, "touch marker");
+    ed.granted();
+    until(&mut ed, "the list", |ed| ed.picker.as_ref().is_some_and(|p| p.kind == crate::granted::KIND));
+    let labels: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.label.clone()).collect();
+    for l in [
+        "tarae's project settings · every checkout",
+        ".tarae.toml",
+        "Claude's settings · every checkout",
+        ".claude/settings.json",
+        "git's own commands · every checkout",
+        ".git/config",
+    ] {
+        assert!(labels.iter().any(|x| x == l), "{l} in {labels:?}");
+    }
+    for kind in [Kind::Tarae, Kind::Claude, Kind::Git] {
+        let p = ed.picker.as_mut().unwrap();
+        p.select_where(
+            |a| matches!(a, crate::picker::Action::Granted(Some(Taken::Trust(k, _))) if *k == kind),
+        );
+        ed.handle_event(crate::event::Event::Key(crate::key::Key::plain(crate::key::Code::Char('d'))));
+        let (file, hash) = &kept_at[kind as usize];
+        until(&mut ed, "taken back", |ed| kept(ed, file, *hash) == State::Ask);
+    }
+    until(&mut ed, "the list again", |ed| {
+        ed.picker.as_ref().is_some_and(|p| !p.items().iter().any(|i| i.label == ".git/config"))
+    });
+    assert_eq!(ed.config.restart_build, "", "tarae's part held back at once");
+    let seen = ed.session.chat.as_ref().and_then(|c| c.settings.seen.clone()).unwrap();
+    assert_eq!(seen.state, State::Ask);
+    until(&mut ed, "claude started again held back", |ed| {
+        ed.session.chat.as_ref().is_some_and(|c| c.running()) && argv().contains(held)
+    });
+    let r = crate::gitrepo::repo(&root).unwrap();
+    assert!(r.asks, "git's commands wait for the card again");
+    assert!(!root.parent().unwrap().join("fsmonitor").exists(), "never run");
+}
+
+/// Piece E: answers `A` kept for another checkout of the repository aren't used here — `sandbox.json` keeps them
+/// by checkout — and the list counts them on its last row, faint.
+#[test]
+fn answers_kept_for_another_checkout_are_counted_not_used() {
+    let (mut ed, root) = checkout("elsewhere", None);
+    let dir = root.parent().unwrap().to_path_buf();
+    std::fs::write(dir.join("user.gitconfig"), "[user]\nname = t\nemail = t@t\n").unwrap();
+    git(&dir, &["commit", "-q", "--allow-empty", "-m", "x"]);
+    git(&dir, &["worktree", "add", "-q", "../wt"]);
+    let wt = std::fs::canonicalize(dir.join("wt")).unwrap();
+    let store = dir.join("sandbox.json");
+    ed.allow_path = Some(store.clone());
+    let other = crate::sandbox::profile_path(&wt);
+    crate::allow::keep(&store, &other, |a| {
+        a.add_read("/opt/tarae-stand-in".into());
+        a.add_write("/opt/tarae-stand-in-w".into());
+    })
+    .unwrap();
+    ed.granted();
+    until(&mut ed, "the list", |ed| ed.picker.as_ref().is_some_and(|p| p.kind == crate::granted::KIND));
+    let items = ed.picker.as_ref().unwrap().items();
+    let last = items.last().unwrap();
+    assert_eq!(last.label, "2 more kept for other checkouts — not used here");
+    assert_eq!(last.action, crate::picker::Action::Heading, "faint, never the row in hand");
+    assert!(!items.iter().any(|i| i.label.contains("tarae-stand-in")), "not this checkout's");
+}
+
 /// `n` holds each part back, each kept so; the toast names the commands that ask again.
 #[test]
 fn no_holds_each_part_back() {

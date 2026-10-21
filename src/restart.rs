@@ -1672,7 +1672,7 @@ mod tests {
         let sources = || Sources { user: Some(user.clone()), trust: Some(trust.clone()) };
         // The project trusted, as its card's `y` does
         let p = load(&front, &sources()).0.project.expect("its steps wait for trust");
-        crate::trust::record(trust.clone(), p.file, p.hash, true).unwrap();
+        crate::trust::record(trust.clone(), crate::trust::Kind::Tarae, p.file, p.hash, true).unwrap();
         let started = |ed: &mut Editor| {
             (ed.config_file, ed.trust_path) = (Some(user.clone()), Some(trust.clone()));
             let (c, w) = load(&front, &ed.config_sources());

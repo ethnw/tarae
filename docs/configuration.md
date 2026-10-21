@@ -35,7 +35,10 @@ the [keymap reference](reference/keymap.md).
   project, `n` ignores that part. The rest of the file applies either way. Each answer is kept for that version
   of those values, for the whole repository: every checkout of it (each session) shares every version you
   answered, so going back to one you trusted doesn't ask, and a version never seen does. `:project-trust`
-  shows the card again, and `:project-untrust` takes trust back (for the version in hand)
+  shows the card again, and `:project-untrust` takes trust back (for the version in hand, kept as held back).
+  `:granted` lists every trust answer kept for the repository — this file's, Claude's settings', git's own
+  commands', a hook's — and `d` on one forgets it: what it let run is held back at once, and its card asks at the
+  next look
 - **So are a project's Claude Code settings.** What a repository's `.claude/settings.json` (or a committed
   `.claude/settings.local.json`) would run in the chat — its helper commands, its `env` block, the plugins it
   turns on — waits for its own card the first time the chat starts, kept the same way. `:claude-settings` shows

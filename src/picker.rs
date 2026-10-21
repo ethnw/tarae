@@ -57,9 +57,9 @@ pub enum Action {
     Message,
     /// A plain list's group heading (`:granted`'s scopes) — drawn faint, never selected.
     Heading,
-    /// A row of `:granted` (`granted.rs`): an answer `d` takes back (what `:sandbox-disallow` takes), or None —
-    /// a default, not one to take back. Enter does nothing: the list is for reading.
-    Granted(Option<String>),
+    /// A row of `:granted` (`granted.rs`): an answer `d` takes back, or None — a default, not one to take back.
+    /// Enter does nothing: the list is for reading.
+    Granted(Option<crate::granted::Taken>),
     /// A local branch (`B` in the git tab): Enter switches to it, `C-r` renames, `C-x` deletes. `held` = where
     /// it's checked out when that's another worktree (as shown — switching there is refused).
     Branch {

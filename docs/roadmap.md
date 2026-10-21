@@ -193,7 +193,16 @@ Done so far, under way, and the order after it (2026-10-17):
   - **H** — done: Claude's `commit {message, paths}` tool (`committool.rs`). The card shows the message and the diff of
     exactly those paths; `y` commits them through tarae's own git, plumbing and no hooks, what else is staged left
     as it was; `n` does nothing; it never pushes or amends.
-  - **E** (to be re-judged, 2026-10-17): one list — settings and trust answers join `:granted`, each taken back with `d`.
+  - **E** — done: one list — the trust answers (tarae's, Claude's, git's, a hook's), the plugins' approvals, the
+    packs' preflight told and the no-sandbox `s` join `:granted`, each taken back with `d`, what it let run held
+    back at once; what's kept for the repository's other checkouts is counted, not used.
+  - **J**: "always" per repository, not per checkout. `sandbox.json` keeps an `A` by the checkout's path, so
+    another session's checkout of the same repository asks again (a reference repository's README answered in one
+    session, asked in the next). Share the grants that name nothing inside a checkout (reads and writes outside
+    every checkout, ports, hosts, variables) with every checkout of the repository; keep or rebase the ones inside
+    one (a key file, a write in it). With it, the read card offers the outside repository's root (never home or
+    above, nor a place holding keys) beside the file, and "Always here" says which: this checkout or this
+    repository.
   - **I** — done: one trust card when tarae's, Claude's and git's wait together as the repository opens (each part
     joins it as it's found, nothing waits); a later change asks only about its own part. `:git-trust` asks git's
     part again.

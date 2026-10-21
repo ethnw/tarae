@@ -622,7 +622,7 @@ mod tests {
         assert!(c.editor.review_risky.is_empty(), "held back");
         assert_eq!(c.editor.review_quiet, ["src/snapshots/"]);
         let mut store = Store::default();
-        store.answer(&path, p.hash, true);
+        store.answer(crate::trust::Kind::Tarae, &path, p.hash, true, 0);
         let (t, _) = crate::config::load_from(None, Some(path.clone()), &store);
         assert_eq!(t.editor.review_risky, ["sandbox*"], "trusted");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();

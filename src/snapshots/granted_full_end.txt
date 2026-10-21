@@ -1,0 +1,157 @@
+# granted_full_end · 100x50 · theme meok · cursor hidden
+## text
+00                                                                claude › 6 granted             ready
+01   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     ────────────────────────────────────
+02      what you've let through               granted  20/20
+03    ──────────────────────────────────────────────────────
+04     by default
+05     ◦ read /private/tmp…shot-granted/tarae  this checkout
+06     ◦ read /private/tmp/ta…tarae-review  another checkout
+07     ◦ read /private/tmp                  the temp folders
+08     ◦ read /private/tmp/t…registry/src  a toolchain's own
+09     ◦ read /private/…0/lib/rustlib/src  a toolchain's own
+10     ◦ read outside home        not others' homes, volumes
+11
+12     always · this checkout
+13     • reach registry.npmjs.org:443          you · 5 h ago
+14     • write in /private/tm…ed/npm-cache  you · 3 days ago
+15
+16     this session
+17     • connect to port 5432                  you · 2 h ago
+18     • reach db.example.com:5432      you · until you quit      ▎ Ask Claude
+19     • run without a sandbox          you · until you quit
+20                                                                It reads the whole project,
+21     this chat                                                  starting from demo.rs.
+22     • open terminals, yours too            you · just now
+23     • read /private/tmp/t…granted/notes  you · 12 min ago      tab for a suggestion
+24                                                                › Explain what this file does
+25     tarae's project settings · every checkout                  › Where is this used across the pro…
+26     • .tarae.toml           you · 2 days ago · 2 versions      › Why is this diagnostic happening?
+27
+28     Claude's settings · every checkout                         C-t for another model
+29     • .claude/settings.json               you · yesterday
+30
+31     git's own commands · every checkout
+32     • .git/config                           you · 5 h ago
+33
+34     git hooks · every checkout
+35     • .githooks/pre-commit                  you · 1 h ago
+36     • .githooks/pre-push                    you · 1 h ago
+37
+38     plugins · everywhere
+39     • k8s: run kubectl, r…kube/config, reach 2 hosts  you
+40
+41     preflight · every checkout
+42   ▎ • run the packs' default steps                    you
+43
+44     4 more kept for other checkouts — not used here
+45
+46                                                                ────────────────────────────────────
+47   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀     › Ask about demo.rs…
+48                                                                space l focus  space L close
+49  ▐ PICKER ▌  d take it back  j k move  esc close                             rust   utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00                                                              ppppppppppppppppppppppppppppppppppppppp
+01                                                              ppppppppppppppppppppppppppppppppppppppp
+02   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+03   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+04   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+05   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+06   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+07   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+08   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+09   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+10   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+11   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+12   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+13   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+14   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+15   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+16   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+17   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+18   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+19   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+20   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+21   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+22   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+23   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+24   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+25   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+26   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+27   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+28   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+29   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+30   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+31   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+32   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+33   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+34   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+35   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+36   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+37   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+38   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+39   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+40   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+41   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+42   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP   ppppppppppppppppppppppppppppppppppppppp
+43   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+44   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+45   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+46   pppppppppppppppppppppppppppppppppppppppppppppppppppppppp   ppppppppppppppppppppppppppppppppppppppp
+47                                                              ppppppppppppppppppppppppppppppppppppppp
+48                                                              ppppppppppppppppppppppppppppppppppppppp
+49   AAAAAAAA
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00                                                                dddddd f f fffffff             fffff
+01                                                                ffffffffffffffffffffffffffffffffffff
+02      ffff ffffff fff fffffff               fffffff  fffff
+03    ffffffffffffffffffffffffffffffffffffffffffffffffffffff
+04     ff fffffff
+05     f                                       dddd dddddddd
+06     f                                    ddddddd dddddddd
+07     f                                    ddd dddd ddddddd
+08     f                                   d ddddddddddd ddd
+09     f                                   d ddddddddddd ddd
+10     f                          ddd ddddddd dddddd ddddddd
+11
+12     ffffff f ffff ffffffff
+13     d                                       ddd d d d ddd
+14     d                                    ddd d d dddd ddd
+15
+16     ffff fffffff
+17     d                                       ddd d d d ddd
+18     d                                ddd d ddddd ddd dddd      a TTT TTTTTT
+19     d                                ddd d ddddd ddd dddd
+20                                                                dd ddddd ddd ddddd dddddddd
+21     ffff ffff                                                  dddddddd dddd dddddddd
+22     d                                      ddd d dddd ddd
+23     d                                    ddd d dd ddd ddd      DDD fff f ffffffffff
+24                                                                f ddddddd dddd dddd dddd dddd
+25     fffffff fffffff ffffffff f fffff ffffffff                  f ddddd dd dddd dddd dddddd ddd dddd
+26     d                       ddd d d dddd ddd d d dddddddd      f ddd dd dddd dddddddddd dddddddddd
+27
+28     ffffffff ffffffff f fffff ffffffff                         DDD fff fffffff fffff
+29     d                                     ddd d ddddddddd
+30
+31     fffff fff ffffffff f fffff ffffffff
+32     d                                       ddd d d d ddd
+33
+34     fff fffff f fffff ffffffff
+35     d                                       ddd d d d ddd
+36     d                                       ddd d d d ddd
+37
+38     fffffff f ffffffffff
+39     d                                                 ddd
+40
+41     fffffffff f fffff ffffffff
+42   a d TTT TTT TTTTTT TTTTTTT TTTTT                    ddd
+43
+44     f ffff ffff fff fffff fffffffff f fff ffff ffff
+45
+46                                                                ffffffffffffffffffffffffffffffffffff
+47                                                                f fff fffff ffffffff
+48                                                                DDDDD D fffff  DDDDD D fffff
+49  a BBBBBB a  D ffff ff ffff  D D ffff  DDD fffff                             dddd   ddddd dd   TTT
+## legend
+bg: p=ui.popup  P=ui.menu.selected  A=ui.cursor.primary
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

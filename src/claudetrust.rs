@@ -489,6 +489,23 @@ pub fn settings(base: &str, seen: &Seen) -> (String, String) {
     (Json::Object(json).to_string(), sources.join(","))
 }
 
+/// `:granted`'s `d` on the project's Claude settings (forgotten in the store by then), in the session whose chat
+/// read them: held back now — a claude running with them started again without (mid-turn stopped, as `n` does);
+/// the card asks when a chat reads them next.
+pub(crate) fn forgotten(ed: &mut Editor) {
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    let Some(seen) = c.settings.seen.as_mut().filter(|s| s.state == State::Trusted) else { return };
+    seen.state = State::Ask;
+    let now = settings(crate::chat::CHAT_SETTINGS, seen);
+    if c.running() && Some(&now) != c.settings.started.as_ref() {
+        crate::chat::settings_restart(
+            ed,
+            "Taken back — Claude started again without the project's settings, the conversation going on",
+            true,
+        );
+    }
+}
+
 /// The chat's claude may start (`chat::ensure_proc`): its `--settings` and `--setting-sources` — None while
 /// the project's settings are read (it starts once they are).
 pub fn ready(ed: &mut Editor, base: &str) -> Option<(String, String)> {
@@ -770,7 +787,7 @@ impl Editor {
         if let Some(path) = self.trust_path.clone() {
             let file = seen.file.clone();
             self.events.jobs().spawn(move || {
-                let r = crate::trust::record(path, file, hash, trusted);
+                let r = crate::trust::record(path, crate::trust::Kind::Claude, file, hash, trusted);
                 move |ed: &mut Editor| {
                     if let Err(e) = r {
                         ed.set_error(format!("couldn't keep the answer: {e}"));

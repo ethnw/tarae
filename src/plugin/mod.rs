@@ -24,6 +24,7 @@ mod host;
 mod io;
 mod panel;
 mod perm;
+pub(crate) use perm::approved;
 
 use std::path::{Path, PathBuf};
 
@@ -1134,6 +1135,34 @@ mod tests {
             kept["demo"].granted,
             ["env TARAE_DEMO", "network", "project", "read /tmp/tarae-demo/**", "run true"]
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Piece E: `:granted` lists what a plugin was approved, for every project, and `d` takes it back as
+    /// `:plugin-revoke` does — the next load asks again.
+    #[test]
+    fn granted_lists_a_plugins_approvals_and_d_revokes_them() {
+        let (mut ed, dir) = setup("granted", "x\n");
+        let store = dir.join("state/plugin-permissions.json");
+        ed.plugins.as_mut().unwrap().perm_store = Some(store.clone());
+        answer(&mut ed, approval, true);
+        ed.granted();
+        settle_until(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| p.kind == crate::granted::KIND));
+        let p = ed.picker.as_mut().unwrap();
+        let row = p.items().iter().find(|i| i.label.starts_with("demo: ")).map(|i| i.label.clone());
+        assert_eq!(
+            row.as_deref(),
+            Some("demo: env TARAE_DEMO, network, project, read /tmp/tarae-demo/**, run true")
+        );
+        let heading = p.items().iter().any(|i| i.label == "plugins · everywhere");
+        assert!(heading);
+        let taken = crate::picker::Action::Granted(Some(crate::granted::Taken::Plugin("demo".into())));
+        p.select_where(|a| *a == taken);
+        key(&mut ed, "d");
+        assert!(!perm::load(Some(&store)).contains_key("demo"), "revoked");
+        settle_until(&mut ed, |ed| {
+            ed.picker.as_ref().is_some_and(|p| !p.items().iter().any(|i| i.label.starts_with("demo: ")))
+        });
         std::fs::remove_dir_all(dir).ok();
     }
 

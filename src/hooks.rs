@@ -312,10 +312,10 @@ impl Editor {
         };
         let Some(path) = self.trust_path.clone().filter(|_| run) else { return go(self) };
         self.events.jobs().spawn(move || {
-            let r: Result<(), String> = ask
-                .hooks
-                .iter()
-                .try_for_each(|h| crate::trust::record(path.clone(), ask.top.join(&h.rel), h.hash, true));
+            let r: Result<(), String> = ask.hooks.iter().try_for_each(|h| {
+                let file = ask.top.join(&h.rel);
+                crate::trust::record(path.clone(), crate::trust::Kind::Hook, file, h.hash, true)
+            });
             move |ed: &mut Editor| {
                 if let Err(e) = r {
                     ed.set_error(format!("couldn't keep the answer: {e}"));

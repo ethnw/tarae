@@ -1252,13 +1252,23 @@ for. What's read goes to Claude.
 - "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
   "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`, per project), not in the
   project's files. `:granted` lists them, and `d` on one takes it back
-- `:granted` (or a click on the chat title's faint `› 3 granted`) is the whole list of what Claude may do
-  without asking. The defaults come first — this checkout, the repository's other checkouts, the temp folders,
-  the toolchains' own, outside home — each saying why. Then your answers, under how long they last (always ·
-  this session · this chat), newest first, each saying when you gave it. `d` takes an answer back from the next
-  run and the next read on, and Claude hears it with your next message; a default isn't an answer to take
-  back, and its row says so. A kept answer that a default now covers is dropped from `sandbox.json`, and a
-  toast names it
+- `:granted` (or a click on the chat title's faint `› 3 granted`) is the whole list of what you've let through.
+  The defaults come first — this checkout, the repository's other checkouts, the temp folders, the toolchains'
+  own, outside home — each saying why. Then your answers to Claude's asks, under how long they last (always ·
+  this checkout · this session · this chat), newest first, each saying when you gave it; the session's no-sandbox
+  `s` with this session's. `d` takes an answer back from the next run and the next read on, and Claude hears it
+  with your next message; a default isn't an answer to take back, and its row says so. A kept answer that a
+  default now covers is dropped from `sandbox.json`, and a toast names it
+- Then the trust answers, kept for every checkout of the repository, grouped by what they're about: tarae's
+  project settings, Claude's settings, git's own commands, git hooks — each its file, when you trusted it, and
+  how many of its versions. `d` forgets the trusted versions (one you held back stays held back) and what they
+  let run follows at once: tarae's project settings are held back, a claude running with Claude's settings starts
+  again without them (the conversation going on; mid-turn it's stopped, as `n` does), tarae's git holds the
+  repository's commands. Each card asks again at the next look — `:project-trust`, `:claude-settings`,
+  `:git-trust` ask now. Then the plugins' approvals (`d` = `:plugin-revoke`) and the packs' preflight you were
+  told about (`d`: its card shows again before the next run)
+- "Always" is this checkout's: another session's checkout of the same repository keeps its own. The list's
+  last row counts what's kept for the other checkouts, faint — not used here
 - Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
   `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
 - Each answer on a card is one `card` line in tarae's log (`~/.local/state/tarae/tarae.log`): the session, why

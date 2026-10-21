@@ -409,7 +409,7 @@ pub fn kept_path() -> Option<std::path::PathBuf> {
 /// cloned at its path, a fork with the same root commit too, had the same key and ran with no card), and each
 /// step the card listed, name and command — as one SHA-256 (`trust::hash`): no path or command in the file, and
 /// a step changed or added is a card again. None where the clone can't be told apart: nothing is kept.
-fn told_key(root: &std::path::Path, steps: &[Step]) -> Option<String> {
+pub(crate) fn told_key(root: &std::path::Path, steps: &[Step]) -> Option<String> {
     let repo = crate::allow::common_dir(root)
         .or_else(|| std::fs::canonicalize(root).ok())
         .unwrap_or_else(|| root.to_path_buf());
@@ -444,6 +444,26 @@ fn told_before(
     let kept = kept?;
     let key = told_key(root, &set.of(steps))?;
     Some(told_in(kept, &key))
+}
+
+/// The lines kept in `kept` for the packs' default preflight in `root` over `steps` (theirs and yours) — either
+/// set's card's (`:granted`). A worker's.
+pub(crate) fn told_kept(kept: &std::path::Path, root: &std::path::Path, steps: &[Step]) -> Vec<String> {
+    let mut keys: Vec<String> = [Set::Quick, Set::Full]
+        .iter()
+        .filter_map(|s| told_key(root, &s.of(steps)))
+        .filter(|k| told_in(kept, k))
+        .collect();
+    keys.dedup();
+    keys
+}
+
+/// `keys` taken out of `kept` (`:granted`'s `d`, on a worker): the card shows again before the next run.
+pub(crate) fn told_forget(kept: &std::path::Path, keys: &[String]) -> std::io::Result<()> {
+    let Ok(text) = std::fs::read_to_string(kept) else { return Ok(()) };
+    let left: String =
+        text.lines().filter(|l| !keys.iter().any(|k| l.trim() == k)).map(|l| format!("{l}\n")).collect();
+    crate::disk::write_atomic(kept, |w| std::io::Write::write_all(w, left.as_bytes()))
 }
 
 /// Whether `key` is kept in `path`.

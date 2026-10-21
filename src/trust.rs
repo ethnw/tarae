@@ -196,17 +196,43 @@ fn unhex(s: &str) -> Option<Digest> {
 /// Versions of one file answered at most (the oldest answer goes first).
 const VERSIONS_KEPT: usize = 64;
 
+/// What a kept answer is about — `:granted` lists them by it (`granted.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    /// A project's `.tarae.toml` (this file's).
+    Tarae,
+    /// A repository's `.claude/settings*.json` (`claudetrust.rs`).
+    Claude,
+    /// A repository's own git commands, by its config file (`gittrust.rs`).
+    Git,
+    /// A hook in a hooks folder inside the checkout, by its content (`hooks.rs`).
+    Hook,
+}
+
+impl Kind {
+    const WORDS: [(Kind, &str); 4] =
+        [(Kind::Tarae, "tarae"), (Kind::Claude, "claude"), (Kind::Git, "git"), (Kind::Hook, "hook")];
+
+    fn word(self) -> &'static str {
+        Kind::WORDS.iter().find(|(k, _)| *k == self).map_or("", |(_, w)| w)
+    }
+
+    fn of_word(w: &str) -> Option<Kind> {
+        Kind::WORDS.iter().find(|(_, x)| *x == w).map(|(k, _)| *k)
+    }
+}
+
 /// Where answers are kept: a repository's file — git's common folder, which its checkouts (sessions) share,
 /// and the file's path in a checkout — or, outside a repository, the file itself (real path).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Place {
+pub enum Place {
     File(PathBuf),
     Repo { common: PathBuf, file: PathBuf },
 }
 
 /// Where `file`'s answers are kept. A checkout counts as the repository's only when git's links go both
 /// ways (`allow::common_dir`): a `.git` file naming another repository's folder doesn't get its answers.
-fn place_of(file: &Path) -> Place {
+pub fn place_of(file: &Path) -> Place {
     // (its deepest existing folder resolved: one answered before its folder was made — or seen through
     // another name of it, `/tmp` for `/private/tmp` — is kept and found under one name)
     let real = crate::paths::real(file).unwrap_or_else(|| file.to_path_buf());
@@ -218,11 +244,51 @@ fn place_of(file: &Path) -> Place {
     }
 }
 
+impl Place {
+    /// As `:granted` shows it: a repository's file from its checkout's top, else from `root` when it's there (or
+    /// whole, `~` for home).
+    pub fn shown(&self, root: &Path) -> String {
+        match self {
+            Place::Repo { file, .. } => file.display().to_string(),
+            Place::File(f) => match f.strip_prefix(root) {
+                Ok(rel) if !root.as_os_str().is_empty() => rel.display().to_string(),
+                _ => crate::allow::tilde(f),
+            },
+        }
+    }
+
+    /// Whether it's `common`'s (a repository's git common folder), or — outside a repository — under `root`.
+    fn in_here(&self, common: Option<&Path>, root: &Path) -> bool {
+        match self {
+            Place::Repo { common: c, .. } => Some(c.as_path()) == common,
+            Place::File(f) => common.is_none() && f.starts_with(root),
+        }
+    }
+}
+
+/// One place's answers: what they're about, and each version's (digest, trusted, when — seconds since the
+/// epoch), the oldest first.
+#[derive(Clone, Debug, PartialEq)]
+struct Kept {
+    kind: Kind,
+    versions: Vec<(Digest, bool, u64)>,
+}
+
+/// A place with a version trusted, as `:granted` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trusted {
+    pub kind: Kind,
+    pub place: Place,
+    /// When the newest trusted version was answered.
+    pub at: u64,
+    /// How many of its versions are trusted.
+    pub versions: usize,
+}
+
 /// The answers given, each version of a project file's (by its hash) — `$state/trust.json`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Store {
-    /// (digest, trusted), the oldest answer first.
-    answers: BTreeMap<Place, Vec<(Digest, bool)>>,
+    answers: BTreeMap<Place, Kept>,
 }
 
 impl Store {
@@ -230,15 +296,15 @@ impl Store {
         crate::config::state_dir().map(|d| d.join("trust.json"))
     }
 
-    /// Read from `path` (missing or unreadable = nothing answered). What was kept by FNV-1a before — one
-    /// answer per file (`projects`), or 16 hex digits — can't be checked against a SHA-256: not read, so
-    /// that version asks once again.
+    /// Read from `path` (missing or unreadable = nothing answered). An entry without its kind or a version without
+    /// its time isn't read — that version asks again.
     pub fn read(path: Option<&Path>) -> Store {
         let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Store::default() };
         let Ok(json) = serde_json::from_str::<Json>(&text) else { return Store::default() };
         let mut store = Store::default();
         let digest = |h: &Json| h.as_str().and_then(unhex);
         for a in json["answers"].as_array().into_iter().flatten() {
+            let Some(kind) = a["kind"].as_str().and_then(Kind::of_word) else { continue };
             let file = a["file"].as_str().map(PathBuf::from);
             let place = match (a["repository"].as_str(), file) {
                 (Some(common), Some(file)) => Place::Repo { common: PathBuf::from(common), file },
@@ -246,10 +312,10 @@ impl Store {
                 _ => continue,
             };
             let versions = a["versions"].as_array().into_iter().flatten();
-            let versions: Vec<(Digest, bool)> =
-                versions.filter_map(|v| Some((digest(&v[0])?, v[1].as_bool()?))).collect();
+            let versions: Vec<(Digest, bool, u64)> =
+                versions.filter_map(|v| Some((digest(&v[0])?, v[1].as_bool()?, v[2].as_u64()?))).collect();
             if !versions.is_empty() {
-                store.answers.entry(place).or_default().extend(versions);
+                store.answers.insert(place, Kept { kind, versions });
             }
         }
         store
@@ -257,33 +323,63 @@ impl Store {
 
     /// The answer for `file` as it is now (`hash`) — Ask when this version was never answered.
     pub fn state(&self, file: &Path, hash: Digest) -> State {
-        let found = self.answers.get(&place_of(file)).and_then(|v| v.iter().rfind(|a| a.0 == hash));
+        let found = self.answers.get(&place_of(file)).and_then(|k| k.versions.iter().rfind(|a| a.0 == hash));
         match found {
-            Some((_, true)) => State::Trusted,
-            Some((_, false)) => State::Ignored,
+            Some((_, true, _)) => State::Trusted,
+            Some((_, false, _)) => State::Ignored,
             None => State::Ask,
         }
     }
 
-    /// `file`'s version `hash` answered (again: the new answer).
-    pub fn answer(&mut self, file: &Path, hash: Digest, trusted: bool) {
-        let v = self.answers.entry(place_of(file)).or_default();
-        v.retain(|a| a.0 != hash);
-        v.push((hash, trusted));
-        let over = v.len().saturating_sub(VERSIONS_KEPT);
-        v.drain(..over);
+    /// `file`'s version `hash`, a `kind` of answer, answered at `at` (again: the new answer).
+    pub fn answer(&mut self, kind: Kind, file: &Path, hash: Digest, trusted: bool, at: u64) {
+        let k = self.answers.entry(place_of(file)).or_insert(Kept { kind, versions: Vec::new() });
+        k.kind = kind;
+        k.versions.retain(|a| a.0 != hash);
+        k.versions.push((hash, trusted, at));
+        let over = k.versions.len().saturating_sub(VERSIONS_KEPT);
+        k.versions.drain(..over);
+    }
+
+    /// `place`'s trusted versions forgotten — each asks again; one held back stays so.
+    pub fn forget(&mut self, place: &Place) {
+        if let Some(k) = self.answers.get_mut(place) {
+            k.versions.retain(|a| !a.1);
+            if k.versions.is_empty() {
+                self.answers.remove(place);
+            }
+        }
+    }
+
+    /// The places with a version trusted — the repository's whose git common folder is `common`, or (none:
+    /// outside one) under `root` — by kind, then the newest answer first.
+    pub fn trusted_in(&self, common: Option<&Path>, root: &Path) -> Vec<Trusted> {
+        let mut out: Vec<Trusted> = self
+            .answers
+            .iter()
+            .filter(|(p, _)| p.in_here(common, root))
+            .filter_map(|(place, k)| {
+                let trusted = k.versions.iter().filter(|v| v.1);
+                let at = trusted.clone().map(|v| v.2).max()?;
+                Some(Trusted { kind: k.kind, place: place.clone(), at, versions: trusted.count() })
+            })
+            .collect();
+        crate::sorting::by(&mut out, |a, b| a.kind.cmp(&b.kind).then(b.at.cmp(&a.at)));
+        out
     }
 
     pub fn to_json(&self) -> String {
         let answers: Vec<Json> = self
             .answers
             .iter()
-            .map(|(place, v)| {
-                let versions: Vec<Json> = v.iter().map(|(h, t)| json!([hex(h), t])).collect();
+            .map(|(place, k)| {
+                let versions: Vec<Json> =
+                    k.versions.iter().map(|(h, t, at)| json!([hex(h), t, at])).collect();
+                let kind = k.kind.word();
                 match place {
-                    Place::File(f) => json!({ "file": f, "versions": versions }),
+                    Place::File(f) => json!({ "kind": kind, "file": f, "versions": versions }),
                     Place::Repo { common, file } => {
-                        json!({ "repository": common, "file": file, "versions": versions })
+                        json!({ "kind": kind, "repository": common, "file": file, "versions": versions })
                     }
                 }
             })
@@ -292,11 +388,22 @@ impl Store {
     }
 }
 
-/// Keeps an answer (on a worker — read, change, write; the file is tiny) — under the lock beside it: two answers
+/// Keeps an answer of `kind` (on a worker — `change`).
+pub fn record(path: PathBuf, kind: Kind, file: PathBuf, hash: Digest, trusted: bool) -> Result<(), String> {
+    let at = crate::allow::now_s();
+    change(&path, |s| s.answer(kind, &file, hash, trusted, at))
+}
+
+/// Takes back what's trusted at `place` (`:granted`'s `d`, on a worker — `change`): each version asks again.
+pub fn forget(path: &Path, place: &Place) -> Result<(), String> {
+    change(path, |s| s.forget(place))
+}
+
+/// The store changed by `f` (read, change, write; the file is tiny) — under the lock beside it: two answers
 /// kept side by side (two cards answered at once, two taraes) each read what the other hadn't written yet, and
 /// the later write lost the other's (`a_change_answered_before_restarts_claude_without_a_card` on Linux: the
 /// card's `n` and the test's own answer).
-pub fn record(path: PathBuf, file: PathBuf, hash: Digest, trusted: bool) -> Result<(), String> {
+fn change(path: &Path, f: impl FnOnce(&mut Store)) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -308,10 +415,10 @@ pub fn record(path: PathBuf, file: PathBuf, hash: Digest, trusted: bool) -> Resu
         o.open(path.with_extension("lock")).map_err(|e| e.to_string())?
     };
     lock.lock().map_err(|e| e.to_string())?;
-    let mut store = Store::read(Some(&path));
-    store.answer(&file, hash, trusted);
+    let mut store = Store::read(Some(path));
+    f(&mut store);
     let body = store.to_json();
-    crate::disk::write_atomic(&path, |w| std::io::Write::write_all(w, body.as_bytes()))
+    crate::disk::write_atomic(path, |w| std::io::Write::write_all(w, body.as_bytes()))
         .map_err(|e| e.to_string())
 }
 
@@ -383,7 +490,7 @@ impl crate::editor::Editor {
         self.project_trust_apply();
         if let Some(path) = self.trust_path.clone() {
             self.events.jobs().spawn(move || {
-                let r = record(path, file, hash, trusted);
+                let r = record(path, Kind::Tarae, file, hash, trusted);
                 move |ed: &mut crate::editor::Editor| {
                     if let Err(e) = r {
                         ed.set_error(format!("couldn't keep the answer: {e}"));
@@ -415,6 +522,14 @@ impl crate::editor::Editor {
         Ok(())
     }
 
+    /// `:granted`'s `d` on the project's trust answer (forgotten in the store by then): held back now, the card
+    /// asking at the next look — not kept as held back, as `:project-untrust` keeps it.
+    pub(crate) fn project_trust_forgotten(&mut self) {
+        let Some(p) = self.project_trust.as_mut().filter(|p| p.state == State::Trusted) else { return };
+        p.state = State::Ask;
+        self.project_trust_apply();
+    }
+
     /// `:project-untrust` — held back again (and kept so).
     pub fn project_untrust(&mut self) -> Result<(), String> {
         let p = self.project_trust.as_ref().ok_or("nothing in this project's .tarae.toml needs trust")?;
@@ -430,7 +545,7 @@ impl crate::editor::Editor {
         self.project_trust_apply();
         if let Some(path) = self.trust_path.clone() {
             self.events.jobs().spawn(move || {
-                let r = record(path, file, hash, false);
+                let r = record(path, Kind::Tarae, file, hash, false);
                 move |ed: &mut crate::editor::Editor| {
                     if let Err(e) = r {
                         ed.set_error(format!("couldn't keep the answer: {e}"));
@@ -452,14 +567,42 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tarae-trust-{}", std::process::id()));
         let path = dir.join("trust.json");
         let file = PathBuf::from("/p/.tarae.toml");
-        record(path.clone(), file.clone(), v(0xab), true).unwrap();
+        record(path.clone(), Kind::Tarae, file.clone(), v(0xab), true).unwrap();
         let s = Store::read(Some(&path));
         assert_eq!(s.state(&file, v(0xab)), State::Trusted);
         assert_eq!(s.state(&file, v(0xac)), State::Ask, "what it was about changed: asks again");
         assert_eq!(s.state(Path::new("/q/.tarae.toml"), v(0xab)), State::Ask, "another project");
-        record(path.clone(), file.clone(), v(0xab), false).unwrap();
+        record(path.clone(), Kind::Tarae, file.clone(), v(0xab), false).unwrap();
         assert_eq!(Store::read(Some(&path)).state(&file, v(0xab)), State::Ignored);
         assert_eq!(Store::read(Some(&dir.join("none.json"))), Store::default());
+    }
+
+    /// Piece E: each answer is kept with its kind and time, as `:granted` lists them; `forget` takes back the
+    /// trusted versions only (a held-back one stays so); an entry without its kind isn't read — it asks again.
+    #[test]
+    fn answers_keep_their_kind_and_time_and_forget_takes_back_the_trusted_ones() {
+        let scratch = crate::scratch::Scratch::new("trust-kinds");
+        let path = scratch.join("trust.json");
+        let root = scratch.join("p");
+        let (toml, hook) = (root.join(".tarae.toml"), root.join(".githooks/pre-commit"));
+        record(path.clone(), Kind::Tarae, toml.clone(), v(1), true).unwrap();
+        record(path.clone(), Kind::Tarae, toml.clone(), v(2), false).unwrap();
+        record(path.clone(), Kind::Hook, hook.clone(), v(3), true).unwrap();
+        record(path.clone(), Kind::Tarae, scratch.join("q/.tarae.toml"), v(4), true).unwrap();
+        let s = Store::read(Some(&path));
+        let listed = s.trusted_in(None, &std::fs::canonicalize(&*scratch).unwrap().join("p"));
+        let kinds: Vec<(Kind, usize)> = listed.iter().map(|t| (t.kind, t.versions)).collect();
+        assert_eq!(kinds, [(Kind::Tarae, 1), (Kind::Hook, 1)], "this project's, by kind — not q's");
+        assert!(listed.iter().all(|t| t.at + 60 > crate::allow::now_s()), "each with its time");
+        forget(&path, &listed[0].place).unwrap();
+        let s = Store::read(Some(&path));
+        assert_eq!(s.state(&toml, v(1)), State::Ask, "taken back: asks again");
+        assert_eq!(s.state(&toml, v(2)), State::Ignored, "a held-back version stays so");
+        assert_eq!(s.state(&hook, v(3)), State::Trusted, "another place untouched");
+        // Without its kind: not read
+        let text = std::fs::read_to_string(&path).unwrap().replace("\"kind\": \"hook\",", "");
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(Store::read(Some(&path)).state(&hook, v(3)), State::Ask);
     }
 
     /// Answers kept side by side are all kept: each read-change-write under the lock beside the file — without
@@ -474,7 +617,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u8 {
-                        record(path.clone(), file(t, i), v(i), true).unwrap();
+                        record(path.clone(), Kind::Tarae, file(t, i), v(i), true).unwrap();
                     }
                 })
             })
@@ -499,7 +642,7 @@ mod tests {
         std::fs::create_dir_all(base.join("real")).unwrap();
         std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
         let path = base.join("trust.json");
-        record(path.clone(), base.join("link/new/.tarae.toml"), v(1), true).unwrap();
+        record(path.clone(), Kind::Tarae, base.join("link/new/.tarae.toml"), v(1), true).unwrap();
         std::fs::create_dir_all(base.join("real/new")).unwrap();
         let s = Store::read(Some(&path));
         assert_eq!(s.state(&base.join("real/new/.tarae.toml"), v(1)), State::Trusted);
@@ -541,7 +684,7 @@ mod tests {
         // (the same characters split another way: another digest)
         let moved = [("editor.restart-build\"".to_string(), "cargo build\"".to_string())];
         assert_ne!(hash(&moved), hash(&items[..1]));
-        record(path.clone(), file.clone(), hash(&items), true).unwrap();
+        record(path.clone(), Kind::Tarae, file.clone(), hash(&items), true).unwrap();
         let kept = std::fs::read_to_string(&path).unwrap();
         assert!(kept.contains(&format!("\"{}\"", crate::sha256::hex(&bytes))), "kept as the digest: {kept}");
         assert_eq!(Store::read(Some(&path)).state(&file, hash(&items)), State::Trusted);
@@ -586,10 +729,10 @@ mod tests {
         std::fs::write(planted.join(".git"), format!("gitdir: {}\n", link.display())).unwrap();
         let toml = |d: &Path| d.join(".tarae.toml");
         let path = base.join("trust.json");
-        record(path.clone(), toml(&main), v(0xa), true).unwrap();
-        record(path.clone(), toml(&main), v(0xb), true).unwrap();
-        record(path.clone(), toml(&wt), v(0xc), true).unwrap();
-        record(path.clone(), toml(&wt), v(0xd), false).unwrap();
+        record(path.clone(), Kind::Tarae, toml(&main), v(0xa), true).unwrap();
+        record(path.clone(), Kind::Tarae, toml(&main), v(0xb), true).unwrap();
+        record(path.clone(), Kind::Tarae, toml(&wt), v(0xc), true).unwrap();
+        record(path.clone(), Kind::Tarae, toml(&wt), v(0xd), false).unwrap();
         let s = Store::read(Some(&path));
         assert_eq!(s.state(&toml(&main), v(0xa)), State::Trusted, "an earlier version stays trusted");
         assert_eq!(s.state(&toml(&main), v(0xb)), State::Trusted);
@@ -602,7 +745,7 @@ mod tests {
         assert_eq!(s.state(&toml(&planted), v(0xa)), State::Ask, "{planted_said}");
         assert_eq!(s.state(&main.join("sub/.tarae.toml"), v(0xa)), State::Ask, "another file of it");
         // Answered again: the new answer
-        record(path.clone(), toml(&wt), v(0xa), false).unwrap();
+        record(path.clone(), Kind::Tarae, toml(&wt), v(0xa), false).unwrap();
         assert_eq!(Store::read(Some(&path)).state(&toml(&main), v(0xa)), State::Ignored);
         std::fs::remove_dir_all(&base).ok();
     }
@@ -689,7 +832,7 @@ mod tests {
         let p = c.project.unwrap();
         assert!(question(Path::new("/"), &p).contains("too long to show"));
         let mut store = Store::default();
-        store.answer(&path, p.hash, true);
+        store.answer(crate::trust::Kind::Tarae, &path, p.hash, true, 0);
         let (t, _) = crate::config::load_from(None, Some(path), &store);
         assert_eq!(t.editor.restart_build, "");
     }

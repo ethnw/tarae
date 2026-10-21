@@ -4351,20 +4351,51 @@ fn snapshot_granted() {
         s.ed.session.hosts = hosts.to_vec();
         s
     };
+    // Piece E: the trust answers, a plugin, the preflight told, the no-sandbox `s`, other checkouts' count
+    let trusted = |kind, file: &str, ago: u64, versions| crate::trust::Trusted {
+        kind,
+        place: crate::trust::Place::Repo { common: at("tarae/.git"), file: file.into() },
+        at: now - ago,
+        versions,
+    };
+    use crate::trust::Kind;
+    let more = crate::granted::More {
+        no_sandbox: true,
+        repository: true,
+        trusted: vec![
+            trusted(Kind::Tarae, ".tarae.toml", 2 * 86_400, 2),
+            trusted(Kind::Claude, ".claude/settings.json", 86_400, 1),
+            trusted(Kind::Git, ".git/config", 5 * 3600, 1),
+            trusted(Kind::Hook, ".githooks/pre-commit", 3600, 1),
+            trusted(Kind::Hook, ".githooks/pre-push", 3600, 1),
+        ],
+        plugins: vec![("k8s".into(), "run kubectl, read ~/.kube/config, reach 2 hosts".into())],
+        preflight: vec!["0".repeat(64)],
+        elsewhere: 4,
+    };
     let full = [&kept, &session, &chat];
     let mut s = scene(100, 30, full, &hosts);
     s.check("granted_chip");
     s.frames_both("granted_chip");
-    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, now), false);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
     s.check("granted_full");
     s.frames_both("granted_full");
+    let mut s = scene(100, 50, full, &hosts);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
+    s.keys("G");
+    s.check("granted_full_end");
+    s.frames_both("granted_full_end");
     let mut s = scene(60, 24, full, &hosts);
-    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, now), false);
+    s.ed.granted_open(crate::granted::items(&caps(full), full, &hosts, &more, now), false);
     s.check("granted_narrow");
     s.frames_both("granted_narrow");
+    s.keys("G");
+    s.check("granted_narrow_end");
+    s.frames_both("granted_narrow_end");
     let none = Allowed::default();
     let mut s = scene(100, 30, [&none; 3], &[]);
-    s.ed.granted_open(crate::granted::items(&caps([&none; 3]), [&none; 3], &[], now), false);
+    let nothing = crate::granted::More::default();
+    s.ed.granted_open(crate::granted::items(&caps([&none; 3]), [&none; 3], &[], &nothing, now), false);
     s.check("granted_empty");
     s.frames_both("granted_empty");
 }
