@@ -736,14 +736,16 @@ fn the_guarantees_say_each_tier() {
         if said.is_empty() != (want.is_empty() && !below_6) {
             wrong.push(format!("{label}: the report says {said:?} of {want:?}"));
         }
-        // (linmeta: a file's mode and times open in every Linux tier, said in the line, the report and the state;
-        // Seatbelt's where it writes, said nowhere — as its files)
-        let open = g.tier().is_some();
+        // (linmeta B: a file's mode and times served in own and host, open in offline; Seatbelt's where it writes)
+        let open = g.tier() == Some(super::guarantees::Tier::Offline);
+        let served = matches!(g.tier(), Some(super::guarantees::Tier::Own | super::guarantees::Tier::Host));
         let state = g.json()["attributes"]["mode_times"].clone();
         if line.contains(" · attributes mode and times anywhere · ") != open
             || g.attrs_said().contains("any file of the user's it can name") != open
             || (state == "anywhere") != open
-            || (g.json()["attributes"]["owner_xattrs_flags"] == "never") != open
+            || g.attrs_said().contains("changes a file's mode and times only where it may write") != served
+            || ((state == "where-writes") != (served || g.tier().is_none()))
+            || ((g.json()["attributes"]["owner_xattrs_flags"] == "never") != g.tier().is_some())
         {
             wrong
                 .push(format!("{label}: a file's attributes said {line:?} · {:?} · {state}", g.attrs_said()));

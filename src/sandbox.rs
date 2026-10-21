@@ -5227,7 +5227,7 @@ fn toolchain_dirs(base: &Policy, asks: &Asks) -> ToolDirs {
     let mut dirs = ToolDirs::default();
     let json_of = |run: &[String], env: &[(&str, &str)]| {
         let args: Vec<&str> = run.iter().skip(1).map(String::as_str).collect();
-        output_in(base, run.first()?, &args, env)
+        output_in(base, run.first()?, &args, env, &mut Vec::new())
     };
     if let Some(tool) = &asks.tool {
         let (run, target, build) = tool.asked();
@@ -5288,25 +5288,62 @@ pub(crate) fn toolchain_found_in(root: &Path, dirs: ToolDirs, here: &Here) {
     SEEN.get_or_init(Default::default).lock().unwrap().insert(root, (stamp, dirs));
 }
 
-/// A program's JSON output, run in the project inside `policy`, with `env` set.
+/// Tests: the project whose probe's served start fails (a stand-in for its confining or serving failing).
+#[cfg(all(test, target_os = "linux"))]
+static PROBE_SERVING_REFUSED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// A program's JSON output, run in the project inside `policy`, with `env` set — what the supervisor refused it
+/// (Linux, where served) in `denied` and the log: the probe's own, never in a run's report.
 fn output_in(
     policy: &Policy,
     program: &str,
     args: &[&str],
     env: &[(&str, &str)],
+    denied: &mut Vec<Denial>,
 ) -> Option<serde_json::Value> {
-    // (through the session's keeper — any of its policies': a probe's is none — without a supervisor)
+    // (through the session's keeper — served for mode and times confinement, with its network closed)
     #[cfg(target_os = "linux")]
     let out = {
         let abi = crate::landlock::abi().ok()?;
         let ns = tier::for_policy(policy);
         let k = keeper::ready(&policy.root, None, ns).ok()?;
-        let unserved = Err("a probe's run".into());
-        let rules = linux::confine(policy, abi, Err("not watched".into()), false, Some(&k), unserved).ok()?;
+        let mut closed_policy = policy.clone();
+        closed_policy.network = false;
+        closed_policy.asks_hosts = false;
+        closed_policy.ports = Vec::new();
+        closed_policy.localhost = false;
+        closed_policy.egress = Default::default();
+        closed_policy.proxy = None;
         let mut c = Command::new(program);
-        from_run_env(&mut c, policy);
+        from_run_env(&mut c, &closed_policy);
         c.args(args).envs(env.iter().copied()).current_dir(&policy.root).env(MARK, "1");
-        let s = k.start_confined(&c, &crate::landlock::thread_name(), &rules).ok()?.spawned;
+        let name = crate::landlock::thread_name();
+        let confine =
+            |serve| linux::confine(&closed_policy, abi, Err("not watched".into()), false, Some(&k), serve);
+        let served = || -> io::Result<_> {
+            #[cfg(test)]
+            if PROBE_SERVING_REFUSED.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&policy.root)
+            {
+                return Err(io::Error::other("refused by a test"));
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let policy = std::sync::Arc::new(closed_policy.clone());
+            Ok((k.start_served(&c, &name, &confine(Ok(()))?, policy, tx)?.spawned, Some(rx)))
+        };
+        let started = supervisor::served(ns.user).ok().map(|()| served());
+        let (s, rx) = match started {
+            Some(Ok(started)) => started,
+            // (a probe only asks a toolchain where its folders are: unserved, its mode and times open — as in tier
+            // offline — rather than no answer)
+            failed => {
+                if let Some(Err(e)) = failed {
+                    let said = format!("a probe's served start failed, it runs unserved: {e}");
+                    crate::log::line("sandbox", "warn", &said);
+                }
+                let rules = confine(Err("a probe's run".into())).ok()?;
+                (k.start_confined(&c, &name, &rules).ok()?.spawned, None)
+            }
+        };
         // (what it says on stderr read meanwhile, unkept: a full pipe would stop it)
         if let Some(mut err) = s.stderr {
             crate::event::thread("tarae-probe", move || io::copy(&mut err, &mut io::sink()));
@@ -5314,8 +5351,16 @@ fn output_in(
         let mut stdout = Vec::new();
         io::Read::read_to_end(&mut s.stdout?, &mut stdout).ok()?;
         let status = crate::spawn::wait(s.pid).ok()?;
+        if let Some(rx) = rx {
+            while let Ok(d) = rx.try_recv() {
+                crate::log::line("sandbox", "info", &format!("probe blocked {}: {}", d.op, d.target));
+                denied.push(d);
+            }
+        }
         std::process::Output { status, stdout, stderr: Vec::new() }
     };
+    #[cfg(not(target_os = "linux"))]
+    let _ = denied;
     #[cfg(not(target_os = "linux"))]
     let out = from_run_env(&mut Command::new(SANDBOX_EXEC), policy)
         .args(policy.args())
@@ -11476,6 +11521,7 @@ mod tests {
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
+            own_shm: false,
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -12038,12 +12084,20 @@ mod tests {
     /// the project (a hook made executable runs later, outside); a file of the project's takes them all. Seatbelt's
     /// `file-write-mode`, `-times`, `-owner`, `-flags`, `-xattr` and `-acl` are `file-write*`'s, allowed only where
     /// writes are (`target/sb/linmeta-design.md`).
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_run_changes_no_attribute_of_a_file_outside_its_write_places() {
-        use std::os::macos::fs::MetadataExt as _;
+        #[cfg(not(target_os = "macos"))]
+        use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        #[cfg(target_os = "macos")]
         if skipped_inside("a_run_changes_no_attribute_of_a_file_outside_its_write_places") {
+            return;
+        }
+        // (no Landlock here: no sandbox to try — said, as the other Linux sandbox tests say it)
+        #[cfg(not(target_os = "macos"))]
+        if !crate::landlock::abi().is_ok_and(|n| n >= 2) {
+            let test = "sandbox::tests::a_run_changes_no_attribute_of_a_file_outside_its_write_places";
+            crate::test_results::said_skip(&format!("{test} — no Landlock here"));
             return;
         }
         let t = profile_path(&crate::scratch::Scratch::new("sb-attrs").into_path());
@@ -12052,8 +12106,19 @@ mod tests {
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         let p = key_policy(&root);
+        #[cfg(target_os = "linux")]
+        let p = confined(Policy { run: RunDir::new().ok(), ..p });
         let (mine, theirs) = (root.join("f"), outside.join("f"));
         assert!(!p.writes_allow(&theirs) && !p.writes_allow(&hook) && p.writes_allow(&mine));
+        let g = p.guarantees().expect("guarantees");
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(want) = std::env::var("TARAE_EXPECT_TIER").map(|w| w.trim().to_string()) {
+            let got = g.tier().map_or("none", |t| t.said());
+            assert_eq!(got, want, "tier {want} expected by TARAE_EXPECT_TIER, got {got}");
+        }
+        let attrs = g.attrs_json();
+        let mode_times_where = attrs["mode_times"] == "where-writes";
+        let owner_xattrs_where = attrs["owner_xattrs_flags"] == "where-writes";
         let fresh = |f: &Path| {
             let _ = std::fs::remove_file(f);
             std::fs::write(f, "marker\n").unwrap();
@@ -12063,13 +12128,45 @@ mod tests {
         };
         let state = |f: &Path| {
             let m = std::fs::metadata(f).unwrap();
-            let out = Command::new("/usr/bin/xattr").args(["-p", "tarae.marker"]).arg(f).output().unwrap();
             let text = std::fs::read_to_string(f).unwrap();
-            // (`ls -le`: a line of its own for each entry of the file's ACL)
-            let acl = Command::new("/bin/ls").arg("-le").arg(f).output().unwrap();
-            let acl = String::from_utf8_lossy(&acl.stdout).lines().count() > 1;
-            let marked = out.status.success();
-            (m.permissions().mode() & 0o7777, m.mtime(), m.gid(), m.st_flags(), marked, acl, text)
+            #[cfg(target_os = "macos")]
+            let flags = {
+                use std::os::macos::fs::MetadataExt as _;
+                m.st_flags()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let flags = 0u32;
+            #[cfg(target_os = "macos")]
+            let marked = {
+                let out =
+                    Command::new("/usr/bin/xattr").args(["-p", "tarae.marker"]).arg(f).output().unwrap();
+                out.status.success()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let marked = {
+                let path = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+                unsafe {
+                    libc::getxattr(path.as_ptr(), c"user.tarae.marker".as_ptr(), std::ptr::null_mut(), 0) >= 0
+                }
+            };
+            #[cfg(target_os = "macos")]
+            let acl = {
+                let out = Command::new("/bin/ls").arg("-le").arg(f).output().unwrap();
+                String::from_utf8_lossy(&out.stdout).lines().count() > 1
+            };
+            #[cfg(not(target_os = "macos"))]
+            let acl = {
+                let path = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+                unsafe {
+                    libc::getxattr(
+                        path.as_ptr(),
+                        c"system.posix_acl_access".as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    ) >= 0
+                }
+            };
+            (m.permissions().mode() & 0o7777, m.mtime(), m.gid(), flags, marked, acl, text)
         };
         // (another of the user's groups: what an unprivileged chown can change)
         fresh(&mine);
@@ -12077,18 +12174,26 @@ mod tests {
         let mut groups = vec![0 as libc::gid_t; 64];
         // SAFETY: a buffer of 64.
         let n = unsafe { libc::getgroups(64, groups.as_mut_ptr()) };
-        let g = groups[..n.max(0) as usize].iter().find(|&&o| o != gid).copied().expect("a second group");
+        let secondary = groups[..n.max(0) as usize].iter().find(|&&o| o != gid).copied();
+        // (macOS: every user has another group, `staff`'s `everyone`: Seatbelt's owner rule is always tried)
+        #[cfg(target_os = "macos")]
+        let secondary = Some(secondary.expect("a second group"));
+        // (a row this machine can't try, said where the run's report counts it — never a pass in silence)
+        let skipped = |rows: &str| {
+            let test = "sandbox::tests::a_run_changes_no_attribute_of_a_file_outside_its_write_places";
+            crate::test_results::said_skip(&format!("{test} — {rows}"));
+        };
         // (each a script, `{f}` the file's path, quoted)
         let perl = |call: &str| {
             format!(
                 "/usr/bin/perl -e 'open(my $h, \"<\", $ARGV[0]) or die; print \"opened\"; {call} or die \"$!\\n\"' {{f}}"
             )
         };
-        let tries = [
+        let mut tries = vec![
             ("mode", "chmod 755 {f}".to_string()),
             ("mode, a descriptor", perl("chmod(0755, $h)")),
             // (a descriptor opened for reading, by its `/dev/fd` name — which the profile lets a run write: Seatbelt
-            // judges the file it leads to)
+            // judges the file it leads to; on Linux tarae never resolves a name in `/dev/fd`: refused, the project's too)
             ("mode, /dev/fd", "exec 3< {f} && echo opened && chmod 755 /dev/fd/3".to_string()),
             // (not `touch -t`: macOS's needs more than `file-write-times`, refused without the fix too)
             ("times", "/usr/bin/perl -e 'utime(1, 42, $ARGV[0]) or die \"$!\\n\"' {f}".to_string()),
@@ -12098,19 +12203,50 @@ mod tests {
                 "exec 3< {f} && echo opened && /usr/bin/perl -e 'utime(1, 42, \"/dev/fd/3\") or die \"$!\\n\"'"
                     .to_string(),
             ),
-            ("group", format!("chown :{g} {{f}}")),
-            ("group, a descriptor", perl(&format!("chown(-1, {g}, $h)"))),
-            ("flags", "chflags nodump {f}".to_string()),
-            ("xattr", "/usr/bin/xattr -w tarae.marker x {f}".to_string()),
-            // (`file-write-acl`: an entry added to the file's ACL)
-            ("ACL", "chmod +a 'everyone deny write' {f}".to_string()),
         ];
+        if let Some(g) = secondary {
+            tries.push(("group", format!("chown :{g} {{f}}")));
+            tries.push(("group, a descriptor", perl(&format!("chown(-1, {g}, $h)"))));
+        } else {
+            skipped("its group rows: the user has no second group here");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            tries.push(("flags", "chflags nodump {f}".to_string()));
+            tries.push(("xattr", "/usr/bin/xattr -w tarae.marker x {f}".to_string()));
+            // (`file-write-acl`: an entry added to the file's ACL)
+            tries.push(("ACL", "chmod +a 'everyone deny write' {f}".to_string()));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let has_python3 =
+                Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success());
+            if has_python3 {
+                tries.push((
+                    "xattr",
+                    "python3 -c 'import os, sys; os.setxattr(sys.argv[1], \"user.tarae.marker\", b\"x\")' {f}"
+                        .to_string(),
+                ));
+            } else {
+                skipped("its xattr row: no python3 here");
+            }
+        }
         let mut wrong = vec![];
         for (what, line) in &tries {
-            for (f, kept) in [(&theirs, true), (&hook, true), (&mine, false)] {
+            let is_mode_times = what.starts_with("mode") || what.starts_with("times");
+            for (f, is_mine) in [(&theirs, false), (&hook, false), (&mine, true)] {
+                let by_name = cfg!(target_os = "linux") && what.ends_with("/dev/fd");
+                let kept = if is_mode_times {
+                    if mode_times_where { !is_mine || by_name } else { false }
+                } else {
+                    if owner_xattrs_where { !is_mine } else { true }
+                };
                 fresh(f);
                 let before = state(f);
-                let (ok, out, err) = sh_under(&p, &root, &line.replace("{f}", &format!("'{}'", f.display())));
+                let w = Watch::quiet("sb-attrs.");
+                let p_run = Policy { watch: Some(w.clone()), ..p.clone() };
+                let (ok, out, err) =
+                    sh_under(&p_run, &root, &line.replace("{f}", &format!("'{}'", f.display())));
                 let after = state(f);
                 let opened = !what.contains(", ") || out.contains("opened");
                 if !opened || kept == (ok || after != before) {
@@ -12118,6 +12254,31 @@ mod tests {
                         "{what} on {}: ran {ok}, {before:?} → {after:?}, {out} {err}",
                         f.display()
                     ));
+                }
+                #[cfg(not(target_os = "macos"))]
+                if is_mode_times && kept && mode_times_where {
+                    let op = if what.starts_with("mode") { "file-write-mode" } else { "file-write-times" };
+                    let by = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                    while w.blocked().seen.is_empty() && std::time::Instant::now() < by {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let denials = w.blocked().seen;
+                    let has_denial = denials.iter().any(|d| d.op == op && d.plain().starts_with("changing "));
+                    if !has_denial {
+                        wrong.push(format!(
+                            "{what} on {}: missing {op} denial in {:?}",
+                            f.display(),
+                            denials
+                        ));
+                    }
+                    let r = Guard::In(Box::new(p_run.clone())).report_with(
+                        &[(ok, err.clone())],
+                        Told::default(),
+                        ok,
+                    );
+                    if !r.blocked || !r.text.contains("changing ") {
+                        wrong.push(format!("{what} on {}: report missing changing: {}", f.display(), r.text));
+                    }
                 }
             }
         }
@@ -12295,6 +12456,7 @@ mod tests {
         assert!(confine.closed.is_empty(), "no folder closed: {:?}", confine.closed);
         for (refused, file) in [
             ("echo planted > Cargo.toml", "Cargo.toml"),
+            ("chmod 777 Cargo.toml", "Cargo.toml"),
             ("mv Cargo.toml moved.toml", "Cargo.toml"),
             ("rm -f Cargo.toml", "Cargo.toml"),
             ("ln Cargo.toml linked.toml", "Cargo.toml"),
@@ -12305,15 +12467,32 @@ mod tests {
             ("mkdir -p out && mv sub out/x && mkdir sub && echo planted > sub/build.rs", "sub/build.rs"),
             ("rm -rf sub && mkdir sub && echo planted > sub/build.rs", "sub/build.rs"),
         ] {
+            use std::os::unix::fs::PermissionsExt as _;
             let before = std::fs::read_to_string(root.join(file)).unwrap();
+            let before_mode = std::fs::metadata(root.join(file)).unwrap().permissions().mode() & 0o777;
             let (ok, _, err) = sh_confined(&c, &root, refused);
             assert!(!ok, "{refused}: it went through");
             assert_eq!(std::fs::read_to_string(root.join(file)).unwrap(), before, "{refused}: {err}");
+            let after_mode = std::fs::metadata(root.join(file)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(before_mode, after_mode, "{refused}: mode changed! {before_mode:o} -> {after_mode:o}");
             if refused.starts_with("echo") {
                 let said = c.said_in_output(&[(false, err.clone())], &[]);
                 assert!(said.iter().any(|d| d.target.ends_with(file)), "{refused}: {err} — {said:?}");
             }
         }
+        // (its mode and times, tarae's to serve: by path and through a descriptor, the seal's own answer, as the kernel
+        // gives it there — Read-only file system — the times as they were)
+        let then = std::fs::metadata(root.join("Cargo.toml")).unwrap().modified().unwrap();
+        for served in [
+            "chmod 644 Cargo.toml",
+            "/usr/bin/perl -e 'utime(1, 42, $ARGV[0]) or die \"$!\\n\"' Cargo.toml",
+            "/usr/bin/perl -e 'open(my $h, \"<\", $ARGV[0]) or die; chmod(0644, $h) or die \"$!\\n\"' Cargo.toml",
+            "/usr/bin/perl -e 'open(my $h, \"<\", $ARGV[0]) or die; utime(1, 42, $h) or die \"$!\\n\"' Cargo.toml",
+        ] {
+            let (ok, _, err) = sh_confined(&c, &root, served);
+            assert!(!ok && err.contains("Read-only file system"), "{served}: {err}");
+        }
+        assert_eq!(std::fs::metadata(root.join("Cargo.toml")).unwrap().modified().unwrap(), then);
         // (a refusal of theirs naming nothing — Rust's — has the seals said as its likely cause, compat7 review 1)
         let out = [(false, "Error: Read-only file system (os error 30)".to_string())];
         let r = Guard::In(Box::new(Policy { cwd: Some(root.clone()), ..c.clone() })).report_with(
@@ -12821,6 +13000,7 @@ mod tests {
                 run_env: Default::default(),
                 run_homes: Vec::new(),
                 kept: Vec::new(),
+                own_shm: false,
             };
             let sh = |script: &str| {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -12907,6 +13087,7 @@ mod tests {
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
+            own_shm: false,
         };
         let pid = std::process::id();
         let (mine, other) = (format!("tarae-test-{pid}-1."), format!("tarae-test-{pid}-10."));
@@ -12980,6 +13161,7 @@ mod tests {
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
+            own_shm: false,
         };
         let sh = |script: &str| {
             let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
@@ -14270,6 +14452,7 @@ mod tests {
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
+            own_shm: false,
         };
         let reached = |p: &Policy, l: &TcpListener| {
             let script = format!("/usr/bin/nc -z -w 2 127.0.0.1 {}", port(l));
@@ -14425,7 +14608,8 @@ mod tests {
         crate::spawn::wait(s.pid).unwrap();
         // (whether each is set — never what it holds)
         let script = r#"printf '{"token": "%s", "path": "%s"}' "${GITHUB_TOKEN:+set}" "${PATH:+set}""#;
-        let probe = output_in(&p, "/bin/sh", &["-c", script], &[]).expect("the probe answers");
+        let probe =
+            output_in(&p, "/bin/sh", &["-c", script], &[], &mut Vec::new()).expect("the probe answers");
         let said =
             format!("token={};path={}", probe["token"].as_str().unwrap(), probe["path"].as_str().unwrap());
         std::fs::write(dir.join("probe"), said).unwrap();
@@ -14533,8 +14717,9 @@ mod tests {
     }
 
     /// A toolchain's probe (`output_in`) runs through the session's keeper, confined: its parent is the keeper
-    /// `keeper::of` lists for the project, and it can't write the project's `Cargo.toml`. (The project under the
-    /// build's `target/`, not in `/tmp`: the policy writes there.)
+    /// `keeper::of` lists for the project, and it can't write the project's `Cargo.toml`, change its mode where served,
+    /// nor connect, whatever the policy opens; what it's refused is its own, never in the report of a run of the
+    /// project's. (The project under the build's `target/`, not in `/tmp`: the policy writes there.)
     #[cfg(target_os = "linux")]
     #[test]
     fn a_probe_runs_through_the_sessions_keeper() {
@@ -14558,19 +14743,96 @@ mod tests {
             run_env: run_env_of(&Here::now(), &crate::llm::LlmConfig::default()),
             ..Default::default()
         };
-        let p = Policy::for_project(&env);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tag = format!("tarae-test-probe-{}.", std::process::id());
+        let w = Watch::quiet(&tag);
+        let mut p = Policy::for_project(&env);
+        p.network = true;
+        p.localhost = true;
+        p.ports = vec![port];
+        p.tag = Some(tag);
+        p.watch = Some(w.clone());
+        // (python3 is needed: without it the connect isn't tried and `net` says so — a failure, not a pass)
         let script = r#"if printf x >> "$R/Cargo.toml" 2>/dev/null; then w=yes; else w=no; fi
-            printf '{"ppid": %s, "wrote": "%s"}' "$PPID" "$w""#;
-        let r = root.to_string_lossy().into_owned();
-        let probe = output_in(&p, "/bin/sh", &["-c", script], &[("R", &r)]).expect("the probe answers");
+            if chmod 777 "$R/Cargo.toml" 2>/dev/null; then ch=yes; else ch=no; fi
+            net=$(python3 -c "import socket
+try: socket.create_connection(('127.0.0.1', $PORT), 2); print('yes')
+except OSError: print('no')" 2>/dev/null) || net="python3 failed"
+            printf '{"ppid": %s, "wrote": "%s", "chmod": "%s", "net": "%s"}' "$PPID" "$w" "$ch" "$net""#;
+        let (r, port) = (root.to_string_lossy().into_owned(), port.to_string());
+        let mut denied = Vec::new();
+        let probe = output_in(&p, "/bin/sh", &["-c", script], &[("R", &r), ("PORT", &port)], &mut denied)
+            .expect("the probe answers");
         // (its `$PPID` is the keeper's number as its runs see it: 1 inside a PID namespace)
         let keepers: Vec<u64> =
             keeper::of(Some(&root)).iter().map(|k| u64::from(keeper::seen_by_runs(k))).collect();
         assert_eq!(keepers, [probe["ppid"].as_u64().unwrap()], "forked by the session's keeper: {probe}");
         assert_eq!(probe["wrote"], "no", "confined: {probe}");
+        assert_eq!(probe["net"], "no", "the connect tried and refused, the network closed: {probe}");
+        // (what it was refused is the probe's own: the run whose watch the policy holds hears none of it)
+        assert!(w.blocked().seen.is_empty(), "a probe's denials in a run's report: {:?}", w.blocked().seen);
+        let ns = tier::for_policy(&p);
+        if supervisor::served(ns.user).is_ok() {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(probe["chmod"], "no", "served: {probe}");
+            let m = std::fs::metadata(root.join("Cargo.toml")).unwrap();
+            assert_ne!(m.permissions().mode() & 0o777, 0o777, "probe changed Cargo.toml's mode");
+            // (in the session's own network namespace the connect meets its own loopback, where nothing listens: the
+            // kernel's refusal, nothing of tarae's to say; where tarae makes the run's sockets, tarae's)
+            assert!(
+                ns.net || denied.iter().any(|d| d.op == "network-outbound"),
+                "the connect refused, said: {denied:?}"
+            );
+            assert!(denied.iter().any(|d| d.op == "file-write-mode"), "the chmod refused, said: {denied:?}");
+        }
         assert_eq!(std::fs::read_to_string(root.join("Cargo.toml")).unwrap(), "[workspace]\n");
         end_leftovers(Some(&root));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A probe whose served start fails (confining or serving: a stand-in refuses it) still answers — unserved, its
+    /// mode and times open as in tier offline: it only asks a toolchain where its folders are — and the failure is in
+    /// the log, never silent; the toolchain's folders aren't lost.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_probe_whose_served_start_fails_runs_unserved_and_says_so() {
+        // (under the build's `target/`, not in /tmp: the policy writes there)
+        let target = std::env::current_dir().unwrap().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let project = crate::scratch::Scratch::in_dir(&target, "probe-unserved");
+        let root = project.path().to_path_buf();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let env = Env {
+            root: root.clone(),
+            tmp: Some(profile_path(&std::env::temp_dir())),
+            run_env: run_env_of(&Here::now(), &crate::llm::LlmConfig::default()),
+            ..Default::default()
+        };
+        let p = Policy::for_project(&env);
+        let served_here = supervisor::served(tier::for_policy(&p).user).is_ok();
+        if !crate::landlock::abi().is_ok_and(|n| n >= 2) || !served_here {
+            let test = "sandbox::tests::a_probe_whose_served_start_fails_runs_unserved_and_says_so";
+            crate::test_results::said_skip(&format!("{test} — no served runs here"));
+            return;
+        }
+        *PROBE_SERVING_REFUSED.lock().unwrap() = Some(root.clone());
+        let log = crate::log::capture();
+        let probe =
+            output_in(&p, "/bin/sh", &["-c", r#"printf '{"answered": "yes"}'"#], &[], &mut Vec::new());
+        *PROBE_SERVING_REFUSED.lock().unwrap() = None;
+        assert_eq!(
+            probe.as_ref().map(|v| v["answered"].clone()),
+            Some("yes".into()),
+            "the probe answers unserved"
+        );
+        let said = log.lines();
+        assert!(
+            said.iter()
+                .any(|l| l.contains("a probe's served start failed, it runs unserved: refused by a test")),
+            "its failure in the log: {said:?}"
+        );
+        end_leftovers(Some(&root));
     }
 
     /// A sandboxed run's side: the names of its environment, one a line, into `$TARAE_ENV_NAMES` — never a

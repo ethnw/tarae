@@ -39,6 +39,7 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -51,6 +52,8 @@ use super::wire::{
     netlink_reads, parse, read_msg, unix_address,
 };
 use super::{Denial, Policy};
+
+mod attrs;
 
 /// A call's answer: what it returns, or the errno it fails with.
 type Answer = Result<i64, i32>;
@@ -357,10 +360,12 @@ impl std::ops::Deref for Served {
 }
 
 /// The calls a supervisor answers, as its counts name them.
-const KINDS: [&str; 8] = ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "pty"];
+pub(super) const KINDS: [&str; 9] =
+    ["socket", "bind", "connect", "sendto", "sendmsg", "sendmmsg", "listen", "pty", "mode or times"];
 
 fn kind(nr: i32) -> usize {
     match nr as libc::c_long {
+        n if crate::seccomp::serves_attr(n) => 8,
         libc::SYS_socket => 0,
         libc::SYS_bind => 1,
         libc::SYS_connect => 2,
@@ -458,6 +463,10 @@ impl Totals {
 #[cfg(test)]
 pub static APART_OFF: AtomicU64 = AtomicU64::new(0);
 
+/// Tests: each ended run's own calls, by its `run_id` — one run's, which `totals` (every test's at once) isn't.
+#[cfg(test)]
+pub static ENDED: std::sync::Mutex<Vec<(u64, Totals)>> = std::sync::Mutex::new(Vec::new());
+
 /// Tests (M4): every supervisor's calls so far (`Totals::since` for a span).
 #[cfg(test)]
 pub fn totals() -> Totals {
@@ -521,7 +530,7 @@ pub fn serve(
                 libc::SYS_bind => l.answer(n.id, bind(&l, &n, &policy)),
                 libc::SYS_listen => l.answer(n.id, listen(&l, &n, &policy)),
                 libc::SYS_ioctl => l.answer(n.id, pty_ioctl(&l, &n, &policy)),
-                // (a connect or a send may wait — as long as the caller would have)
+                // (a connect, send, or file attribute call may wait on network or slow/hung mounts — handled in a thread)
                 _ => {
                     let (on, p, stats) = (l.clone(), policy.clone(), run.clone());
                     let spawned = std::thread::Builder::new().name("tarae-serve".into()).spawn(move || {
@@ -545,6 +554,8 @@ pub fn serve(
             ptys.end();
         }
         let said = run.now();
+        #[cfg(test)]
+        ENDED.lock().unwrap_or_else(|e| e.into_inner()).push((policy.run_id, said));
         if said.calls.iter().any(|&c| c > 0) {
             crate::log::line("sandbox", "info", &format!("a run's supervisor ended: {}", said.said()));
         }
@@ -569,6 +580,7 @@ fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer {
         libc::SYS_sendto => sendto(l, n, p),
         libc::SYS_sendmsg => sendmsg(l, n, p),
         libc::SYS_sendmmsg => sendmmsg(l, n, p),
+        nr if crate::seccomp::serves_attr(nr) => attrs::call(l, n, p),
         _ => Err(libc::ENOSYS),
     }
 }
@@ -704,6 +716,17 @@ impl Caller {
     /// The folder it works in (a relative socket path is from there).
     fn cwd(&self) -> Result<PathBuf, i32> {
         std::fs::read_link(format!("/proc/{}/cwd", self.tid)).map_err(|_| libc::ENOENT)
+    }
+
+    /// The folder it works in as tarae's own `O_PATH` descriptor (`/proc/<tid>/cwd` opened: that folder, whatever
+    /// its name now) — none there: `ENOENT`.
+    fn open_cwd(&self) -> Result<OwnedFd, i32> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(format!("/proc/{}/cwd", self.tid))
+            .map(OwnedFd::from)
+            .map_err(|e| errno(&e))
     }
 
     /// Its program's name, as a denial says it (`java`) — the run's own bytes, shown (lossy where they aren't

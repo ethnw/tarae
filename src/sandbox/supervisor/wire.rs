@@ -315,6 +315,96 @@ pub(super) fn mmsg_at(base: u64, i: u64) -> Option<u64> {
     at.checked_add(MMSGHDR as u64).map(|_| at)
 }
 
+/// A page: what a path read asks at most at once — a path that ends before a page's end never reads past it, where
+/// nothing may be mapped.
+const PAGE: u64 = 4096;
+/// The longest path a call names, its NUL too (`PATH_MAX`).
+const PATH_MAX: usize = 4096;
+
+/// The path a call names at `at` (a C string), read once, a page at a time: what comes before its NUL — none within
+/// `PATH_MAX`: `ENAMETOOLONG`; at 0: `EFAULT`, as the kernel says them.
+pub(super) fn c_path(m: &impl Mem, at: u64) -> Result<Vec<u8>, i32> {
+    if at == 0 {
+        return Err(libc::EFAULT);
+    }
+    let (mut path, mut next) = (Vec::new(), at);
+    while path.len() < PATH_MAX {
+        let want = ((PAGE - next % PAGE) as usize).min(PATH_MAX - path.len());
+        let chunk = m.read(next, want)?;
+        if let Some(end) = chunk.iter().position(|&b| b == 0) {
+            path.extend_from_slice(&chunk[..end]);
+            return Ok(path);
+        }
+        path.extend_from_slice(&chunk);
+        next = next.checked_add(want as u64).ok_or(libc::EFAULT)?;
+    }
+    Err(libc::ENAMETOOLONG)
+}
+
+/// How a call gives a file's new times: `utime`'s `struct utimbuf` (two seconds), `utimes`' and `futimesat`'s two
+/// `struct timeval`s, `utimensat`'s two `struct timespec`s — 64-bit fields all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Times {
+    Utimbuf,
+    Timevals,
+    Timespecs,
+}
+
+/// The access and modification times a call gives at `at`, as `utimensat` takes them (seconds and nanoseconds,
+/// twice), read once — None at 0 (both now). A `timeval`'s microseconds outside a second: `EINVAL`, as the kernel
+/// says it (a `timespec`'s are the kernel's to judge: `UTIME_NOW` and `UTIME_OMIT` among them).
+pub(super) fn times(m: &impl Mem, at: u64, kind: Times) -> Result<Option<[i64; 4]>, i32> {
+    if at == 0 {
+        return Ok(None);
+    }
+    let b = m.read(at, if kind == Times::Utimbuf { 16 } else { 32 })?;
+    let w = |i: usize| i64::from_ne_bytes(b[8 * i..8 * i + 8].try_into().unwrap_or_default());
+    Ok(Some(match kind {
+        Times::Utimbuf => [w(0), 0, w(1), 0],
+        Times::Timevals if [w(1), w(3)].iter().any(|us| !(0..1_000_000).contains(us)) => {
+            return Err(libc::EINVAL);
+        }
+        Times::Timevals => [w(0), w(1) * 1000, w(2), w(3) * 1000],
+        Times::Timespecs => [w(0), w(1), w(2), w(3)],
+    }))
+}
+
+/// N where a path a call named is the whole `/proc/self/fd/N` — the caller's own descriptor N, by its name (N as the
+/// kernel reads it: digits, no leading zero). Any other path is a path, opened as one.
+pub(super) fn self_fd(path: &[u8]) -> Option<u64> {
+    let n = path.strip_prefix(b"/proc/self/fd/")?;
+    let digits = !n.is_empty() && n.iter().all(u8::is_ascii_digit) && (n == b"0" || n[0] != b'0');
+    std::str::from_utf8(n).ok()?.parse().ok().filter(|_| digits)
+}
+
+/// Whether a descriptor's link (`/proc/self/fd/M`) names no file of the user's — the run's own to change: a pipe, a
+/// socket or an anonymous inode, by the kernel's exact words; or a file no folder holds any more, by the kernel's
+/// ` (deleted)` mark (`d_unlinked`) with its last link gone (`no_links`: never alone — a FUSE file may say 0) and
+/// the marked words themselves not leading the run to it (`named`: a file truly named so). Anything else is a name,
+/// decided as one.
+pub(super) fn no_name(link: &[u8], no_links: bool, named: impl FnOnce() -> bool) -> bool {
+    match link.first() {
+        Some(b'/') => no_links && link.ends_with(b" (deleted)") && !named(),
+        _ => [&b"pipe:["[..], b"socket:[", b"anon_inode:"].iter().any(|w| link.starts_with(w)),
+    }
+}
+
+/// Whether a path a call named goes through `/proc` or names a descriptor in `/dev` (`/dev/fd/…`, `/dev/stdin` …:
+/// links into `/proc/self`), as its words say — refused, never resolved for the run (`self_fd`'s whole form aside):
+/// tarae's `self` there isn't the run's, nor in tier own one at all. What reaches them through a link or `..` meets
+/// a magic link on the way (`RESOLVE_NO_MAGICLINKS`), refused too, or a `self` not found.
+pub(super) fn through_proc(path: &[u8]) -> bool {
+    use std::path::Component::{Normal, RootDir};
+    let parts: Vec<_> = std::path::Path::new(OsStr::from_bytes(path)).components().take(3).collect();
+    match parts.as_slice() {
+        [RootDir, Normal(p), ..] if *p == "proc" => true,
+        [RootDir, Normal(d), Normal(n)] if *d == "dev" => {
+            ["fd", "stdin", "stdout", "stderr"].iter().any(|w| n == w)
+        }
+        _ => false,
+    }
+}
+
 /// The properties the loops and the fuzz targets hold these readers to (`fuzz/parsers`: `--cfg fuzzing`).
 #[cfg(any(test, fuzzing))]
 #[path = "wire/check.rs"]

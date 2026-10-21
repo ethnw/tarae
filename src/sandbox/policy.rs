@@ -303,6 +303,8 @@ pub struct Policy {
     /// (the run then doesn't start: `spawn`); None before it's made (`policy` makes it).
     #[cfg(target_os = "linux")]
     pub confine: Option<Result<linux::Confine, String>>,
+    /// Linux, tier own: whether the run has its own private `/dev/shm` tmpfs.
+    pub own_shm: bool,
 }
 
 /// The ioctl commands a run may use on a terminal (macOS's numbers, the same on every Mac — written here, not
@@ -881,7 +883,8 @@ impl Policy {
         if real.starts_with(&self.root) {
             return !protected_in(&self.root, real) && !self.protect.iter().any(|p| real.starts_with(p));
         }
-        let open = self.run.as_ref().is_some_and(|d| real.starts_with(d.path()))
+        let open = (self.own_shm && real.starts_with(Path::new("/dev/shm")))
+            || self.run.as_ref().is_some_and(|d| real.starts_with(d.path()))
             || self.write.iter().any(|w| real.starts_with(w));
         open && !self.keep.iter().chain(&self.caches).any(|k| real.starts_with(k))
     }
@@ -1270,6 +1273,7 @@ impl Policy {
             seals_off: false,
             #[cfg(target_os = "linux")]
             confine: None,
+            own_shm: false,
         }
     }
 }

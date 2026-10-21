@@ -924,6 +924,9 @@ impl Keeper {
             return Err(io::Error::other("a run not served starts on its own (start)"));
         }
         let tree = (self.pid, self.serial);
+        let mut policy_served = (*policy).clone();
+        policy_served.own_shm = self.ns.user && self.ns.shm;
+        let policy = Arc::new(policy_served);
         let to = super::supervisor::serve(policy, net, refused, tree, c.ptys.clone())?;
         let no_userns = super::tier::runs_refuse_userns();
         let (rules, covers) = c.rules_and_covers();
@@ -3919,6 +3922,11 @@ mod tests {
             "protocols" => helper_protocols(),
             "udp" => helper_udp(&std::env::var("TARAE_TO").unwrap_or_default()),
             "reach" => helper_reach(&std::env::var("TARAE_TO").unwrap_or_default()),
+            "attr_calls" => helper_attr_calls(),
+            "attr_race" => helper_attr_race(),
+            "attr_shm" => helper_attr_shm(),
+            "attr_shm_manifest" => helper_attr_shm_manifest(),
+            "perf_chmod" => helper_perf_chmod(),
             // (step 7: another session's run holding what it holds until `done` is in its folder — 30 s at most)
             // (step 8: `hold` started as its child, what that holds said, then gone — the child left running below
             // the keeper, as a daemon a build starts is)
@@ -4759,6 +4767,1018 @@ mod tests {
                 return format!("recv={}", errno_now());
             }
             format!("answer={}", String::from_utf8_lossy(&buf[..n as usize]))
+        }
+    }
+
+    /// `attr_calls`: Test 2's raw mode and times calls in a sandboxed run — one row per form:
+    /// `fchmod`, `fchmodat`, `fchmodat2`, `utimensat`, x86-64's `chmod`, `utime`, `utimes`, `futimesat`,
+    /// and `/proc/self/fd/N`.
+    fn helper_attr_calls() -> String {
+        use std::ffi::CString;
+        let outside = std::env::var("TARAE_OUTSIDE").expect("TARAE_OUTSIDE");
+        let inside = "inside_file";
+        std::fs::write(inside, "inside marker\n").unwrap();
+        let link_inside = "link_inside";
+        let _ = std::fs::remove_file(link_inside);
+        std::os::unix::fs::symlink(inside, link_inside).unwrap();
+        let link_outside = "link_outside";
+        let _ = std::fs::remove_file(link_outside);
+        std::os::unix::fs::symlink(&outside, link_outside).unwrap();
+
+        let c_outside = CString::new(outside.as_bytes()).unwrap();
+        let c_inside = CString::new(inside.as_bytes()).unwrap();
+        let c_link_inside = CString::new(link_inside.as_bytes()).unwrap();
+        let c_link_outside = CString::new(link_outside.as_bytes()).unwrap();
+        let c_empty = CString::new("").unwrap();
+
+        let file_outside = std::fs::File::open(&outside).unwrap();
+        let fd_outside = std::os::fd::AsRawFd::as_raw_fd(&file_outside) as libc::c_long;
+        let file_inside = std::fs::OpenOptions::new().read(true).write(true).open(inside).unwrap();
+        let fd_inside = std::os::fd::AsRawFd::as_raw_fd(&file_inside) as libc::c_long;
+
+        let proc_outside = format!("/proc/self/fd/{fd_outside}");
+        let proc_inside = format!("/proc/self/fd/{fd_inside}");
+        let c_proc_outside = CString::new(proc_outside.as_bytes()).unwrap();
+        let c_proc_inside = CString::new(proc_inside.as_bytes()).unwrap();
+
+        let raw = |nr: libc::c_long, args: [libc::c_long; 6]| -> Result<(), i32> {
+            let r = unsafe { libc::syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5]) };
+            if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)) }
+        };
+
+        let wrong = std::cell::RefCell::new(Vec::new());
+        let check = |name: &str, got: Result<(), i32>, want: Result<(), i32>| {
+            if got != want {
+                wrong.borrow_mut().push(format!("{name}: got {got:?}, want {want:?}"));
+            }
+        };
+
+        let at = libc::AT_FDCWD as libc::c_long;
+        let eperm = Err(libc::EPERM);
+        let ebadf = Err(libc::EBADF);
+        let einval = Err(libc::EINVAL);
+        let enoent = Err(libc::ENOENT);
+        let efault = Err(libc::EFAULT);
+        let ok = Ok(());
+
+        // 1. fchmod
+        check("fchmod outside", raw(libc::SYS_fchmod, [fd_outside, 0o644, 0, 0, 0, 0]), eperm);
+        check("fchmod inside", raw(libc::SYS_fchmod, [fd_inside, 0o644, 0, 0, 0, 0]), ok);
+        check("fchmod bad fd", raw(libc::SYS_fchmod, [-1, 0o644, 0, 0, 0, 0]), ebadf);
+
+        // Completely deleted file (st_nlink == 0): allowed
+        let unlinked_file = "file_unlinked";
+        std::fs::write(unlinked_file, "unlinked\n").unwrap();
+        let c_unlinked = std::ffi::CString::new(unlinked_file).unwrap();
+        let fd_unlinked =
+            unsafe { libc::open(c_unlinked.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
+        std::fs::remove_file(unlinked_file).unwrap();
+        check("fchmod on st_nlink == 0", raw(libc::SYS_fchmod, [fd_unlinked, 0o644, 0, 0, 0, 0]), ok);
+        unsafe { libc::close(fd_unlinked as i32) };
+
+        // Deleted file with remaining hard link (st_nlink > 0 && deleted): refused
+        let multi_1 = "file_multi_1";
+        let multi_2 = "file_multi_2";
+        std::fs::write(multi_1, "multi\n").unwrap();
+        std::fs::hard_link(multi_1, multi_2).unwrap();
+        let c_multi_1 = std::ffi::CString::new(multi_1).unwrap();
+        let fd_multi =
+            unsafe { libc::open(c_multi_1.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
+        std::fs::remove_file(multi_1).unwrap();
+        check(
+            "fchmod on deleted with hard link",
+            raw(libc::SYS_fchmod, [fd_multi, 0o644, 0, 0, 0, 0]),
+            eperm,
+        );
+        // (`.` from it: no folder, as the kernel says — never the file its other name holds, by a text read as gone)
+        let enotdir = Err(libc::ENOTDIR);
+        let dot = c".".as_ptr() as libc::c_long;
+        check(
+            "fchmodat . of a file gone by one name",
+            raw(libc::SYS_fchmodat, [fd_multi, dot, 0o644, 0, 0, 0]),
+            enotdir,
+        );
+        check(
+            "utimensat . of a file gone by one name",
+            raw(libc::SYS_utimensat, [fd_multi, dot, 0, 0, 0, 0]),
+            enotdir,
+        );
+        unsafe { libc::close(fd_multi as i32) };
+        std::fs::remove_file(multi_2).ok();
+
+        // File moved outside: refused
+        let moved_file = "file_moved";
+        std::fs::write(moved_file, "moved\n").unwrap();
+        let c_moved = std::ffi::CString::new(moved_file).unwrap();
+        let fd_moved =
+            unsafe { libc::open(c_moved.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
+        std::fs::write("ready_to_move", "").unwrap();
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::path::Path::new("moved_done").exists() && std::time::Instant::now() < by {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        check("fchmod on file moved outside", raw(libc::SYS_fchmod, [fd_moved, 0o644, 0, 0, 0, 0]), eperm);
+        unsafe { libc::close(fd_moved as i32) };
+        let _ = std::fs::remove_file("ready_to_move");
+        let _ = std::fs::remove_file("moved_done");
+
+        // Replaced file (dev/ino changed): refused by same(&t, &st)
+        let replaced_1 = "file_replaced_1";
+        let replaced_2 = "file_replaced_2";
+        let replaced_link = "file_replaced_link";
+        std::fs::write(replaced_1, "replaced 1\n").unwrap();
+        std::fs::hard_link(replaced_1, replaced_link).unwrap();
+        std::fs::write(replaced_2, "replaced 2\n").unwrap();
+        let c_replaced_1 = std::ffi::CString::new(replaced_1).unwrap();
+        let fd_replaced =
+            unsafe { libc::open(c_replaced_1.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
+        std::fs::rename(replaced_2, replaced_1).unwrap();
+        check(
+            "fchmod on replaced file (dev/ino changed)",
+            raw(libc::SYS_fchmod, [fd_replaced, 0o644, 0, 0, 0, 0]),
+            eperm,
+        );
+        unsafe { libc::close(fd_replaced as i32) };
+        std::fs::remove_file(replaced_1).ok();
+        std::fs::remove_file(replaced_link).ok();
+
+        // (open for writing, its name another file's since — as a cover's would be — and the file still kept by
+        // another: refused, written or not; its name must lead the run to it)
+        std::fs::write("written", "w\n").unwrap();
+        std::fs::hard_link("written", "written_kept").unwrap();
+        std::fs::write("written_new", "n\n").unwrap();
+        let flags = libc::O_WRONLY | libc::O_CLOEXEC;
+        let fd_written = unsafe { libc::open(c"written".as_ptr(), flags) } as libc::c_long;
+        std::fs::rename("written_new", "written").unwrap();
+        check(
+            "fchmod written, its name another's",
+            raw(libc::SYS_fchmod, [fd_written, 0o600, 0, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "futimens written, its name another's",
+            raw(libc::SYS_utimensat, [fd_written, 0, 0, 0, 0, 0]),
+            eperm,
+        );
+        unsafe { libc::close(fd_written as i32) };
+        let _ = (std::fs::remove_file("written"), std::fs::remove_file("written_kept"));
+
+        // (the project's own link to outside, by an `O_PATH | O_NOFOLLOW` descriptor with AT_EMPTY_PATH: the link
+        // itself, in the project — let, and the kernel's answer: a link has no mode of its own, `EOPNOTSUPP`; a kernel
+        // without `fchmodat2` (below 6.6) has none to give, `ENOSYS`)
+        let fd_link_outside =
+            unsafe { libc::open(c_link_outside.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) }
+                as libc::c_long;
+        let empty = |fd| [fd, c_empty.as_ptr() as libc::c_long, 0o644, libc::AT_EMPTY_PATH as _, 0, 0];
+        let here = raw(libc::SYS_fchmodat2, empty(fd_inside)) != Err(libc::ENOSYS);
+        let want = Err(if here { libc::EOPNOTSUPP } else { libc::ENOSYS });
+        let on_link = raw(libc::SYS_fchmodat2, empty(fd_link_outside));
+        check("fchmodat2 on the project's link to outside, by its O_PATH descriptor", on_link, want);
+        unsafe { libc::close(fd_link_outside as i32) };
+
+        // Symlink to /proc/self/fd/N opened with O_PATH: dev/ino check refuses
+        let link_proc = "link_proc_outside";
+        let _ = std::fs::remove_file(link_proc);
+        std::os::unix::fs::symlink(&proc_outside, link_proc).unwrap();
+        let c_link_proc = std::ffi::CString::new(link_proc).unwrap();
+        let fd_link_proc = unsafe { libc::open(c_link_proc.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if fd_link_proc >= 0 {
+            check(
+                "fchmodat2 on O_PATH link to /proc/self/fd/N with AT_EMPTY_PATH",
+                raw(
+                    libc::SYS_fchmodat2,
+                    [fd_link_proc as _, c_empty.as_ptr() as _, 0o777, libc::AT_EMPTY_PATH as _, 0, 0],
+                ),
+                eperm,
+            );
+            unsafe { libc::close(fd_link_proc) };
+        }
+        let _ = std::fs::remove_file(link_proc);
+
+        // 2. fchmodat
+        check(
+            "fchmodat outside",
+            raw(libc::SYS_fchmodat, [at, c_outside.as_ptr() as _, 0o644, 0, 0, 0]),
+            eperm,
+        );
+        check("fchmodat inside", raw(libc::SYS_fchmodat, [at, c_inside.as_ptr() as _, 0o644, 0, 0, 0]), ok);
+        check(
+            "fchmodat bad fd",
+            raw(libc::SYS_fchmodat, [-1, c_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            ebadf,
+        );
+
+        // 3. fchmodat2
+        check(
+            "fchmodat2 outside",
+            raw(libc::SYS_fchmodat2, [at, c_outside.as_ptr() as _, 0o644, 0, 0, 0]),
+            eperm,
+        );
+        check("fchmodat2 inside", raw(libc::SYS_fchmodat2, [at, c_inside.as_ptr() as _, 0o644, 0, 0, 0]), ok);
+        check(
+            "fchmodat2 empty outside",
+            raw(
+                libc::SYS_fchmodat2,
+                [fd_outside, c_empty.as_ptr() as _, 0o644, libc::AT_EMPTY_PATH as _, 0, 0],
+            ),
+            eperm,
+        );
+        let empty_in = raw(
+            libc::SYS_fchmodat2,
+            [fd_inside, c_empty.as_ptr() as _, 0o644, libc::AT_EMPTY_PATH as _, 0, 0],
+        );
+        if empty_in != Ok(()) && empty_in != Err(libc::ENOSYS) {
+            wrong.borrow_mut().push(format!("fchmodat2 empty inside: {empty_in:?}"));
+        }
+        check(
+            "fchmodat2 nofollow outside",
+            raw(
+                libc::SYS_fchmodat2,
+                [at, c_outside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            eperm,
+        );
+        check(
+            "fchmodat2 nofollow inside",
+            raw(
+                libc::SYS_fchmodat2,
+                [at, c_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            ok,
+        );
+        check(
+            "fchmodat2 nofollow link",
+            raw(
+                libc::SYS_fchmodat2,
+                [at, c_link_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            Err(libc::EOPNOTSUPP),
+        );
+        check(
+            "fchmodat2 unknown flags",
+            raw(libc::SYS_fchmodat2, [at, c_inside.as_ptr() as _, 0o644, 0x2000, 0, 0]),
+            einval,
+        );
+        check(
+            "fchmodat2 empty without AT_EMPTY_PATH",
+            raw(libc::SYS_fchmodat2, [fd_inside, c_empty.as_ptr() as _, 0o644, 0, 0, 0]),
+            enoent,
+        );
+        check(
+            "fchmodat2 bad fd",
+            raw(libc::SYS_fchmodat2, [-1, c_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            ebadf,
+        );
+
+        // 4. utimensat
+        let ts = [
+            libc::timespec { tv_sec: 1_577_836_800, tv_nsec: 0 },
+            libc::timespec { tv_sec: 1_577_836_800, tv_nsec: 0 },
+        ];
+        let ts_ptr = ts.as_ptr() as libc::c_long;
+        check(
+            "utimensat outside",
+            raw(libc::SYS_utimensat, [at, c_outside.as_ptr() as _, ts_ptr, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat inside",
+            raw(libc::SYS_utimensat, [at, c_inside.as_ptr() as _, ts_ptr, 0, 0, 0]),
+            ok,
+        );
+        check(
+            "utimensat null path outside",
+            raw(libc::SYS_utimensat, [fd_outside, 0, ts_ptr, 0, 0, 0]),
+            eperm,
+        );
+        check("utimensat null path inside", raw(libc::SYS_utimensat, [fd_inside, 0, ts_ptr, 0, 0, 0]), ok);
+        check(
+            "utimensat empty outside",
+            raw(
+                libc::SYS_utimensat,
+                [fd_outside, c_empty.as_ptr() as _, ts_ptr, libc::AT_EMPTY_PATH as _, 0, 0],
+            ),
+            eperm,
+        );
+        check(
+            "utimensat empty inside",
+            raw(
+                libc::SYS_utimensat,
+                [fd_inside, c_empty.as_ptr() as _, ts_ptr, libc::AT_EMPTY_PATH as _, 0, 0],
+            ),
+            ok,
+        );
+        check(
+            "utimensat nofollow outside",
+            raw(
+                libc::SYS_utimensat,
+                [at, c_outside.as_ptr() as _, ts_ptr, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            eperm,
+        );
+        check(
+            "utimensat nofollow inside",
+            raw(
+                libc::SYS_utimensat,
+                [at, c_inside.as_ptr() as _, ts_ptr, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            ok,
+        );
+        check(
+            "utimensat link to outside followed",
+            raw(libc::SYS_utimensat, [at, c_link_outside.as_ptr() as _, ts_ptr, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat link to outside nofollow",
+            raw(
+                libc::SYS_utimensat,
+                [at, c_link_outside.as_ptr() as _, ts_ptr, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            ok,
+        );
+        check(
+            "utimensat null times outside",
+            raw(libc::SYS_utimensat, [at, c_outside.as_ptr() as _, 0, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat null times inside",
+            raw(libc::SYS_utimensat, [at, c_inside.as_ptr() as _, 0, 0, 0, 0]),
+            ok,
+        );
+
+        let ts_special = [
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+        ];
+        let ts_special_ptr = ts_special.as_ptr() as libc::c_long;
+        check(
+            "utimensat special outside",
+            raw(libc::SYS_utimensat, [at, c_outside.as_ptr() as _, ts_special_ptr, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat special inside",
+            raw(libc::SYS_utimensat, [at, c_inside.as_ptr() as _, ts_special_ptr, 0, 0, 0]),
+            ok,
+        );
+        // (both times `UTIME_OMIT`: the kernel's no-op, which looks at neither the path nor the flags — never refused
+        // nor said, outside, not there, a descriptor's)
+        let omit = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }; 2];
+        let omit = omit.as_ptr() as libc::c_long;
+        let nowhere = c"not_there".as_ptr() as libc::c_long;
+        check(
+            "utimensat both OMIT outside",
+            raw(libc::SYS_utimensat, [at, c_outside.as_ptr() as _, omit, 0, 0, 0]),
+            ok,
+        );
+        check(
+            "utimensat both OMIT, not there",
+            raw(libc::SYS_utimensat, [at, nowhere, omit, 0x2000, 0, 0]),
+            ok,
+        );
+        check("futimens both OMIT outside", raw(libc::SYS_utimensat, [fd_outside, 0, omit, 0, 0, 0]), ok);
+
+        check(
+            "utimensat unknown flags",
+            raw(libc::SYS_utimensat, [at, c_inside.as_ptr() as _, ts_ptr, 0x2000, 0, 0]),
+            einval,
+        );
+        check(
+            "utimensat empty without AT_EMPTY_PATH",
+            raw(libc::SYS_utimensat, [fd_inside, c_empty.as_ptr() as _, ts_ptr, 0, 0, 0]),
+            enoent,
+        );
+        check("utimensat bad fd null path", raw(libc::SYS_utimensat, [-1, 0, ts_ptr, 0, 0, 0]), ebadf);
+        check(
+            "utimensat null path with AT_FDCWD",
+            raw(libc::SYS_utimensat, [at, 0, ts_ptr, 0, 0, 0]),
+            efault,
+        );
+        check(
+            "utimensat null path with flags",
+            raw(libc::SYS_utimensat, [fd_inside, 0, ts_ptr, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0]),
+            einval,
+        );
+
+        // 5. x86-64 syscalls
+        #[cfg(target_arch = "x86_64")]
+        {
+            check("chmod outside", raw(libc::SYS_chmod, [c_outside.as_ptr() as _, 0o644, 0, 0, 0, 0]), eperm);
+            check("chmod inside", raw(libc::SYS_chmod, [c_inside.as_ptr() as _, 0o644, 0, 0, 0, 0]), ok);
+
+            let utimbuf = [1_577_836_800i64, 1_577_836_800i64];
+            let utim_ptr = utimbuf.as_ptr() as libc::c_long;
+            check(
+                "utime outside",
+                raw(libc::SYS_utime, [c_outside.as_ptr() as _, utim_ptr, 0, 0, 0, 0]),
+                eperm,
+            );
+            check("utime inside", raw(libc::SYS_utime, [c_inside.as_ptr() as _, utim_ptr, 0, 0, 0, 0]), ok);
+            check("utime null inside", raw(libc::SYS_utime, [c_inside.as_ptr() as _, 0, 0, 0, 0, 0]), ok);
+
+            let tv = [
+                libc::timeval { tv_sec: 1_577_836_800, tv_usec: 0 },
+                libc::timeval { tv_sec: 1_577_836_800, tv_usec: 0 },
+            ];
+            let tv_ptr = tv.as_ptr() as libc::c_long;
+            check(
+                "utimes outside",
+                raw(libc::SYS_utimes, [c_outside.as_ptr() as _, tv_ptr, 0, 0, 0, 0]),
+                eperm,
+            );
+            check("utimes inside", raw(libc::SYS_utimes, [c_inside.as_ptr() as _, tv_ptr, 0, 0, 0, 0]), ok);
+            check("utimes null inside", raw(libc::SYS_utimes, [c_inside.as_ptr() as _, 0, 0, 0, 0, 0]), ok);
+
+            let tv_bad = [
+                libc::timeval { tv_sec: 1_577_836_800, tv_usec: 1_000_000 },
+                libc::timeval { tv_sec: 1_577_836_800, tv_usec: 0 },
+            ];
+            check(
+                "utimes bad tv_usec",
+                raw(libc::SYS_utimes, [c_inside.as_ptr() as _, tv_bad.as_ptr() as _, 0, 0, 0, 0]),
+                einval,
+            );
+
+            check(
+                "futimesat outside",
+                raw(libc::SYS_futimesat, [at, c_outside.as_ptr() as _, tv_ptr, 0, 0, 0]),
+                eperm,
+            );
+            check(
+                "futimesat inside",
+                raw(libc::SYS_futimesat, [at, c_inside.as_ptr() as _, tv_ptr, 0, 0, 0]),
+                ok,
+            );
+            check(
+                "futimesat null path outside",
+                raw(libc::SYS_futimesat, [fd_outside, 0, tv_ptr, 0, 0, 0]),
+                eperm,
+            );
+            check(
+                "futimesat null path inside",
+                raw(libc::SYS_futimesat, [fd_inside, 0, tv_ptr, 0, 0, 0]),
+                ok,
+            );
+            check(
+                "futimesat null path with AT_FDCWD",
+                raw(libc::SYS_futimesat, [at, 0, tv_ptr, 0, 0, 0]),
+                efault,
+            );
+            check(
+                "futimesat bad tv_usec",
+                raw(libc::SYS_futimesat, [at, c_inside.as_ptr() as _, tv_bad.as_ptr() as _, 0, 0, 0]),
+                einval,
+            );
+        }
+
+        // 5b. An empty path names nothing: `ENOENT`, as the kernel says it — never the folder the run works in
+        {
+            // (its mode read, and put back if changed, through a descriptor held from before: a folder at 000 can't
+            // be looked into by name)
+            let here =
+                unsafe { libc::open(c".".as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+            let mode_here = || {
+                let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+                // SAFETY: a descriptor of ours and a buffer the call fills, read once filled.
+                unsafe {
+                    (libc::fstat(here, st.as_mut_ptr()) == 0).then(|| st.assume_init().st_mode & 0o7777)
+                }
+            };
+            let before = mode_here();
+            let enoent = Err(libc::ENOENT);
+            check(
+                "fchmodat an empty path",
+                raw(libc::SYS_fchmodat, [at, c_empty.as_ptr() as _, 0, 0, 0, 0]),
+                enoent,
+            );
+            #[cfg(target_arch = "x86_64")]
+            {
+                check(
+                    "chmod an empty path",
+                    raw(libc::SYS_chmod, [c_empty.as_ptr() as _, 0, 0, 0, 0, 0]),
+                    enoent,
+                );
+                check(
+                    "utimes an empty path",
+                    raw(libc::SYS_utimes, [c_empty.as_ptr() as _, 0, 0, 0, 0, 0]),
+                    enoent,
+                );
+            }
+            if let (Some(was), Some(now)) = (before, mode_here())
+                && now != was
+            {
+                wrong.borrow_mut().push(format!("the folder it works in changed: {was:o} -> {now:o}"));
+                // (back through its descriptor's own name, which tarae serves as that descriptor)
+                let back = CString::new(format!("/proc/self/fd/{here}")).unwrap();
+                unsafe { libc::chmod(back.as_ptr(), was) };
+            }
+            unsafe { libc::close(here) };
+        }
+
+        // 6. /proc/self/fd/N path
+        check(
+            "/proc/self/fd/N outside",
+            raw(libc::SYS_fchmodat, [at, c_proc_outside.as_ptr() as _, 0o644, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "/proc/self/fd/N inside",
+            raw(libc::SYS_fchmodat, [at, c_proc_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            ok,
+        );
+        check(
+            "/proc/self/fd/N nofollow inside",
+            raw(
+                libc::SYS_fchmodat2,
+                [at, c_proc_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
+            ),
+            Err(libc::EOPNOTSUPP),
+        );
+        check(
+            "/proc/self/fd/N follow inside",
+            raw(libc::SYS_fchmodat2, [at, c_proc_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            ok,
+        );
+
+        // 6b. Non-UTF-8 directory: fchmodat and utimensat through dirfd
+        let non_utf8_dir = b"non_utf8_dir_\xff\xfe";
+        let c_non_utf8 = std::ffi::CString::new(non_utf8_dir.as_slice()).unwrap();
+        unsafe { libc::mkdir(c_non_utf8.as_ptr(), 0o755) };
+        let dirfd_non_utf8 =
+            unsafe { libc::open(c_non_utf8.as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) } as libc::c_long;
+        if dirfd_non_utf8 >= 0 {
+            let file_sub = "subfile";
+            let c_sub = std::ffi::CString::new(file_sub).unwrap();
+            let fd_sub = unsafe {
+                libc::openat(
+                    dirfd_non_utf8 as i32,
+                    c_sub.as_ptr(),
+                    libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+                    0o644,
+                )
+            };
+            if fd_sub >= 0 {
+                unsafe { libc::close(fd_sub) };
+                check(
+                    "fchmodat inside non-utf8 dir",
+                    raw(libc::SYS_fchmodat, [dirfd_non_utf8, c_sub.as_ptr() as _, 0o600, 0, 0, 0]),
+                    ok,
+                );
+                check(
+                    "utimensat inside non-utf8 dir",
+                    raw(libc::SYS_utimensat, [dirfd_non_utf8, c_sub.as_ptr() as _, 0, 0, 0, 0]),
+                    ok,
+                );
+                unsafe { libc::unlinkat(dirfd_non_utf8 as i32, c_sub.as_ptr(), 0) };
+            }
+            unsafe { libc::close(dirfd_non_utf8 as i32) };
+            unsafe { libc::rmdir(c_non_utf8.as_ptr()) };
+        }
+
+        // 6c. A path through `/proc`, a descriptor's name in `/dev`, or a magic link on the way is refused and said,
+        // never followed for the run — though each here leads to a project file (`/dev/stdout` is `inside` now)
+        let dot = unsafe { libc::open(c".".as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        let real_inside = std::fs::canonicalize(inside).unwrap();
+        let link_magic = "link_to_magic";
+        let _ = std::fs::remove_file(link_magic);
+        std::os::unix::fs::symlink(format!("/proc/{}/cwd/{inside}", std::process::id()), link_magic).unwrap();
+        let stdout_dup = unsafe { libc::dup(1) };
+        unsafe { libc::dup2(fd_inside as i32, 1) };
+        for path in [
+            format!("/proc/self/cwd/{inside}"),
+            format!("/proc/self/root{}", real_inside.display()),
+            format!("/dev/fd/{dot}/{inside}"),
+            "/dev/stdout".to_string(),
+            // (named from the root, so its link resolves in the run's own: a relative path starts at the run's folder,
+            // and an absolute link met there resolves from tarae's root — in tier own another /proc)
+            std::env::current_dir().unwrap().join(link_magic).display().to_string(),
+        ] {
+            let c_path = CString::new(path.as_str()).unwrap();
+            let mode = raw(libc::SYS_fchmodat, [at, c_path.as_ptr() as _, 0o644, 0, 0, 0]);
+            check(&format!("fchmodat {path}"), mode, eperm);
+            check(
+                &format!("utimensat {path}"),
+                raw(libc::SYS_utimensat, [at, c_path.as_ptr() as _, 0, 0, 0, 0]),
+                eperm,
+            );
+        }
+        unsafe {
+            libc::dup2(stdout_dup, 1);
+            libc::close(stdout_dup);
+            libc::close(dot);
+        }
+        let _ = std::fs::remove_file(link_magic);
+        // (a loop of links, no magic one in it: the kernel's own ELOOP, nothing refused nor said)
+        let (loop_a, loop_b) = ("loop_a", "loop_b");
+        std::os::unix::fs::symlink(loop_b, loop_a).unwrap();
+        std::os::unix::fs::symlink(loop_a, loop_b).unwrap();
+        let eloop = Err(libc::ELOOP);
+        check(
+            "fchmodat a loop of links",
+            raw(libc::SYS_fchmodat, [at, c"loop_a".as_ptr() as _, 0o644, 0, 0, 0]),
+            eloop,
+        );
+        check(
+            "utimensat a loop of links",
+            raw(libc::SYS_utimensat, [at, c"loop_a".as_ptr() as _, 0, 0, 0, 0]),
+            eloop,
+        );
+        let _ = (std::fs::remove_file(loop_a), std::fs::remove_file(loop_b));
+
+        // 6d. A relative path from a dirfd starts at the run's own descriptor, never at the text its name reads as:
+        // a folder removed reads `gone (deleted)`, and a folder named so beside it isn't it — nor is that the folder
+        // to change through `.`
+        let decoy = "gone (deleted)/f";
+        std::fs::create_dir_all("gone (deleted)").unwrap();
+        std::fs::write(decoy, "decoy\n").unwrap();
+        std::fs::set_permissions(decoy, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        std::fs::create_dir("gone").unwrap();
+        let gone =
+            unsafe { libc::open(c"gone".as_ptr(), libc::O_DIRECTORY | libc::O_CLOEXEC) } as libc::c_long;
+        std::fs::remove_dir("gone").unwrap();
+        let (c_f, c_dot) = (c"f", c".");
+        check(
+            "fchmodat from a removed folder",
+            raw(libc::SYS_fchmodat, [gone, c_f.as_ptr() as _, 0o600, 0, 0, 0]),
+            enoent,
+        );
+        check(
+            "utimensat from a removed folder",
+            raw(libc::SYS_utimensat, [gone, c_f.as_ptr() as _, 0, 0, 0, 0]),
+            enoent,
+        );
+        check(
+            "fchmodat . of a removed folder",
+            raw(libc::SYS_fchmodat, [gone, c_dot.as_ptr() as _, 0o700, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat . of a removed folder",
+            raw(libc::SYS_utimensat, [gone, c_dot.as_ptr() as _, 0, 0, 0, 0]),
+            eperm,
+        );
+        let decoy_mode = std::fs::metadata(decoy).unwrap().permissions();
+        if std::os::unix::fs::PermissionsExt::mode(&decoy_mode) & 0o777 != 0o644 {
+            wrong.borrow_mut().push(format!("the decoy beside a removed folder changed: {decoy_mode:?}"));
+        }
+        unsafe { libc::close(gone as i32) };
+        let _ = std::fs::remove_dir_all("gone (deleted)");
+
+        // 6e. The folder the run works in, removed: its name is gone, so `.` there is refused
+        let del_cwd = "del_cwd_test";
+        std::fs::create_dir_all(del_cwd).unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(del_cwd).unwrap();
+        std::fs::remove_dir(orig_cwd.join(del_cwd)).unwrap();
+        check(
+            "fchmodat . in deleted cwd",
+            raw(libc::SYS_fchmodat, [at, c_dot.as_ptr() as _, 0o755, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "utimensat . in deleted cwd",
+            raw(libc::SYS_utimensat, [at, c_dot.as_ptr() as _, 0, 0, 0, 0]),
+            eperm,
+        );
+        std::env::set_current_dir(&orig_cwd).unwrap();
+
+        // 6f. A protected name the run made where none was (Landlock can't refuse it — G23, the snapshot's card asks):
+        // through a descriptor the run holds open for writing its mode and times are the run's, as its contents are;
+        // through one open for reading, or by its path, refused as every protected name's
+        std::fs::create_dir_all("made").unwrap();
+        let made = c"made/Makefile";
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC;
+        let written = unsafe { libc::open(made.as_ptr(), flags, 0o644) } as libc::c_long;
+        let read = unsafe { libc::open(made.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
+        check(
+            "fchmod a made Makefile open for writing",
+            raw(libc::SYS_fchmod, [written, 0o755, 0, 0, 0, 0]),
+            ok,
+        );
+        check(
+            "futimens a made Makefile open for writing",
+            raw(libc::SYS_utimensat, [written, 0, 0, 0, 0, 0]),
+            ok,
+        );
+        check(
+            "fchmod a made Makefile open for reading",
+            raw(libc::SYS_fchmod, [read, 0o644, 0, 0, 0, 0]),
+            eperm,
+        );
+        check(
+            "futimens a made Makefile open for reading",
+            raw(libc::SYS_utimensat, [read, 0, 0, 0, 0, 0]),
+            eperm,
+        );
+        let by_path = raw(libc::SYS_fchmodat, [at, made.as_ptr() as _, 0o644, 0, 0, 0]);
+        check("chmod a made Makefile by its path", by_path, eperm);
+        unsafe {
+            libc::close(written as i32);
+            libc::close(read as i32);
+        }
+        let _ = std::fs::remove_dir_all("made");
+
+        // 6g. No file of the user's — a pipe, a socket, a memfd: the run's own, the kernel's answer
+        let (mut pipe, mut pair) = ([0; 2], [0; 2]);
+        // SAFETY: plain calls filling arrays of two.
+        let made = unsafe {
+            libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) == 0
+                && libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                    pair.as_mut_ptr(),
+                ) == 0
+        };
+        // SAFETY: a name that lives through the call.
+        let memfd = unsafe { libc::memfd_create(c"tarae".as_ptr(), libc::MFD_CLOEXEC) };
+        if !made || memfd < 0 {
+            wrong
+                .borrow_mut()
+                .push(format!("a pipe, socket or memfd not made: {}", std::io::Error::last_os_error()));
+        }
+        for (what, fd) in [("a pipe", pipe[0]), ("a socket", pair[0]), ("a memfd", memfd)] {
+            check(&format!("fchmod {what}"), raw(libc::SYS_fchmod, [fd as _, 0o600, 0, 0, 0, 0]), ok);
+            check(&format!("futimens {what}"), raw(libc::SYS_utimensat, [fd as _, 0, 0, 0, 0, 0]), ok);
+        }
+        for fd in [pipe[0], pipe[1], pair[0], pair[1], memfd] {
+            unsafe { libc::close(fd) };
+        }
+
+        // 7. ownership calls: refused in every tier
+        let (uid, gid) = unsafe { (libc::getuid() as libc::c_long, libc::getgid() as libc::c_long) };
+        check("fchown outside", raw(libc::SYS_fchown, [fd_outside, uid, gid, 0, 0, 0]), eperm);
+        check("fchown inside", raw(libc::SYS_fchown, [fd_inside, uid, gid, 0, 0, 0]), eperm);
+        check(
+            "fchownat outside",
+            raw(libc::SYS_fchownat, [at, c_outside.as_ptr() as _, uid, gid, 0, 0]),
+            eperm,
+        );
+        check(
+            "fchownat inside",
+            raw(libc::SYS_fchownat, [at, c_inside.as_ptr() as _, uid, gid, 0, 0]),
+            eperm,
+        );
+        check(
+            "fchownat empty outside",
+            raw(
+                libc::SYS_fchownat,
+                [fd_outside, c_empty.as_ptr() as _, uid, gid, libc::AT_EMPTY_PATH as _, 0],
+            ),
+            eperm,
+        );
+        check(
+            "fchownat empty inside",
+            raw(
+                libc::SYS_fchownat,
+                [fd_inside, c_empty.as_ptr() as _, uid, gid, libc::AT_EMPTY_PATH as _, 0],
+            ),
+            eperm,
+        );
+        check(
+            "fchownat link to outside followed",
+            raw(libc::SYS_fchownat, [at, c_link_outside.as_ptr() as _, uid, gid, 0, 0]),
+            eperm,
+        );
+        check(
+            "fchownat link to outside nofollow",
+            raw(
+                libc::SYS_fchownat,
+                [at, c_link_outside.as_ptr() as _, uid, gid, libc::AT_SYMLINK_NOFOLLOW as _, 0],
+            ),
+            eperm,
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            check("chown outside", raw(libc::SYS_chown, [c_outside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
+            check("chown inside", raw(libc::SYS_chown, [c_inside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
+            check(
+                "lchown outside",
+                raw(libc::SYS_lchown, [c_outside.as_ptr() as _, uid, gid, 0, 0, 0]),
+                eperm,
+            );
+            check("lchown inside", raw(libc::SYS_lchown, [c_inside.as_ptr() as _, uid, gid, 0, 0, 0]), eperm);
+        }
+
+        let _ = std::fs::remove_file(inside);
+        let _ = std::fs::remove_file(link_inside);
+        let _ = std::fs::remove_file(link_outside);
+
+        let wrong = wrong.into_inner();
+        if wrong.is_empty() { "ok".to_string() } else { wrong.join("\n") }
+    }
+
+    /// `attr_race`: midway folder flipped between inside project and outside directory 10 000 times under a chmod + utimensat loop;
+    /// and parent folder flipped during symlink utimensat loop. Asserts inside_ok > 0, outside_refused > 0,
+    /// and the outside file's mode and times never change (Test 4).
+    fn helper_attr_race() -> String {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let outside = std::env::var("TARAE_OUTSIDE").expect("TARAE_OUTSIDE");
+        let outside_path = std::path::PathBuf::from(&outside);
+        let outside_dir = outside_path.parent().unwrap().to_str().unwrap().to_string();
+        let target_name = outside_path.file_name().unwrap().to_str().unwrap().to_string();
+
+        let inside_dir = "inside_race_dir";
+        std::fs::create_dir_all(inside_dir).unwrap();
+        std::fs::write(format!("{inside_dir}/{target_name}"), "inside marker\n").unwrap();
+        let midway = "race_mid";
+        let _ = std::fs::remove_file(midway);
+        std::os::unix::fs::symlink(inside_dir, midway).unwrap();
+
+        let running = Arc::new(AtomicBool::new(true));
+        let r = running.clone();
+        let outside_dir_clone = outside_dir.clone();
+        let flipper = std::thread::spawn(move || {
+            let mut i = 0usize;
+            while r.load(Ordering::Relaxed) {
+                let target = if i & 1 == 0 { "inside_race_dir" } else { outside_dir_clone.as_str() };
+                let tmp = format!("tmp_mid_{}", i & 1);
+                let _ = std::fs::remove_file(&tmp);
+                if std::os::unix::fs::symlink(target, &tmp).is_ok() {
+                    let _ = std::fs::rename(&tmp, "race_mid");
+                }
+                i = i.wrapping_add(1);
+            }
+        });
+
+        let target_path = format!("{midway}/{target_name}");
+        let c_target = std::ffi::CString::new(target_path.as_str()).unwrap();
+        let ts = [
+            libc::timespec { tv_sec: 2_000_000_000, tv_nsec: 0 },
+            libc::timespec { tv_sec: 2_000_000_000, tv_nsec: 0 },
+        ];
+        let mut inside_ok = 0usize;
+        let mut outside_refused = 0usize;
+        for _ in 0..10_000 {
+            let r1 = unsafe { libc::fchmodat(libc::AT_FDCWD, c_target.as_ptr(), 0o777, 0) };
+            if r1 == 0 {
+                inside_ok += 1;
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                outside_refused += 1;
+            }
+            let r2 = unsafe {
+                libc::syscall(libc::SYS_utimensat, libc::AT_FDCWD, c_target.as_ptr(), ts.as_ptr(), 0)
+            };
+            if r2 == 0 {
+                inside_ok += 1;
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                outside_refused += 1;
+            }
+        }
+        running.store(false, Ordering::Relaxed);
+        let _ = flipper.join();
+        let _ = std::fs::remove_file(midway);
+        let _ = std::fs::remove_dir_all(inside_dir);
+        let _ = std::fs::remove_file("tmp_mid_0");
+        let _ = std::fs::remove_file("tmp_mid_1");
+
+        if inside_ok == 0 {
+            return "race: inside_ok == 0".to_string();
+        }
+        if outside_refused == 0 {
+            return "race: outside_refused == 0".to_string();
+        }
+
+        // Phase 2: symlink parent swap race
+        let race_parent = "race_parent_dir";
+        let _ = std::fs::remove_dir_all(race_parent);
+        let _ = std::fs::remove_file(race_parent);
+        let _ = std::fs::remove_dir_all("race_parent_real");
+        std::fs::create_dir_all(race_parent).unwrap();
+        let sym_target_path = format!("{race_parent}/{target_name}");
+        let _ = std::fs::remove_file(&sym_target_path);
+        std::os::unix::fs::symlink("dummy_target", &sym_target_path).unwrap();
+        let c_sym_target = std::ffi::CString::new(sym_target_path.as_str()).unwrap();
+
+        let running2 = Arc::new(AtomicBool::new(true));
+        let r2 = running2.clone();
+        let outside_dir_clone2 = outside_dir.clone();
+        let flipper2 = std::thread::spawn(move || {
+            while r2.load(Ordering::Relaxed) {
+                if std::fs::rename("race_parent_dir", "race_parent_real").is_ok() {
+                    let _ = std::os::unix::fs::symlink(&outside_dir_clone2, "race_parent_dir");
+                    let _ = std::fs::remove_file("race_parent_dir");
+                    let _ = std::fs::rename("race_parent_real", "race_parent_dir");
+                }
+            }
+        });
+
+        let mut sym_inside_ok = 0usize;
+        let mut sym_outside_refused = 0usize;
+        for _ in 0..10_000 {
+            let r = unsafe {
+                libc::syscall(
+                    libc::SYS_utimensat,
+                    libc::AT_FDCWD,
+                    c_sym_target.as_ptr(),
+                    ts.as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if r == 0 {
+                sym_inside_ok += 1;
+            } else {
+                let err = std::io::Error::last_os_error().raw_os_error();
+                if err == Some(libc::EPERM) || err == Some(libc::ELOOP) {
+                    sym_outside_refused += 1;
+                }
+            }
+        }
+        running2.store(false, Ordering::Relaxed);
+        let _ = flipper2.join();
+        let _ = std::fs::remove_file(&sym_target_path);
+        let _ = std::fs::remove_dir_all(race_parent);
+        let _ = std::fs::remove_dir_all("race_parent_real");
+        let _ = std::fs::remove_file("race_parent_dir");
+
+        if sym_inside_ok == 0 {
+            return "symlink race: sym_inside_ok == 0".to_string();
+        }
+        if sym_outside_refused == 0 {
+            return "symlink race: sym_outside_refused == 0".to_string();
+        }
+
+        "ok".to_string()
+    }
+
+    /// `attr_shm_manifest`: the mode of `Cargo.toml` in a project in `/dev/shm`, then of the machine's file beside it
+    /// there (`TARAE_SHM`), changed — each refused (EPERM), else what each got.
+    fn helper_attr_shm_manifest() -> String {
+        let beside = std::ffi::CString::new(std::env::var("TARAE_SHM").expect("TARAE_SHM")).unwrap();
+        let mut wrong = Vec::new();
+        for (what, at) in [("Cargo.toml", c"Cargo.toml"), ("the machine's /dev/shm file", beside.as_c_str())]
+        {
+            // SAFETY: a path that lives through the call.
+            let r = unsafe { libc::chmod(at.as_ptr(), 0o600) };
+            let err = io::Error::last_os_error().raw_os_error();
+            if r == 0 || err != Some(libc::EPERM) {
+                wrong.push(format!("{what}: r={r}, err={err:?}"));
+            }
+        }
+        if wrong.is_empty() { "ok".to_string() } else { wrong.join("; ") }
+    }
+
+    /// `attr_shm`: a file made in `/dev/shm` (a scratch folder the run makes there, new), its mode and then its times
+    /// changed, then its mode by a link in the project to its absolute path (`link`: the run's own /dev/shm where
+    /// it has one, reached as the run reaches it) — each `ok` or its errno.
+    fn helper_attr_shm() -> String {
+        let dir = crate::scratch::Scratch::in_dir(Path::new("/dev/shm"), "attr-shm");
+        let path = dir.join("f");
+        if let Err(e) = std::fs::write(&path, "shm\n") {
+            return format!("not made: {e}");
+        }
+        let _ = std::fs::remove_file("shm_link");
+        std::os::unix::fs::symlink(&path, "shm_link").unwrap();
+        let at = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let said = |r: i32| match r {
+            0 => "ok".to_string(),
+            _ => io::Error::last_os_error().raw_os_error().unwrap_or(0).to_string(),
+        };
+        // SAFETY: paths that live through each call; no times: now.
+        let mode = said(unsafe { libc::chmod(at.as_ptr(), 0o600) });
+        let times = said(unsafe { libc::utimensat(libc::AT_FDCWD, at.as_ptr(), std::ptr::null(), 0) });
+        let link = said(unsafe { libc::chmod(c"shm_link".as_ptr(), 0o640) });
+        let _ = std::fs::remove_file("shm_link");
+        format!("mode {mode} times {times} link {link}")
+    }
+
+    /// `perf_chmod`: 2 000 `chmod` calls and 2 000 `utimensat` calls on a project file, time in µs a call.
+    fn helper_perf_chmod() -> String {
+        let inside = "perf_target";
+        std::fs::write(inside, "perf\n").unwrap();
+        let c_inside = std::ffi::CString::new(inside).unwrap();
+        let ts = [
+            libc::timespec { tv_sec: 1_577_836_800, tv_nsec: 0 },
+            libc::timespec { tv_sec: 1_577_836_800, tv_nsec: 0 },
+        ];
+        let n = 2000;
+        // (each call done, or the run says which failed: a refusal isn't the cost of serving one)
+        let mut failed = Vec::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            if unsafe { libc::fchmodat(libc::AT_FDCWD, c_inside.as_ptr(), 0o644, 0) } != 0 {
+                failed.push(format!("chmod {}", io::Error::last_os_error()));
+            }
+        }
+        let chmod_us = t0.elapsed().as_micros() as f64 / n as f64;
+
+        let t1 = std::time::Instant::now();
+        for _ in 0..n {
+            if unsafe {
+                libc::syscall(libc::SYS_utimensat, libc::AT_FDCWD, c_inside.as_ptr(), ts.as_ptr(), 0)
+            } != 0
+            {
+                failed.push(format!("utimensat {}", io::Error::last_os_error()));
+            }
+        }
+        let utimensat_us = t1.elapsed().as_micros() as f64 / n as f64;
+        let _ = std::fs::remove_file(inside);
+        match failed.first() {
+            Some(first) => format!("{} calls failed, the first: {first}", failed.len()),
+            None => format!("chmod={chmod_us:.2} utimensat={utimensat_us:.2}"),
         }
     }
 
@@ -7140,7 +8160,12 @@ mod tests {
         .current_dir(root);
         let (tx, rx) = std::sync::mpsc::channel();
         let name = crate::landlock::thread_name();
-        let s = k.start_served(&cmd, &name, c, p.clone(), tx).unwrap();
+        let s = match c.net {
+            super::super::tier::RunNet::Served | super::super::tier::RunNet::Routed => {
+                k.start_served(&cmd, &name, c, p.clone(), tx).unwrap()
+            }
+            _ => k.start_confined(&cmd, &name, c).unwrap(),
+        };
         let pid = s.spawned.pid;
         let lines =
             io::BufRead::lines(std::io::BufReader::new(s.spawned.stdout.unwrap())).map_while(Result::ok);
@@ -8011,6 +9036,289 @@ mod tests {
         assert_eq!(status.code(), Some(127), "its way out, not an allocation ({ALLOCATED}): {err}");
         let said = format!("tarae's sandbox couldn't start it — its folder: errno {}\n", libc::ENOENT);
         assert_eq!(err, said);
+        k.end();
+    }
+
+    /// Test 2: raw mode and times calls in a sandboxed run under tarae's policy — one row per form:
+    /// `fchmod`, `fchmodat`, `fchmodat2`, `utimensat`, x86-64 calls, `/proc/self/fd/N`.
+    #[test]
+    fn a_runs_raw_mode_and_times_calls_are_served_or_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let test = "a_runs_raw_mode_and_times_calls_are_served_or_refused";
+        let Some(tiers) = served_tiers(test) else {
+            return;
+        };
+        for (tier, ns) in tiers {
+            let name = format!("raw-attrs-{tier}");
+            let k = keeper_for(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let outside_scratch = crate::scratch::Scratch::new(&format!("sb-raw-out-{tier}")).into_path();
+            let outside = outside_scratch.join("outside_file");
+            std::fs::write(&outside, "marker\n").unwrap();
+            std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let before_mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
+            let real_outside = std::fs::canonicalize(&outside).unwrap().display().to_string();
+
+            let outside_moved = outside_scratch.join("file_moved");
+            // (a run of its own number: its supervisor's own calls and threads, not every test's at once)
+            let run_id = 0x7a77_0000 + u64::from(std::process::id()) * 4 + u64::from(tier == "netns");
+            let p = super::super::Policy { run_id, ..p };
+            let (mut lines, pid, refused) = served_helper(
+                &k,
+                (&Arc::new(p), &c, &root),
+                "attr_calls",
+                &[("TARAE_OUTSIDE", &real_outside)],
+            );
+            let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !root.join("ready_to_move").exists() && std::time::Instant::now() < by {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if root.join("file_moved").exists() {
+                let _ = std::fs::rename(root.join("file_moved"), &outside_moved);
+            }
+            let _ = std::fs::write(root.join("moved_done"), "");
+            let said = said_next(&mut lines);
+            lines.for_each(drop);
+            crate::spawn::wait(pid).unwrap();
+            let refused: Vec<_> = refused.try_iter().collect();
+            assert_eq!(said, "ok", "tier {tier}: raw calls failed:\n{said}");
+            // (its supervisor ends once no process of it is left; this run makes no connect nor send: its threads are
+            // its mode and times calls')
+            let ended =
+                |id| super::super::supervisor::ENDED.lock().unwrap().iter().find(|e| e.0 == id).map(|e| e.1);
+            let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while ended(run_id).is_none() && std::time::Instant::now() < by {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let own = ended(run_id).expect("the run's supervisor ended");
+            let attrs = super::super::supervisor::KINDS.iter().position(|k| *k == "mode or times").unwrap();
+            assert!(
+                own.calls[attrs] > 0 && own.threads >= own.calls[attrs],
+                "tier {tier}: its mode and times calls not each on a thread of its own: {}",
+                own.said()
+            );
+            let after_mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(
+                before_mode, after_mode,
+                "tier {tier}: outside file mode changed: {before_mode:o} -> {after_mode:o}"
+            );
+
+            let mode_denials =
+                refused.iter().filter(|d| d.op == "file-write-mode" && d.target == real_outside).count();
+            let times_denials =
+                refused.iter().filter(|d| d.op == "file-write-times" && d.target == real_outside).count();
+
+            assert!(
+                mode_denials >= 3,
+                "tier {tier}: expected at least 3 mode denials on outside, got {mode_denials}: {refused:?}"
+            );
+            assert!(
+                times_denials >= 3,
+                "tier {tier}: expected at least 3 times denials on outside, got {times_denials}: {refused:?}"
+            );
+            assert!(
+                refused.iter().all(|d| d.plain().starts_with("changing ")),
+                "tier {tier}: denials must say 'changing …': {refused:?}"
+            );
+            // (6c: a path through /proc, a descriptor's name in /dev or a magic link refused and said, by the words
+            // the run gave — its mode and its times each)
+            for (ways, was) in [
+                ("/proc/self/cwd/", true),
+                ("/proc/self/root/", true),
+                ("/dev/fd/", true),
+                ("/dev/stdout", true),
+                ("link_to_magic", false),
+            ] {
+                let names = |t: &str| if was { t.starts_with(ways) } else { t.ends_with(ways) };
+                for op in ["file-write-mode", "file-write-times"] {
+                    assert!(
+                        refused.iter().any(|d| d.op == op && names(&d.target)),
+                        "tier {tier}: {ways} refused unsaid ({op}): {refused:?}"
+                    );
+                }
+            }
+
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::remove_dir_all(&outside_scratch).ok();
+        }
+    }
+
+    /// Test 4: a file outside write places never changes its mode or times, whatever happens to links while
+    /// the call is being decided (a link flipped 10,000 times under a chmod loop).
+    #[test]
+    fn a_file_outside_write_places_is_never_changed_by_a_link_race() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let test = "a_file_outside_write_places_is_never_changed_by_a_link_race";
+        let Some(tiers) = served_tiers(test) else {
+            return;
+        };
+        for (tier, ns) in tiers {
+            let name = format!("race-attrs-{tier}");
+            let k = keeper_for(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let outside_scratch = crate::scratch::Scratch::new(&format!("sb-race-out-{tier}")).into_path();
+            let outside = outside_scratch.join("outside_target");
+            std::fs::write(&outside, "target marker\n").unwrap();
+            std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
+            std::fs::File::options().write(true).open(&outside).unwrap().set_modified(then).unwrap();
+            let real_outside = std::fs::canonicalize(&outside).unwrap().display().to_string();
+
+            let before_m = std::fs::metadata(&outside).unwrap();
+            let before_mode = before_m.permissions().mode() & 0o7777;
+            let before_mtime = before_m.mtime();
+
+            let (said, _) =
+                served_said(&k, (&Arc::new(p), &c, &root), "attr_race", &[("TARAE_OUTSIDE", &real_outside)]);
+            assert_eq!(said, "ok", "tier {tier}: link race failed:\n{said}");
+
+            let after_m = std::fs::metadata(&outside).unwrap();
+            let after_mode = after_m.permissions().mode() & 0o7777;
+            let after_mtime = after_m.mtime();
+
+            assert_eq!(
+                after_mode, before_mode,
+                "tier {tier}: outside file mode changed during race: {before_mode:o} -> {after_mode:o}"
+            );
+            assert_eq!(
+                after_mtime, before_mtime,
+                "tier {tier}: outside file mtime changed during race: {before_mtime} -> {after_mtime}"
+            );
+
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+            std::fs::remove_dir_all(&outside_scratch).ok();
+        }
+    }
+
+    /// M11: a served `chmod` and `utimensat` on a project file against the same unserved, median of five.
+    #[test]
+    fn perf_a_served_chmod() {
+        if crate::test_results::unoptimized("sandbox::keeper::tests::perf_a_served_chmod") {
+            return;
+        }
+        let test = "perf_a_served_chmod";
+        let Some(tiers) = served_tiers(test) else {
+            return;
+        };
+        for (tier, ns) in tiers {
+            let name = format!("perf-chmod-{tier}");
+            let k = keeper_for(&name, ns);
+            let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+            let (_, plain_c, _) =
+                project_served(&name, Vec::new(), Some(&k), &[], Err("measured plain".into()));
+            let p_arc = Arc::new(p);
+
+            // (both numbers, or the measurement fails: never a 0 µs for a run that didn't do its calls)
+            let parse_us = |s: &str| -> (f64, f64) {
+                let us =
+                    |key: &str| s.split_whitespace().find_map(|w| w.strip_prefix(key)?.parse::<f64>().ok());
+                match (us("chmod="), us("utimensat=")) {
+                    (Some(chmod), Some(utimensat)) => (chmod, utimensat),
+                    _ => panic!("tier {tier}: the measurement didn't run whole: {s}"),
+                }
+            };
+
+            let mut served_chmod = Vec::new();
+            let mut served_utime = Vec::new();
+            let mut unserved_chmod = Vec::new();
+            let mut unserved_utime = Vec::new();
+
+            for _ in 0..5 {
+                let (said_served, _) = served_said(&k, (&p_arc, &c, &root), "perf_chmod", &[]);
+                let (c_us, u_us) = parse_us(&said_served);
+                served_chmod.push(c_us);
+                served_utime.push(u_us);
+
+                let (said_unserved, _) = served_said(&k, (&p_arc, &plain_c, &root), "perf_chmod", &[]);
+                let (c_us, u_us) = parse_us(&said_unserved);
+                unserved_chmod.push(c_us);
+                unserved_utime.push(u_us);
+            }
+
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v[v.len() / 2]
+            };
+
+            let med_sc = median(served_chmod);
+            let med_uc = median(unserved_chmod);
+            let med_su = median(served_utime);
+            let med_uu = median(unserved_utime);
+
+            let line = format!(
+                "M11, tier {tier}: served chmod {med_sc:.1} µs (unserved {med_uc:.1} µs, +{:.1} µs); utimensat {med_su:.1} µs (unserved {med_uu:.1} µs, +{:.1} µs)\n",
+                med_sc - med_uc,
+                med_su - med_uu
+            );
+            let _ = io::Write::write_all(&mut io::stderr(), line.as_bytes());
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// linmeta B: a run changes the mode and times of what's in `/dev/shm` only where it has its own (tier own with
+    /// the keeper's private one: `ns.shm`, set by `start_served` on the supervisor's policy); where it shares the
+    /// machine's (tier host, or own without one) they're refused, as anywhere outside its write places.
+    #[test]
+    fn dev_shm_is_a_runs_to_change_only_where_it_has_its_own() {
+        let Some(tiers) = served_tiers("dev_shm_is_a_runs_to_change_only_where_it_has_its_own") else {
+            return;
+        };
+        for (tier, ns) in tiers {
+            for shm in if ns.user { [true, false].as_slice() } else { &[false] } {
+                let ns = Ns { shm: *shm, ..ns };
+                let name = format!("shm-attrs-{tier}-{shm}");
+                let k = keeper_for(&name, ns);
+                let (p, c, root) = project_served(&name, Vec::new(), Some(&k), &[], Ok(()));
+                let (said, _) = served_said(&k, (&Arc::new(p), &c, &root), "attr_shm", &[]);
+                let want = if *shm {
+                    "mode ok times ok link ok".to_string()
+                } else {
+                    format!("mode {0} times {0} link {0}", libc::EPERM)
+                };
+                assert_eq!(said, want, "tier {tier}, its own /dev/shm: {shm}");
+                k.end();
+                std::fs::remove_dir_all(&root).ok();
+            }
+        }
+    }
+
+    /// linmeta B: a project inside `/dev/shm` protects `Cargo.toml` from mode changes (Finding 3).
+    #[test]
+    fn a_project_in_dev_shm_protects_manifest_from_chmod() {
+        let test = "a_project_in_dev_shm_protects_manifest_from_chmod";
+        if served_tiers(test).is_none() {
+            return;
+        }
+        let project = crate::scratch::Scratch::in_dir(Path::new("/dev/shm"), "shm-proj");
+        let root = project.path().to_path_buf();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"foo\"\n").unwrap();
+        let beside = crate::scratch::Scratch::in_dir(Path::new("/dev/shm"), "shm-proj-beside");
+        std::fs::write(beside.join("f"), "the machine's\n").unwrap();
+        let env = super::super::Env {
+            root: root.clone(),
+            tmp: Some(crate::sandbox::profile_path(&std::env::temp_dir())),
+            run_env: crate::sandbox::run_env_of(
+                &crate::sandbox::Here::now(),
+                &crate::llm::LlmConfig::default(),
+            ),
+            ..Default::default()
+        };
+        let p = super::super::Policy::for_project(&env);
+        // (the session's namespaces as tarae picks them for this project: no /dev/shm of its own — one would be over
+        // the project, and `start_served` would make what's in /dev/shm the run's)
+        let ns = super::super::tier::for_policy(&p);
+        assert!(!ns.shm, "a project in /dev/shm given a /dev/shm of its own: {ns:?}");
+        let k = keeper_for("shm-proj", ns);
+        let abi = crate::landlock::abi().unwrap();
+        let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false, Some(&k), Ok(()))
+            .unwrap();
+        let shm_file = beside.join("f").display().to_string();
+        let (said, _) =
+            served_said(&k, (&Arc::new(p), &c, &root), "attr_shm_manifest", &[("TARAE_SHM", &shm_file)]);
+        assert_eq!(said, "ok", "Cargo.toml, or the machine's /dev/shm beside it, changed:\n{said}");
         k.end();
     }
 }

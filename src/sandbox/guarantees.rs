@@ -308,11 +308,17 @@ const PROCESSES_SAID: &str = " Here a command sees this system's processes — a
 const MAC_SHARED: &str = " Here a command shares POSIX shared memory with other sessions' commands and the user's \
      other programs — it can read and write what they keep there: macOS's sandbox can't tell whose a name is.";
 
-/// What a Landlock run may change of a file's attributes, every tier (linmeta, D-h): Landlock has no right for them, so
-/// tarae's filter refuses a file's owner, extended attributes and flags outright (`seccomp::ATTR_CALLS`); its mode and
-/// times are the run's (tier offline stays a full tier with this said: user decision 2026-10-18).
-const ATTRS_SAID: &str = " Here a command can change the mode and times of any file of the user's it can name — \
-     never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — \
+/// What a Landlock run may change of a file's attributes where served (own, host — linmeta B, D-h): Landlock has no
+/// right for them, so tarae serves its mode and times calls (`seccomp::serves_attr`), and allows them only where the
+/// run may write, or through a file it holds open for writing (what Landlock let it write); owner, extended
+/// attributes, ACLs and flags are refused in every tier (`seccomp::ATTR_CALLS`).
+const ATTRS_SERVED: &str = " A command changes a file's mode and times only where it may write, or through a file it \
+     holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.";
+
+/// What an unserved Landlock run may change of a file's attributes (tier offline stays a full tier with this said:
+/// user decision 2026-10-18): nothing serves its calls, so mode and times stay the run's.
+const ATTRS_OFFLINE: &str = " Here a command can change the mode and times of any file of the user's it can name — \
+     never what's in it: Landlock has no right for them. Never a file's owner, extended attributes, ACLs or flags — \
      in the project neither.";
 
 /// Where a Seatbelt policy opens this machine's ports: what listens on them is reached whoever's it is (step 8, user
@@ -641,29 +647,31 @@ impl Guarantees {
         format!("{}{}{}", self.sentence(), self.shared_said(), self.attrs_said())
     }
 
-    /// What a run may change of a file's attributes, in the report's words (linmeta): Landlock's, every tier
-    /// (`ATTRS_SAID`); nothing for Seatbelt, whose `file-write-mode`, `-times`, `-owner`, `-flags`, `-xattr` and
-    /// `-acl` are `file-write*`'s — where it writes, as its files.
+    /// What a run may change of a file's attributes, in the report's words (linmeta B): served (`ATTRS_SERVED`),
+    /// offline (`ATTRS_OFFLINE`); nothing for Seatbelt, whose `file-write-mode`, `-times`, `-owner`, `-flags`,
+    /// `-xattr` and `-acl` are `file-write*`'s — where it writes, as its files.
     pub fn attrs_said(&self) -> &'static str {
         match self.by {
-            By::Landlock { .. } => ATTRS_SAID,
+            By::Landlock { tier: Tier::Offline, .. } => ATTRS_OFFLINE,
+            By::Landlock { .. } => ATTRS_SERVED,
             By::Seatbelt => "",
         }
     }
 
-    /// The same on the state line — None for Seatbelt, as above.
+    /// The same on the state line — None for Seatbelt and served, as above.
     fn attrs_brief(&self) -> Option<&'static str> {
         match self.by {
-            By::Landlock { .. } => Some("mode and times anywhere"),
-            By::Seatbelt => None,
+            By::Landlock { tier: Tier::Offline, .. } => Some("mode and times anywhere"),
+            _ => None,
         }
     }
 
     /// `tarae state`'s `attributes`: where a run may change a file's mode and times (`where-writes`, `anywhere`), and
     /// its owner, extended attributes and flags (`where-writes`, `never`).
-    fn attrs_json(&self) -> serde_json::Value {
+    pub fn attrs_json(&self) -> serde_json::Value {
         let (mode_times, owner_xattrs_flags) = match self.by {
-            By::Landlock { .. } => ("anywhere", "never"),
+            By::Landlock { tier: Tier::Offline, .. } => ("anywhere", "never"),
+            By::Landlock { .. } => ("where-writes", "never"),
             By::Seatbelt => ("where-writes", "where-writes"),
         };
         serde_json::json!({ "mode_times": mode_times, "owner_xattrs_flags": owner_xattrs_flags })

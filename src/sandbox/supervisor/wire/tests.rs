@@ -598,3 +598,91 @@ fn a_bind_names_the_bytes_it_checked() {
     assert_eq!(named_in(7, name), Ok(want));
     assert_eq!(named_in(7, OsStr::new(&"n".repeat(100))), Err(libc::ENAMETOOLONG));
 }
+
+/// linmeta: a path is read once, a page at a time — never past the page its NUL is on (what's after may not be
+/// mapped) — across pages whole; none at 0, `EFAULT`; past `PATH_MAX` without a NUL, `ENAMETOOLONG`; running into
+/// what isn't mapped, `EFAULT`.
+#[test]
+fn a_path_is_read_to_its_nul_a_page_at_a_time() {
+    // (a page is mapped to its end: what's laid out ends there, and the next page isn't mapped)
+    let near_end = Fake::default().at(0x1ffa, b"/a/b\0x".to_vec());
+    assert_eq!(c_path(&near_end, 0x1ffa), Ok(b"/a/b".to_vec()));
+    assert_eq!(*near_end.reads.borrow(), [(0x1ffa, 6)], "only to the page's end");
+    let mut two_pages = b"/xyz/w\0".to_vec();
+    two_pages.resize(2 + 4096, b'z');
+    let across = Fake::default().at(0x1ffe, two_pages);
+    assert_eq!(c_path(&across, 0x1ffe), Ok(b"/xyz/w".to_vec()));
+    assert_eq!(*across.reads.borrow(), [(0x1ffe, 2), (0x2000, 4094)], "then the next page, to PATH_MAX");
+    assert_eq!(c_path(&Fake::default(), 0), Err(libc::EFAULT));
+    let long = Fake::default().at(0x1000, vec![b'a'; 8192]);
+    assert_eq!(c_path(&long, 0x1000), Err(libc::ENAMETOOLONG));
+    let unended = Fake::default().at(0x1ff0, vec![b'a'; 16]);
+    assert_eq!(c_path(&unended, 0x1ff0), Err(libc::EFAULT));
+}
+
+/// linmeta: the three ways a call gives times, as `utimensat` takes them; a microsecond outside a second refused as
+/// the kernel refuses it; none given: now.
+#[test]
+fn times_are_read_in_each_calls_form() {
+    let words = |w: &[i64]| w.iter().flat_map(|v| v.to_ne_bytes()).collect::<Vec<u8>>();
+    let m = Fake::default().at(0x100, words(&[7, 8, 9, 10]));
+    assert_eq!(times(&m, 0x100, Times::Utimbuf), Ok(Some([7, 0, 8, 0])));
+    assert_eq!(times(&m, 0x100, Times::Timevals), Ok(Some([7, 8000, 9, 10_000])));
+    assert_eq!(times(&m, 0x100, Times::Timespecs), Ok(Some([7, 8, 9, 10])));
+    assert_eq!(times(&m, 0, Times::Timespecs), Ok(None));
+    let past = Fake::default().at(0x100, words(&[1, 1_000_000, 2, 0]));
+    assert_eq!(times(&past, 0x100, Times::Timevals), Err(libc::EINVAL));
+    let negative = Fake::default().at(0x100, words(&[1, 0, 2, -1]));
+    assert_eq!(times(&negative, 0x100, Times::Timevals), Err(libc::EINVAL));
+    assert_eq!(times(&Fake::default(), 0x100, Times::Timespecs), Err(libc::EFAULT));
+}
+
+/// linmeta: only the whole path `/proc/self/fd/N` is the caller's descriptor N (served as that descriptor); any other
+/// through `/proc` or a descriptor's name in `/dev`, as its words say, is refused — tarae never resolves those.
+#[test]
+fn only_the_whole_proc_self_fd_path_is_a_descriptor() {
+    assert_eq!(self_fd(b"/proc/self/fd/3"), Some(3));
+    assert_eq!(self_fd(b"/proc/self/fd/0"), Some(0));
+    assert_eq!(self_fd(b"/proc/self/fd/120"), Some(120));
+    for path in [
+        "/proc/self/fd/03",
+        "/proc/self/fd/+3",
+        "/proc/self/fd/",
+        "/proc/self/fd/3/x",
+        "/proc/self/fd/x",
+        "//proc/self/fd/3",
+        "/proc/thread-self/fd/3",
+        "/proc/40/fd/3",
+        "/dev/fd/3",
+        "/dev/stdout",
+        "/proc/self/cwd/x",
+        "proc/self/fd/3",
+    ] {
+        assert_eq!(self_fd(path.as_bytes()), None, "{path}");
+    }
+    let through = |p: &str| through_proc(p.as_bytes());
+    for path in
+        ["/proc/self/cwd/x", "//proc/./40/root", "/proc", "/dev/fd/3/x", "/dev/stdout", "/./dev/stdin"]
+    {
+        assert!(through(path), "{path}");
+    }
+    for path in ["proc/self/cwd", "/home/proc/x", "/dev/null", "/dev/shm/x", "/dev", "/procfs/x"] {
+        assert!(!through(path), "{path}");
+    }
+}
+
+/// linmeta: a descriptor names no file of the user's only by the kernel's words — a pipe, a socket, an anonymous
+/// inode exactly, or a file marked ` (deleted)` with no link left and no file truly named so; a filesystem that says
+/// 0 links (FUSE) for a file still named isn't that.
+#[test]
+fn only_the_kernels_words_say_a_descriptor_names_no_file() {
+    let none = |link: &str, no_links: bool, named: bool| no_name(link.as_bytes(), no_links, || named);
+    assert!(none("pipe:[123]", false, false) && none("socket:[9]", false, false));
+    assert!(none("anon_inode:[eventfd]", false, false));
+    assert!(none("/memfd:x (deleted)", true, false), "a memfd");
+    assert!(none("/p/f (deleted)", true, false), "a file gone");
+    assert!(!none("/p/f", true, false), "0 links but its name there: FUSE's");
+    assert!(!none("/p/f (deleted)", false, false), "gone by one name, another left");
+    assert!(!none("/p/f (deleted)", true, true), "a file truly named so");
+    assert!(!none("pipe", false, false) && !none("x:pipe:[1]", false, false) && !none("", false, false));
+}

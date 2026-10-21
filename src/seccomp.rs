@@ -104,7 +104,7 @@ fn ops(arch: u32, mode: Mode, no_userns: bool, ptys: bool) -> Vec<Op> {
     if no_userns {
         ops.extend(userns_ops());
     }
-    ops.extend(attr_ops());
+    ops.extend(attr_ops(served));
     if served {
         // (`listen`: on a socket tarae put out of the session it would listen on this machine's every address)
         for n in [libc::SYS_connect, libc::SYS_bind, libc::SYS_listen, libc::SYS_sendmsg, libc::SYS_sendmmsg]
@@ -224,11 +224,12 @@ fn userns_ops() -> Vec<Op> {
 /// What the filter does with a call that changes a file's attributes (`ATTR_CALLS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attr {
-    /// Refused in every mode — a file's owner, extended attributes, inode flags.
+    /// Refused in every mode — extended attributes, inode flags.
     Refused,
-    /// The run's in every mode, named so the kernel's table is checked whole — a file's mode and times: Landlock has
-    /// no right for them, and tarae doesn't decide them yet (the guarantees say so: `guarantees::ATTRS_SAID`).
-    Open,
+    /// Mode and times: to tarae where served (`supervisor::attrs`), else the run's (offline).
+    ModeTimes,
+    /// Owner and group: refused in every mode and tier (user decision D-h: mode and times only served).
+    Owner,
 }
 
 /// `setxattrat` and `removexattrat` (Linux 6.13), `file_setattr` (6.17: an inode's flags, as `FS_IOC_FSSETXATTR`) —
@@ -241,24 +242,24 @@ const SYS_FILE_SETATTR: libc::c_long = 469;
 /// attribute_call_the_kernel_has`) — path and descriptor forms alike: `fchmod` on a file opened for reading needs
 /// its ownership, not write access. The un-`at` ones are x86-64's only.
 const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
-    ("fchmod", libc::SYS_fchmod, Attr::Open),
-    ("fchmodat", libc::SYS_fchmodat, Attr::Open),
-    ("fchmodat2", libc::SYS_fchmodat2, Attr::Open),
-    ("utimensat", libc::SYS_utimensat, Attr::Open),
+    ("fchmod", libc::SYS_fchmod, Attr::ModeTimes),
+    ("fchmodat", libc::SYS_fchmodat, Attr::ModeTimes),
+    ("fchmodat2", libc::SYS_fchmodat2, Attr::ModeTimes),
+    ("utimensat", libc::SYS_utimensat, Attr::ModeTimes),
     #[cfg(target_arch = "x86_64")]
-    ("chmod", libc::SYS_chmod, Attr::Open),
+    ("chmod", libc::SYS_chmod, Attr::ModeTimes),
     #[cfg(target_arch = "x86_64")]
-    ("utime", libc::SYS_utime, Attr::Open),
+    ("utime", libc::SYS_utime, Attr::ModeTimes),
     #[cfg(target_arch = "x86_64")]
-    ("utimes", libc::SYS_utimes, Attr::Open),
+    ("utimes", libc::SYS_utimes, Attr::ModeTimes),
     #[cfg(target_arch = "x86_64")]
-    ("futimesat", libc::SYS_futimesat, Attr::Open),
-    ("fchown", libc::SYS_fchown, Attr::Refused),
-    ("fchownat", libc::SYS_fchownat, Attr::Refused),
+    ("futimesat", libc::SYS_futimesat, Attr::ModeTimes),
+    ("fchown", libc::SYS_fchown, Attr::Owner),
+    ("fchownat", libc::SYS_fchownat, Attr::Owner),
     #[cfg(target_arch = "x86_64")]
-    ("chown", libc::SYS_chown, Attr::Refused),
+    ("chown", libc::SYS_chown, Attr::Owner),
     #[cfg(target_arch = "x86_64")]
-    ("lchown", libc::SYS_lchown, Attr::Refused),
+    ("lchown", libc::SYS_lchown, Attr::Owner),
     ("setxattr", libc::SYS_setxattr, Attr::Refused),
     ("lsetxattr", libc::SYS_lsetxattr, Attr::Refused),
     ("fsetxattr", libc::SYS_fsetxattr, Attr::Refused),
@@ -270,6 +271,11 @@ const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
     ("file_setattr", SYS_FILE_SETATTR, Attr::Refused),
 ];
 
+/// Whether call `nr` is one a served filter hands tarae for a file's mode or times (`supervisor::attrs`).
+pub fn serves_attr(nr: libc::c_long) -> bool {
+    ATTR_CALLS.iter().any(|&(_, n, a)| n == nr && a == Attr::ModeTimes)
+}
+
 /// The `ioctl`s that set an inode's flags or what acts like them, for its owner — refused in every mode, as the
 /// owner's calls are: `FS_IOC_SETFLAGS` (`chattr`) and its 32-bit number, `FS_IOC_SETVERSION` (both),
 /// `FS_IOC_FSSETXATTR`, `FS_IOC_ENABLE_VERITY` (a file read-only for good), `FS_IOC_SET_ENCRYPTION_POLICY` (an
@@ -280,15 +286,19 @@ const FLAG_IOCTLS: [u32; 8] =
 
 /// A file's attributes (linmeta, `target/sb/linmeta-design.md`): Landlock has no right for them — the kernel's
 /// docs list `chmod`, `chown`, `setxattr` and `utime` among what it can't restrict — so the filter takes them
-/// (`ATTR_CALLS`, `FLAG_IOCTLS`). Owner, extended attributes, inode flags: refused, the project's files too
-/// (builds don't change them; `cp -p`, `tar` and Python's `copystat` go on without). Mode and times: the run's, in
-/// every mode — said (`guarantees`). Starts and ends on the call's number.
-fn attr_ops() -> Vec<Op> {
-    let mut ops: Vec<Op> = ATTR_CALLS
-        .iter()
-        .filter(|&&(_, _, a)| a == Attr::Refused)
-        .map(|&(_, n, _)| Op::Is(n as u32, To::Refuse, To::Next))
-        .collect();
+/// (`ATTR_CALLS`, `FLAG_IOCTLS`).
+/// In served tiers (own, host), mode and times calls go to tarae, which lets them only where the run may write
+/// (`writes_allow`). In unserved tiers (offline), mode and times stay the run's. Owner, extended attributes, and
+/// inode flags are refused in every tier (`EPERM`). Starts and ends on the call's number.
+fn attr_ops(served: bool) -> Vec<Op> {
+    let mut ops: Vec<Op> = Vec::new();
+    for &(_, n, a) in ATTR_CALLS {
+        match a {
+            Attr::Refused | Attr::Owner => ops.push(Op::Is(n as u32, To::Refuse, To::Next)),
+            Attr::ModeTimes if served => ops.push(Op::Is(n as u32, To::Tarae, To::Next)),
+            Attr::ModeTimes => {}
+        }
+    }
     ops.extend([
         Op::Is(libc::SYS_ioctl as u32, To::Next, To::Skip(FLAG_IOCTLS.len() + 2)),
         Op::Load(arg_low(1)),
@@ -938,20 +948,35 @@ mod tests {
     }
 
     /// linmeta: a file's owner, extended attributes and flags are refused in every mode — the flag `ioctl`s
-    /// whatever the request's high half, no other `ioctl`; its mode and times are the run's in every mode; the
-    /// blocks after still see the call's number.
+    /// whatever the request's high half, no other `ioctl`; its mode and times go to tarae where served and are the
+    /// run's where not; the blocks after still see the call's number.
     #[test]
-    fn a_files_owner_xattrs_and_flags_are_refused_in_every_mode() {
+    fn a_files_attributes_are_refused_or_go_to_tarae() {
         let arch = ARCH.unwrap();
+        let tarae = libc::SECCOMP_RET_USER_NOTIF;
         for mode in [Mode::Plain, Mode::Served, Mode::Routed, Mode::OwnNetwork] {
+            let served = matches!(mode, Mode::Served | Mode::Routed);
             for no_userns in [false, true] {
                 let run = |nr, args: &[u64]| eval_with(mode, no_userns, arch, nr, args);
                 for &(name, nr, a) in ATTR_CALLS {
                     let want = match a {
-                        Attr::Refused => EPERM,
-                        Attr::Open => ALLOW,
+                        Attr::Refused | Attr::Owner => EPERM,
+                        Attr::ModeTimes if served => tarae,
+                        Attr::ModeTimes => ALLOW,
                     };
                     assert_eq!(run(nr, &[3, 0x1000, 0o644]), want, "{mode:?}: {name}");
+                }
+                // (linmeta D-h: ownership changes with realistic uid/gid arguments are refused in every mode and tier)
+                assert_eq!(run(libc::SYS_fchown, &[3, 1000, 1000]), EPERM, "{mode:?}: fchown");
+                assert_eq!(
+                    run(libc::SYS_fchownat, &[libc::AT_FDCWD as u64, 0x1000, 1000, 1000, 0]),
+                    EPERM,
+                    "{mode:?}: fchownat"
+                );
+                #[cfg(target_arch = "x86_64")]
+                {
+                    assert_eq!(run(libc::SYS_chown, &[0x1000, 1000, 1000]), EPERM, "{mode:?}: chown");
+                    assert_eq!(run(libc::SYS_lchown, &[0x1000, 1000, 1000]), EPERM, "{mode:?}: lchown");
                 }
                 for c in FLAG_IOCTLS {
                     let c = u64::from(c);
@@ -1055,44 +1080,46 @@ mod tests {
         let v = value.as_ptr() as libc::c_long;
         let acl_access = c"system.posix_acl_access".as_ptr() as libc::c_long;
         let acl_default = c"system.posix_acl_default".as_ptr() as libc::c_long;
-        // SAFETY: getgid has no preconditions.
+        // SAFETY: getgid and getuid have no preconditions.
         let gid = unsafe { libc::getgid() } as libc::c_long;
+        let other_gid = gid.wrapping_add(1);
+        let other_uid = unsafe { libc::getuid() as libc::c_long }.wrapping_add(1);
         let at = libc::AT_FDCWD as libc::c_long;
         // (`struct xattr_args`: the value's address, its size, flags — 16 bytes; `struct file_attr`: 24 zeroes;
         // what an `ioctl` reads: zeroes)
         let xattr_args: [u64; 2] = [v as u64, 1];
         let zeroes = [0u8; 128];
         let (xa, z) = (xattr_args.as_ptr() as libc::c_long, zeroes.as_ptr() as libc::c_long);
-        let mut calls: Vec<(&'static str, libc::c_long, [libc::c_long; 5])> = vec![
-            ("fchown", libc::SYS_fchown, [fd, -1, gid, 0, 0]),
-            ("fchownat", libc::SYS_fchownat, [at, p, -1, gid, 0]),
-            ("setxattr", libc::SYS_setxattr, [p, name, v, 1, 0]),
+        let mut calls: Vec<(&'static str, libc::c_long, [libc::c_long; 6])> = vec![
+            ("fchown", libc::SYS_fchown, [fd, other_uid, other_gid, 0, 0, 0]),
+            ("fchownat", libc::SYS_fchownat, [at, p, other_uid, other_gid, 0, 0]),
+            ("setxattr", libc::SYS_setxattr, [p, name, v, 1, 0, 0]),
             // (an ACL — `setfacl`'s way: its access and default lists are extended attributes on Linux)
-            ("an access ACL", libc::SYS_setxattr, [p, acl_access, v, 1, 0]),
-            ("a default ACL", libc::SYS_setxattr, [p, acl_default, v, 1, 0]),
-            ("lsetxattr", libc::SYS_lsetxattr, [p, name, v, 1, 0]),
-            ("fsetxattr", libc::SYS_fsetxattr, [fd, name, v, 1, 0]),
-            ("removexattr", libc::SYS_removexattr, [p, name, 0, 0, 0]),
-            ("lremovexattr", libc::SYS_lremovexattr, [p, name, 0, 0, 0]),
-            ("fremovexattr", libc::SYS_fremovexattr, [fd, name, 0, 0, 0]),
-            ("setxattrat", SYS_SETXATTRAT, [at, p, 0, name, xa]),
-            ("removexattrat", SYS_REMOVEXATTRAT, [at, p, 0, name, 0]),
-            ("file_setattr", SYS_FILE_SETATTR, [at, p, z, 24, 0]),
+            ("an access ACL", libc::SYS_setxattr, [p, acl_access, v, 1, 0, 0]),
+            ("a default ACL", libc::SYS_setxattr, [p, acl_default, v, 1, 0, 0]),
+            ("lsetxattr", libc::SYS_lsetxattr, [p, name, v, 1, 0, 0]),
+            ("fsetxattr", libc::SYS_fsetxattr, [fd, name, v, 1, 0, 0]),
+            ("removexattr", libc::SYS_removexattr, [p, name, 0, 0, 0, 0]),
+            ("lremovexattr", libc::SYS_lremovexattr, [p, name, 0, 0, 0, 0]),
+            ("fremovexattr", libc::SYS_fremovexattr, [fd, name, 0, 0, 0, 0]),
+            ("setxattrat", SYS_SETXATTRAT, [at, p, 0, name, xa, 16]),
+            ("removexattrat", SYS_REMOVEXATTRAT, [at, p, 0, name, 0, 0]),
+            ("file_setattr", SYS_FILE_SETATTR, [at, p, z, 24, 0, 0]),
         ];
         #[cfg(target_arch = "x86_64")]
         calls.extend([
-            ("chown", libc::SYS_chown, [p, -1, gid, 0, 0]),
-            ("lchown", libc::SYS_lchown, [p, -1, gid, 0, 0]),
+            ("chown", libc::SYS_chown, [p, other_uid, other_gid, 0, 0, 0]),
+            ("lchown", libc::SYS_lchown, [p, other_uid, other_gid, 0, 0, 0]),
         ]);
         for c in FLAG_IOCTLS {
-            calls.push(("a flag ioctl", libc::SYS_ioctl, [fd, c as libc::c_long, z, 0, 0]));
+            calls.push(("a flag ioctl", libc::SYS_ioctl, [fd, c as libc::c_long, z, 0, 0, 0]));
         }
         let said = calls
             .iter()
             .map(|&(what, nr, a)| {
                 // SAFETY: each call's arguments point at what lives through it: the path, the names, the value,
                 // the zeroes; a flag ioctl reads at most 128 bytes.
-                let r = unsafe { libc::syscall(nr, a[0], a[1], a[2], a[3], a[4]) };
+                let r = unsafe { libc::syscall(nr, a[0], a[1], a[2], a[3], a[4], a[5]) };
                 (
                     what,
                     if r < 0 { Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)) } else { Ok(()) },

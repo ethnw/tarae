@@ -89,11 +89,21 @@ Kept:
   your own builds pick up later can't be planted offline.
   test: `sandbox::tests::an_asked_cache_is_kept_as_caches_are` · `sandbox::golden::the_policy_is_pinned` (rule)
 - A file's attributes. macOS: its mode, times, owner, flags, extended attributes and ACLs change only where a run
-  writes, by path, through a descriptor and by its `/dev/fd` name. Linux: a file's owner, extended attributes (ACLs
-  too) and flags never change, the project's neither ([D-h](design/sandbox-keeper.md#decisions)).
-  test: `sandbox::tests::a_run_changes_no_attribute_of_a_file_outside_its_write_places` (shown, macOS) ·
+  writes, by path, through a descriptor and by its `/dev/fd` name. Linux: in tiers own and host tarae serves a file's
+  mode and times calls, allowing them only where the run may write — or through a file it holds open for writing,
+  which Landlock let it write when it opened it (a protected name it made where none was too: §1.2's card asks about
+  that one); a path through `/proc`, `/dev/fd` or a magic link is refused, never resolved for it. A file's owner,
+  extended attributes (ACLs too) and flags never change, the project's neither
+  ([D-h](design/sandbox-keeper.md#decisions)).
+  test: `sandbox::tests::a_run_changes_no_attribute_of_a_file_outside_its_write_places` (shown, macOS/Linux) ·
+  `sandbox::keeper::tests::a_runs_raw_mode_and_times_calls_are_served_or_refused` ·
+  `compat::tests::a_protected_name_is_refused_with_its_cause_or_found_made` (a made name's times, Linux) ·
+  `sandbox::keeper::tests::a_file_outside_write_places_is_never_changed_by_a_link_race` ·
+  `sandbox::tests::a_probe_runs_through_the_sessions_keeper` ·
+  `sandbox::keeper::tests::dev_shm_is_a_runs_to_change_only_where_it_has_its_own` ·
+  `sandbox::policy::tests::writes_allow_checks_dev_shm_against_kept_and_caches` ·
   `seccomp::tests::owner_xattr_and_flag_calls_are_refused_on_a_filtered_thread` (shown, Linux) ·
-  `seccomp::tests::a_files_owner_xattrs_and_flags_are_refused_in_every_mode`,
+  `seccomp::tests::a_files_attributes_are_refused_or_go_to_tarae`,
   `seccomp::tests::the_filter_names_every_attribute_call_the_kernel_has` (rule)
 
 Not kept:
@@ -107,9 +117,10 @@ Not kept:
   every run at ABI 2 and says why. Below ABI 2: no sandbox, every command asks (§1.12).
 - **Below a pack's tools' output** (`target/`, `node_modules/`, `.venv/`) a run writes freely — what runs from
   there later is §1.2's (G28).
-- **Linux, every tier: a file's mode and times.** Landlock has no right for them and tarae doesn't decide them yet:
-  a run can change the mode and times of any file of yours it can name (`chmod 644` on a key, `chmod +x` on a hook,
-  times backdated), never what's in it, nor read it. Said in the report, `tarae state` and the state line (G29).
+- **Linux, tier offline: a file's mode and times.** Landlock has no right for them and nothing serves its calls here
+  (user decision 2026-10-18: offline stays a full tier): a run can change the mode and times of any file of yours it can
+  name (`chmod 644` on a key, `chmod +x` on a hook, times backdated), never what's in it, nor read it. Said in the
+  report, `tarae state` and the state line (G29).
 
 ### 1.2 What runs later — the protected names
 
@@ -823,7 +834,7 @@ Not Claude's, but a hostile repository reaches them:
 | G26 | macOS: where the network reaches a host as the run starts, trust's service (`com.apple.trustd.agent`) is reachable, and it fetches revocation lists and issuers itself, outside tarae's proxy | Go's TLS (and Security.framework's) asks it: without it `x509: OSStatus -26276`, measured | only then (as srt's `enableWeakerNetworkIsolation`), never with every host asked; left: a run can make it fetch a URL a certificate names |
 | G27 | macOS: System V shared memory and `setpriority` are refused a run's own too, and a System V segment it makes can't be removed — `shmget` isn't checked, `shmctl(IPC_RMID)` is refused (measured: the probe's 4 KB segment stayed) | the deny-default profile, as srt's (it allows neither); a segment's key doesn't say whose it is | said; a tool that needs either (a SysV user, `renice`) fails in the sandbox — a `BASE` row only with a measured need |
 | G28 | Below a pack's tools' output (`target/`, `node_modules/`, `.venv/`) a run writes freely: what your own builds, tests and tools load from there later can be planted | builds write there; srt and Codex leave it writable too (user decision 2026-10-17: no separate output folder for runs) | narrowed: `__pycache__/` beside the source protected; the programs, bytecode and libraries a run that isn't a build or a check changed there are named in Claude's report (§1.2; tests: `snapshot::tests::code_a_run_changed_below_tools_output_is_named`, `sandbox::tests::bytecode_beside_its_source_is_kept_and_a_virtualenvs_isnt`) |
-| G29 | Linux: a file's mode and times change outside the write places, in every tier (protected names in the project too); in a run `cp -a` copies no extended attributes or ACLs | Landlock has no right for a file's attributes; tarae doesn't decide those calls yet | said in every tier; owner, extended attributes and flags refused (D-h); next: tarae decides mode and times where it serves the run (tiers own and host) — offline stays a full tier with this said (user decision 2026-10-18); closed where a Landlock ABI brings an attribute right |
+| G29 | Linux: a file's mode and times change outside the write places, in tier offline (protected names in the project too); in tiers own and host tarae serves them where writes are allowed; in a run `cp -a` copies no extended attributes or ACLs | Landlock has no right for a file's attributes; in tier offline nothing serves them | said in tier offline; in own and host tarae serves mode and times; owner, extended attributes and flags refused in every tier (D-h); closed where a Landlock ABI brings an attribute right |
 
 ## 5. For a reviewer: where to start
 

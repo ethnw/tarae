@@ -59,7 +59,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ own, ABI 11: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Own namespaces (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing. A command changes a file's mode and times only where it may write, or through a file it holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
@@ -67,7 +67,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ own without a PID namespace, ABI 6: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Own namespaces (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — processes (command lines, priority). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. A command changes a file's mode and times only where it may write, or through a file it holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
@@ -75,7 +75,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ offline in the session's namespaces, ABI 6: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Offline (Landlock ABI 6): kept apart from other tarae sessions' commands — files (but the temp folders), processes, signals, System V IPC, /dev/shm, terminals, loopback (its own); shared with them — nothing. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
@@ -83,7 +83,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ host, ABI 4: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Host namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm. This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Host namespaces (Landlock ABI 4): kept apart from other tarae sessions' commands — files (but the temp folders), terminals (only those it makes), loopback (this machine's, other sessions' sockets refused); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm. This kernel's Landlock (ABI 4) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC and /dev/shm with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there. Of the terminals (/dev/pts) it opens only those it makes, up to 16 at a time. A command changes a file's mode and times only where it may write, or through a file it holds open for writing; never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
@@ -91,7 +91,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ offline, pidfd_getfd refused (Docker's default profile), ABI 11: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Offline (Landlock ABI 11): kept apart from other tarae sessions' commands — files (but the temp folders), signals, loopback (no socket); shared with them — processes (command lines, priority), System V IPC, /dev/shm, terminals. Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
@@ -99,7 +99,7 @@ The sandbox blocked nothing. [the rules]
 
 ══ offline without namespaces, ABI 3: the conversation's first run
 The sandbox blocked nothing. [the rules]
-Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals. This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's group, extended attributes, ACLs or flags — in the project neither.
+Offline (Landlock ABI 3): kept apart from other tarae sessions' commands — files (but the temp folders), loopback (no socket); shared with them — processes (command lines, priority), signals (no signal scope below ABI 6), System V IPC, /dev/shm, terminals. This kernel's Landlock (ABI 3) can't keep a command's signals to its own processes (6 does). Here a command sees this system's processes — another session's commands and the user's others: it can read their command lines and lower their priority, never their environment, nor trace them. Here a command shares this system's System V IPC, /dev/shm and terminals (/dev/pts) with other sessions' commands and the user's other programs: it can read and write the shared memory they keep there and open any of those terminals — the user's own too, not only other sessions'. Here a command can change the mode and times of any file of the user's it can name — never what's in it: Landlock has no right for them. Never a file's owner, extended attributes, ACLs or flags — in the project neither.
 ── a later run
 The sandbox blocked nothing.
 ── a later run that failed
