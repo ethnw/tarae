@@ -4673,12 +4673,25 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
             ));
         }
     }
-    // Tests that skipped themselves (`test_results::SELF_SKIP`) — libtest calls them ok
-    let skipped: Vec<&str> =
+    // Tests that skipped themselves (`test_results::SELF_SKIP`) — libtest calls them ok. Its output's lines and
+    // its own file's (`said_skip`), which a filter on the output can't drop (frictions29 #29)
+    let mut skipped: Vec<&str> =
         r.output.iter().filter_map(|(_, l)| l.strip_prefix(crate::test_results::SELF_SKIP)).collect();
+    // (counted as added: a skip said twice — two binaries, two calls — is one)
+    let mut unseen = 0;
+    for s in &r.ended.skipped {
+        if !skipped.contains(&s.as_str()) {
+            skipped.push(s);
+            unseen += 1;
+        }
+    }
     if !skipped.is_empty() {
+        let filtered = match unseen {
+            0 => String::new(),
+            n => format!(" ({n} not in the output you kept)"),
+        };
         out.push_str(&format!(
-            "\n{} test{} skipped {} — libtest says ok, but nothing was checked:\n",
+            "\n{} test{} skipped {} — libtest says ok, but nothing was checked{filtered}:\n",
             skipped.len(),
             if skipped.len() == 1 { "" } else { "s" },
             if skipped.len() == 1 { "itself" } else { "themselves" }
@@ -4686,6 +4699,10 @@ fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item
         for s in skipped {
             out.push_str(&format!("  {s}\n"));
         }
+    }
+    // (the ptys it made through its broker — no card asks for them: said here, the user's decision 2026-10-19)
+    if let Some(s) = r.ended.ptys_said() {
+        out.push_str(&s);
     }
     // (the sandbox's report goes after it — `rules_known`)
     let lines = &r.output;
@@ -4797,6 +4814,10 @@ fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
         for c in said {
             out.push_str(&format!("  {} — {}\n", c.name, c.message.join(" ")));
         }
+    }
+    // (the ptys its broker made — no card asked for them: said, as a run's report says them)
+    if let Some(s) = r.ended.ptys_said() {
+        out.push_str(&s);
     }
     if r.state != RunState::Passed && fails.is_empty() {
         let from = r.output.len().saturating_sub(TAIL);
@@ -5229,6 +5250,12 @@ mod tests {
         assert!(text.starts_with("no tests ran — term_snapshots::shows\n"), "{text}");
         assert!(text.contains("running 0 tests\n"), "the output says why: {text}");
         assert_eq!(super::verdict(&text), "no tests ran");
+        // (the review of terminals A: a test run's ptys from its broker are said, as a run's — and its refusals)
+        r.ended = crate::sandbox::RunEnd { ptys: 2, ptys_refused: 1, skipped: Vec::new() };
+        let text = super::report(elsewhere(), &r, super::Waited::No);
+        let said =
+            "It made 2 ptys — new ones, tarae's, handed in (none of the user's terminals). 1 ask past the";
+        assert!(text.contains(said), "{text}");
     }
 
     /// A run's policy has what the user allowed in it — kept, this chat's, and a grant for this run alone —
@@ -8385,6 +8412,37 @@ mod tests {
         );
         r.output.retain(|(err, _)| !err);
         assert!(!super::run_report(elsewhere(), &r, &[], super::Waited::No).contains("skipped"));
+        // frictions29 #29: a filter on its output dropped the line — the run's own file has it (`said_skip`),
+        // counted all the same and said as not in the output; one in both counted once
+        r.ended.skipped = vec![
+            "sandbox::tests::real — Seatbelt can't start inside a sandbox".into(),
+            "term::tests::pty — no pty opens here".into(),
+        ];
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(
+            text.contains("2 tests skipped themselves — libtest says ok, but nothing was checked (2 not in the output you kept):"),
+            "{text}"
+        );
+        r.output.push((true, "tarae-test: skipped term::tests::pty — no pty opens here".into()));
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(
+            text.contains("2 tests skipped themselves — libtest says ok, but nothing was checked (1 not in"),
+            "{text}"
+        );
+        // (one said twice in the file counts once — the review of terminals A)
+        r.ended.skipped.push("sandbox::tests::real — Seatbelt can't start inside a sandbox".into());
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(
+            text.contains("2 tests skipped themselves — libtest says ok, but nothing was checked (1 not in"),
+            "{text}"
+        );
+        // terminals A: the ptys its broker made, said (no card asked for them)
+        r.ended.ptys = 3;
+        let text = super::run_report(elsewhere(), &r, &[], super::Waited::No);
+        assert!(
+            text.contains("It made 3 ptys — new ones, tarae's, handed in (none of the user's terminals)."),
+            "{text}"
+        );
     }
 
     /// frictions29 21: a long run whose output went through a filter (`| grep … | head -40`) has its report say what

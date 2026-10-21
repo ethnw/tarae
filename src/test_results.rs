@@ -60,6 +60,24 @@ fn file_line(s: &str, ext: &str) -> Option<(String, usize)> {
 /// run inside a sandbox (`sandbox::skipped_inside`). The case reads as skipped, with the why.
 pub const SELF_SKIP: &str = "tarae-test: skipped ";
 
+/// The variable naming the file a run's tests write their skips to (in its `RunDir` — `sandbox::SKIPS_FILE`).
+pub const SKIPS: &str = "TARAE_SKIPS";
+
+/// A test that skips itself says so — `SELF_SKIP` then `rest` (`<name> — <why>`) on a line of its own, past
+/// libtest's capture — and, in a run that says where (`SKIPS`), in that file too: the run's report counts it
+/// whatever a filter on its output kept (frictions29 #29: `| grep 'test result'` dropped the lines, and a
+/// sandboxed `cargo test` read as all passed). The one way a skip is said (`every_self_skip_goes_through_said_skip`).
+#[cfg(test)]
+pub fn said_skip(rest: &str) {
+    use std::io::Write as _;
+    let line = format!("{SELF_SKIP}{}\n", rest.trim_end());
+    let _ = std::io::stderr().write_all(line.as_bytes());
+    if let Some(at) = std::env::var_os(SKIPS) {
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(at);
+        let _ = file.and_then(|mut f| f.write_all(line.as_bytes()));
+    }
+}
+
 /// A `perf_` test measures an optimized build: at the test profile's opt-level 0 (a fast edit-test loop, where
 /// a key costs several times as much) it skips itself — true — saying so past libtest's capture by its full
 /// name (`term::tests::perf_…`, else the skip lands on another test's row); `cargo perf` runs it in the `perf`
@@ -69,9 +87,101 @@ pub fn unoptimized(name: &str) -> bool {
     if cfg!(tarae_optimized) {
         return false;
     }
-    let line = format!("{SELF_SKIP}{name} — built at opt-level 0 (the test profile); `cargo perf` runs it\n");
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    said_skip(&format!("{name} — built at opt-level 0 (the test profile); `cargo perf` runs it"));
     true
+}
+
+/// A skip's line as `said_skip` writes it, for a fixture to hold (a run's skips file, an output) — never said.
+#[cfg(test)]
+pub fn skip_line(rest: &str) -> String {
+    format!("{SELF_SKIP}{rest}")
+}
+
+/// frictions29 #29: a skip said goes past libtest's capture and, where the run names a file (`SKIPS`), into it —
+/// in a process of its own (the variable is the process's): this binary on `skip_said_in_its_own_process`.
+#[cfg(test)]
+#[test]
+fn a_skip_is_said_in_the_runs_file_too() {
+    let dir = crate::scratch::Scratch::new("skips");
+    let file = dir.path().join("skips");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "test_results::skip_said_in_its_own_process", "--ignored", "--nocapture"])
+        .env(SKIPS, &file)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let line = format!("{SELF_SKIP}a::b — no pty opens here\n");
+    assert!(err.contains(&line), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), line.repeat(2), "appended, each");
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "a_skip_is_said_in_the_runs_file_too's own process"]
+fn skip_said_in_its_own_process() {
+    said_skip("a::b — no pty opens here");
+    said_skip("a::b — no pty opens here\n");
+}
+
+/// The writers of `SELF_SKIP` lines that don't go through `said_skip` yet, by file — a list that only shrinks
+/// (frictions29 #29: one that writes the line itself is missed by a filtered run's report). A new writer uses
+/// `said_skip`; converting one lowers its file's count.
+/// (2026-10-19: the macOS-built writers converted; these are Linux's tests, built only there — `cargo xtask
+/// linux` checks a conversion.)
+#[cfg(test)]
+const SKIP_WRITERS_LEFT: &[(&str, usize)] = &[
+    ("editor.rs", 1),
+    ("landlock.rs", 5),
+    ("sandbox.rs", 11),
+    ("sandbox/keeper.rs", 10),
+    ("sandbox/linux.rs", 2),
+    ("sandbox/owners/tests.rs", 1),
+    ("sandbox/supervisor.rs", 4),
+    ("sandbox/tier.rs", 2),
+    ("seccomp.rs", 1),
+];
+
+#[cfg(test)]
+#[test]
+fn every_self_skip_goes_through_said_skip() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: Vec<(String, usize)> = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("test_results.rs") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                // (a reader strips the prefix; a writer puts it in a line)
+                let writes = |l: &&str| {
+                    l.contains("SELF_SKIP")
+                        && !l.contains("strip_prefix")
+                        && !l.trim_start().starts_with("//")
+                };
+                let n = text.lines().filter(writes).count();
+                if n > 0 {
+                    let rel = p.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+                    found.push((rel, n));
+                }
+            }
+        }
+    }
+    found.sort();
+    let left: Vec<(String, usize)> = SKIP_WRITERS_LEFT.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+    let over: Vec<String> = found
+        .iter()
+        .filter_map(|(f, n)| {
+            let allowed = left.iter().find(|(g, _)| g == f).map_or(0, |(_, m)| *m);
+            (*n > allowed).then(|| format!("(\"{f}\", {n}) — {allowed} allowed"))
+        })
+        .collect();
+    assert!(
+        over.is_empty(),
+        "lines that write `SELF_SKIP` themselves — use `said_skip`:\n{}",
+        over.join("\n")
+    );
 }
 
 /// How a pack's runner says its results, a line at a time — `[test]`'s `[[test.line]]` and `none-ran`, read

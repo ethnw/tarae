@@ -56,6 +56,9 @@ mod policy;
 pub mod ptys;
 // (the egress proxy: Linux's runs reach it through their supervisors, macOS's at their own ports)
 pub mod proxy;
+// (macOS: the ptys a run makes, made by tarae and handed in — Linux's host tier has its own, `ptys`)
+#[cfg(not(target_os = "linux"))]
+pub mod ptybroker;
 #[cfg(test)]
 mod refused;
 pub mod route;
@@ -2373,9 +2376,10 @@ impl Denial {
                 false => format!("opening the terminal {t}"),
             };
             return format!(
-                "{what} — every terminal is closed to a run, the ones it makes too (expect, script, a pty test): \
-                 macOS's sandbox can't tell them from the user's; the run's panel (space m s) lets this project's \
-                 commands open terminals"
+                "{what} — every terminal is closed to a run, the ones it makes too (expect, script): macOS's \
+                 sandbox can't tell them from the user's. tarae's own pty code asks the run's broker for new ones \
+                 (TARAE_PTY_SOCK — its tests, shots); the run's panel (space m s) lets this project's commands \
+                 open terminals"
             );
         }
         match op {
@@ -5473,7 +5477,24 @@ pub fn spawn_as(
         }
         return Ok(spawned);
     }
-    let spawned = crate::spawn::setsid_as(cmd, acts)?;
+    // (macOS: its pty broker listening before it starts, so its first ask finds it — its end comes with
+    // `after_run`; none if it doesn't start)
+    #[cfg(not(target_os = "linux"))]
+    let broker = policy.filter(|p| p.brokers_ptys()).and_then(|p| Some((p.run_id, p.run.as_ref()?)));
+    #[cfg(not(target_os = "linux"))]
+    if let Some((id, run)) = broker {
+        ptybroker::start(id, run.path());
+    }
+    let spawned = match crate::spawn::setsid_as(cmd, acts) {
+        Ok(s) => s,
+        Err(e) => {
+            #[cfg(not(target_os = "linux"))]
+            if let Some((id, _)) = broker {
+                ptybroker::end(id);
+            }
+            return Err(e);
+        }
+    };
     // (macOS, the network open: the run's own port goes to tarae's proxy — its end comes with `after_run`)
     #[cfg(not(target_os = "linux"))]
     if let Some((p, r)) = policy.and_then(|p| Some((p, p.proxy.as_ref()?))) {
@@ -5514,7 +5535,7 @@ fn program_of(cmd: &Command) -> String {
 /// reaped): on Linux, the folders it could remove inside protected ones made again (`linux::Kept`) — the
 /// report says which; on macOS, its port to tarae's proxy closed (`proxy::RunPort::ended`) — what it left
 /// running loses its way out, closed.
-pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
+pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() -> RunEnd + Send + 'static {
     #[cfg(target_os = "linux")]
     let kept = match policy.map(|p| &p.confine) {
         Some(Some(Ok(c))) => Some(c.kept.clone()),
@@ -5522,6 +5543,9 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
     };
     #[cfg(not(target_os = "linux"))]
     let proxied = policy.and_then(|p| p.proxy.as_ref()).map(|r| r.run);
+    #[cfg(not(target_os = "linux"))]
+    let brokered = policy.filter(|p| p.brokers_ptys()).map(|p| p.run_id);
+    let skips = policy.and_then(|p| p.run.as_ref()).map(|r| r.path().join(SKIPS_FILE));
     move || {
         #[cfg(target_os = "linux")]
         if let Some(k) = kept {
@@ -5531,8 +5555,91 @@ pub fn after_run(policy: Option<&Policy>) -> impl FnOnce() + Send + 'static {
         if let Some(run) = proxied {
             proxy::RunPort::ended(run);
         }
+        #[cfg(not(target_os = "linux"))]
+        let (ptys, ptys_refused) = brokered.map_or((0, 0), ptybroker::end);
+        #[cfg(target_os = "linux")]
+        let (ptys, ptys_refused) = (0, 0);
+        // (the tests that said they skipped themselves, as the run's own file has them — its output may have gone
+        // through a filter that dropped their lines: frictions29 #29; read bounded, `skips_of`)
+        let skipped = skips.map(|f| skips_of(&f)).unwrap_or_default();
+        RunEnd { ptys, ptys_refused, skipped }
     }
 }
+
+/// What a run's end found (`after_run`): the ptys its broker made (macOS, `ptybroker`) and the tests that said
+/// they skipped themselves (`test_results::said_skip`, the run's `SKIPS_FILE`) — its report says both.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunEnd {
+    pub ptys: usize,
+    /// The asks its broker refused past its cap (`ptybroker::PTYS_MAX`).
+    pub ptys_refused: usize,
+    /// Each `<test> — <why>`, at most `SKIPS_KEPT`.
+    pub skipped: Vec<String>,
+}
+
+impl RunEnd {
+    /// What a report says of its ptys — None: it made none and was refused none.
+    pub fn ptys_said(&self) -> Option<String> {
+        let refused = match self.ptys_refused {
+            0 => String::new(),
+            n => format!(
+                " {} past the {} a run may have were refused",
+                crate::nav::count(n, "ask"),
+                ptys_max()
+            ),
+        };
+        (self.ptys + self.ptys_refused > 0).then(|| {
+            format!(
+                "\nIt made {} — new ones, tarae's, handed in (none of the user's terminals).{refused}\n",
+                crate::nav::count(self.ptys, "pty")
+            )
+        })
+    }
+}
+
+/// The ptys a run's broker makes at most (macOS's; elsewhere none is made).
+fn ptys_max() -> usize {
+    #[cfg(not(target_os = "linux"))]
+    return ptybroker::PTYS_MAX;
+    #[cfg(target_os = "linux")]
+    0
+}
+
+/// A run's skips kept for its report at most — and the bytes of its file read: the file is the run's to write
+/// (the review of terminals A: read whole, a run could have tarae load gigabytes and Claude read every line).
+const SKIPS_KEPT: usize = 50;
+const SKIPS_READ: u64 = 64 * 1024;
+const SKIP_LINE_MAX: usize = 300;
+
+/// The skips in a run's file `f` (`test_results::said_skip`): its first `SKIPS_READ` bytes, at most `SKIPS_KEPT`
+/// lines of at most `SKIP_LINE_MAX` characters — one more line says how many were left out.
+pub fn skips_of(f: &Path) -> Vec<String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let read = std::fs::File::open(f).and_then(|file| file.take(SKIPS_READ).read_to_end(&mut bytes));
+    if read.is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let all: Vec<&str> =
+        text.lines().filter_map(|l| l.strip_prefix(crate::test_results::SELF_SKIP)).collect();
+    let mut kept: Vec<String> = Vec::new();
+    for l in &all {
+        let l: String = l.chars().take(SKIP_LINE_MAX).collect();
+        if !kept.contains(&l) {
+            kept.push(l);
+        }
+    }
+    let cut = kept.len() > SKIPS_KEPT || bytes.len() as u64 >= SKIPS_READ;
+    kept.truncate(SKIPS_KEPT);
+    if cut {
+        kept.push("… and more — the run's skips file was cut (its first 64 KiB, 50 lines)".into());
+    }
+    kept
+}
+
+/// The file in a run's folder its tests' skips are written to (`test_results::SKIPS` names it).
+pub const SKIPS_FILE: &str = "skips";
 
 /// `program args` inside `policy` — or as it is, without one. On Linux the sandbox comes with the spawn
 /// (`spawn`); here only what a sandboxed run's environment says: nothing of tarae's but `Policy::run_env`, then
@@ -5555,6 +5662,13 @@ pub fn command(policy: Option<&Policy>, program: &str, args: &[String]) -> Comma
             inside_env(&mut c, p.tag.as_deref()).envs(p.env.iter().map(|(k, v)| (k, v)));
             if let Some(run) = &p.run {
                 c.env("TMPDIR", run.path());
+                // (a test that skips itself says so in a file of the run's own too — frictions29 #29)
+                c.env(crate::test_results::SKIPS, run.path().join(SKIPS_FILE));
+                // (macOS: a pty it makes, its broker makes — `ptybroker`, started with it in `spawn_as`)
+                #[cfg(not(target_os = "linux"))]
+                if p.brokers_ptys() {
+                    c.env(crate::pty::BROKER, ptybroker::socket(run.path()));
+                }
             }
             // (npm's daily check for its own update writes the date in `~/.npm`, closed — and asks the network:
             // reported blocked in every npm run on the VMs, step 7)
@@ -5598,27 +5712,24 @@ pub(crate) fn skipped_inside_for(test: &str, why: &str) -> bool {
     if std::env::var_os(MARK).is_none() {
         return false;
     }
-    let line = format!(
-        "{}{test} — {why}; run `cargo test` outside one to check it\n",
-        crate::test_results::SELF_SKIP
-    );
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    crate::test_results::said_skip(&format!("{test} — {why}; run `cargo test` outside one to check it"));
     true
 }
 
 /// Whether test `test` (its full path), which opens a pty — a terminal panel, `pty::open` — skips itself here:
-/// inside macOS's sandbox a run can't open a pty's other end (`TERMINALS`). Elsewhere it runs.
+/// whether a pty opens, asked once (frictions29 #29: it read only the sandbox's mark, so the 23 skipped even
+/// with the terminals grant). Inside macOS's sandbox the run's broker makes one (`ptybroker`); where none
+/// opens, said why.
 #[cfg(test)]
 pub(crate) fn no_pty_here(test: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    return skipped_inside_for(
-        test,
-        "a run inside macOS's sandbox can't open a pty's other end (sandbox::TERMINALS)",
-    );
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = test;
-        false
+    static OPENS: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    let opens = OPENS.get_or_init(|| crate::pty::open(24, 80).map(drop).map_err(|e| e.to_string()));
+    match opens {
+        Ok(()) => false,
+        Err(e) => {
+            crate::test_results::said_skip(&format!("{test} — no pty opens here ({e})"));
+            true
+        }
     }
 }
 
@@ -10757,18 +10868,100 @@ mod tests {
         assert!(!has(&Policy { network: false, ..any }), "the network off");
     }
 
-    /// A pty only with the terminals grant (srt's `allowPty`): without it no `pseudo-tty` and `/dev/ptmx` closed to
-    /// writes, the terminals denied; with it all three open.
+    /// A pty made by a run only with the terminals grant (srt's `allowPty`): without it no `pseudo-tty` and
+    /// `/dev/ptmx` closed to writes, the terminals denied — but their ioctl, and the masters', open (terminals A:
+    /// the ptys its broker hands in); with it all three open.
     #[test]
     fn ptys_only_with_the_terminals_grant() {
-        let p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        let mut p = Policy::for_project(&env(Path::new("/Users/u/p")));
+        p.run = Some(RunDir::new().unwrap());
         let closed = p.profile();
-        assert!(!closed.contains("pseudo-tty") && !closed.contains("/dev/ptmx"), "{closed}");
+        let rule =
+            closed.lines().find(|l| l.starts_with("(allow file-ioctl (require-all")).unwrap_or_default();
+        assert!(!closed.contains("pseudo-tty"), "{closed}");
+        assert_eq!(closed.matches("/dev/ptmx").count(), 1, "only in the ioctl rule: {closed}");
+        assert!(
+            rule.contains(&format!("(require-any (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\"))")),
+            "{rule}"
+        );
+        // (the review of terminals A: by command — a terminal's own, never TIOCSTI)
+        for (name, n) in policy::TTY_IOCTLS {
+            assert!(rule.contains(&format!("(ioctl-command #x{n:x})")), "{name}: {rule}");
+        }
+        assert!(!rule.contains("#x80017472"), "TIOCSTI: {rule}");
         assert!(closed.contains(&format!("(deny file-read-data file-write* (regex #\"{TERMINALS}\"))")));
+        assert!(p.brokers_ptys());
+        // A socket of the user's granted: no ioctl on terminals, no broker — the terminals card as before
+        let socketed = Policy { sockets: vec!["/Users/u/.colima/default/docker.sock".into()], ..p.clone() };
+        assert!(!socketed.profile().contains("ioctl-command"), "{}", socketed.profile());
+        assert!(!socketed.brokers_ptys());
         let open = Policy { terminals: true, ..p }.profile();
         assert!(open.contains(&format!(
             "(allow pseudo-tty)\n(allow file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\"))\n"
         )));
+    }
+
+    /// `TTY_IOCTLS` are macOS's numbers as its libc has them (written out so both systems' policies pin alike).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_tty_ioctls_are_macoss() {
+        let libc: &[(&str, u64)] = &[
+            ("TIOCGWINSZ", libc::TIOCGWINSZ),
+            ("TIOCSWINSZ", libc::TIOCSWINSZ),
+            ("TIOCSCTTY", libc::TIOCSCTTY.into()),
+            ("TIOCGETA", libc::TIOCGETA),
+            ("TIOCSETA", libc::TIOCSETA),
+            ("TIOCSETAW", libc::TIOCSETAW),
+            ("TIOCSETAF", libc::TIOCSETAF),
+            ("TIOCGPGRP", libc::TIOCGPGRP),
+            ("TIOCSPGRP", libc::TIOCSPGRP),
+            ("TIOCFLUSH", libc::TIOCFLUSH),
+            ("TIOCDRAIN", libc::TIOCDRAIN.into()),
+            ("TIOCOUTQ", libc::TIOCOUTQ),
+            ("FIONREAD", libc::FIONREAD),
+            ("FIONBIO", libc::FIONBIO),
+            ("FIOCLEX", libc::FIOCLEX),
+            ("FIONCLEX", libc::FIONCLEX),
+        ];
+        assert_eq!(policy::TTY_IOCTLS, libc);
+        assert!(!policy::TTY_IOCTLS.iter().any(|(_, n)| *n == libc::TIOCSTI));
+    }
+
+    /// The review of terminals A: a run's skips file is the run's to write — read bounded: its first 64 KiB, 50
+    /// lines at most (each said once, cut at 300 characters), and a last one saying the rest was left out.
+    #[test]
+    fn a_runs_skips_file_is_read_bounded() {
+        let dir = scratch("skips-bounded");
+        let f = dir.join("skips");
+        let skip = |rest: &str| crate::test_results::skip_line(rest);
+        let long = "x".repeat(1000);
+        let mut text = format!(
+            "{}\n{}\n{}\nnot a skip\n",
+            skip("a — why"),
+            skip("a — why"),
+            skip(&format!("long — {long}"))
+        );
+        std::fs::write(&f, &text).unwrap();
+        let got = skips_of(&f);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], "a — why");
+        assert_eq!(got[1].chars().count(), SKIP_LINE_MAX);
+        for i in 0..5000 {
+            text.push_str(&format!("{}\n", skip(&format!("t{i} — why"))));
+        }
+        std::fs::write(&f, &text).unwrap();
+        let got = skips_of(&f);
+        assert_eq!(got.len(), SKIPS_KEPT + 1);
+        assert!(got.last().unwrap().contains("was cut"), "{got:?}");
+        assert!(skips_of(&dir.join("none")).is_empty());
+        // (and as a run's end reads it: the file in its own folder, through `after_run`)
+        let mut p = Policy::for_project(&env(&dir));
+        p.run = Some(RunDir::new().unwrap());
+        std::fs::write(p.run.as_ref().unwrap().path().join(SKIPS_FILE), &text).unwrap();
+        let end = after_run(Some(&p))();
+        assert_eq!(end.skipped.len(), SKIPS_KEPT + 1, "{:?}", end.skipped);
+        assert_eq!(end.skipped[0], "a — why");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A quiet write is quiet only at its place for the home on this system — macOS's `~/Library/Application

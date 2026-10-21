@@ -7,13 +7,44 @@
 //! holding its own master and others', rust-analyzer and marksman holding 36 and 16 — all 511 of the Mac's
 //! ptys taken. Shared by the terminal panel, the e2e harness and `cargo xtask shot` (`#[path]`): std and
 //! libc only.
+//!
+//! Inside a sandboxed run on macOS no pty can be opened (every `/dev/ttys*` is closed to it — the user's are
+//! those names too): the run's broker makes it (`sandbox::ptybroker`), asked on the socket `BROKER` names, and
+//! hands both ends in (`SCM_RIGHTS`).
 
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+/// The variable naming the socket of the run's pty broker — set for a sandboxed run on macOS only.
+pub const BROKER: &str = "TARAE_PTY_SOCK";
 
 /// A new pty of `rows` × `cols`: (master, slave), both close-on-exec — a child gets the slave only as the
-/// stdio it's handed.
+/// stdio it's handed. In a sandboxed run (`BROKER` set): asked of its broker.
 pub fn open(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+    match std::env::var_os(BROKER) {
+        Some(socket) => asked(std::path::Path::new(&socket), rows, cols),
+        None => made(rows, cols),
+    }
+}
+
+/// A pty asked of the broker at `socket`: the size sent, both ends received.
+pub fn asked(socket: &std::path::Path, rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+    use std::io::Write as _;
+    let mut s = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| io::Error::new(e.kind(), format!("the run's pty broker ({}): {e}", socket.display())))?;
+    let mut ask = [0u8; 4];
+    ask[..2].copy_from_slice(&rows.to_le_bytes());
+    ask[2..].copy_from_slice(&cols.to_le_bytes());
+    s.write_all(&ask)?;
+    let fds = recv_fds(s.as_raw_fd())?;
+    match <[OwnedFd; 2]>::try_from(fds) {
+        Ok([master, slave]) => Ok((master, slave)),
+        Err(_) => Err(io::Error::other("the run's pty broker sent no pty")),
+    }
+}
+
+/// A new pty made here — `/dev/ptmx` opened (what `open` does outside a sandbox, and the broker for a run).
+pub fn made(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     // SAFETY: open with a NUL-terminated path; the descriptor is owned from here.
     let master = unsafe { OwnedFd::from_raw_fd(cvt(libc::open(c"/dev/ptmx".as_ptr(), flags))?) };
@@ -31,6 +62,77 @@ pub fn open(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     // SAFETY: TIOCSWINSZ reads one winsize from a live local.
     cvt(unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) })?;
     Ok((master, slave))
+}
+
+/// `fds` sent on the unix socket `sock` with one byte (`SCM_RIGHTS`) — the broker's side.
+#[allow(dead_code, reason = "tarae's broker's: the e2e harness and xtask share this file (`#[path]`)")]
+pub fn send_fds(sock: RawFd, fds: &[RawFd]) -> io::Result<()> {
+    let bytes = std::mem::size_of_val(fds) as u32;
+    // SAFETY: CMSG_SPACE only computes a size.
+    let space = unsafe { libc::CMSG_SPACE(bytes) } as usize;
+    let mut control = vec![0u8; space];
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    // SAFETY: a zeroed msghdr pointing at live locals; one control message of `fds.len()` descriptors fills
+    // the buffer CMSG_SPACE sized for it.
+    unsafe {
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        let c = libc::CMSG_FIRSTHDR(&msg);
+        (*c).cmsg_level = libc::SOL_SOCKET;
+        (*c).cmsg_type = libc::SCM_RIGHTS;
+        (*c).cmsg_len = libc::CMSG_LEN(bytes) as _;
+        std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(c).cast::<RawFd>(), fds.len());
+        if libc::sendmsg(sock, &msg, 0) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// The descriptors one message on `sock` carries (at most 2), each made close-on-exec at once (macOS has no
+/// `MSG_CMSG_CLOEXEC`: until then a program another thread starts could get a copy — a moment, in a run).
+fn recv_fds(sock: RawFd) -> io::Result<Vec<OwnedFd>> {
+    let bytes = (2 * std::mem::size_of::<RawFd>()) as u32;
+    // SAFETY: CMSG_SPACE only computes a size.
+    let space = unsafe { libc::CMSG_SPACE(bytes) } as usize;
+    let mut control = vec![0u8; space];
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let mut out = Vec::new();
+    // SAFETY: a zeroed msghdr pointing at live locals; the control messages walked as the kernel filled them,
+    // each descriptor owned from here.
+    unsafe {
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        #[cfg(target_os = "linux")]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = 0;
+        if libc::recvmsg(sock, &mut msg, flags) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut c = libc::CMSG_FIRSTHDR(&msg);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let data = libc::CMSG_DATA(c).cast::<RawFd>();
+                let n = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
+                for i in 0..n {
+                    let fd = std::ptr::read_unaligned(data.add(i));
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    out.push(OwnedFd::from_raw_fd(fd));
+                }
+            }
+            c = libc::CMSG_NXTHDR(&msg, c);
+        }
+    }
+    Ok(out)
 }
 
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {

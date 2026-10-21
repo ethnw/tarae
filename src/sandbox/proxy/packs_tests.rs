@@ -134,8 +134,7 @@ pub(super) fn on_path(name: &str) -> Option<PathBuf> {
 /// The test says it skips itself, and why (`test`: its name in this module, else its path from `proxy::`).
 pub(super) fn skip(test: &str, why: &str) {
     let path = if test.contains("::") { test.to_string() } else { format!("packs_tests::{test}") };
-    let line = format!("{}sandbox::proxy::{path} — {why}\n", crate::test_results::SELF_SKIP);
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    crate::test_results::said_skip(&format!("sandbox::proxy::{path} — {why}"));
 }
 
 /// Where the test's outside listens: loopback, taken for beyond in the runs of `root` (macOS) — or this

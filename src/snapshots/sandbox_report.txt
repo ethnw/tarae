@@ -9,7 +9,7 @@ The sandbox blocked 10 things — 10 times:
   writing $ROOT/Cargo.toml (file-write-data, x)
   writing $ROOT/.git/index.lock (file-write-create, x)
   writing /opt/tarae-golden/x (file-write-create, x)
-  opening the terminal /dev/ttys012 — every terminal is closed to a run, the ones it makes too (expect, script, a pty test): macOS's sandbox can't tell them from the user's; the run's panel (space m s) lets this project's commands open terminals (file-write-data, x)
+  opening the terminal /dev/ttys012 — every terminal is closed to a run, the ones it makes too (expect, script): macOS's sandbox can't tell them from the user's. tarae's own pty code asks the run's broker for new ones (TARAE_PTY_SOCK — its tests, shots); the run's panel (space m s) lets this project's commands open terminals (file-write-data, x)
 $HOME/.gitconfig ($GIT_CONFIG_GLOBAL): it holds a token, so your commands read a copy without those lines, at the variable named — the tool finds it on its own; the file itself stays closed. If a command needs the token, say so to the user and let them run it.
 $HOME/.cargo/credentials.toml: tarae keeps these from every command of yours — keys, tokens, Claude's and tarae's own state, the clipboard, the keychain. Nothing opens them for a command; if one needs it, say so to the user and let them run it.
 Cargo.toml: tarae keeps it from your commands — what's in it runs later outside the sandbox (the user's builds, their terminal) or sets how things run. To change it, edit it with your edit tool: the user reviews it. Don't work around it (another name, a copy, a link).

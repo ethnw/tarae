@@ -264,7 +264,10 @@ impl Sandbox {
         .into_iter()
         .map(|(k, v): (&str, OsString)| (k.into(), v))
         .collect();
-        base.into_iter().chain(self.vars.iter().cloned()).collect()
+        // (in a sandboxed run its pty broker makes the ptys — a tarae under test asks it for its terminal panel's
+        // too: `pty::BROKER`, terminals A)
+        let broker = std::env::var_os(pty::BROKER).map(|s| (OsString::from(pty::BROKER), s));
+        base.into_iter().chain(broker).chain(self.vars.iter().cloned()).collect()
     }
 
     pub fn spawn(&self, args: &[&str]) -> Term {

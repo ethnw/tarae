@@ -1087,6 +1087,16 @@ macOS (Seatbelt). A test keeps this table equal to the code:
   the network's way for each case too.
 - **On macOS** a loopback port a command may reach is reached whoever listens on it, another session's command
   too: Seatbelt can't tell whose a listener is. Claude's result says so.
+- **Terminals on macOS** are closed to a command: it can't open your tty, another pty, or make one (`/dev/ptmx`),
+  since Seatbelt can't tell a pty a command made from yours. A command that needs one through tarae's own pty
+  code — its tests, `cargo xtask shot` and `scenes`, the e2e suite — asks the run's **pty broker**
+  (`TARAE_PTY_SOCK`, a socket in the run's own folder): tarae makes a new pair outside the sandbox and hands
+  both ends in, at most 128 a run (more is refused, and said). Only their ioctls are open to the command, and
+  only a terminal's own — its size, its modes, making it a controlling terminal (an ioctl needs a descriptor, and
+  a command starts with none of yours; the [threat model](threat-model.md) says what a descriptor passed over a
+  socket would reach); no card asks, and Claude's result says how many it made. A command with a socket of
+  yours granted (docker's, say) gets no broker: it asks the terminals card as before. `expect` or `script` open their own and are still refused: the terminals grant (`also {"terminals"}`)
+  opens every one, yours too.
 - **Getting namespaces.** Where Ubuntu's restriction is why, the sandbox panel says so faint under its header
   ("tarae's AppArmor profile would give own namespaces"), and its last row copies the step that installs the profile:
   run it with `sudo`, then restart tarae. In a container, `--cap-add SYS_PTRACE` takes a session from offline to

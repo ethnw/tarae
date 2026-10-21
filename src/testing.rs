@@ -311,6 +311,9 @@ pub struct TestRun {
     pub snap: Option<crate::snapshot::Before>,
     /// Claude's: the containers it names from its prefix, stopped when it's stopped (`containers.rs`).
     pub containers: Option<crate::containers::Run>,
+    /// What its sandbox found at its end: the ptys its broker made (`sandbox::RunEnd` — its skips are its
+    /// output's own here: nothing filters a test run's output).
+    pub ended: crate::sandbox::RunEnd,
 }
 
 impl TestRun {
@@ -387,6 +390,7 @@ impl TestRun {
             queued: None,
             snap: None,
             containers: None,
+            ended: Default::default(),
         }
     }
 
@@ -747,7 +751,7 @@ impl Editor {
             }
             let status = crate::spawn::wait_and_drain(pid, &ended, readers).ok();
             // What it removed inside protected folders is made again before its end is told (`sandbox::after_run`)
-            after_run();
+            let over = after_run();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
@@ -769,6 +773,7 @@ impl Editor {
                 }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;
+                r.ended = over;
                 if let Some(cases) = cases {
                     r.cases = cases;
                 }
@@ -830,6 +835,7 @@ impl Editor {
             queued: None,
             snap: None,
             containers,
+            ended: Default::default(),
         });
     }
 

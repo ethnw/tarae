@@ -507,8 +507,22 @@ Kept:
   outside the session).
   test: `sandbox::tests::a_run_signals_and_looks_into_only_its_own_processes` ·
   `sandbox::keeper::tests::a_run_reads_no_details_outside_its_session` · `sandbox::keeper::tests::a_run_sees_only_its_sessions_processes` (with a PID namespace)
-- **Other terminals**: a run can't open your tty or another pty.
-  test: `sandbox::tests::a_run_cant_open_another_terminal` (macOS) · `sandbox::keeper::tests::a_run_opens_only_the_ptys_it_makes`
+- **Other terminals**: a run can't open your tty or another pty. On macOS it can't make one either; the ptys
+  tarae's pty broker hands in (terminals A, 2026-10-19) are new pairs tarae made, at most 128 a run (past it an
+  ask is refused and said: the Mac has ~511), and a run's profile opens only ioctl on terminals
+  (`^/dev/ttys[0-9]+$`, `/dev/ptmx`), **only the commands a program on a pty uses** (`policy::TTY_IOCTLS`: its
+  size, its modes, its process group, the bytes waiting, close-on-exec — Seatbelt narrows `file-ioctl` by
+  `ioctl-command`, measured; anything else, a line discipline's `TIOCGETD` say, refused). An ioctl needs a
+  descriptor, and a run starts with none of yours (no controlling terminal, stdio pipes). **What that leaves:** a
+  descriptor could come in over a unix socket in the project or the run's own folder, if a process of yours
+  passed one of your terminals' there: the run could then change its modes or size (raw mode needs the termios
+  setters, so they stay — tarae's own e2e and shots set raw mode on the pty), not type into it: `TIOCSTI` isn't in
+  the list, and macOS refuses it anyway (`hid-control`, measured, on a run's own controlling terminal too). A run
+  with **a socket of yours granted** (`llm.sandbox-sockets`, a card's grant — docker's, colima's) is where that's
+  likeliest, so such a run gets no ioctl on terminals and no broker: it asks the terminals card as before.
+  test: `sandbox::tests::a_run_cant_open_another_terminal` (macOS) ·
+  `sandbox::ptybroker::tests::a_run_without_the_grant_uses_the_ptys_its_broker_hands_in` (macOS) ·
+  `sandbox::keeper::tests::a_run_opens_only_the_ptys_it_makes`
 - **The keeper** (Linux): a run can't trace it; from Landlock ABI 6, or inside the session's PID namespace
   (as PID 1), a run can't signal it. Below ABI 6 without one, a run can kill it, and its runs fail closed
   (they fail, what they left ends, tarae says so); it isn't dumpable; a run holds no capability and no

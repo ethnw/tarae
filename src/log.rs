@@ -620,7 +620,7 @@ mod tests {
             mode(0o755);
             let _ = std::fs::remove_dir_all(&dir);
             let why = "its folder can't be made unwritable here (root)";
-            eprintln!("{}{test} — {why}", crate::test_results::SELF_SKIP);
+            crate::test_results::said_skip(&format!("{test} — {why}"));
             return;
         }
         let (tx, rx) = channel::<Entry>();

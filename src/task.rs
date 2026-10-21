@@ -332,6 +332,8 @@ pub struct Run {
     pub containers: Option<crate::containers::Run>,
     /// Claude's run on a commit's tree (`basetree.rs`): said in its report, the tree removed at its end.
     pub base: Option<crate::basetree::Base>,
+    /// What its sandbox found at its end: the ptys its broker made, its tests' skips (`sandbox::RunEnd`).
+    pub ended: crate::sandbox::RunEnd,
 }
 
 impl Run {
@@ -450,6 +452,7 @@ impl Run {
             snap: None,
             containers: None,
             base: None,
+            ended: Default::default(),
         }
     }
 }
@@ -918,7 +921,7 @@ impl Editor {
             }
             let status = crate::spawn::wait_and_drain(pid, &read_all, readers).ok();
             // What it removed inside protected folders is made again before its end is told (`sandbox::after_run`)
-            after_run();
+            let over = after_run();
             // Its last denials reach the watch before its end is told (here, not on the main loop)
             if watched {
                 std::thread::sleep(crate::sandbox::WATCH_LAST);
@@ -936,6 +939,7 @@ impl Editor {
                 }
                 r.took = Some(r.started.elapsed());
                 r.pid = None;
+                r.ended = over;
                 r.state = match status.and_then(|s| s.code()) {
                     Some(0) => State::Passed,
                     code => State::Failed(code),
@@ -1025,6 +1029,7 @@ impl Editor {
             snap: None,
             containers,
             base: None,
+            ended: Default::default(),
         });
     }
 }

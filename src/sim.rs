@@ -29,6 +29,8 @@ mod board;
 mod brings;
 mod hosts;
 mod instructions;
+#[cfg(not(target_os = "linux"))]
+mod ptybroker;
 mod rebasemsg;
 mod reviews;
 mod sessions;

@@ -516,8 +516,7 @@ pub fn sandboxed_here(test: &str) -> bool {
     match crate::sandbox::probe() {
         crate::sandbox::Availability::Ready | crate::sandbox::Availability::Partial(_) => true,
         found => {
-            let line = format!("{}{test} — no sandbox here ({found:?})\n", crate::test_results::SELF_SKIP);
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            crate::test_results::said_skip(&format!("{test} — no sandbox here ({found:?})"));
             false
         }
     }
@@ -1555,8 +1554,7 @@ timeout = 60
         // the proxy, so no card to see)
         #[cfg(target_os = "linux")]
         if let Some(why) = crate::sandbox::supervisor::unavailable() {
-            let line = format!("{}{test} — runs not served here: {why}\n", crate::test_results::SELF_SKIP);
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+            crate::test_results::said_skip(&format!("{test} — runs not served here: {why}"));
             return;
         }
         let hold = crate::sandbox::proxy::Limits::default().hold;

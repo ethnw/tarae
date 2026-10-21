@@ -304,10 +304,9 @@ fn a_run_reaches_only_its_own_proxy_port() {
             assert!(reached(&jvm, &la, &java), "a JVM's default socket: its own port");
             assert!(!reached(&jvm, &lb, &java), "a JVM's default socket: the other run's port");
         }
-        None => eprintln!(
-            "{}sandbox::proxy::macos_tests::a_run_reaches_only_its_own_proxy_port — its JVM part: no JDK (no \
+        None => crate::test_results::said_skip(
+            "sandbox::proxy::macos_tests::a_run_reaches_only_its_own_proxy_port — its JVM part: no JDK (no \
              JAVA_HOME, none /usr/libexec/java_home knows)",
-            crate::test_results::SELF_SKIP
         ),
     }
     std::fs::remove_dir_all(&root).ok();

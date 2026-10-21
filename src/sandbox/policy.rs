@@ -273,7 +273,38 @@ pub struct Policy {
     pub confine: Option<Result<linux::Confine, String>>,
 }
 
+/// The ioctl commands a run may use on a terminal (macOS's numbers, the same on every Mac — written here, not
+/// read from the build's libc, so both systems' policies pin alike: `golden`; checked against libc on macOS):
+/// what a program on a pty asks of it — its size, its modes (raw mode: `TIOCSETA*` — tarae's own e2e and shots
+/// need them), its process group, the bytes waiting, close-on-exec. Not `TIOCSTI` (macOS refuses it anyway —
+/// measured), nor making one (`TIOCPTYGRANT`, `TIOCPTYUNLK`, `TIOCPTYGNAME`: the broker makes it, outside).
+pub const TTY_IOCTLS: &[(&str, u64)] = &[
+    ("TIOCGWINSZ", 0x4008_7468),
+    ("TIOCSWINSZ", 0x8008_7467),
+    ("TIOCSCTTY", 0x2000_7461),
+    ("TIOCGETA", 0x4048_7413),
+    ("TIOCSETA", 0x8048_7414),
+    ("TIOCSETAW", 0x8048_7415),
+    ("TIOCSETAF", 0x8048_7416),
+    ("TIOCGPGRP", 0x4004_7477),
+    ("TIOCSPGRP", 0x8004_7476),
+    ("TIOCFLUSH", 0x8004_7410),
+    ("TIOCDRAIN", 0x2000_745e),
+    ("TIOCOUTQ", 0x4004_7473),
+    ("FIONREAD", 0x4004_667f),
+    ("FIONBIO", 0x8004_667e),
+    ("FIOCLEX", 0x2000_6601),
+    ("FIONCLEX", 0x2000_6602),
+];
+
 impl Policy {
+    /// Whether its run gets a pty broker (macOS, `ptybroker`): it has a folder of its own, and no socket of the
+    /// user's is granted it — one could hand it a descriptor of the user's terminal, and its profile then has no
+    /// ioctl on terminals (`TTY_IOCTLS`): such a run asks the terminals card as before.
+    pub fn brokers_ptys(&self) -> bool {
+        self.run.is_some() && self.sockets.is_empty()
+    }
+
     /// Piece C, each host asked: the caches of a pack one of whose `registries` (`registries`: by pack) names a
     /// host this run's rules carry the user's yes for (`egress.answered` — this run's, this conversation's, this
     /// session's) — written as with the network open, for this run: its rules are made once, so a yes given while
@@ -456,12 +487,30 @@ impl Policy {
         }
         p.push_str(&devices_rule());
         // The terminals: closed, read and write, and no pty made, but where the project's grant opens them
-        // (`TERMINALS`, `/dev/ptmx`, srt's `allowPty`). After every file allow, so none opens them
+        // (`TERMINALS`, `/dev/ptmx`, srt's `allowPty`). After every file allow, so none opens them. Their ioctl
+        // stays: it needs a descriptor, and a run has none of a terminal but the ptys its broker hands in
+        // (`ptybroker` — always on, the user's decision 2026-10-19; Seatbelt checks an ioctl at every call, by
+        // path: without it a pty handed in can't be sized or made a controlling terminal — measured)
         match self.terminals {
             true => p.push_str(&format!(
                 "(allow pseudo-tty)\n(allow file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\"))\n"
             )),
-            false => p.push_str(&deny(&format!("file-read-data file-write* (regex #\"{TERMINALS}\")"))),
+            false => {
+                p.push_str(&deny(&format!("file-read-data file-write* (regex #\"{TERMINALS}\")")));
+                // (and the masters', `/dev/ptmx` by its path: the e2e harness sizes its pty through it) — only
+                // the commands a program on a pty uses (`TTY_IOCTLS`: measured, Seatbelt narrows by command), and
+                // none for a run with a socket of the user's granted: a descriptor of one of the user's terminals
+                // could come in over it (the review of terminals A) — that run gets no broker and asks the
+                // terminals card as before
+                if self.sockets.is_empty() {
+                    let commands: String =
+                        TTY_IOCTLS.iter().map(|(_, n)| format!(" (ioctl-command #x{n:x})")).collect();
+                    p.push_str(&format!(
+                        "(allow file-ioctl (require-all (require-any (literal \"/dev/ptmx\") (regex #\"{TERMINALS}\")) \
+                         (require-any{commands})))\n"
+                    ));
+                }
+            }
         }
         let open: String =
             self.ports.iter().chain(&proxied).map(|n| format!(" (remote ip \"localhost:{n}\")")).collect();

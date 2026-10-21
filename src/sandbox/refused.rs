@@ -152,8 +152,7 @@ fn skipped(test: &str) -> bool {
                 }
             }
         };
-        let line = format!("{}{test} — {why}\n", crate::test_results::SELF_SKIP);
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+        crate::test_results::said_skip(&format!("{test} — {why}"));
         true
     }
 }
