@@ -307,6 +307,13 @@ Done so far, under way, and the order after it (2026-10-17, brought up to 2026-1
   cargo's build-dir apart. Batch 35 (2026-10-20, `5b7aa937`): the reviewer reads the project's rules, all of a big
   change and the session's whole change; a card hides the cursor under it; a run busy at nothing it shows is said;
   System V segments a run made are named with `ipcrm` to free them, never removed (a Mac's 32 can fill up).
+  Batch 36 (2026-10-21, `78a4b589`): viewed marks kept across a review's re-open and a quit; a moved bracket never
+  asked by itself; `:commit <file>` from a review; a session's CLAUDE.md changes carried into main's on its bring or
+  end; a rebase's reloads one toast; tarae's own tests need no terminals grant (the pty broker serves the sandboxed
+  runs' ptys); `:restart`'s own build told apart from a run it ended, a send after it waits for claude; the state's
+  `refused`, `waits` and a session's answer line (V 10); the usage asked where the stream's rate-limit event carries
+  no percent; the reviewer's delta round measured (no saving, left as it was); the outside run card for
+  `userns-run.sh` designed only.
   frictions29's item 12, the web tool: not built — measured
   first; if needed, tarae's `read` takes an https URL (GET, text, `select`), not a new tool; Claude Code's
   WebSearch stays held back.
@@ -533,7 +540,7 @@ git tab, search, a short Kubernetes one.
   first; the session list saying its letters are keys (what was the first-use check). Next: 7, keys inside
   zellij. Driving it logged frictions 59–81 (`target/sb/frictions29.md`: the landing's cost — repeated
   grants, viewed marks lost on a review's re-open, moved-brace re-flags, the reviewer re-reading whole, ten keys
-  to commit — and tier-own tests only runnable outside) for the next frictions batch.
+  to commit — and tier-own tests only runnable outside); batch 36 took 66–79 and 81, 80 (the load flakes) is its own hunt.
 - **A memory card and panel**: what Claude remembers for the project, in Claude Code's own format.
 - **The run-flow panel**: one run's processes, writes, connections and refusals, from sources that need no
   privileges, on macOS too.
