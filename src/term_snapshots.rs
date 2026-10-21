@@ -3436,6 +3436,45 @@ fn every_rail_row_clicks_the_file_drawn_on_it_while_its_head_grows() {
     }
 }
 
+/// frictions25 R6, fixed: the chat narrows beside the review's rail only where the rail is then drawn — at 120
+/// columns it isn't (the code would have 84, under its 90), so the chat keeps the width it has without a review
+/// (it lost 12 columns for nothing, and its rows wrapped: e2e `follow_shows_each_edit_and_replays_the_turn`);
+/// at 160 the chat gives way to the rail and the code.
+#[test]
+fn the_chat_narrows_for_the_review_rail_only_where_the_rail_is_drawn() {
+    use crate::codereview::{Base, CodeReview, File};
+    let scratch = crate::scratch::Scratch::new("rail-chat-width");
+    let dir = scratch.to_path_buf();
+    let files: Vec<File> = ["src/a.rs", "src/b.rs"]
+        .iter()
+        .map(|rel| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x\n").unwrap();
+            File { path, rel: rel.to_string(), added: 1, removed: 0, new: false, gone: false, binary: false }
+        })
+        .collect();
+    for (w, review_chat, rail) in [(120, 48, false), (160, crate::sizes::CHAT_MIN, true)] {
+        let mut s = Shot::new(w, 30);
+        s.ed.session.root = dir.clone();
+        s.ed.config.llm.command = "sh".into();
+        s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut s.ed);
+        s.ed.session.chat.as_mut().unwrap().focused = false;
+        s.ed.open(&files[0].path).unwrap();
+        s.frame();
+        let alone = s.ed.screen.chat_w;
+        assert_eq!(alone, crate::sizes::widths(w as usize, true, false, Default::default()).chat);
+        s.ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.clone(), files.clone()));
+        s.frame();
+        assert_eq!(
+            s.ed.screen.chat_w, review_chat,
+            "{w} columns: the chat beside the review (alone: {alone})"
+        );
+        assert_eq!(s.ed.screen.rail_w > 0, rail, "{w} columns: the rail drawn");
+    }
+}
+
 /// #179: a turn's review of 80 files in folders (~78 met), beside the chat, at heights from small to tall:
 /// the rail's rows stay inside it — its counts (`N of 80 viewed`) at the top and its keys at the bottom
 /// always in sight, the files between them counted above and below (`↑ a more` · shown · `↓ b more` = 80);
