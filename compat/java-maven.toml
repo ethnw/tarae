@@ -5,6 +5,7 @@ pack = "java"
 tools = ["mvn", "java"]
 prewarm = ["mvn -B -q dependency:go-offline", "mvn -B -q package"]
 watch = ["~/.m2"]
+image = "java"
 
 [files]
 ".gitignore" = """

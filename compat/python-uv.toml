@@ -7,6 +7,7 @@ prewarm = ["uv sync"]
 # (the Pythons and tools uv installs — not its cache, `~/.cache/uv`: with the wheels it unpacks it's past a tree's
 # 200,000 entries; no run writes there while the sandbox closes it)
 watch = ["~/.local/share/uv"]
+image = "python"
 
 [files]
 ".gitignore" = """

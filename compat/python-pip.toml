@@ -9,6 +9,10 @@ prewarm = [
     ".venv/bin/pip download -q -d .wheels setuptools",
 ]
 watch = ["~/Library/Caches/pip"]
+image = "python"
+
+[linux]
+watch = ["~/.cache/pip"]
 
 [files]
 ".gitignore" = """

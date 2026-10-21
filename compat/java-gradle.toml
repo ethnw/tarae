@@ -16,6 +16,7 @@ prewarm = [
 # entries at most. Not `daemon/`: kept from runs, so a run's write there is a denial in its report; what changes
 # there is the user's daemons' logs — the baseline's own `./gradlew` starts one, outside the sandbox)
 watch = ["~/.gradle/caches/modules-2", "~/.gradle/wrapper", "~/.m2"]
+image = "java"
 
 [files]
 ".gitignore" = """

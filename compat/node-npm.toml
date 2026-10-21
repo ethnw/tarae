@@ -5,6 +5,7 @@ pack = "javascript"
 tools = ["node", "npm", "npx"]
 prewarm = ["npm install --no-audit --no-fund"]
 watch = ["~/.npm"]
+image = "node"
 
 [files]
 ".gitignore" = """

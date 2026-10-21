@@ -93,16 +93,22 @@ pub struct Manifest {
     pub files: Vec<(String, String)>,
     pub prewarm: Vec<String>,
     /// Places outside the project watched for what the entries change (absolute, or `~/`): the toolchain's homes
-    /// (§2.1) — none: a folder of the harness's own.
+    /// (§2.1) — none: a folder of the harness's own. On Linux `[linux]`'s, where it names them (`~/.cache/…` for
+    /// `~/Library/Caches/…`).
     pub watch: Vec<String>,
+    /// The image its Linux runs take, `compat/linux/<image>.Dockerfile` built on `rust:<pin>` by the xtask — None:
+    /// `rust:<pin>` itself.
+    pub image: Option<String>,
     pub entries: Vec<Entry>,
 }
 
 /// Where the manifests and their fixtures are, from the checkout's root.
 pub const MANIFESTS: &str = "compat";
 
-const MANIFEST_KEYS: [&str; 9] =
-    ["stack", "pack", "tools", "fixture", "files", "prewarm", "watch", "writes", "entry"];
+const MANIFEST_KEYS: [&str; 11] =
+    ["stack", "pack", "tools", "fixture", "files", "prewarm", "watch", "writes", "entry", "image", "linux"];
+/// `[linux]`'s: the places on Linux, in place of the manifest's own.
+const LINUX_KEYS: [&str; 2] = ["watch", "writes"];
 const ENTRY_KEYS: [&str; 10] =
     ["name", "run", "cwd", "expect", "said", "cards", "settings", "writes", "pending", "baseline"];
 const ENTRY_KEYS_MORE: [&str; 2] = ["timeout", "quick"];
@@ -122,11 +128,29 @@ impl Manifest {
             Some(toml::Value::Array(a)) => a.iter().map(entry).collect::<Result<_, _>>()?,
             Some(_) => return Err("entry: an array of tables ([[entry]])".into()),
         };
+        let linux = match t.get("linux") {
+            None => toml::Table::new(),
+            Some(toml::Value::Table(l)) => {
+                unknown(l, &LINUX_KEYS, "[linux]")?;
+                l.clone()
+            }
+            Some(_) => return Err("linux: a table ([linux])".into()),
+        };
+        // (both checked on every OS; Linux's taken there where it names them)
+        let places = |key: &str| -> Result<Vec<String>, String> {
+            let (own, on_linux) =
+                (strings(&t, key)?, strings(&linux, key).map_err(|e| format!("[linux] {e}"))?);
+            if let Some(w) = own.iter().chain(&on_linux).find(|w| !w.starts_with('/') && !w.starts_with("~/"))
+            {
+                return Err(format!("{key}: {w} — absolute or ~/"));
+            }
+            Ok(match cfg!(target_os = "linux") && linux.contains_key(key) {
+                true => on_linux,
+                false => own,
+            })
+        };
         // (what every entry may change outside the project: a toolchain's own lock or last-use files)
-        let writes = strings(&t, "writes")?;
-        if let Some(w) = writes.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
-            return Err(format!("writes: {w} — absolute or ~/"));
-        }
+        let writes = places("writes")?;
         for e in &mut entries {
             e.writes.extend(writes.iter().cloned());
         }
@@ -152,9 +176,12 @@ impl Manifest {
                 .collect::<Result<_, _>>()?,
             Some(_) => return Err("files: a table of paths and their text".into()),
         };
-        let watch = strings(&t, "watch")?;
-        if let Some(w) = watch.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
-            return Err(format!("watch: {w} — absolute or ~/"));
+        let watch = places("watch")?;
+        let image = string(&t, "image")?;
+        if let Some(i) = image.as_deref().filter(|i| {
+            i.is_empty() || !i.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }) {
+            return Err(format!("image: {i} — a recipe's name in {MANIFESTS}/linux/ (a-z, 0-9, -)"));
         }
         Ok(Manifest {
             stack,
@@ -164,6 +191,7 @@ impl Manifest {
             files,
             prewarm: strings(&t, "prewarm")?,
             watch,
+            image,
             entries,
         })
     }
@@ -353,6 +381,8 @@ pub struct Verdict {
     /// Each card it raised, as `kind why → answer`.
     pub cards: Vec<String>,
     pub failed: Vec<Failure>,
+    /// The protected names the snapshot found it made, its expected end on Linux (`judge_made`): `⊘ found`.
+    pub found: Vec<String>,
 }
 
 impl Verdict {
@@ -375,6 +405,9 @@ impl Verdict {
         let rank = |c: &&str| CLASSES.iter().position(|k| k == c);
         if let Some(class) = self.failed.iter().map(Failure::class).min_by_key(rank) {
             return format!("✗ {class}");
+        }
+        if !self.found.is_empty() {
+            return "⊘ found".into();
         }
         if self.ended != Some(crate::task::State::Passed) {
             return "⊘".into();
@@ -416,6 +449,9 @@ impl std::fmt::Display for Verdict {
         };
         let ran = self.ran.as_deref().map(|r| format!(", {r}")).unwrap_or_default();
         let verdict = match (self.ok(), &self.pending) {
+            (true, _) if !self.found.is_empty() => {
+                format!("made {}, found by the snapshot as expected on Linux", self.found.join(", "))
+            }
             (true, Some(p)) => format!("refused as expected, pending {p}"),
             (true, None) => "ok".into(),
             (false, _) => format!("FAILED ({})", self.failed.len()),
@@ -479,6 +515,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         answer: String::new(),
         cards: Vec::new(),
         failed: Vec::new(),
+        found: Vec::new(),
     };
     // (no checkout, no snapshot: a protected name Landlock let it make would pass unseen)
     if !at.project.join(".git").exists() {
@@ -547,9 +584,8 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     v.ended = Some(r.state.clone());
     v.took = r.took;
     judge_report(&mut v, entry, r);
-    for m in &ed.session.made_protected {
-        v.fail(Check::Made, format!("it made {}, a protected name", m.path));
-    }
+    let made: Vec<String> = ed.session.made_protected.iter().map(|m| m.path.clone()).collect();
+    judge_made(&mut v, entry, &made, cfg!(target_os = "linux"));
     // (before the baseline: what the same command writes outside the sandbox is the user's own build's)
     let after = Tree::of(&at.watched, &allowed);
     for (path, how) in before.changes(&after) {
@@ -568,8 +604,11 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         v.failed.retain(|f| f.check != Check::Exit && !(f.check == Check::Report && f.what == NO_CAUSE));
         v.fail(Check::Outside, format!("it fails unsandboxed too — {how}"));
     }
+    // (only an entry expected to pass is timed: one expected refused that ran — `⊘ found` on Linux — made its name
+    // the first time, and its second run, finding nothing new, would say "it succeeded" again)
     if let Some(c) = &copy
         && v.ended == Some(crate::task::State::Passed)
+        && entry.expect == Expect::Pass
     {
         // (timed warm, both sides — §2.1, D9: a project's first run in the sandbox fills the run homes kept for
         // it, the user's own caches are warm already; how the second run ended and what it was denied are as
@@ -688,6 +727,38 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
             let said = report.text.replace(&g.rules(), "");
             for w in words.iter().filter(|w| !said.contains(w.as_str())) {
                 v.fail(Check::Report, format!("the report doesn't say {w}"));
+            }
+        }
+    }
+}
+
+/// The protected names the snapshot found the run made (`made`) against what was expected. Under Landlock
+/// (`landlock`) a name made where none was can't be refused (G23): the snapshot finds it after the run and its
+/// card (`ProtectedMade`) stands before what runs there next. So an entry expected refused that ran and made only
+/// names it says (`said`: the path or its file name), each found, ended as expected there — `⊘ found`, its "it succeeded" and
+/// "the report doesn't say" taken back. Anything else made is a failure: on macOS, or by an entry expected to pass.
+fn judge_made(v: &mut Verdict, entry: &Entry, made: &[String], landlock: bool) {
+    let named = |m: &String, words: &[String]| {
+        let name = Path::new(m).file_name().and_then(|n| n.to_str()).unwrap_or(m);
+        words.iter().any(|w| w == m || w == name)
+    };
+    match &entry.expect {
+        Expect::Refused(words)
+            if landlock
+                && v.ended == Some(crate::task::State::Passed)
+                && !made.is_empty()
+                && made.iter().all(|m| named(m, words)) =>
+        {
+            v.failed.retain(|f| match f.check {
+                Check::Exit => f.what != "it succeeded",
+                Check::Report => !f.what.starts_with("the report doesn't say "),
+                _ => true,
+            });
+            v.found = made.to_vec();
+        }
+        _ => {
+            for m in made {
+                v.fail(Check::Made, format!("it made {m}, a protected name"));
             }
         }
     }
@@ -1222,10 +1293,27 @@ timeout = 60
             ("files = { \".git/config\" = \"x\" }", "not in .git"),
             ("files = { \"a\" = 1 }", "its text, a string"),
             ("files = [\"a\"]", "a table of paths"),
+            ("image = \"../node\"", "a recipe's name"),
+            ("image = \"\"", "a recipe's name"),
+            ("linux = [\"x\"]", "a table"),
+            ("[linux]\nwach = []", "[linux] has no key wach"),
+            ("[linux]\nwatch = [\"cache\"]", "absolute or ~/"),
+            ("[linux]\nwrites = [\"cache\"]", "absolute or ~/"),
         ] {
             let r = Manifest::parse(&format!("stack = \"s\"\n{top}"));
             assert!(r.as_ref().is_err_and(|r| r.contains(why)), "{top}: {r:?}");
         }
+        // (`[linux]`'s places stand for the manifest's own there, the others' where it names none)
+        let m = Manifest::parse(
+            "stack = \"s\"\nimage = \"go\"\nwatch = [\"~/Library/Caches/go-build\"]\nwrites = [\"~/w\"]\n\
+             [linux]\nwatch = [\"~/.cache/go-build\"]\n[[entry]]\nname = \"e\"\nrun = \"x\"\nexpect = \"pass\"",
+        )
+        .unwrap();
+        let watch = if cfg!(target_os = "linux") { "~/.cache/go-build" } else { "~/Library/Caches/go-build" };
+        assert_eq!(
+            (m.image.as_deref(), &m.watch[..], &m.entries[0].writes[..]),
+            (Some("go"), &[watch.to_string()][..], &["~/w".to_string()][..])
+        );
     }
 
     #[test]
@@ -1241,6 +1329,12 @@ timeout = 60
                 .unwrap_or_else(|e| panic!("{MANIFESTS}/{stack}.toml: {e}"));
             assert_eq!(m.stack, stack, "its stack is its file's name");
             assert!(!m.tools.is_empty() && !m.watch.is_empty(), "{stack}: its tools and its homes");
+            if let Some(i) = &m.image {
+                assert!(
+                    dir.join("linux").join(format!("{i}.Dockerfile")).is_file(),
+                    "{stack}: no recipe {i}"
+                );
+            }
             // (§9, piece 2: a protected name made where none is — the case only the snapshot catches on Linux)
             assert!(
                 m.entries.iter().any(|e| matches!(e.expect, Expect::Refused(_)) && e.run.contains("sub")),
@@ -1364,7 +1458,8 @@ timeout = 60
 
     /// A protected name, judged by what happened: refused, its cause is in the report (a pass expected fails
     /// naming it; a refusal expected passes only by its words); made — Landlock can't refuse a name made where
-    /// none was (G23) — the snapshot finds it and the entry fails as made, whatever was expected, never ok. Two
+    /// none was (G23) — the snapshot finds it: an entry expected refused that says the name ends `⊘ found`
+    /// (`judge_made`), any other fails as made. Two
     /// places: the root, which holds `.git` (Landlock grants it entry by entry: refused everywhere), and `sub/`,
     /// which holds no protected name (made on Linux: the case the snapshot is there for).
     #[test]
@@ -1388,8 +1483,20 @@ timeout = 60
                 let v = run(&entry(&text), at);
                 let at_ = format!("{name}, {expected:?}: {v}");
                 if path.exists() {
-                    assert!(failed(&v, Check::Made).iter().any(|f| f.contains(name)), "made, unsaid: {at_}");
-                    assert_eq!(v.cell(), "✗ protected-name", "never ok: {at_}");
+                    if expected == "refused" {
+                        assert_eq!(
+                            (v.cell(), &v.found[..]),
+                            ("⊘ found".into(), &[name.to_string()][..]),
+                            "{at_}"
+                        );
+                        assert!(v.to_string().contains("found by the snapshot"), "{at_}");
+                    } else {
+                        assert!(
+                            failed(&v, Check::Made).iter().any(|f| f.contains(name)),
+                            "made, unsaid: {at_}"
+                        );
+                        assert_eq!(v.cell(), "✗ protected-name", "{at_}");
+                    }
                     std::fs::remove_file(&path).unwrap();
                     made.push(name);
                     continue;
@@ -1463,6 +1570,7 @@ timeout = 60
             answer: String::new(),
             cards: Vec::new(),
             failed: Vec::new(),
+            found: Vec::new(),
         };
         assert_eq!(v.cell(), "✓ 1.7×");
         v.took = Some(Duration::from_millis(1100));
@@ -1505,10 +1613,48 @@ timeout = 60
         assert!(failed(&v, Check::Outside).is_empty(), "{v}");
     }
 
+    /// A protected name made: under Landlock, by an entry expected refused that says it, the expected end (`⊘
+    /// found`, its "succeeded" taken back); on macOS, by an entry expected to pass, or a name it doesn't say, a
+    /// failure.
+    #[test]
+    fn a_name_made_under_landlock_is_found_only_where_refused_was_expected() {
+        let judged = |text: &str, made: &[&str], landlock: bool| {
+            let e = entry(text);
+            let mut v = Verdict {
+                entry: "e".into(),
+                pending: None,
+                ended: Some(crate::task::State::Passed),
+                ran: None,
+                took: None,
+                baseline: None,
+                cold: None,
+                answer: String::new(),
+                cards: Vec::new(),
+                failed: Vec::new(),
+                found: Vec::new(),
+            };
+            // (as `judge_report` leaves a refusal expected that passed)
+            if matches!(e.expect, Expect::Refused(_)) {
+                v.fail(Check::Exit, "it succeeded");
+                v.fail(Check::Report, "the report doesn't say Makefile");
+            }
+            let made: Vec<String> = made.iter().map(|m| m.to_string()).collect();
+            judge_made(&mut v, &e, &made, landlock);
+            v.cell()
+        };
+        let refused = "name = \"m\"\nrun = \"x\"\nexpect = \"refused\"\nsaid = [\"Makefile\"]";
+        assert_eq!(judged(refused, &["sub/Makefile"], true), "⊘ found");
+        assert_eq!(judged(refused, &["sub/Makefile"], false), "✗ protected-name");
+        assert_eq!(judged(refused, &["sub/Makefile", "sub/build.rs"], true), "✗ protected-name");
+        assert_eq!(judged(refused, &[], true), "✗ unexplained", "nothing made, nothing refused");
+        assert_eq!(judged(&e_text("x"), &["sub/Makefile"], true), "✗ protected-name");
+    }
+
     /// The driver `cargo xtask compat` runs (ignored: it needs the stacks' toolchains, and runs their `prewarm`
     /// outside the sandbox): each stack of `TARAE_COMPAT_STACKS` (comma-separated, `compat/<stack>.toml`), its
     /// entries in `TARAE_COMPAT_LANE` (`quick`: the quick ones; else all), each verdict on stderr and its cell on
-    /// stdout as a `COMPAT` line (`line`) for the xtask's table. Without the variable it does nothing.
+    /// stdout as a `COMPAT` line (`line`) for the xtask's table — on a Linux tier's column (`TARAE_COMPAT_TIER`:
+    /// `A+`, `C`) a run at another tier ends the stack there, said. Without the variable it does nothing.
     #[test]
     #[ignore]
     fn driver() {
@@ -1593,10 +1739,24 @@ timeout = 60
                 Err(e) => return skip(&format!("prewarm didn't start: {cmd}: {e}")),
             }
         }
+        // (a Linux column's tier, `TARAE_COMPAT_TIER`: a run at another isn't that column's — the rest of the stack
+        // skipped, said where it ran)
+        let tier = std::env::var("TARAE_COMPAT_TIER").ok().filter(|t| !t.is_empty());
+        let mut elsewhere: Option<String> = None;
         let cells = entries.iter().map(|e| {
+            if let Some(why) = &elsewhere {
+                return (e.name.clone(), why.clone());
+            }
             let v = run(e, &at);
             eprint!("{stack} {v}");
-            (e.name.clone(), v.cell())
+            match (&tier, &v.ran) {
+                (Some(t), Some(ran)) if *ran != format!("sandbox {t}") => {
+                    let why = format!("– {ran} here, not {t}");
+                    elsewhere = Some(why.clone());
+                    (e.name.clone(), why)
+                }
+                _ => (e.name.clone(), v.cell()),
+            }
         });
         cells.collect()
     }

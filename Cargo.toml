@@ -83,6 +83,19 @@ debug = "line-tables-only"
 split-debuginfo = "unpacked"
 strip = false
 
+# The compatibility suite's build (`cargo xtask compat`): optimized, as D9 times a sandboxed run against the same
+# command outside it and on Linux tarae's own supervisor serves the run's socket calls — an opt-level 0 tarae would
+# slow only the sandboxed side. No LTO and 16 units: `perf`'s fat LTO of the test binary was killed out of memory
+# in an 11.7 GiB colima VM (compat piece 4, 2026-10-16); without it the whole-program inlining the suite's times
+# don't depend on goes, not the optimizations.
+[profile.compat-tests]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+strip = false
+
 
 [features]
 # Embed more common grammars (`bundle = true` in languages.toml — C sources in runtime/grammars.tar.gz).

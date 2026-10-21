@@ -7,6 +7,11 @@ prewarm = ["cargo fetch"]
 # (cargo's home but `build/`: the build folders `build.build-dir` puts there are each checkout's — this one's
 # the policy opens for it — and with every other checkout's they're past a tree's 200,000 entries)
 watch = ["~/.cargo/registry", "~/.cargo/git", "~/.cargo/bin"]
+# (no image: rust:<pin> itself)
+
+# (the image's CARGO_HOME; its registry is the tarae-registry volume every Linux run shares)
+[linux]
+watch = ["/usr/local/cargo/registry", "/usr/local/cargo/git", "/usr/local/cargo/bin"]
 
 [files]
 ".gitignore" = """

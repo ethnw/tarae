@@ -6,6 +6,11 @@ tools = ["node", "pnpm"]
 prewarm = ["pnpm install"]
 # (pnpm's store, state and cache where macOS puts them)
 watch = ["~/Library/pnpm", "~/Library/Caches/pnpm", "~/.local/state/pnpm"]
+image = "node"
+
+# (where Linux puts them, and corepack's downloaded pnpm)
+[linux]
+watch = ["~/.local/share/pnpm", "~/.cache/pnpm", "~/.local/state/pnpm", "~/.cache/node/corepack"]
 
 [files]
 ".gitignore" = """

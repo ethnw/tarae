@@ -1,9 +1,12 @@
-//! `cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run]` — the "must work"
+//! `cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all [--linux-only]] [--dry-run]` — the "must work"
 //! compatibility suite (`target/sb/compat-plan.md` §4–§5). tarae's tests built under `perf` (a debug supervisor
 //! serving every connect would skew the times), then the ignored driver (`compat::tests::driver`, `src/compat.rs`)
 //! run here and, asked, on Linux tiers in Docker through `cargo xtask linux` — A+ with `--userns`, C under Docker's
-//! own profiles (Ubuntu 24.04's restriction's tier), in `tarae-compat-<stack>` where that image is built (piece 4),
-//! else the toolchain image (a stack's missing tools are skipped cells). The driver makes each stack's project from
+//! own profiles (Ubuntu 24.04's restriction's tier) (`--linux-only`: not here). On Linux a stack runs in the image
+//! its manifest names (`image`: `compat/linux/<image>.Dockerfile` on `rust:<pin>`, built here when its tag — the
+//! recipe's hash — isn't there yet, the tags it built before dropped; none: `rust:<pin>`) with its own volume as
+//! home (`tarae-compat-<stack>-cache`: the caches its pre-warm fills, kept between runs). After them a line says
+//! what compat's images and volumes take against its 10 GB cap (§7 D4), and the disk. The driver makes each stack's project from
 //! its fixture (`compat/<stack>.toml`, `compat/<fixture>/`), runs its `prewarm` outside the sandbox, then each entry
 //! of the lane as Claude's run (`quick`: the entries marked so).
 //!
@@ -17,11 +20,10 @@ use std::io::BufRead as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::linux::quoted;
+use crate::linux::{COMPAT, quoted};
 use crate::{Result, root};
 
-const USAGE: &str =
-    "usage: cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run]";
+const USAGE: &str = "usage: cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all [--linux-only]] [--dry-run]";
 
 /// The manifests and fixtures, and where the tables and their history go, from the checkout's root.
 const MANIFESTS: &str = "compat";
@@ -29,8 +31,15 @@ const OUT: &str = "target/compat";
 const HISTORY: &str = "target/compat/history.tsv";
 const HISTORY_HEAD: &str = "date\tcommit\tlane\tcolumn\tstack\tentry\tcell\n";
 
-/// `cargo test` building tarae's own tests under `perf`, and the driver's arguments after it.
-const TEST: [&str; 5] = ["test", "--profile", "perf", "--bin", "tarae"];
+/// `cargo test` building tarae's own tests under `compat-tests` (optimized, no LTO: Cargo.toml says why), and the
+/// driver's arguments after it.
+const TEST: [&str; 5] = ["test", "--profile", "compat-tests", "--bin", "tarae"];
+
+/// The one Linux build of a round: `cargo xtask linux`'s arguments, the binary kept in the checkout's target
+/// volume for every stack's `test --kept` (each container's fresh clone would otherwise build the crate again),
+/// on two jobs — the VM is shared (11.7 GiB, a test cluster beside it).
+const KEEP: [&str; 8] =
+    ["--env", "CARGO_BUILD_JOBS=2", "test", "--keep", "--profile", "compat-tests", "--bin", "tarae"];
 const DRIVE: [&str; 6] =
     ["--", "--ignored", "--exact", "compat::tests::driver", "--nocapture", "--test-threads=1"];
 
@@ -68,6 +77,14 @@ impl Tier {
         }
     }
 
+    /// The tier as tarae's runs say it (`sandbox A+`): the driver checks each run was at it (`TARAE_COMPAT_TIER`).
+    fn word(self) -> &'static str {
+        match self {
+            Tier::APlus => "A+",
+            Tier::C => "C",
+        }
+    }
+
     /// `cargo xtask linux`'s arguments for it.
     fn args(self) -> &'static [&'static str] {
         match self {
@@ -82,11 +99,13 @@ struct Ask {
     stacks: Vec<String>,
     lane: Lane,
     linux: Vec<Tier>,
+    /// This machine's column too (`--linux-only`: only the Linux tiers').
+    here: bool,
     dry: bool,
 }
 
 fn ask(args: &[String]) -> Result<Ask> {
-    let mut a = Ask { stacks: Vec::new(), lane: Lane::Gate, linux: Vec::new(), dry: false };
+    let mut a = Ask { stacks: Vec::new(), lane: Lane::Gate, linux: Vec::new(), here: true, dry: false };
     let mut it = args.iter().map(String::as_str);
     while let Some(x) = it.next() {
         match x {
@@ -107,12 +126,16 @@ fn ask(args: &[String]) -> Result<Ask> {
                 }
             }
             "--dry-run" => a.dry = true,
+            "--linux-only" => a.here = false,
             s if s.starts_with('-') => return Err(format!("{s}? — {USAGE}")),
             s if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => {
                 a.stacks.push(s.into())
             }
             s => return Err(format!("{s}: a stack's name — {USAGE}")),
         }
+    }
+    if !a.here && a.linux.is_empty() {
+        return Err(format!("--linux-only: with --linux a+, c or all — {USAGE}"));
     }
     Ok(a)
 }
@@ -126,6 +149,8 @@ struct Stack {
     /// The files its manifest writes into the project.
     files: usize,
     prewarm: Vec<String>,
+    /// The image its Linux runs take (`compat/linux/<image>.Dockerfile`) — None: `rust:<pin>` itself.
+    image: Option<String>,
     rows: Vec<Row>,
 }
 
@@ -154,6 +179,7 @@ fn stack(name: &str, text: &str) -> Result<Stack> {
         fixture: s(&t, "fixture"),
         files: t.get("files").and_then(|f| f.as_table()).map_or(0, |f| f.len()),
         prewarm: prewarm.iter().filter_map(|p| p.as_str().map(String::from)).collect(),
+        image: s(&t, "image"),
         rows: rows.collect(),
     })
 }
@@ -193,27 +219,197 @@ fn envs(stacks: &[Stack], lane: Lane) -> [(&'static str, String); 2] {
     [("TARAE_COMPAT_STACKS", names.join(",")), ("TARAE_COMPAT_LANE", lane.word().into())]
 }
 
-/// The image a stack's Linux runs take where it's built (piece 4).
-fn image_of(stack: &str) -> String {
-    format!("tarae-compat-{stack}")
+/// The recipes, from the checkout's root: `<image>.Dockerfile`, each `FROM $BASE` (`rust:<pin>`).
+const RECIPES: &str = "compat/linux";
+
+/// The label on what compat makes, naming its recipe or stack.
+const LABEL: &str = "tarae.compat";
+
+/// Where a stack's volume goes in its container: the home of root, whom the checks run as — so every
+/// toolchain's cache (`~/.npm`, `~/.cache/…`, `~/go`, `~/.gradle`, `~/.m2`) and tarae's own kept run homes are
+/// where a user has them, and still there the next run.
+const HOME: &str = "/root";
+
+/// compat's share of the Docker disk (§7 D4): said after each Linux run, its images and volumes against it.
+const CAP: u64 = 10_000_000_000;
+
+/// A stack's volume: its pre-warmed caches, mounted as its container's home (`HOME`).
+fn volume_of(stack: &str) -> String {
+    format!("{COMPAT}{stack}-cache")
 }
 
-/// `cargo xtask linux`'s arguments for one stack on `tier`: the driver's variables, the tier, the image, the driver.
+/// The tag `recipe` builds on `base`: `tarae-compat-<image>:<minor>-<hash>`, the hash (FNV-1a) of both — a
+/// changed recipe or Rust is a tag of its own, and what the old one built is stale.
+fn tag(image: &str, base: &str, recipe: &str) -> String {
+    let hash = (base.bytes().chain([0]).chain(recipe.bytes()))
+        .fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    let minor = base.rsplit(':').next().unwrap_or(base);
+    format!("{COMPAT}{image}:{minor}-{:012x}", hash >> 16)
+}
+
+/// `docker build`'s arguments for `tag`: the recipe on stdin with no context (it fetches what it needs), `base`
+/// its `BASE`, labelled as compat's.
+fn build_args(tag: &str, image: &str, base: &str) -> Vec<String> {
+    ["build", "-t", tag, "--label", &format!("{LABEL}={image}"), "--build-arg", &format!("BASE={base}"), "-"]
+        .map(String::from)
+        .into()
+}
+
+/// `docker volume create`'s arguments for a stack's volume (one that's there is left as it is).
+fn volume_args(stack: &str) -> Vec<String> {
+    ["volume", "create", "--label", &format!("{LABEL}={stack}"), &volume_of(stack)].map(String::from).into()
+}
+
+/// `cargo xtask linux`'s arguments for one stack on `tier`: the driver's variables, the tier, the image (None:
+/// `rust:<pin>`), the stack's volume as home, the driver.
 fn linux_args(s: &Stack, lane: Lane, tier: Tier, image: Option<&str>) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     for (k, v) in envs(std::slice::from_ref(s), lane) {
         a.extend(["--env".into(), format!("{k}={v}")]);
     }
+    a.extend(["--env".into(), format!("TARAE_COMPAT_TIER={}", tier.word())]);
     a.extend(tier.args().iter().map(|t| t.to_string()));
     if let Some(i) = image {
         a.extend(["--image".into(), i.into()]);
     }
-    a.extend(TEST.iter().chain(&DRIVE).map(|t| t.to_string()));
+    a.extend(["--volume".into(), format!("{}:{HOME}", volume_of(&s.name))]);
+    // (the binary `KEEP` built, its own arguments: the driver's, without cargo's `--`)
+    a.extend(["test", "--kept"].iter().chain(&DRIVE[1..]).map(|t| t.to_string()));
     a
 }
 
-/// What a run does, in order, as commands — what `--dry-run` prints.
-fn plan(stacks: &[Stack], lane: Lane, linux: &[Tier], cargo: &str) -> Vec<String> {
+/// The base image, `rust:<pin>`, from `rust-toolchain.toml`.
+fn base(root: &Path) -> Result<String> {
+    let toolchain = root.join("rust-toolchain.toml");
+    let text = std::fs::read_to_string(&toolchain).map_err(|e| format!("{}: {e}", toolchain.display()))?;
+    Ok(crate::linux::image(&crate::linux::pin(&text)?))
+}
+
+/// Each recipe in `RECIPES` and the tag it builds on `base`, by name.
+fn recipes(root: &Path, base: &str) -> BTreeMap<String, (String, String)> {
+    let rd = std::fs::read_dir(root.join(RECIPES)).into_iter().flatten().flatten();
+    rd.filter_map(|e| {
+        let name = e.file_name().to_str()?.strip_suffix(".Dockerfile")?.to_string();
+        let recipe = std::fs::read_to_string(e.path()).ok()?;
+        Some((name.clone(), (tag(&name, base, &recipe), recipe)))
+    })
+    .collect()
+}
+
+/// The image `name`'s recipe builds, built when it isn't yet (its output passed on) — the tags it built before
+/// dropped then. Err: why there's none.
+fn built(root: &Path, base: &str, name: &str) -> Result<String> {
+    let Some((tag, recipe)) = recipes(root, base).remove(name) else {
+        return Err(format!("no recipe {RECIPES}/{name}.Dockerfile"));
+    };
+    let there = Command::new("docker").args(["image", "inspect", "--format", ".", &tag]).output();
+    if there.is_ok_and(|o| o.status.success()) {
+        return Ok(tag);
+    }
+    eprintln!("building {tag} from {RECIPES}/{name}.Dockerfile on {base} …");
+    let mut c = Command::new("docker");
+    c.args(build_args(&tag, name, base)).stdin(Stdio::piped()).stdout(Stdio::inherit());
+    let mut child = c.spawn().map_err(|e| format!("docker build: {e}"))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    std::io::Write::write_all(&mut stdin, recipe.as_bytes()).map_err(|e| format!("docker build: {e}"))?;
+    drop(stdin);
+    if !child.wait().map_err(|e| format!("docker build: {e}"))?.success() {
+        return Err(format!("building {tag} failed (above)"));
+    }
+    drop_stale(root);
+    Ok(tag)
+}
+
+/// The images of compat's no recipe builds now, out of `listed` (`repository:tag` a line, every image of compat's):
+/// a recipe changed or gone, an older Rust.
+fn stale(listed: &str, current: &[String]) -> Vec<String> {
+    let ours = listed.lines().map(str::trim).filter(|l| l.starts_with(COMPAT) && !l.ends_with(":<none>"));
+    ours.filter(|l| !current.iter().any(|c| c == l)).map(String::from).collect()
+}
+
+/// Drops compat's images no recipe builds now (`stale`), each said — `cargo xtask linux prune`'s, and each
+/// build's after it.
+pub fn drop_stale(root: &Path) {
+    let Ok(base) = base(root) else { return };
+    let current: Vec<String> = recipes(root, &base).into_values().map(|(t, _)| t).collect();
+    let reference = format!("reference={COMPAT}*");
+    let ls = Command::new("docker")
+        .args(["image", "ls", "--filter", &reference, "--format", "{{.Repository}}:{{.Tag}}"])
+        .output();
+    let listed = ls.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    for old in stale(&listed, &current) {
+        match Command::new("docker").args(["image", "rm", &old]).output() {
+            Ok(o) if o.status.success() => eprintln!("dropped image {old} (its recipe builds another now)"),
+            _ => eprintln!("kept image {old} for now: Docker didn't drop it (in use?)"),
+        }
+    }
+}
+
+/// The line said after the Linux runs: what compat's images (`images`: `docker system df -v`'s, repository and
+/// unique size a line — the shared `rust:<pin>` not counted) and volumes (`volumes`: `linux::df`'s) take against
+/// `CAP`, each one's size, and the disk.
+fn cap_line(images: &str, volumes: &str, disk: Option<crate::linux::Disk>) -> String {
+    use crate::linux::{bytes, gb};
+    let ours = |text: &str| -> Vec<(String, u64)> {
+        let rows = text.lines().filter_map(|l| {
+            let mut cols = l.split('\t').map(str::trim);
+            let (name, size) = (cols.next()?, bytes(cols.next()?)?);
+            name.starts_with(COMPAT).then(|| (name.strip_prefix(COMPAT).unwrap_or(name).to_string(), size))
+        });
+        rows.collect()
+    };
+    let (images, volumes) = (ours(images), ours(volumes));
+    let sum = |v: &[(String, u64)]| v.iter().map(|(_, s)| s).sum::<u64>();
+    let each =
+        |v: &[(String, u64)]| v.iter().map(|(n, s)| format!("{n} {}", gb(*s))).collect::<Vec<_>>().join(", ");
+    let total = sum(&images) + sum(&volumes);
+    let past = match total > CAP {
+        true => {
+            " — past it: `cargo xtask linux prune --all` lists them (--yes drops; the next run builds and warms again)"
+        }
+        false => "",
+    };
+    let disk = disk.map(|d| format!("; {}", crate::linux::disk_said(d))).unwrap_or_default();
+    format!(
+        "compat's Docker images and volumes take {} of its {} cap{past}: images {} ({}), volumes {} ({}){disk}",
+        gb(total),
+        gb(CAP),
+        gb(sum(&images)),
+        each(&images),
+        gb(sum(&volumes)),
+        each(&volumes),
+    )
+}
+
+/// `docker system df -v`'s images as `cap_line` reads them: repository and unique size (the layers no other image
+/// shares), a line.
+const IMAGES_DF: &str = "{{range .Images}}{{.Repository}}\t{{.UniqueSize}}{{println}}{{end}}";
+
+/// `cap_line` for the Docker the CLI reaches, the disk from a container of `base` (its `/`: the machine's disk,
+/// where the volumes are too) — Err: why it couldn't be measured.
+fn say_cap(base: &str) -> std::result::Result<String, String> {
+    let images = Command::new("docker").args(["system", "df", "-v", "--format", IMAGES_DF]).output();
+    let images = images.map_err(|e| e.to_string())?;
+    if !images.status.success() {
+        return Err(String::from_utf8_lossy(&images.stderr).trim().to_string());
+    }
+    let volumes = crate::linux::df(&mut Command::new("docker"))?;
+    let df = Command::new("docker").args(["run", "--rm", base, "df", "-P", "/"]).output();
+    let disk =
+        df.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).lines().nth(1).and_then(crate::linux::disk));
+    Ok(cap_line(&String::from_utf8_lossy(&images.stdout), &volumes, disk))
+}
+
+/// What a run does, in order, as commands — what `--dry-run` prints. `recipes`: each recipe's tag and text by
+/// name (`recipes`), on `base`.
+fn plan(
+    stacks: &[Stack],
+    lane: Lane,
+    linux: &[Tier],
+    cargo: &str,
+    base: &str,
+    recipes: &BTreeMap<String, (String, String)>,
+) -> Vec<String> {
     let mut out = vec![format!("{cargo} {} --no-run --quiet", TEST.join(" "))];
     for s in stacks {
         let from = match (&s.fixture, s.files) {
@@ -229,11 +425,42 @@ fn plan(stacks: &[Stack], lane: Lane, linux: &[Tier], cargo: &str) -> Vec<String
     }
     let set: Vec<String> = envs(stacks, lane).iter().map(|(k, v)| format!("{k}={v}")).collect();
     out.push(format!("{} {cargo} {} {}", set.join(" "), TEST.join(" "), DRIVE.join(" ")));
+    if linux.is_empty() {
+        return out;
+    }
+    let mut images: Vec<&str> = stacks.iter().filter_map(|s| s.image.as_deref()).collect();
+    images.sort();
+    images.dedup();
+    for i in &images {
+        match recipes.get(*i) {
+            Some((tag, _)) => {
+                out.push(format!(
+                    "# {i}: built where {tag} isn't yet, then the tags its recipe built before dropped"
+                ));
+                let args: Vec<String> = build_args(tag, i, base).iter().map(|a| quoted(a)).collect();
+                out.push(format!("docker {} < {RECIPES}/{i}.Dockerfile", args.join(" ")));
+            }
+            None => {
+                out.push(format!("# {i}: no recipe {RECIPES}/{i}.Dockerfile — its stacks' cells skipped"))
+            }
+        }
+    }
+    for s in stacks {
+        out.push(format!("docker {}", volume_args(&s.name).join(" ")));
+    }
+    out.push("# the one build every stack's Linux run takes, kept in the checkout's target volume".into());
+    out.push(format!("cargo xtask linux {}", KEEP.map(quoted).join(" ")));
     for t in linux {
         for s in stacks {
-            let i = image_of(&s.name);
-            out.push(format!("# {}, {}: --image {i} where it's built, else none", s.name, t.column()));
-            let args: Vec<String> = linux_args(s, lane, *t, Some(&i)).iter().map(|a| quoted(a)).collect();
+            let tag = s.image.as_deref().and_then(|i| recipes.get(i)).map(|(t, _)| t.as_str());
+            out.push(format!(
+                "# {}, {}: in {}, home {}",
+                s.name,
+                t.column(),
+                tag.unwrap_or(base),
+                volume_of(&s.name)
+            ));
+            let args: Vec<String> = linux_args(s, lane, *t, tag).iter().map(|a| quoted(a)).collect();
             out.push(format!("cargo xtask linux {}", args.join(" ")));
         }
     }
@@ -383,28 +610,62 @@ pub fn run(args: &[String]) -> Result<()> {
     let root = root();
     let stacks = stacks(&root.join(MANIFESTS), &a.stacks)?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let base = base(&root)?;
     if a.dry {
-        for l in plan(&stacks, a.lane, &a.linux, &cargo) {
+        let here = plan(&stacks, a.lane, &[], &cargo, &base, &BTreeMap::new());
+        let all = plan(&stacks, a.lane, &a.linux, &cargo, &base, &recipes(&root, &base));
+        // (`--linux-only`: what the plan says past this machine's own)
+        for l in all.iter().skip(if a.here { 0 } else { here.len() }) {
             println!("{l}");
         }
         return Ok(());
     }
-    eprintln!("building tarae's tests under perf …");
-    let mut build = Command::new(&cargo);
-    build.args(TEST).args(["--no-run", "--quiet"]).current_dir(&root);
-    if !build.status().map_err(|e| format!("cargo: {e}"))?.success() {
-        return Err("building tarae's tests under perf failed".into());
-    }
     let mut cells = Cells::new();
-    let mut columns = vec![here()];
-    let mut c = Command::new(&cargo);
-    c.args(TEST).args(DRIVE).current_dir(&root).envs(envs(&stacks, a.lane));
-    fill(&mut cells, here(), &stacks, a.lane, &driven(c)?);
+    let mut columns = Vec::new();
+    if a.here {
+        eprintln!("building tarae's tests under perf …");
+        let mut build = Command::new(&cargo);
+        build.args(TEST).args(["--no-run", "--quiet"]).current_dir(&root);
+        if !build.status().map_err(|e| format!("cargo: {e}"))?.success() {
+            return Err("building tarae's tests under perf failed".into());
+        }
+        columns.push(here());
+        let mut c = Command::new(&cargo);
+        c.args(TEST).args(DRIVE).current_dir(&root).envs(envs(&stacks, a.lane));
+        fill(&mut cells, here(), &stacks, a.lane, &driven(c)?);
+    }
     let docker = match a.linux.is_empty() {
         true => Ok(()),
         false => crate::linux::reachable(&mut Command::new("docker")),
     };
     let xtask = std::env::current_exe().map_err(|e| format!("this xtask: {e}"))?;
+    // (each image built once and each stack's volume made once, before any tier — Err: the stack's cells skipped
+    // with why)
+    let mut ready: BTreeMap<String, std::result::Result<Option<String>, String>> = BTreeMap::new();
+    if docker.is_ok() && !a.linux.is_empty() {
+        let mut images: BTreeMap<String, Result<String>> = BTreeMap::new();
+        for s in &stacks {
+            let image = match &s.image {
+                None => Ok(None),
+                Some(i) => {
+                    images.entry(i.clone()).or_insert_with(|| built(&root, &base, i)).clone().map(Some)
+                }
+            };
+            let made = Command::new("docker").args(volume_args(&s.name)).output();
+            let image = image.and_then(|i| match made {
+                Ok(o) if o.status.success() => Ok(i),
+                _ => Err(format!("docker volume create {} failed", volume_of(&s.name))),
+            });
+            ready.insert(s.name.clone(), image);
+        }
+        eprintln!("the one Linux build of tarae's tests, kept for every stack …");
+        let mut keep = Command::new(&xtask);
+        keep.arg("linux").args(KEEP).current_dir(&root);
+        if !keep.status().map_err(|e| format!("cargo xtask linux: {e}"))?.success() {
+            let why = "the Linux build of tarae's tests failed (above)".to_string();
+            ready.values_mut().for_each(|r| *r = Err(why.clone()));
+        }
+    }
     for t in &a.linux {
         columns.push(t.column());
         for s in &stacks {
@@ -412,36 +673,48 @@ pub fn run(args: &[String]) -> Result<()> {
                 Err(why) => {
                     Driven { skipped: Some(format!("Docker isn't reachable: {why}")), ..Driven::default() }
                 }
-                Ok(()) => {
-                    let i = image_of(&s.name);
-                    let built =
-                        Command::new("docker").args(["image", "inspect", "--format", ".", &i]).output();
-                    let image = built.is_ok_and(|o| o.status.success()).then_some(i);
-                    eprintln!(
-                        "{}, {}: in {}",
-                        s.name,
-                        t.column(),
-                        image.as_deref().unwrap_or("the toolchain's image")
-                    );
-                    let mut c = Command::new(&xtask);
-                    c.arg("linux").args(linux_args(s, a.lane, *t, image.as_deref())).current_dir(&root);
-                    driven(c)?
-                }
+                Ok(()) => match ready.get(&s.name).cloned().unwrap_or(Ok(None)) {
+                    Err(why) => Driven { skipped: Some(why), ..Driven::default() },
+                    Ok(image) => {
+                        let on = image.as_deref().unwrap_or(&base);
+                        eprintln!("{}, {}: in {on}, home {}", s.name, t.column(), volume_of(&s.name));
+                        let mut c = Command::new(&xtask);
+                        c.arg("linux").args(linux_args(s, a.lane, *t, image.as_deref())).current_dir(&root);
+                        driven(c)?
+                    }
+                },
             };
             fill(&mut cells, t.column(), std::slice::from_ref(s), a.lane, &d);
         }
     }
+    let cap = match (&docker, a.linux.is_empty()) {
+        (Ok(()), false) => {
+            Some(say_cap(&base).unwrap_or_else(|why| format!("compat's share not measured: {why}")))
+        }
+        _ => None,
+    };
     let (date, commit) = (crate::perf::today(), crate::perf::commit(&root));
     let file = root.join(HISTORY);
     let past = std::fs::read_to_string(&file).unwrap_or_default();
     let head = format!("{date}, {commit}, the {} lane", a.lane.word());
     let md = table(&head, &columns, &stacks, a.lane, &cells, &past);
-    let out = root.join(OUT).join(format!("{date}-{}.md", std::env::consts::OS));
+    // (named by its columns: this machine's OS where it ran here, `linux` where Linux tiers did)
+    let mut on: Vec<&str> = Vec::new();
+    if a.here {
+        on.push(std::env::consts::OS);
+    }
+    if !a.linux.is_empty() && !on.contains(&"linux") {
+        on.push("linux");
+    }
+    let out = root.join(OUT).join(format!("{date}-{}.md", on.join("-")));
     std::fs::create_dir_all(root.join(OUT)).map_err(|e| e.to_string())?;
     std::fs::write(&out, &md).map_err(|e| format!("{}: {e}", out.display()))?;
     let kept = history(&past, (&date, &commit, a.lane), &cells);
     std::fs::write(&file, kept).map_err(|e| format!("{}: {e}", file.display()))?;
     println!("{md}\nwritten to {}, kept in {}", out.display(), file.display());
+    if let Some(cap) = cap {
+        println!("{cap}");
+    }
     match cells.values().filter(|c| c.starts_with('✗')).count() {
         0 => Ok(()),
         n => Err(format!("{n} cells failed (✗)")),
@@ -459,6 +732,7 @@ mod tests {
     const NODE: &str = r#"
 stack = "node-npm"
 fixture = "node-npm"
+image = "node"
 prewarm = ["npm ci", "echo 'it''s warm'"]
 [[entry]]
 name = "test"
@@ -485,9 +759,11 @@ pending = "manifest-review"
                 stacks: vec!["node-npm".into(), "go".into()],
                 lane: Lane::Quick,
                 linux: vec![Tier::APlus, Tier::C],
+                here: true,
                 dry: true
             }
         );
+        assert!(!ask(&args("--linux c --linux-only")).unwrap().here);
         let a = ask(&[]).unwrap();
         assert_eq!((a.lane, a.linux.len(), a.dry), (Lane::Gate, 0, false));
         assert_eq!(ask(&args("--linux c")).unwrap().linux, vec![Tier::C]);
@@ -498,6 +774,7 @@ pending = "manifest-review"
             ("--linux b", "a+, c or all"),
             ("--repeat", "--repeat?"),
             ("../node", "a stack's name"),
+            ("--linux-only", "--linux-only: with --linux"),
         ] {
             let r = ask(&args(bad));
             assert!(r.as_ref().is_err_and(|e| e.contains(why) && e.contains(USAGE)), "{bad}: {r:?}");
@@ -527,12 +804,14 @@ pending = "manifest-review"
     #[test]
     fn the_dry_run_says_every_command_in_order_the_prewarm_too() {
         let s = [stack("node-npm", NODE).unwrap()];
-        let p = plan(&s, Lane::Gate, &[Tier::APlus, Tier::C], "cargo");
+        let tag = "tarae-compat-node:1.99-0123456789ab";
+        let recipes = BTreeMap::from([("node".to_string(), (tag.to_string(), "FROM $BASE".to_string()))]);
+        let p = plan(&s, Lane::Gate, &[Tier::APlus, Tier::C], "cargo", "rust:1.99", &recipes);
         let drive = "-- --ignored --exact compat::tests::driver --nocapture --test-threads=1";
         assert_eq!(
             p,
             [
-                "cargo test --profile perf --bin tarae --no-run --quiet".to_string(),
+                "cargo test --profile compat-tests --bin tarae --no-run --quiet".to_string(),
                 "# node-npm: the driver first runs, outside the sandbox, in a copy of compat/node-npm/:"
                     .into(),
                 "sh -c 'npm ci'".into(),
@@ -540,20 +819,47 @@ pending = "manifest-review"
                     .into(),
                 r#"sh -c 'echo '\''it'\'''\''s warm'\'''"#.into(),
                 format!(
-                    "TARAE_COMPAT_STACKS=node-npm TARAE_COMPAT_LANE=gate cargo test --profile perf --bin tarae {drive}"
+                    "TARAE_COMPAT_STACKS=node-npm TARAE_COMPAT_LANE=gate cargo test --profile compat-tests --bin tarae {drive}"
                 ),
-                "# node-npm, Linux A+: --image tarae-compat-node-npm where it's built, else none".into(),
-                "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
-                 '--userns' '--image' 'tarae-compat-node-npm' 'test' '--profile' 'perf' '--bin' 'tarae' '--' \
-                 '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
+                format!("# node: built where {tag} isn't yet, then the tags its recipe built before dropped"),
+                format!(
+                    "docker 'build' '-t' '{tag}' '--label' 'tarae.compat=node' '--build-arg' 'BASE=rust:1.99' '-' \
+                     < compat/linux/node.Dockerfile"
+                ),
+                "docker volume create --label tarae.compat=node-npm tarae-compat-node-npm-cache".into(),
+                "# the one build every stack's Linux run takes, kept in the checkout's target volume".into(),
+                "cargo xtask linux '--env' 'CARGO_BUILD_JOBS=2' 'test' '--keep' '--profile' 'compat-tests' '--bin' \
+                 'tarae'"
                     .into(),
-                "# node-npm, Linux C: --image tarae-compat-node-npm where it's built, else none".into(),
-                "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
-                 '--image' 'tarae-compat-node-npm' 'test' '--profile' 'perf' '--bin' 'tarae' '--' \
-                 '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
-                    .into(),
+                format!("# node-npm, Linux A+: in {tag}, home tarae-compat-node-npm-cache"),
+                format!(
+                    "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
+                     '--env' 'TARAE_COMPAT_TIER=A+' '--userns' '--image' '{tag}' '--volume' \
+                     'tarae-compat-node-npm-cache:/root' 'test' '--kept' \
+                     '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
+                ),
+                format!("# node-npm, Linux C: in {tag}, home tarae-compat-node-npm-cache"),
+                format!(
+                    "cargo xtask linux '--env' 'TARAE_COMPAT_STACKS=node-npm' '--env' 'TARAE_COMPAT_LANE=gate' \
+                     '--env' 'TARAE_COMPAT_TIER=C' '--image' '{tag}' '--volume' \
+                     'tarae-compat-node-npm-cache:/root' 'test' '--kept' '--ignored' '--exact' 'compat::tests::driver' '--nocapture' '--test-threads=1'"
+                ),
             ]
         );
+        // (a stack with no image runs on rust:<pin> itself; one whose recipe is missing says so)
+        let rust = [
+            stack("rust", "stack = \"rust\"").unwrap(),
+            stack("go", "stack = \"go\"\nimage = \"go\"").unwrap(),
+        ];
+        let p = plan(&rust, Lane::Gate, &[Tier::C], "cargo", "rust:1.99", &recipes);
+        assert!(
+            p.contains(&"# go: no recipe compat/linux/go.Dockerfile — its stacks' cells skipped".to_string())
+        );
+        assert!(
+            p.contains(&"# rust, Linux C: in rust:1.99, home tarae-compat-rust-cache".to_string()),
+            "{p:#?}"
+        );
+        assert!(!p.iter().any(|l| l.contains("'--image'") && l.contains("STACKS=rust")));
         // (a fixture kept in the manifest: its files said)
         let written = format!(
             "{}[files]\n\"a\" = \"x\"\n\"b/c\" = \"y\"\n",
@@ -561,7 +867,7 @@ pending = "manifest-review"
         );
         let s = [stack("node-npm", &written).unwrap()];
         assert_eq!(
-            plan(&s, Lane::Gate, &[], "cargo")[1],
+            plan(&s, Lane::Gate, &[], "cargo", "rust:1.99", &BTreeMap::new())[1],
             "# node-npm: the driver first runs, outside the sandbox, in a project of the 2 files compat/node-npm.toml writes:"
         );
     }
@@ -634,5 +940,46 @@ pending = "manifest-review"
         assert!(changes(&cells, &kept).is_empty(), "the last run is what's compared");
         let quick = table("h", &["macOS"], &s, Lane::Quick, &Cells::new(), "");
         assert_eq!(quick, "# compat — h\n\n## node-npm\n\n| command | macOS |\n|---|---|\n| test | – |\n");
+    }
+
+    /// An image's tag is its recipe's and its base's: either changed, a new tag — and what the old one built is
+    /// stale, dropped; no other image is.
+    #[test]
+    fn a_changed_recipe_is_a_new_tag_and_the_old_ones_image_is_stale() {
+        let t = tag("go", "rust:1.99", "FROM $BASE\nRUN a");
+        assert!(
+            t.starts_with("tarae-compat-go:1.99-") && t.len() == "tarae-compat-go:1.99-".len() + 12,
+            "{t}"
+        );
+        assert_eq!(t, tag("go", "rust:1.99", "FROM $BASE\nRUN a"));
+        assert_ne!(t, tag("go", "rust:1.99", "FROM $BASE\nRUN b"));
+        assert_ne!(t, tag("go", "rust:1.100", "FROM $BASE\nRUN a"));
+        let listed = format!(
+            "{t}\ntarae-compat-go:1.99-000000000000\ntarae-compat-node:1.98-111111111111\ntarae-compat-go:<none>\n\
+             tarae-trace:1.99-ab\nrust:1.99\n"
+        );
+        assert_eq!(
+            stale(&listed, std::slice::from_ref(&t)),
+            ["tarae-compat-go:1.99-000000000000", "tarae-compat-node:1.98-111111111111"]
+        );
+    }
+
+    /// The cap line counts only compat's images (their own layers) and volumes, each named, and says the way out
+    /// past `CAP`.
+    #[test]
+    fn the_cap_line_sums_compats_own_and_says_past_the_cap() {
+        let images = "tarae-compat-go\t412.5MB\nrust\t1.6GB\ntarae-compat-node\t190MB\n";
+        let volumes = "tarae-compat-go-cache\t300MB\ttarae.compat=go\ntarae-target-1.99.0-ab\t6.2GB\t\n";
+        let disk = crate::linux::disk("overlay 41000000 25000000 14000000 65% /");
+        assert_eq!(
+            cap_line(images, volumes, disk),
+            "compat's Docker images and volumes take 0.9 GB of its 10.0 GB cap: images 0.6 GB (go 0.4 GB, node 0.2 GB), \
+             volumes 0.3 GB (go-cache 0.3 GB); the disk 65 % used (26 of 42 GB)"
+        );
+        let line = cap_line("tarae-compat-java\t9.5GB\n", "tarae-compat-java-gradle-cache\t1GB\t\n", None);
+        assert!(
+            line.starts_with("compat's Docker images and volumes take 10.5 GB of its 10.0 GB cap — past it"),
+            "{line}"
+        );
     }
 }

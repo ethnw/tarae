@@ -14,6 +14,16 @@ watch = [
     "~/Library/Caches/golangci-lint",
     "~/Library/Application Support/go",
 ]
+image = "go"
+
+[linux]
+watch = [
+    "~/go/pkg/mod/cache",
+    "~/go/pkg/mod/golang.org",
+    "~/.cache/go-build",
+    "~/.cache/golangci-lint",
+    "~/.config/go",
+]
 
 [files]
 "go.mod" = """

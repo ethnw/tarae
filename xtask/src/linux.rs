@@ -1,4 +1,4 @@
-//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments] | test --installed … | test --as-user …]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
+//! `cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy|test [--repeat N] [cargo test's arguments] | test --installed … | test --as-user … | test --keep … | test --kept …]` — tarae's checks on Linux (CI runs there too: `-D dead-code` on code only
 //! macOS calls, a root container's `#` prompt …), in Docker on the pinned toolchain (`rust:<major.minor>`, and
 //! `rust-toolchain.toml`'s exact version in it). Whichever Docker the CLI reaches: `DOCKER_CONTEXT` or `DOCKER_HOST`, else the
 //! current context (here the colima VM: `colima start -p tarae-test`, `DOCKER_CONTEXT=colima-tarae-test`).
@@ -64,6 +64,19 @@ enum What {
     Installed {
         args: Vec<String>,
     },
+    /// `test --keep`: tarae's own tests built with these arguments (cargo test's: `--profile`, `--bin tarae`) and
+    /// the binary kept in the checkout's target volume (`KEPT`) — for `--kept` runs after it (`cargo xtask
+    /// compat`: one build a round, every stack's image runs it). Each container clones the tree anew, so cargo
+    /// would build the crate again in each (new mtimes).
+    Keep {
+        args: Vec<String>,
+    },
+    /// `test --kept`: the binary `--keep` kept, run with these arguments (the test binary's) — no cargo, no build,
+    /// so without the container's `CARGO_TARGET_DIR` (the target volume): the tests' own cargo runs (compat's
+    /// rust stack) build where a user's would, not into tarae's target; none kept yet, it fails saying so.
+    Kept {
+        args: Vec<String>,
+    },
     /// `test --as-user`: tarae's own tests (`--bin tarae`) built as root, then run as a user of the container's own
     /// (`AS_USER`, made there) through `setpriv` with these arguments (the test binary's), the `--env` variables
     /// kept — what runs as tarae does on a desktop, where root's ways differ (7d: root can't map itself into a run's
@@ -77,7 +90,7 @@ enum What {
 /// The user `test --as-user` runs the tests as, made in the container.
 const AS_USER: &str = "tarae-test";
 
-const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments] | test --as-user [the test binary's arguments]]";
+const USAGE: &str = "usage: cargo xtask linux [--env NAME=VALUE]… [--userns[=masked] | --docker-default] [--cgroup] [--image NAME] [--volume tarae-compat-…:/PATH] [--platform linux/<arch>] [clippy | test [--repeat N] [cargo test's arguments] | test --installed [the test binary's arguments] | test --as-user [the test binary's arguments] | test --keep [cargo test's arguments] | test --kept [the test binary's arguments]]";
 
 /// `--cgroup` (6g): the container in the machine's cgroup namespace (`--cgroupns host`), the hierarchy writable, and
 /// a folder under the container's own cgroup made first, as root — as systemd's `Delegate=yes` makes one — for the
@@ -207,6 +220,39 @@ fn image_named(args: &[String]) -> Result<(Option<String>, &[String])> {
         [i] if i == "--image" => Err(format!("--image: which one? — {USAGE}")),
         rest => Ok((None, rest)),
     }
+}
+
+/// A leading `--volume NAME:PATH`, and the arguments after it: one of compat's volumes (`COMPAT`: a stack's
+/// pre-warmed caches, its home) mounted at PATH, an absolute one — never another volume, nor a folder of the
+/// machine's.
+fn volume_named(args: &[String]) -> Result<(Option<String>, &[String])> {
+    match args {
+        [v, spec, rest @ ..] if v == "--volume" => {
+            let (name, path) = spec.split_once(':').unwrap_or_default();
+            let ok = name.len() > COMPAT.len()
+                && name.starts_with(COMPAT)
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+                && path.starts_with('/')
+                && !path.contains([':', ','])
+                && !path.split('/').any(|p| p == "..");
+            match ok {
+                true => Ok((Some(spec.clone()), rest)),
+                false => Err(format!("--volume {spec}: {COMPAT}…:/an/absolute/path — {USAGE}")),
+            }
+        }
+        [v] if v == "--volume" => Err(format!("--volume: which one? — {USAGE}")),
+        rest => Ok((None, rest)),
+    }
+}
+
+/// `docker run`'s arguments with `-v NAME:PATH` before the image (the last four: image, `sh`, `-ec`, the script)
+/// — None: as they are.
+fn with_volume(mut a: Vec<String>, volume: Option<&str>) -> Vec<String> {
+    if let Some(v) = volume {
+        let at = a.len().saturating_sub(4);
+        a.splice(at..at, ["-v".to_string(), v.to_string()]);
+    }
+    a
 }
 
 /// `docker run`'s arguments with `image` in the image's place (the fourth from the end: image, `sh`, `-ec`, the
@@ -356,6 +402,8 @@ fn what(args: &[String]) -> Result<What> {
         Some((t, rest)) if t == "test" => match rest {
             [i, rest @ ..] if i == "--installed" => What::Installed { args: rest.to_vec() },
             [u, rest @ ..] if u == "--as-user" => What::AsUser { args: rest.to_vec() },
+            [k, rest @ ..] if k == "--keep" => What::Keep { args: rest.to_vec() },
+            [k, rest @ ..] if k == "--kept" => What::Kept { args: rest.to_vec() },
             [r, n, rest @ ..] if r == "--repeat" => What::Test {
                 args: rest.to_vec(),
                 repeat: n
@@ -381,6 +429,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let (cgroups, args) = cgroup(args);
     let (named, args) = image_named(args)?;
+    let (volume, args) = volume_named(args)?;
     let (platform, what) = ask(args)?;
     let platform = platform.as_deref();
     let root = root();
@@ -423,9 +472,12 @@ pub fn run(args: &[String]) -> Result<()> {
     stop_on_signal(name.clone());
     let name = Some(name);
     let args = with_image(docker_args(&root, tree, &pin, platform, &what), named.as_deref());
-    let args = with_userns(with_envs(args, &set), ns);
+    let args = with_userns(with_envs(with_volume(args, volume.as_deref()), &set), ns);
     if let Some(i) = &named {
         eprintln!("--image: the checks run in {i}");
+    }
+    if let Some(v) = &volume {
+        eprintln!("--volume: {v}");
     }
     // (the name last: `with_cgroup` puts its options after `run --rm --cap-add SYS_PTRACE`, counted unnamed; then
     // `--docker-default` takes the capability out)
@@ -953,14 +1005,14 @@ const DISK_MARK: &str = "tarae-xtask-disk: ";
 /// The disk the target volume is on, as the container's `df -P` saw it: its share used (`Capacity`), bytes used
 /// and its size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Disk {
+pub(crate) struct Disk {
     pct: u32,
     used: u64,
     size: u64,
 }
 
 /// `df -P`'s row (filesystem, 1024-blocks, used, available, capacity, mounted on — one row under `-P`).
-fn disk(row: &str) -> Option<Disk> {
+pub(crate) fn disk(row: &str) -> Option<Disk> {
     let f: Vec<&str> = row.split_whitespace().collect();
     let [_, size, used, _, pct, ..] = f[..] else { return None };
     let kb = |n: &str| n.parse::<u64>().ok().map(|n| n * 1024);
@@ -1018,12 +1070,12 @@ fn failed_said(failed: &[String]) -> String {
 }
 
 /// `the disk 82 % used (48 of 59 GB)`
-fn disk_said(d: Disk) -> String {
+pub(crate) fn disk_said(d: Disk) -> String {
     format!("the disk {} % used ({:.0} of {:.0} GB)", d.pct, d.used as f64 / 1e9, d.size as f64 / 1e9)
 }
 
 /// Docker's size as it prints it (`7.21GB`, `606.3MB`, `0B` — powers of 1000) in bytes.
-fn bytes(size: &str) -> Option<u64> {
+pub(crate) fn bytes(size: &str) -> Option<u64> {
     let at = size.find(|c: char| !c.is_ascii_digit() && c != '.')?;
     let (n, unit) = size.split_at(at);
     let times = match unit {
@@ -1053,7 +1105,7 @@ fn sizes(listed: &str) -> Vec<(String, u64, String)> {
 }
 
 /// `8.0 GB`
-fn gb(n: u64) -> String {
+pub(crate) fn gb(n: u64) -> String {
     format!("{:.1} GB", n as f64 / 1e9)
 }
 
@@ -1107,7 +1159,7 @@ fn size_line(volumes: &[(String, u64, String)], over: u64, disk: Option<Disk>) -
 const DF_FORMAT: &str = "{{range .Volumes}}{{.Name}}\t{{.Size}}\t{{.Labels}}{{println}}{{end}}";
 
 /// What `docker` prints for `DF_FORMAT` — Err: why it didn't, in a line.
-fn df(docker: &mut Command) -> std::result::Result<String, String> {
+pub(crate) fn df(docker: &mut Command) -> std::result::Result<String, String> {
     let out = docker
         .args(["system", "df", "-v", "--format", DF_FORMAT])
         .stdin(std::process::Stdio::null())
@@ -1158,15 +1210,25 @@ pub fn prune(mine: bool) -> Result<()> {
     for note in notes {
         println!("{note}");
     }
+    // (the images only on a Docker of this machine's alone, as `prune --all` judges them)
+    match &local {
+        Ok(()) => crate::compat::drop_stale(&root()),
+        Err(why) => println!("compat's images with {why}"),
+    }
     // (no container ran: the disk unknown)
     say_sizes(None);
     Ok(())
 }
 
 /// The images this repository builds: `trace.rs`'s (`tarae-trace:<minor>-<hash>`) and netlink's capture
-/// fixtures' (`tarae-redirect` — `netlink/fixtures/capture/vm.sh`). `rust:<minor>` isn't ours: pulled, maybe
-/// another project's too.
+/// fixtures' (`tarae-redirect` — `netlink/fixtures/capture/vm.sh`), and compat's (`COMPAT`). `rust:<minor>` isn't
+/// ours: pulled, maybe another project's too.
 const OWN_IMAGES: [&str; 2] = ["tarae-trace", "tarae-redirect"];
+
+/// What `cargo xtask compat` makes starts with this: its images (`tarae-compat-node:1.99-<hash>`, one per recipe
+/// in `compat/linux/`) and a volume per stack (`tarae-compat-go-cache`, the stack's home). Its own as
+/// `OWN_IMAGES` are: `prune --all` lists them, `prune` drops an image its recipe no longer builds.
+pub(crate) const COMPAT: &str = "tarae-compat-";
 
 /// One thing `prune --all` drops.
 #[derive(Debug, PartialEq)]
@@ -1227,7 +1289,7 @@ fn everything(
         let mut cols = l.split('\t').map(str::trim);
         let (name, size) = (cols.next()?, bytes(cols.next()?)?);
         let repo = name.rsplit_once(':').map_or(name, |(r, _)| r);
-        OWN_IMAGES.contains(&repo).then(|| Dropped {
+        (OWN_IMAGES.contains(&repo) || repo.starts_with(COMPAT)).then(|| Dropped {
             kind: "image",
             name: name.to_string(),
             size,
@@ -1413,7 +1475,14 @@ fn script(tree: Tree, what: &What) -> String {
         }
     });
     s.push_str("echo \"toolchain: $(rustc --version)\"\n");
-    if !matches!(what, What::Test { .. } | What::Installed { .. } | What::AsUser { .. }) {
+    if !matches!(
+        what,
+        What::Test { .. }
+            | What::Installed { .. }
+            | What::AsUser { .. }
+            | What::Keep { .. }
+            | What::Kept { .. }
+    ) {
         // (every package: netlink/ is Linux code, linted only here)
         s.push_str("cargo clippy --locked --workspace --all-targets -- -D warnings\n");
         s.push_str(
@@ -1431,6 +1500,24 @@ fn script(tree: Tree, what: &What) -> String {
             ));
             let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
             s.push_str(&format!("CARGO_MANIFEST_DIR=/work/tarae /usr/bin/tarae {}\n", args.join(" ")));
+        }
+        What::Keep { args } => {
+            let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
+            s.push_str(&format!(
+                "exe=$(cargo test --locked --no-run {} 2>&1 | tee /dev/stderr | sed -n '{EXE_SED}')\n\
+                 test -n \"$exe\" || {{ echo 'cargo named no test binary'; exit 1; }}\n\
+                 mkdir -p \"$(dirname {KEPT})\" && cp \"$exe\" {KEPT}.new && mv {KEPT}.new {KEPT}\n\
+                 echo \"kept $exe as {KEPT}\"\n",
+                args.join(" ")
+            ));
+        }
+        What::Kept { args } => {
+            let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
+            s.push_str(&format!(
+                "test -x {KEPT} || {{ echo 'no test binary kept yet: `test --keep` first'; exit 1; }}\n\
+                 env -u CARGO_TARGET_DIR CARGO_MANIFEST_DIR=/work/tarae {KEPT} {}\n",
+                args.join(" ")
+            ));
         }
         What::AsUser { args } => {
             // (the binary copied where the user reads it; the clone — a throwaway, where tests write under `target/` —
@@ -1470,6 +1557,10 @@ fn script(tree: Tree, what: &What) -> String {
     }
     s
 }
+
+/// Where `test --keep` keeps the test binary: in the checkout's own target volume, so only its checkout's runs
+/// find it.
+const KEPT: &str = "/target/kept/tarae-tests";
 
 /// The binary `cargo test --no-run` built for tarae's own tests, from its line `Executable unittests src/main.rs
 /// (<path>)` — a `sed -n` expression.
@@ -1874,6 +1965,58 @@ mod tests {
         }
     }
 
+    /// `test --keep` builds once and keeps the binary in the target volume; `test --kept` runs it with no cargo at
+    /// all (each container's clone is new, so cargo would build the crate again) — none kept: it says so.
+    #[test]
+    fn a_kept_binary_is_built_once_and_run_without_cargo() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let keep = what(&args(&["test", "--keep", "--profile", "compat-tests", "--bin", "tarae"])).unwrap();
+        assert_eq!(keep, What::Keep { args: args(&["--profile", "compat-tests", "--bin", "tarae"]) });
+        let s = script(Tree::Mounted(None), &keep);
+        assert!(s.contains("cargo test --locked --no-run '--profile' 'compat-tests' '--bin' 'tarae'"), "{s}");
+        assert!(s.contains(&format!("mv {KEPT}.new {KEPT}")) && !s.contains("clippy"), "{s}");
+        let kept = what(&args(&["test", "--kept", "--ignored", "--exact", "x"])).unwrap();
+        let s = script(Tree::Mounted(None), &kept);
+        assert!(
+            s.contains(&format!(
+                "env -u CARGO_TARGET_DIR CARGO_MANIFEST_DIR=/work/tarae {KEPT} '--ignored' '--exact' 'x'"
+            )),
+            "{s}"
+        );
+        assert!(
+            s.contains("`test --keep` first") && !s.contains("cargo test") && !s.contains("clippy"),
+            "{s}"
+        );
+    }
+
+    /// `--volume` mounts one of compat's volumes, before the image, and nothing else: another volume, a folder of
+    /// the machine's, a relative path or one with `..` is refused.
+    #[test]
+    fn a_volume_named_is_compats_and_mounted_before_the_image() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let given = args(&["--volume", "tarae-compat-go-cache:/root", "test"]);
+        let (v, rest) = volume_named(&given).unwrap();
+        assert_eq!((v.as_deref(), rest), (Some("tarae-compat-go-cache:/root"), &args(&["test"])[..]));
+        let plain = docker_args(Path::new("/r/tarae"), Tree::Mounted(None), "1.99.0", None, &What::Clippy);
+        let with = with_volume(plain.clone(), v.as_deref());
+        let at = with.iter().position(|a| a == "rust:1.99").unwrap();
+        assert_eq!(with[at - 2..at], args(&["-v", "tarae-compat-go-cache:/root"]), "{with:?}");
+        assert_eq!(with_volume(plain.clone(), None), plain);
+        assert_eq!(volume_named(&args(&["test"])).unwrap(), (None, &args(&["test"])[..]));
+        for bad in [
+            &["--volume"][..],
+            &["--volume", "tarae-registry:/root"],
+            &["--volume", "/:/root"],
+            &["--volume", "tarae-compat-:/root"],
+            &["--volume", "tarae-compat-go-cache:root"],
+            &["--volume", "tarae-compat-go-cache:/root/../etc"],
+            &["--volume", "tarae-compat-go-cache:/root:ro"],
+            &["--volume", "tarae-compat-go-cache"],
+        ] {
+            assert!(volume_named(&args(bad)).is_err_and(|e| e.contains("--volume")), "{bad:?}");
+        }
+    }
+
     /// A worktree (a tarae session): the main checkout's git folder goes in read-only, at the path its `.git`
     /// file names — and only then. Found from a real worktree of a temp repository.
     #[test]
@@ -2204,10 +2347,12 @@ mod tests {
                       tarae-rustup-1.99.0\t1.5GB\t\n\
                       tarae-registry\t800MB\t\n\
                       tarae-trace-target-1.99.0\t2GB\t\n\
+                      tarae-compat-go-cache\t300MB\ttarae.compat=go\n\
                       k8s-data\t3GB\ttarae.machine=me\n";
         let images = "tarae-trace:1.99-0a1b2c3d\t1.9GB\n\
                       tarae-redirect:latest\t1.1GB\n\
                       rust:1.99\t1.5GB\n\
+                      tarae-compat-go:1.99-0123456789ab\t2GB\n\
                       tarae-traced:x\t1MB\n";
         let names = |d: &[Dropped]| d.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
         // (tproxy6 a session tarae has open; frictions16's folder there; the rest gone)
@@ -2223,8 +2368,10 @@ mod tests {
                 "tarae-rustup-1.99.0",
                 "tarae-registry",
                 "tarae-trace-target-1.99.0",
+                "tarae-compat-go-cache",
                 "tarae-trace:1.99-0a1b2c3d",
-                "tarae-redirect:latest"
+                "tarae-redirect:latest",
+                "tarae-compat-go:1.99-0123456789ab"
             ]
         );
         assert_eq!(
@@ -2243,8 +2390,8 @@ mod tests {
         // Said first: each with its size (a target with its checkout), and the total
         let said = dropped_list(&here);
         assert_eq!(said[0], "  volume tarae-target-1.99.0-aaaa  7.2 GB  (/w/gone)");
-        assert_eq!(said[5], "  image tarae-trace:1.99-0a1b2c3d  1.9 GB");
-        assert_eq!(said.last().unwrap(), "  19.5 GB in all");
+        assert_eq!(said[6], "  image tarae-trace:1.99-0a1b2c3d  1.9 GB");
+        assert_eq!(said.last().unwrap(), "  21.8 GB in all");
         // The open sessions: asked of the socket `TARAE_UI` names, as `tarae state` asks (a stand-in answers
         // here) — never by running a `tarae`; not run from one, or one answering an error: said, none
         assert!(tarae_sessions(None).unwrap_err().contains("not run from a tarae"));
