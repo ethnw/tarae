@@ -87,6 +87,9 @@ pub struct Egress {
     pub any: bool,
     /// The hosts reached without asking (`llm.sandbox-hosts`).
     pub hosts: Vec<Pattern>,
+    /// The network closed (`llm.sandbox-network` off, piece C): no setting names a host — each is the user's yes
+    /// on its card, and a refusal says so (an open network's empty list would send them to `llm.sandbox-hosts`).
+    pub closed: bool,
     /// The user's answers when the run's policy was made — what the project keeps (`A`) and a grant for this run
     /// alone (`:sandbox-blocked`'s `y`): each host at its port. An answer the proxy was told since (`Answer`,
     /// `Taken`) goes before them — a host taken back is asked again, a daemon's older rules too.
@@ -117,9 +120,10 @@ impl Egress {
         self.hosts.iter().any(|p| at(p) && p.matches(host, port, port))
     }
 
-    /// Whether the user's answers, as the run's policy had them, let `host:port` go.
+    /// Whether the user's answers, as the run's policy had them, let `host:port` go — an answer for a registry's
+    /// `*.domain` (the card's suggestion, piece C) every name under it.
     pub fn answered(&self, host: &str, port: u16) -> bool {
-        self.answered.iter().any(|(h, p)| h == host && *p == port)
+        self.answered.iter().any(|(h, p)| covers(h, host) && *p == port)
     }
 
     /// Whether the setting or the user's answers it carries name `host` at any port — what a name asked of the
@@ -133,7 +137,7 @@ impl Egress {
                     && host[..host.len() - d.len()].ends_with('.')
             }
         };
-        self.any || self.hosts.iter().any(named) || self.answered.iter().any(|(h, _)| h == host)
+        self.any || self.hosts.iter().any(named) || self.answered.iter().any(|(h, _)| covers(h, host))
     }
 
     /// Why `ip` is never reached through the proxy — None: it may be. As `route`: never (link-local, the cloud
@@ -156,6 +160,15 @@ impl Egress {
             Some(own) if own.contains(&ip) => Some("one of this machine's own addresses"),
             Some(_) => None,
         }
+    }
+}
+
+/// Whether an answer for `answered` — a name, or `*.domain` for every name under it (not the domain itself, as
+/// `Pattern::Under`) — covers `host`.
+pub fn covers(answered: &str, host: &str) -> bool {
+    match answered.strip_prefix("*.") {
+        Some(d) => host.len() > d.len() && host.ends_with(d) && host[..host.len() - d.len()].ends_with('.'),
+        None => answered == host,
     }
 }
 

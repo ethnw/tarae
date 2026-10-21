@@ -25,8 +25,13 @@ pub struct Policy {
     pub caches: Vec<PathBuf>,
     /// How each tool's caches are said, while they're kept, and the attribute it sets on them.
     pub caches_said: Vec<CachesSaid>,
-    /// The network beyond this machine (`llm.sandbox-network`).
+    /// Beyond this machine, through tarae's proxy: `llm.sandbox-network` on, or each host asked (`asks_hosts`) —
+    /// false, nothing goes beyond (a policy made by hand: tests).
     pub network: bool,
+    /// The network closed (`llm.sandbox-network` off): beyond goes through the proxy with an empty list, every
+    /// host asked on a card (piece C) — no host the project keeps, the caches written only under a grant for
+    /// their pack's registry (`open_granted_caches`).
+    pub asks_hosts: bool,
     /// Ports on this machine it may connect to (`llm.sandbox-ports`): the network closed, the only ones;
     /// open, the risky ones listed here stay reachable.
     pub ports: Vec<u16>,
@@ -112,6 +117,44 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Linux: whether its keeper's session network takes its runs' connections (`redirected`) — where the system
+    /// does (`redirects`, the probe's) and the run goes beyond at all, the open network's or each host asked.
+    pub fn redirect(&mut self, redirects: bool) {
+        self.redirected = self.supervised && self.network && redirects;
+    }
+
+    /// Piece C, each host asked: the caches of a pack one of whose `registries` (`registries`: by pack) names a
+    /// host this run's rules carry the user's yes for (`egress.answered` — this run's, this conversation's, this
+    /// session's) — written as with the network open, for this run: its rules are made once, so a yes given while
+    /// it runs opens them from the next run on. The network open: they are already.
+    pub fn open_granted_caches(&mut self, registries: &[(String, proxy::egress::Pattern)]) {
+        if !self.asks_hosts {
+            return;
+        }
+        // (a registry at its own port, else HTTPS's — as the card names it: `hosts::registry_of`; a `*.domain`
+        // answered is the registry as the pack writes it, the card's suggestion)
+        let answered = &self.egress.answered;
+        let granted = |pack: &str| {
+            registries.iter().filter(|(of, _)| of == pack).any(|(_, r)| {
+                answered.iter().any(|(h, p)| match h.starts_with("*.") {
+                    true => r.to_string() == *h,
+                    false => r.matches(h, *p, 443),
+                })
+            })
+        };
+        let (open, kept): (Vec<CachesSaid>, Vec<CachesSaid>) =
+            std::mem::take(&mut self.caches_said).into_iter().partition(|c| granted(&c.pack));
+        self.caches_said = kept;
+        for c in open {
+            self.caches.retain(|d| !c.dirs.contains(d));
+            for d in c.dirs {
+                if !self.write.contains(&d) {
+                    self.write.push(d);
+                }
+            }
+        }
+    }
+
     /// Its run's proxy URL — the one thing the packs' proxy lines and the proxy variables hang on (step 5f): a
     /// port and token of the run's own where it has one (`proxy`: macOS), else, where its supervisor hands its
     /// connections over (`supervised`: Linux), that address (`route::PROXY` — no credential: the supervisor
@@ -792,7 +835,8 @@ impl Policy {
             keep: mux_dirs(env),
             caches: if env.network { Vec::new() } else { caches },
             caches_said: if env.network { Vec::new() } else { caches_said },
-            network: env.network,
+            network: env.network || env.asks_hosts,
+            asks_hosts: !env.network && env.asks_hosts,
             ports,
             localhost: env.localhost,
             run: None,
@@ -801,11 +845,16 @@ impl Policy {
             proxy: None,
             supervised: Os::HOST == Os::Linux,
             redirected: false,
-            // (with the network off no host is reached, whatever the list says)
+            // (with the network off no host is reached unasked, whatever the list says — each host asked, the
+            // user's yes goes out the way tarae itself does)
             egress: proxy::egress::Egress {
                 any: env.network && env.hosts.is_none(),
                 hosts: if env.network { env.hosts.clone().unwrap_or_default() } else { Vec::new() },
-                upstream: if env.network { env.upstream.clone() } else { Default::default() },
+                closed: !env.network && env.asks_hosts,
+                upstream: match env.network || env.asks_hosts {
+                    true => env.upstream.clone(),
+                    false => Default::default(),
+                },
                 ..Default::default()
             },
             run_id: next_run(),

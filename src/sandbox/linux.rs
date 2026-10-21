@@ -1000,6 +1000,7 @@ pub fn confine(
             hint: probed.and_then(|p| p.hint.clone()),
             network: p.network,
         })
+        .asking(p.asks_hosts)
     });
     Ok(Confine { no_userns, guarantees, ptys, ..c })
 }

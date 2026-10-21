@@ -7154,11 +7154,15 @@ impl OfferCard {
             return None;
         }
         let pad = card_padding(ui, card_style(ui, editor, "ui.popup"));
-        let max_inner = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
-        // The widest it can be — its answers and its cut row may take it past `max_inner`, never past the code
+        let reading = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
+        // The widest it can be — its answers and its cut row may take it past `reading`, never past the code
         let widest = lay.edit_w.saturating_sub(6 + usize::from(lay.scrollbar));
+        // Its text as wide as its answers' row already makes it (narrow, a host card's five answers were 64
+        // cells over text wrapped at 37 — its title cut, its rows doubled)
+        let answers_w = buttons_width(&o.answers(editor.preflight_quick().is_some())).min(widest);
+        let max_inner = reading.max(answers_w);
         // Narrower than a card can be: not drawn — the status line says what it needs (`card_short`, #201)
-        if lay.offer_bar.is_none() && max_inner < CARD_MIN_INNER {
+        if lay.offer_bar.is_none() && reading < CARD_MIN_INNER {
             return None;
         }
         // (with sessions, Claude's card names whose it is — #90: `C-q` landed somewhere unsaid)

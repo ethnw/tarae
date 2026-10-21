@@ -1022,6 +1022,8 @@ pub fn keep_now(ed: &Editor) {
 }
 
 pub fn close(ed: &mut Editor) {
+    // (the hosts its conversation's `a` let through go with it — one conversation a session at a time)
+    crate::hosts::chat_ended(ed);
     ed.session.chat = None;
     crate::restart::turn_over(ed);
 }
@@ -1030,6 +1032,9 @@ pub fn close(ed: &mut Editor) {
 /// (the chat opened first if it's closed — and the recent conversation not continued when it's read).
 pub fn reset(ed: &mut Editor) {
     let said = "New conversation with Claude";
+    // (the hosts this conversation's `a` let through go with it — the proxy keeps them as the session's, right
+    // while a session has one conversation at a time)
+    crate::hosts::chat_ended(ed);
     let Some(c) = &mut ed.session.chat else {
         open(ed);
         if let Some(c) = &mut ed.session.chat {

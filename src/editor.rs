@@ -7952,8 +7952,9 @@ mod tests {
         let in_home = std::env::var_os("HOME").is_some_and(|h| !h.is_empty() && marker.starts_with(h));
         let op = if in_home { crate::sandbox::EITHER } else { "file-write*" };
         assert!(answer.contains(&format!("marker ({op}, said in the output)")), "{answer}");
+        // (piece C: the network closed goes beyond through tarae's proxy, each host on the user's card)
         let net = match crate::sandbox::supervisor::unavailable() {
-            None => "connect to nothing over the network, this machine's ports included",
+            None => "each host only once the user said yes to it on its card (llm.sandbox-network is off)",
             Some(_) => "make no socket",
         };
         assert!(answer.contains(net), "{answer}");

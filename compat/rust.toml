@@ -39,6 +39,20 @@ mod tests {
     }
 }
 """
+# (the asks lane's: a crate of its own, no lock, depending on a version no cache here is likely to hold — as a
+# dependency just added is)
+"need/Cargo.toml" = """
+[package]
+name = "need"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ryu = "=1.0.0"
+"""
+"need/src/lib.rs" = """
+pub use ryu::Buffer;
+"""
 
 [[entry]]
 name = "install"
@@ -76,3 +90,20 @@ expect = "refused"
 said = ["Cargo.toml"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+[[entry]]
+name = "update"
+run = "cargo update --dry-run"
+expect = "pass"
+timeout = 300
+asks = true
+
+# (its build in the root's target/: a new folder beside need/Cargo.toml is Landlock's to refuse)
+[[entry]]
+name = "new-dependency"
+run = "cargo build --manifest-path need/Cargo.toml --target-dir target/need"
+expect = "pass"
+timeout = 300
+asks = true

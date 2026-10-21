@@ -123,6 +123,9 @@ pub enum Scope {
     Run,
     /// Every run of the session (`s`).
     Session,
+    /// Every run of the session while its conversation lasts (`a`, piece C): the proxy keeps it as the session's —
+    /// the main loop takes it back (`Taken`) when the conversation ends (`hosts::chat_ended`).
+    Chat,
     /// The project, from now on (`A`): the session's here, the main loop keeps it for the next runs' rules.
     Project,
     /// Refused, for the session (`n`).
@@ -302,6 +305,7 @@ impl Proxy {
             latest: HashMap::new(),
             run_allowed: HashSet::new(),
             waiting: HashMap::new(),
+            unanswered: HashSet::new(),
         };
         let _ = std::thread::Builder::new().name("tarae-proxy".into()).spawn(move || state.run(rx));
         Proxy { tx }
@@ -375,6 +379,10 @@ struct State {
     run_allowed: HashSet<(u64, Key)>,
     /// The questions out, each with what waits on it.
     waiting: HashMap<Key, Question>,
+    /// (run, what) whose connection waited out its hold unanswered: the run's next ones are refused at once while
+    /// the card waits — a tool's retries would each sit out a hold of their own (pip's six: 133 s) — until the
+    /// user answers it or the run ends. Another run's connection is held and asked as ever.
+    unanswered: HashSet<(u64, Key)>,
 }
 
 /// A question out: the run it was asked for and what asked (the card names them), a lookup's questions so far, and
@@ -501,6 +509,7 @@ impl State {
                     self.latest.retain(|k, _| k.session != session);
                     self.run_allowed.retain(|(_, k)| k.session != session);
                     self.waiting.retain(|k, _| k.session != session);
+                    self.unanswered.retain(|(_, k)| k.session != session);
                 }
                 In::Decide { key, run, process, answered, asked, id, reply, alive } => {
                     self.decide(key, answered, asked, Waiter { id, run, process, reply, alive })
@@ -511,6 +520,9 @@ impl State {
                 }
                 In::GaveUp { key, id } => {
                     if let Some(q) = self.waiting.get_mut(&key) {
+                        if let Some(w) = q.waiters.iter().find(|w| w.id == id) {
+                            self.unanswered.insert((w.run, key.clone()));
+                        }
                         q.waiters.retain(|w| w.id != id);
                         if q.waiters.is_empty() {
                             self.waiting.remove(&key);
@@ -710,13 +722,22 @@ impl State {
     /// next question, `asked`, joins its card), at most `Limits::questions` of a session at once.
     fn decide(&mut self, key: Key, answered: bool, asked: Option<String>, waiter: Waiter) {
         let (session, run) = (key.session, waiter.run);
-        let latest = self.latest.get(&key).copied();
-        let ran = self.run_allowed.contains(&(run, key.clone()));
+        // (an exact answer first; else one for a registry's `*.domain` the card suggested — piece C)
+        let under = |k: &Key| {
+            (k.session, k.kind, k.port) == (key.session, key.kind, key.port)
+                && egress::covers(&k.host, &key.host)
+        };
+        let latest = self.latest.get(&key).copied().or_else(|| {
+            let allowed = |(k, l): (&Key, &Latest)| (under(k) && *l == Latest::Allowed).then_some(*l);
+            self.latest.iter().find_map(allowed)
+        });
+        let ran = self.run_allowed.iter().any(|(r, k)| *r == run && under(k));
         let verdict = match latest {
             Some(Latest::Refused) => Some(Verdict::No("the user refused it for this session".into())),
             Some(Latest::Allowed) => Some(Verdict::Go),
             _ if ran => Some(Verdict::Go),
             None if answered => Some(Verdict::Go),
+            _ if self.unanswered.contains(&(run, key.clone())) => Some(Verdict::No(UNANSWERED.into())),
             _ => None,
         };
         if let Some(v) = verdict {
@@ -753,6 +774,7 @@ impl State {
     fn run_ended(&mut self, run: u64) {
         self.runs.remove(&run);
         self.run_allowed.retain(|(r, _)| *r != run);
+        self.unanswered.retain(|(r, _)| *r != run);
         let asks = &self.asks;
         self.waiting.retain(|key, q| {
             q.waiters.retain(|w| {
@@ -782,13 +804,15 @@ impl State {
             Scope::Run => {
                 self.run_allowed.insert((run, key.clone()));
             }
-            Scope::Session | Scope::Project => {
+            Scope::Session | Scope::Chat | Scope::Project => {
                 self.latest.insert(key.clone(), Latest::Allowed);
             }
             Scope::Refused => {
                 self.latest.insert(key.clone(), Latest::Refused);
             }
         }
+        // (the card answered: what waited it out goes by the answer — a run's yes, the session's, a no)
+        self.unanswered.retain(|(_, k)| *k != key);
         let Some(q) = self.waiting.remove(&key) else { return };
         let (now, rest): (Vec<_>, Vec<_>) =
             q.waiters.into_iter().partition(|w| scope != Scope::Run || w.run == run);
@@ -973,11 +997,17 @@ fn decided(c: &Conn, shared: &Shared, name: &str, port: u16, default: u16) -> De
         return Decided::Go;
     }
     let key = Key::new(c.session, Kind::Host, name, port);
-    held(shared, c.asking(key, c.rules.answered(name, port)), None, NOT_A_HOST)
+    let why = if c.rules.closed { CLOSED_HOST } else { NOT_A_HOST };
+    held(shared, c.asking(key, c.rules.answered(name, port)), None, why)
 }
 
 /// Why a host wasn't let through when the user didn't answer — its rules don't name it.
 const NOT_A_HOST: &str = "not among the hosts it may reach (llm.sandbox-hosts)";
+/// The same with the network closed (piece C): no list to be among — the user's card was the way.
+const CLOSED_HOST: &str = "with the network closed, each host waits on the user's yes on its card";
+/// Why a run's connection was refused unasked: an earlier one of the run waited out its hold, the card still up.
+const UNANSWERED: &str =
+    "the user hasn't answered its card yet — an earlier connection of this run waited out the hold for it";
 /// The same of raw TCP (F5).
 const NOT_RAW: &str = "raw TCP — no rule naming its port lets it through (a host:port in llm.sandbox-hosts)";
 /// The same of a lookup (F1).

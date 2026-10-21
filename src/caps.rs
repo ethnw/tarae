@@ -150,9 +150,10 @@ impl Caps {
             Grant::Key(_) => Scope::Once,
             Grant::Socket(_) if g.as_outside() => Scope::Once,
             Grant::Socket(_) => Scope::ThisChat,
-            Grant::Read(_) | Grant::Write(_) | Grant::Port(_) | Grant::Host(..) | Grant::Terminals => {
-                Scope::Always
-            }
+            // (piece C, cards.md decision 4: the network is grantable up to this session at most — always is
+            // `llm.sandbox-network`, with a host list's `A` on the proxy's own card)
+            Grant::Host(..) => Scope::Session,
+            Grant::Read(_) | Grant::Write(_) | Grant::Port(_) | Grant::Terminals => Scope::Always,
         }
     }
 
@@ -201,6 +202,17 @@ impl Caps {
             out.extend(self.keys.iter().filter(|e| of(e.source)).map(|e| Grant::Key(e.what.clone())));
         }
         out
+    }
+
+    /// `grants` as a run's policy takes them: the network closed (`network_open` false), no host kept only for the
+    /// project — those are a host list's, with `llm.sandbox-network` on (piece C, cards.md decision 4).
+    pub fn run_grants(&self, network_open: bool) -> Vec<Grant> {
+        let kept_only = |h: &str, p: u16| {
+            let of = self.hosts.iter().filter(|e| e.what.0 == h && e.what.1 == p);
+            !network_open && of.into_iter().all(|e| e.source == Source::Grant(Scope::Always))
+        };
+        let out = self.grants().into_iter();
+        out.filter(|g| !matches!(g, Grant::Host(h, p) if kept_only(h, *p))).collect()
     }
 
     /// Whether `real` is read unasked: in the checkout, a place read by default, or one answered.
@@ -310,6 +322,9 @@ pub struct Basis {
     pub outside: bool,
     /// Kept answers taken back, their write not landed yet (`Editor.allow_taking`) — left out of what's read.
     pub taking: Vec<String>,
+    /// The hosts this session's `s` let through (`Session.hosts`, the proxy's): what a run's rules carry with the
+    /// answers (`tools::with_allowed`) — so a registry's caches open under them (piece C).
+    pub hosts: Vec<(String, u16)>,
 }
 
 impl Basis {
@@ -384,6 +399,7 @@ impl crate::editor::Editor {
             temp: self.read_temp,
             outside: self.read_outside,
             taking: self.allow_taking.clone(),
+            hosts: self.session.granted_hosts(),
         }
     }
 
@@ -402,7 +418,8 @@ impl crate::editor::Editor {
         let generation = s.caps_asked;
         let chat = s.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default();
         let (root, session) = (s.root.clone(), s.allowed.clone());
-        let basis = Basis { root, store, session, chat, temp, outside, taking };
+        let hosts = s.granted_hosts();
+        let basis = Basis { root, store, session, chat, temp, outside, taking, hosts };
         self.events.shared_jobs().spawn(move || {
             let caps = Arc::new(basis.build());
             let dropped = basis.drop_covered(&caps);
@@ -556,7 +573,8 @@ mod tests {
             (Grant::Socket("/p/.tarae/x.sock".into()), Scope::ThisChat),
             (Grant::Write("/h/w".into()), Scope::Always),
             (Grant::Port(5432), Scope::Always),
-            (Grant::Host("example.invalid".into(), 443), Scope::Always),
+            // (piece C, cards.md decision 4: always is `llm.sandbox-network`)
+            (Grant::Host("example.invalid".into(), 443), Scope::Session),
             (Grant::Terminals, Scope::Always),
         ] {
             assert_eq!(s(g.clone()), top, "{g:?}");

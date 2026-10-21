@@ -237,6 +237,9 @@ pass = ["CARGO_*", "RUST*", "CLIPPY_CONF_DIR"]
 # Where cargo fetches from by default (the index, the crates) — words on the card that asks for a host, never a
 # grant
 registries = ["crates.io", "*.crates.io"]
+# The network closed (each host asked on a card): no retries — after a `n` cargo tried 3 more times, 11 s of its
+# backoff (`c1-asks-results.txt`); with the network open, cargo's own (and the user's `net.retry`)
+env = { CARGO_NET_RETRY = { value = "0", on = "each-host-asked" } }
 # How the sandbox names the folders `[builds]` asks cargo for (#20: the checkout's cargo config names them)
 builds-said = { who = "cargo", target = "target-dir", build = "build-dir" }
 
@@ -265,7 +268,7 @@ rule = "cargo's caches — its crates and git checkouts"
 said = """Cargo's caches ({caches}) stay as they are while the network is closed: every project's build outside \
 the sandbox uses the crates and git checkouts there. A build that needs a crate unpacked or a git dependency \
 checked out fails here — that's not something to fix in the code: tell the user. A build or `cargo fetch` of \
-theirs puts it there, then run it again; llm.sandbox-network opens the caches to your commands."""
+theirs puts it there, then run it again; their yes for crates.io on its card opens the caches to your next run."""
 
 # Cargo reads its config as an ancestor's and takes no copy (denied, every cargo command fails): it's left as
 # it is, and the user is told once (`tokens.rs`)

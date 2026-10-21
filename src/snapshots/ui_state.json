@@ -242,6 +242,7 @@
           "user": true
         },
         "network": {
+          "asked": false,
           "open": false,
           "way": "copies"
         },
@@ -274,6 +275,7 @@
         "line": "sandbox Seatbelt · loopback the ports it opens, whoever's · network closed · shared processes, System V shared memory, POSIX shared memory, loopback",
         "namespaces": null,
         "network": {
+          "asked": false,
           "open": false,
           "way": "proxy"
         },

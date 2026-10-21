@@ -50,7 +50,8 @@
 //! - `registries`: the hosts the pack's tools fetch from, as `llm.sandbox-hosts` writes them — words only, never
 //!   a grant: the host card names them (Q6).
 //! - `env`: variables in every run's environment (`{run}`: the run's own folder) — or `{ value, on }`: only where
-//!   the fact `on` names holds on the system tarae runs on (`On`: `v4-mapped-refused`).
+//!   the fact `on` names holds on the system tarae runs on or for the run's policy (`On`: `v4-mapped-refused`,
+//!   `each-host-asked`).
 //! - `pass`: what of the user's environment a run gets besides the core's floor (`sandbox::runenv`) — the
 //!   toolchain's own variables: names, or `PREFIX*` families (two characters at least before the `*`); never
 //!   the loader's (`LD_*`, `DYLD_*`), nor a name only a secret has (`NPM_TOKEN`). A token-like one is left out
@@ -181,6 +182,8 @@ pub struct Caches {
     pub xattr: Option<String>,
     pub rule: String,
     pub said: String,
+    /// The pack it's of: a host grant for one of that pack's `registries` opens it to the runs under it (piece C).
+    pub pack: String,
 }
 
 /// What a toolchain is asked (`ask`): by JSON key, the folders it writes (`json`), its shared caches
@@ -329,18 +332,26 @@ pub struct Said {
     pub protect: Option<String>,
 }
 
-/// A fact of the system a run's sandbox is on, that a pack's variable may wait for (`env`'s `on`) — the core
-/// tells it (`sandbox::Here`), never the pack.
+/// A fact of the system a run's sandbox is on, or of the run's policy, that a pack's variable may wait for
+/// (`env`'s `on`) — the core tells it (`sandbox::Here`, `Policy`), never the pack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum On {
     /// `v4-mapped-refused`: the sandbox refuses an IPv6 socket on this machine's loopback reached through a
     /// v4-mapped address (`::ffff:127.0.0.1`) — macOS's Seatbelt below 27 (`Here::v4_mapped_refused`).
     V4MappedRefused,
+    /// `each-host-asked`: the run's network is closed, each host it reaches for asked on a card
+    /// (`Policy.asks_hosts`) — a tool's own retries of a host refused only keep the user waiting; with the
+    /// network open, each tool as it is.
+    EachHostAsked,
 }
 
 impl On {
     fn read(word: &str) -> Option<On> {
-        (word == "v4-mapped-refused").then_some(On::V4MappedRefused)
+        match word {
+            "v4-mapped-refused" => Some(On::V4MappedRefused),
+            "each-host-asked" => Some(On::EachHostAsked),
+            _ => None,
+        }
     }
 }
 
@@ -579,6 +590,7 @@ fn read_key_of(
             let keys = ["home", "dirs", "asked", "places", "var", "files", "xattr", "rule", "said"];
             known(&c, &keys, "`caches`")?;
             let c = Caches {
+                pack: pack.to_string(),
                 home: string(&c, "home")?.unwrap_or_default(),
                 dirs: list_in(&c, "dirs")?,
                 asked: string(&c, "asked")?,

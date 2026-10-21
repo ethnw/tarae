@@ -22,6 +22,9 @@ fn two(name: &str) -> (Editor, PathBuf, SessionId, u64, u64) {
     }
     let dir = std::fs::canonicalize(dir).unwrap();
     let mut ed = Editor::new(crate::config::Config::default());
+    // (as their runs' policies: the network open with a host list — the closed network's cards are
+    // `the_closed_network_asks_each_host_for_a_session_at_most`'s)
+    ed.config.llm.sandbox_network = true;
     (ed.session.root, ed.session.name) = (dir.join("front"), "front".into());
     ed.allow_path = Some(dir.join("state/sandbox.json"));
     let back = ed.session_open(&dir.join("back")).unwrap();
@@ -85,6 +88,123 @@ fn answered(m: &ToProxy) -> Option<(u64, u64, String, u16, Scope)> {
         }
         _ => None,
     }
+}
+
+/// Piece C: with `llm.sandbox-network` off every host is asked, `y` this run · `a` this chat · `s` this session ·
+/// `n` — no `A` (cards.md decision 4: always is the setting), and `A` answers nothing. A pack's registry is answered
+/// with the pack's other registries, listed on the card (Q6: the yes grants them); a pack with caches warns its yes
+/// opens them from the next run, and every host card says what's read can be sent there. A look-alike of a
+/// registry is no registry. The names are the built-in packs' data: nothing connects.
+#[test]
+fn the_closed_network_asks_each_host_for_a_session_at_most() {
+    let (mut ed, dir, _, run, _) = two("closed");
+    ed.config.llm.sandbox_network = false;
+    let front = dir.join("front");
+    asked(&mut ed, ask(&front, run, "index.crates.io"));
+    let o = &ed.offers[0];
+    let a = o.host().unwrap();
+    assert!(!a.open && a.also == ["crates.io", "*.crates.io"], "{a:?}");
+    let keys: Vec<char> = o.answers(false).iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, ['y', 'a', 's', 'v', 'n']);
+    assert_eq!(o.title, "Let Claude's command reach index.crates.io?");
+    let lines: Vec<&str> = o.question.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "curl, in `cargo build` · port 443 · through tarae's proxy",
+            "Rust's registry: a yes also lets in crates.io, *.crates.io",
+            "What it read can be sent there. From the next run, runs can also write cargo's caches, which your own \
+             builds run.",
+        ],
+        "short: the rest is behind `v`"
+    );
+    assert_eq!(o.decided, Some(0..2), "the suggestion is decided at full strength");
+    assert_eq!(o.warning, Some(2..3), "one warning");
+    // (behind `v`: the wait, how long a yes lasts, the caches in full)
+    let more = o.host_details().expect("details");
+    for said in ["waits up to 20 s", "for this session at most", "its crates and git checkouts"] {
+        assert!(more.contains(said), "{said}: {more}");
+    }
+    let _ = sent();
+    settled(&mut ed);
+    key(&mut ed, 'A');
+    assert_eq!(hosts_cards(&ed.offers).len(), 1, "`A` answers nothing");
+    key(&mut ed, 'y');
+    let told: Vec<_> = sent().iter().filter_map(answered).map(|t| (t.2, t.4)).collect();
+    let hosts = ["index.crates.io", "crates.io", "*.crates.io"].map(|h| (h.to_string(), Scope::Run));
+    assert_eq!(told, hosts, "the yes grants what the card listed");
+    // A host no pack names: no suggestion, no caches — and a look-alike of a registry isn't one, at either end
+    for h in [HOST, "registry.npmjs.org.example.invalid", "evilcrates.io"] {
+        asked(&mut ed, ask(&front, run, h));
+        let o = ed.offers.iter().find(|o| o.host().is_some_and(|a| a.host == h)).unwrap();
+        assert!(o.host().unwrap().also.is_empty() && !o.question.contains("registry"), "{h}: {}", o.question);
+        assert!(!o.question.contains("caches"), "{h}");
+    }
+    // A blocked run's host choice lasts the session at most, too
+    assert_eq!(
+        crate::caps::Caps::storable(&crate::allow::Grant::Host(HOST.into(), 443)),
+        crate::allow::Scope::Session
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Piece C: the closed card's `v` opens its text and what it leaves out — the wait, how long a yes lasts — in its
+/// buffer, and the card stays up to answer.
+#[test]
+fn the_closed_cards_details_are_behind_v() {
+    let (mut ed, dir, _, run, _) = two("details");
+    ed.config.llm.sandbox_network = false;
+    asked(&mut ed, ask(&dir.join("front"), run, "index.crates.io"));
+    settled(&mut ed);
+    key(&mut ed, 'v');
+    let text = ed.doc().text.to_string();
+    assert!(text.starts_with("Let Claude's command reach index.crates.io?\n"), "{text}");
+    assert!(
+        text.contains("waits up to 20 s") && text.contains("llm.sandbox-network opens it for good"),
+        "{text}"
+    );
+    assert_eq!(hosts_cards(&ed.offers).len(), 1, "still to answer");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Piece C: `a` is this conversation's — the proxy keeps it as the session's, the chat's own list carries it
+/// into its next runs' rules, and when the conversation ends (`C-l`, the chat closed) the proxy is told to ask
+/// again: each host but one the session's `s` holds too.
+#[test]
+fn a_chat_answer_is_taken_back_when_the_conversation_ends() {
+    let (mut ed, dir, _, run, _) = two("chat");
+    ed.config.llm.sandbox_network = false;
+    // (the new conversation's claude a stand-in that reads nothing)
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    ed.session.chat = Some(crate::chat::Chat::new());
+    let front = dir.join("front");
+    let session = session_of(&front);
+    for h in [HOST, "kept.example.invalid"] {
+        asked(&mut ed, ask(&front, run, h));
+        let o = ed.offers.iter().find(|o| o.host().is_some_and(|a| a.host == h)).unwrap();
+        let (id, a) = (o.id, o.host().unwrap().clone());
+        answer(&mut ed, id, a, Scope::Chat);
+    }
+    let told: Vec<_> = sent().iter().filter_map(answered).map(|t| (t.2, t.4)).collect();
+    assert_eq!(told, [(HOST.to_string(), Scope::Chat), ("kept.example.invalid".to_string(), Scope::Chat)]);
+    let chat = &ed.session.chat.as_ref().unwrap().allowed.hosts;
+    assert_eq!(chat, &[(HOST.to_string(), 443), ("kept.example.invalid".to_string(), 443)]);
+    assert!(ed.session.hosts.is_empty(), "not the session's");
+    // `s` on one of them too: the conversation's end leaves that one
+    granted(&mut ed, "kept.example.invalid", 443, crate::allow::Scope::Session);
+    let _ = sent();
+    crate::chat::reset(&mut ed);
+    let taken: Vec<String> = sent()
+        .into_iter()
+        .filter_map(|m| match m {
+            ToProxy::Taken { session: s, kind: Kind::Host, host, port: 443 } if s == session => Some(host),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(taken, [HOST], "the chat's hosts but the session's");
+    assert!(ed.session.chat.as_ref().unwrap().allowed.hosts.is_empty(), "the new conversation has none");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// One card per host, in the session of the run that asked: the proxy asking again (another connection, the
@@ -163,19 +283,23 @@ fn a_process_left_by_a_run_thats_over_gets_a_card() {
 }
 
 /// Each key reaches as far as it says, for the card's own session and run: `y` this run, `s` the session (listed
-/// in it, Claude told), `A` the project (kept in `sandbox.json`, read back for the next runs), `n` refused for the
-/// session (no longer listed). `a` isn't one of its answers, and says so.
+/// in it, Claude told), `a` this conversation (piece C), `A` the project (kept in `sandbox.json`, read back for the
+/// next runs — the network open), `n` refused for the session (no longer listed).
 #[test]
 fn each_answer_reaches_as_far_as_its_key() {
     let (mut ed, dir, _, run, _) = two("keys");
     let session = session_of(&dir.join("front"));
     let _ = sent();
-    for (k, scope) in [('y', Scope::Run), ('s', Scope::Session), ('A', Scope::Project), ('n', Scope::Refused)]
-    {
+    let keys = [
+        ('y', Scope::Run),
+        ('a', Scope::Chat),
+        ('s', Scope::Session),
+        ('A', Scope::Project),
+        ('n', Scope::Refused),
+    ];
+    for (k, scope) in keys {
         asked(&mut ed, ask(&dir.join("front"), run, HOST));
         settled(&mut ed);
-        key(&mut ed, 'a');
-        assert_eq!(hosts_cards(&ed.offers).len(), 1, "{k}: `a` answers nothing");
         key(&mut ed, k);
         assert!(hosts_cards(&ed.offers).is_empty(), "{k}: answered");
         let told: Vec<_> = sent().iter().filter_map(answered).collect();
@@ -234,7 +358,8 @@ fn a_peer_sessions_key_never_answers_it() {
 
 /// A host granted from what a run was refused (`:sandbox-blocked`) reaches as far as its key: `y` lifts the
 /// session's refusal (the run going again carries the host in its rules — asked again it would wait, not go), `s`
-/// lets it go for the session (listed), `A` for the project — all for the session in front's project.
+/// lets it go for the session (listed), `A` too (piece C: a host is never kept past a session) — all for the
+/// session in front's project.
 #[test]
 fn a_grant_from_a_refused_run_reaches_as_far_as_its_key() {
     let (mut ed, dir, ..) = two("grant");
@@ -249,7 +374,7 @@ fn a_grant_from_a_refused_run_reaches_as_far_as_its_key() {
     granted(&mut ed, HOST, 443, crate::allow::Scope::Session);
     granted(&mut ed, HOST, 443, crate::allow::Scope::Always);
     let told: Vec<_> = sent().iter().filter_map(answered).map(|t| (t.0, t.4)).collect();
-    assert_eq!(told, [(session, Scope::Session), (session, Scope::Project)]);
+    assert_eq!(told, [(session, Scope::Session), (session, Scope::Session)]);
     assert_eq!(ed.session.hosts, [(Kind::Host, HOST.to_string(), 443)]);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -289,8 +414,10 @@ fn a_project_opened_through_a_link_is_one_session_to_both() {
         hosts_cards(&ed.offers).iter().any(|a| a.left && a.session == theirs),
         "the card in that session"
     );
-    // `A`, kept where the next run reads it (`tools::guard_then_go`: the real path)
-    granted(&mut ed, HOST, 443, crate::allow::Scope::Always);
+    // `A` on its card (the network open), kept where the next run reads it (`tools::guard_then_go`: the real path)
+    let o = ed.offers.iter().find(|o| o.host().is_some_and(|a| a.left)).expect("its card");
+    let (id, a) = (o.id, o.host().unwrap().clone());
+    answer(&mut ed, id, a, Scope::Project);
     let path = ed.allow_path.clone().unwrap();
     let end = Instant::now() + std::time::Duration::from_secs(5);
     while crate::allow::Store::read(Some(&path)).get(&real).hosts.is_empty() {
@@ -321,14 +448,12 @@ fn a_registry_is_named_on_the_hosts_card() {
             label: "cargo build".into(),
             users: false,
             left: false,
+            open: false,
+            also: Vec::new(),
         })
     };
     let (named, plain) = (card_at("static.crates.io", 443), card_at(HOST, 443));
-    assert!(
-        named.question.contains("\nstatic.crates.io is the rust pack's registry\n"),
-        "{}",
-        named.question
-    );
+    assert!(named.question.contains("\nRust's registry\n"), "{}", named.question);
     assert!(!plain.question.contains("registry"), "{}", plain.question);
     let odd = card_at("static.crates.io", 22);
     assert!(!odd.question.contains("registry"), "another port is no registry: {}", odd.question);
@@ -384,7 +509,7 @@ fn raw_tcp_is_its_own_card_without_always() {
     assert!(warning.starts_with("Not TLS or HTTP: tarae can't see what passes"), "{}", o.question);
     assert_eq!(o.warning, Some(2..3), "in the warning colour");
     let keys: Vec<char> = o.answers(false).iter().map(|(k, _)| *k).collect();
-    assert_eq!(keys, ['y', 's', 'n']);
+    assert_eq!(keys, ['y', 'a', 's', 'n']);
     let _ = sent();
     settled(&mut ed);
     key(&mut ed, 'A');

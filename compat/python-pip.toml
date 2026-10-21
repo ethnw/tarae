@@ -88,3 +88,21 @@ expect = "refused"
 said = ["Makefile"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+# (the project installed as pip does by default: its build requirements fetched into an isolated environment,
+# pip's own version looked up)
+[[entry]]
+name = "install-plain"
+run = ".venv/bin/pip install -e ."
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "add"
+run = ".venv/bin/pip install six==1.16.0"
+expect = "pass"
+timeout = 300
+asks = true

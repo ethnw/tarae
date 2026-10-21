@@ -3585,20 +3585,41 @@ mod tests {
 
     /// A project's policy with these ports open and these (empty) files: (the policy, the project).
     fn project_policy(name: &str, ports: Vec<u16>, files: &[&str]) -> (super::super::Policy, PathBuf) {
+        project_policy_with(name, ports, files, |_| {})
+    }
+
+    /// `project_policy`, what it's made from `change`d.
+    fn project_policy_with(
+        name: &str,
+        ports: Vec<u16>,
+        files: &[&str],
+        change: impl FnOnce(&mut super::super::Env),
+    ) -> (super::super::Policy, PathBuf) {
         let root = std::env::temp_dir().join(format!("tarae-keeper-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
         for f in files {
             std::fs::write(root.join(f), "").unwrap();
         }
-        let env = super::super::Env {
-            root: root.clone(),
+        (project_policy_at(&root, ports, change), root)
+    }
+
+    /// The policy of the project at `root` (made, its real path) with these ports open, what it's made from
+    /// `change`d.
+    fn project_policy_at(
+        root: &Path,
+        ports: Vec<u16>,
+        change: impl FnOnce(&mut super::super::Env),
+    ) -> super::super::Policy {
+        let mut env = super::super::Env {
+            root: root.to_path_buf(),
             tmp: Some(super::super::profile_path(&std::env::temp_dir())),
             ports,
             run_env: super::super::run_env_of(&super::super::Here::now(), &crate::llm::LlmConfig::default()),
             ..Default::default()
         };
-        (super::super::Policy::for_project(&env), root)
+        change(&mut env);
+        super::super::Policy::for_project(&env)
     }
 
     /// The median of `n` times `f` took, in ms.
@@ -8611,6 +8632,108 @@ mod tests {
                     "{tier}: the {n} arrived outside"
                 );
             }
+            k.end();
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// Piece C: the network closed (`llm.sandbox-network` off), a run's connection beyond still reaches tarae's
+    /// proxy — the closed policy goes beyond through it with an empty list, `redirected` where the session's network
+    /// takes it (TPROXY: a name looked up, its stand-in address connected to) and through the proxy variable's
+    /// address elsewhere — and waits there on the main loop's answer: `y` lets this run's request through alone; the
+    /// next run is asked again, and a no refuses it, nothing more arriving outside. The test stands in for the main
+    /// loop (`proxy::TEST_ASKS`). In tier C, a netns without TPROXY and TPROXY's.
+    #[test]
+    fn with_the_network_closed_a_connection_waits_on_the_card() {
+        use super::super::proxy::{self, FromProxy, Scope, ToProxy};
+        let test = "with_the_network_closed_a_connection_waits_on_the_card";
+        // (where the system redirects, a closed run is the session network's to take, never given the proxy
+        // variable — judged whatever tier this machine has: TPROXY's below may not be one)
+        let at = crate::scratch::Scratch::new("keeper-closed-taken");
+        let mut taken = project_policy_at(at.path(), Vec::new(), |e| e.asks_hosts = true);
+        taken.redirect(true);
+        assert!(
+            taken.redirected && taken.proxy_url().is_none(),
+            "a closed run taken where the system redirects"
+        );
+        let Some(tiers) = served_tiers(test, true) else { return };
+        let Some(ip) = outside() else { return };
+        for (i, (tier, ns, network)) in tiers.into_iter().enumerate() {
+            let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+            let at = l.local_addr().unwrap();
+            let (tx, served) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for s in l.incoming().take(2).flatten() {
+                    let mut line = String::new();
+                    let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
+                    let _ = io::Write::write_all(&mut &s, b"out hello\n");
+                    let _ = tx.send(());
+                }
+            });
+            let host = format!("closed-{tier}.test");
+            proxy::TEST_NAMES.lock().unwrap().push((host.clone(), at));
+            let name = format!("closed-{tier}");
+            let k = keeper_for(&name, ns, network);
+            let closed = |e: &mut super::super::Env| e.asks_hosts = true;
+            let (mut p, root) = project_policy_with(&name, Vec::new(), &[], closed);
+            p.redirect(network);
+            assert!(
+                p.network && p.asks_hosts && !p.egress.any && p.egress.hosts.is_empty(),
+                "{tier}: beyond through the proxy, each host asked, an empty list"
+            );
+            assert_eq!(
+                (p.redirected, p.proxy_url().is_some()),
+                (network, !network),
+                "{tier}: taken by the session's network, else the proxy variable"
+            );
+            let abi = crate::landlock::abi().unwrap();
+            let c = super::super::linux::confine(&p, abi, Err("not watched".into()), false, Some(&k), Ok(()))
+                .unwrap();
+            let session = proxy::session_of(&p.root);
+            let (asks, asked) = std::sync::mpsc::channel();
+            proxy::TEST_ASKS.lock().unwrap().push((session, asks));
+            let of_run = |run_id| {
+                Arc::new(super::super::Policy { own_addresses: Some(Vec::new()), run_id, ..p.clone() })
+            };
+            let base = 5_100_001 + 10 * i as u64;
+            let (first, second) = (of_run(base), of_run(base + 1));
+            // The main loop, stood in: `y` (this run) to the first question, `n` to the next
+            let main = std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                for scope in [Scope::Run, Scope::Refused] {
+                    let Ok(a) = asked.recv_timeout(Duration::from_secs(10)) else { break };
+                    let FromProxy::Ask { run, kind, host, port, .. } = a.clone();
+                    proxy::get().send(ToProxy::Answer { session, run, kind, host, port, scope });
+                    seen.push(a);
+                }
+                seen
+            });
+            let (to, named) = (super::super::route::PROXY.to_string(), format!("{host}:{}", at.port()));
+            let reach = |p: &Arc<super::super::Policy>| match network {
+                true => served_said(&k, (p, &c, &root), "named", &[("TARAE_NAME", host.as_str())]),
+                false => {
+                    let env = [("TARAE_TO", to.as_str()), ("TARAE_HOST", named.as_str())];
+                    served_said(&k, (p, &c, &root), "proxied", &env)
+                }
+            };
+            let (said, refused) = reach(&first);
+            assert!(
+                said.ends_with("reply=out hello"),
+                "{tier}: `y` — the held request went on: {said} {refused:?}"
+            );
+            assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: it arrived outside");
+            let (said, refused) = reach(&second);
+            assert!(!said.ends_with("reply=out hello"), "{tier}: `n` — refused: {said} {refused:?}");
+            let seen = main.join().unwrap();
+            let runs: Vec<(u64, &str)> = seen
+                .iter()
+                .map(|a| {
+                    let FromProxy::Ask { run, host, .. } = a;
+                    (*run, host.as_str())
+                })
+                .collect();
+            assert_eq!(runs, [(base, host.as_str()), (base + 1, host.as_str())], "{tier}: each run asked");
+            assert!(served.recv_timeout(Duration::from_millis(500)).is_err(), "{tier}: nothing more outside");
             k.end();
             std::fs::remove_dir_all(&root).ok();
         }

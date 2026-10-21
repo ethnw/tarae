@@ -224,15 +224,32 @@ Not kept:
 
 ### 1.5 The network
 
-Closed by default. Three settings open it, all in your config (a project's `.tarae.toml` only once trusted):
-`llm.sandbox-ports` (ports on this machine), `llm.sandbox-localhost` (every port on this machine),
-`llm.sandbox-network` (beyond this machine, through tarae's proxy).
+Closed by default: **nothing beyond this machine unless you say yes to a host on its card, for a run, a
+conversation or a session at most, through tarae's proxy** (piece C) — "always" is `llm.sandbox-network`. Three
+settings open more, all in your config (a project's `.tarae.toml` only once trusted): `llm.sandbox-ports` (ports
+on this machine), `llm.sandbox-localhost` (every port on this machine), `llm.sandbox-network` (beyond this machine,
+every host or `llm.sandbox-hosts`' list, through tarae's proxy).
 
 Kept:
-- **Closed**: nothing beyond this machine, no port on it.
+- **Closed**: no port on this machine; beyond it only a host you said yes to.
   test: `sandbox::tests::local_ports_open_only_where_asked` (macOS) · `sandbox::route::tests::the_route_table` (rule) ·
   `sandbox::keeper::tests::a_routed_runs_own_connect_is_refused_by_the_kernel` ·
   `sandbox::keeper::tests::the_users_loopback_isnt_reached` · `sandbox::keeper::tests::in_plain_mode_a_run_reaches_only_its_own_loopback`
+- **Closed is an empty list**: with `llm.sandbox-network` off a run goes through the proxy with no host named —
+  `llm.sandbox-hosts` and the project's kept (`A`) hosts don't apply, a host's grant lasts the session at most,
+  and the card offers no `A`.
+  test: `sandbox::tests::a_closed_network_goes_through_the_proxy_with_an_empty_list` ·
+  `caps::tests::what_may_be_kept_and_for_how_long` · `hosts::tests::the_closed_network_asks_each_host_for_a_session_at_most` ·
+  `sandbox::proxy::macos_tests::with_the_network_closed_a_host_waits_and_yes_lets_it_through`
+- **Before your yes nothing leaves**: the name stays in the request (macOS) or gets a stand-in address (TPROXY,
+  E1) — no lookup; a name a run makes up reaches only your screen; at most `Limits::questions` (8) wait at once.
+  A conversation's yes (`a`) is taken back when it ends.
+  test: `hosts::tests::a_chat_answer_is_taken_back_when_the_conversation_ends` ·
+  `sandbox::proxy::tests::a_registrys_suggestion_answered_lets_its_names_through`
+- **The caches stay read-only** but for a run that starts under a yes for their pack's registry (Rust's, Go's);
+  a yes mid-run opens them from the next run on. A look-alike of a registry isn't called one.
+  test: `sandbox::tests::a_registry_grant_opens_its_packs_caches_for_the_run` ·
+  `hosts::tests::the_closed_network_asks_each_host_for_a_session_at_most`
 - **Ports**: only those you open; on Linux this machine's other addresses count as this machine.
   test: `sandbox::keeper::tests::an_opened_port_reaches_this_machine` ·
   `sandbox::keeper::tests::this_machines_own_address_is_reached_only_where_opened` ·
@@ -266,6 +283,12 @@ Kept:
   test: `sandbox::proxy::tests::two_sessions_rules_stay_apart`
 
 Not kept:
+- **A host you said yes to is a channel**: what the run read can be sent there (a registry takes uploads; a code
+  host takes anything) — every host card says so.
+- **Under a yes for a pack's registry, G4 is open for those runs**: a build script can put code in the toolchain's
+  caches (`~/.cargo/registry/src`) that your own builds then run — the card says so (Rust and Go: tarae's own fetch,
+  piece C3, is the way that keeps them closed).
+- A run waits up to `Limits::hold` (20 s) on a card (availability only).
 - **With the network on and `llm.sandbox-hosts = "any"` (the default), a run can send anything it read to any
   host.** The read rules above are then the only thing between your project and the internet. A host list makes
   every other host a card.
@@ -442,7 +465,8 @@ Not kept:
 | `y`/`a`/`A` on a blocked write (`space m s`) | that folder writable for runs (never home, above it, keys, folders of programs, shared caches, toolchain homes) |
 | a port or `llm.sandbox-localhost` | those ports (the risky ones too, with localhost) |
 | `llm.sandbox-network` | the internet through the proxy; every host unless `llm.sandbox-hosts` lists them |
-| `y` on a host card | that host for the run, session, or always |
+| `y`/`a`/`s` on a host card, the network closed | that host — and the registries the card lists with it — for the run, conversation or session; a registry's pack's caches writable from the next run under it |
+| `A` on a host card, the network open with a list | that host, always, in this project |
 | `y` on a run-outside card | one command as you, unconfined, in full — the card shows what changed since the last `y` (`sinceyes.rs`) |
 | `y`/`s` on a no-sandbox card | commands as you, unconfined — `s` its checks and reads unasked until the session ends, in every chat of it, never kept past a restart |
 | `llm.sandbox = false` | every command of Claude's as you, unconfined, **unasked** — only the chat's title says `› no sandbox` |

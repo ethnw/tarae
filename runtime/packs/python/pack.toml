@@ -173,6 +173,10 @@ pass = ["PYTHON*", "VIRTUAL_ENV", "CONDA_*", "PYENV*", "PIP_*", "UV_*"]
 # Where pip and uv fetch from by default (the index, the files) — words on the card that asks for a host, never
 # a grant
 registries = ["pypi.org", "files.pythonhosted.org"]
+# The network closed (each host asked on a card): uv without retries (after a `n`, ~10 s of its backoff). pip
+# keeps its own: once a try waited out the card's hold, the proxy refuses the run's next ones at once while the
+# card waits. The network open: each as it is
+env = { UV_HTTP_RETRIES = { value = "0", on = "each-host-asked" } }
 # uv's cache: the user's next `uv sync` installs what's unpacked there, so nothing of a run's may reach it —
 # never read nor written, wherever `UV_CACHE_DIR` puts it (runs have their own, below)
 kept = ["{uv}"]

@@ -1046,8 +1046,9 @@ pub(crate) mod tests {
         let kept = Store::read(Some(&path)).get(&root);
         assert_eq!(kept.hosts, [("static.example.invalid".to_string(), 443)], "once");
         let once = Grant::Host("once.example.invalid".into(), 8443);
+        // (a project's kept host is a host list's: the network open — piece C)
         let w = crate::tools::with_allowed(
-            &crate::llm::LlmConfig::default(),
+            &crate::llm::LlmConfig { sandbox_network: true, ..Default::default() },
             &crate::caps::Caps::answered(&[&kept]),
             Some(&once),
         );

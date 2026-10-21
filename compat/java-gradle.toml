@@ -121,3 +121,30 @@ expect = "refused"
 said = ["settings.gradle"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+[[entry]]
+name = "build-plain"
+run = "./gradlew --console=plain assemble"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+timeout = 300
+asks = true
+
+[[entry]]
+name = "deps-plain"
+run = "./gradlew --console=plain dependencies --configuration testRuntimeClasspath"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+timeout = 300
+asks = true
+
+# (every dependency looked up again, as one not cached is)
+[[entry]]
+name = "refresh"
+run = "./gradlew --console=plain --refresh-dependencies dependencies --configuration testRuntimeClasspath"
+expect = "pass"
+settings = { llm = { sandbox-localhost = true } }
+timeout = 300
+asks = true

@@ -298,7 +298,7 @@ fn a_run_reaches_only_its_own_proxy_port() {
             // (the packs' variables, as `for_its_run` gives a run them)
             let here = Here::now();
             let vars = here.path("HOME").map(|h| crate::sandbox::vars_in(&h, &here));
-            let env = vars.map(|v| crate::sandbox::packs_env(&v, &here)).unwrap_or_default();
+            let env = vars.map(|v| crate::sandbox::packs_env(&v, &here, a.asks_hosts)).unwrap_or_default();
             let jvm = Policy { env, ..a.clone() };
             assert!(reached(&jvm, &la, &java), "a JVM's default socket: its own port");
             assert!(!reached(&jvm, &lb, &java), "a JVM's default socket: the other run's port");
@@ -340,6 +340,72 @@ fn a_runs_port_takes_it_to_the_outside() {
     assert!(h.starts_with("GET /through HTTP/1.1\r\n"), "as the proxy rebuilds it: {h:?}");
     assert!(h.contains(&format!("Host: {name}:{port}\r\n")), "{h:?}");
     assert!(!h.to_ascii_lowercase().contains("proxy-"), "no proxy header, no token outside: {h:?}");
+}
+
+/// Piece C: the network closed (`llm.sandbox-network` off), a run still goes out through its own port to tarae's
+/// proxy — with an empty list, `llm.sandbox-hosts` aside — so a host waits on the main loop's answer: `y` lets this
+/// run's request through alone; the next run is asked again, and a no refuses it. Through the real `spawn` (the
+/// Seatbelt profile the closed policy makes), with a curl given the run's proxy variables.
+#[test]
+fn with_the_network_closed_a_host_waits_and_yes_lets_it_through() {
+    use super::{FromProxy, Scope, ToProxy};
+    if skipped_inside(
+        "sandbox::proxy::macos_tests::with_the_network_closed_a_host_waits_and_yes_lets_it_through",
+    ) {
+        return;
+    }
+    let root = Path::new("/Users/u/p-c1-ask");
+    let name = "ask-c1.example.invalid";
+    let (port, seen) = outside(name, root, 30);
+    let (asks, asked) = std::sync::mpsc::channel();
+    let session = super::session_of(root);
+    super::TEST_ASKS.lock().unwrap().push((session, asks));
+    let closed = || {
+        let listed = Some(vec![super::egress::Pattern::parse(name).unwrap()]);
+        let env = crate::sandbox::Env { asks_hosts: true, hosts: listed, ..env(root) };
+        let p = Policy::for_project(&env);
+        assert!(p.asks_hosts && p.egress.hosts.is_empty(), "the list is the open network's");
+        // (the run's port as a closed policy computed on macOS gets it — none, and its runs reach no proxy)
+        let here = crate::sandbox::Here::now();
+        let computed = crate::sandbox::policy_in(root, &crate::llm::LlmConfig::default(), &[], &here);
+        assert!(computed.asks_hosts, "closed by default, each host asked");
+        Policy { proxy: computed.proxy, run_id: computed.run_id, ..p }
+    };
+    let curl = |p: &Policy, path: &str| {
+        let mut c = Command::new("/usr/bin/curl");
+        c.args(["-s", "--max-time", "10", &format!("http://{name}:{port}/{path}")]);
+        let set = env_of(&command(Some(p), "true", &[]));
+        c.envs(set.into_iter().filter(|(k, _)| k.to_lowercase().ends_with("_proxy")));
+        c
+    };
+    let answer = |run, scope| ToProxy::Answer {
+        kind: super::Kind::Host,
+        session,
+        run,
+        host: name.into(),
+        port,
+        scope,
+    };
+    let p = closed();
+    let ended = after_run(Some(&p));
+    let s = spawn(Some(&p), &curl(&p, "first")).unwrap();
+    let FromProxy::Ask { run, host, .. } = asked.recv_timeout(Duration::from_secs(10)).expect("asked");
+    assert_eq!((run, host.as_str()), (p.run_id, name));
+    super::get().send(answer(run, Scope::Run));
+    let (_, out, _) = finish(s, 30);
+    ended();
+    assert_eq!(out, "ok", "`y`: the held request went on");
+    assert!(seen.join().unwrap().0.is_some_and(|h| h.starts_with("GET /first ")));
+    // The next run: `y` was the first one's alone — asked again; a no refuses it
+    let p = closed();
+    let ended = after_run(Some(&p));
+    let s = spawn(Some(&p), &curl(&p, "second")).unwrap();
+    let FromProxy::Ask { run, .. } = asked.recv_timeout(Duration::from_secs(10)).expect("asked again");
+    assert_eq!(run, p.run_id);
+    super::get().send(answer(run, Scope::Refused));
+    let (_, out, _) = finish(s, 30);
+    ended();
+    assert_ne!(out, "ok", "refused");
 }
 
 /// A host a run's rules don't name (`llm.sandbox-hosts = []`) is held at the proxy, and the main loop is asked —

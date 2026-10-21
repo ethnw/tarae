@@ -232,9 +232,15 @@ impl Guard {
                         words.push_str(" — Docker's: as much as outside the sandbox");
                     }
                 }
-                if p.network {
+                if p.network && !p.asks_hosts {
                     mark.push_str(" + network");
                     words.push_str(", the network open (llm.sandbox-network)");
+                } else if !p.egress.answered.is_empty() {
+                    // (piece C: the hosts the user let through when it started — a yes since isn't here)
+                    let hosts: Vec<String> =
+                        p.egress.answered.iter().map(|(h, p)| format!("{h}:{p}")).collect();
+                    mark.push_str(" + hosts");
+                    words.push_str(&format!(", let reach {} through tarae's proxy", hosts.join(", ")));
                 }
                 (mark, past, format!("{words}."))
             }
@@ -684,13 +690,13 @@ impl Guard {
                     _ if loopback_only.is_some() => format!(
                         ", and connect to nothing but this machine's loopback, {lo} — {}{}",
                         loopback_only.as_deref().unwrap_or_default(),
-                        if p.network { ", llm.sandbox-network notwithstanding" } else { "" }
+                        if p.network && !p.asks_hosts { ", llm.sandbox-network notwithstanding" } else { "" }
                     ),
                     // (step 5: the open network goes through tarae's proxy — Linux: a direct connect is
                     // `network-direct`; macOS: Seatbelt opens loopback's ports only, the proxy's among them)
                     (true, here, none) => format!(
                         ", and reach the network beyond this machine (its loopback and its own addresses) {}; \
-                         {checks} — {}",
+                         {checks}{} — {}",
                         match p.redirected {
                             // (6e′: the session's network takes every connection and answers every name — no
                             // variable; what isn't TLS or HTTP names no host to check — E4)
@@ -702,6 +708,12 @@ impl Guard {
                                       ignores it (ssh, a database client, Node's fetch without NODE_USE_ENV_PROXY) \
                                       can't go out"
                                 .to_string(),
+                        },
+                        // (piece C: the network closed, each host waits on the user's card)
+                        match p.asks_hosts {
+                            true => "; each host only once the user said yes to it on its card \
+                                     (llm.sandbox-network is off) — a host refused is the user's no",
+                            false => "",
                         },
                         match (here, none) {
                             (true, _) => format!("and every port of this machine's{every}"),
@@ -828,7 +840,7 @@ pub const UNTOLD_OP: &str = "network-untold";
 /// — and, where it opens this machine's ports, what listens on them. Pinned by
 /// `apart::two_sessions_cant_reach_each_others_{processes,sockets}`.
 fn seatbelt_guarantees(p: &Policy) -> guarantees::Guarantees {
-    guarantees::Guarantees::seatbelt(p.localhost || !p.ports.is_empty(), p.network)
+    guarantees::Guarantees::seatbelt(p.localhost || !p.ports.is_empty(), p.network).asking(p.asks_hosts)
 }
 
 /// Whether Claude's runs are refused new user namespaces here (`tier::runs_refuse_userns`) — outside the sandbox
@@ -865,6 +877,8 @@ pub struct CachesSaid {
     /// The extended attribute the tool sets on these folders themselves at every run (Seatbelt's: Landlock has
     /// no such rule) — cargo's for file sync, the one write to its caches an offline build makes.
     pub xattr: Option<String>,
+    /// The pack they're of (`sandboxpack::Caches::pack`): a grant for one of its `registries` opens them.
+    pub pack: String,
 }
 
 impl CachesSaid {
@@ -969,7 +983,8 @@ pub struct Here {
     /// The sandbox refuses an IPv6 socket on this machine's loopback reached through a v4-mapped address
     /// (`::ffff:127.0.0.1`, what a JVM's 127.0.0.1 is): macOS's Seatbelt takes it as no `localhost`, connect and
     /// bind alike, below 27 — measured refused on 26.6.2, taken on 27.0.1 (`target/sb/macos26-jvm.md`; older ones
-    /// taken as 26). Linux's supervisor reads the address itself: false. The packs' `env` `on = "v4-mapped-refused"`.
+    /// taken as 26). Linux's supervisor reads the address itself: false. The packs' `env` `on = "v4-mapped-refused"`
+    /// (`holds`).
     pub v4_mapped_refused: bool,
     /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
     /// (`every_variable_the_policy_reads_reaches_the_run`).
@@ -1013,13 +1028,6 @@ impl Here {
             asked: Default::default(),
             #[cfg(test)]
             runs: Some(profile_path(&std::env::temp_dir())),
-        }
-    }
-
-    /// Whether `on` holds here.
-    pub fn holds(&self, on: crate::sandboxpack::On) -> bool {
-        match on {
-            crate::sandboxpack::On::V4MappedRefused => self.v4_mapped_refused,
         }
     }
 
@@ -2892,6 +2900,9 @@ pub struct Env {
     pub write: Vec<String>,
     pub protect: Vec<String>,
     pub network: bool,
+    /// The network closed (`network` off), beyond this machine still goes through tarae's proxy, every host asked
+    /// on a card (piece C) — `env_in` sets it; off, nothing goes beyond (tests that build an `Env` by hand).
+    pub asks_hosts: bool,
     pub ports: Vec<u16>,
     pub localhost: bool,
     /// `llm.sandbox-hosts` (None: any host).
@@ -3058,6 +3069,8 @@ pub(crate) fn env_in(
         write: llm.sandbox_write.clone(),
         protect: llm.sandbox_protect.clone(),
         network: llm.sandbox_network,
+        // (set below: the toolchain's own ask goes out nowhere)
+        asks_hosts: false,
         ports: llm.sandbox_ports.clone(),
         localhost: llm.sandbox_localhost,
         hosts: llm.sandbox_hosts.clone(),
@@ -3074,6 +3087,7 @@ pub(crate) fn env_in(
     // The toolchain is asked inside the sandbox it's for (it reads only)
     let found = toolchain_dirs(&Policy::for_project(&env), &asks);
     (env.dirs, env.asked, env.own_build) = (found.other, found.named, found.own_build);
+    env.asks_hosts = !llm.sandbox_network;
     // Its caches, as the packs say them; what it names that no run reads — in home, not home itself nor what
     // holds the project
     let packs = &crate::sandboxpack::get().caches;
@@ -3217,7 +3231,14 @@ fn caches_in(c: &crate::sandboxpack::Caches, home: &Path) -> (CachesSaid, Vec<Pa
         None => c.dirs.iter().map(|d| home.join(d)).collect(),
     };
     let files = c.files.iter().map(|f| home.join(f)).collect();
-    (CachesSaid { dirs, rule: c.rule.clone(), said: c.said.clone(), xattr: c.xattr.clone() }, files)
+    let said = CachesSaid {
+        dirs,
+        rule: c.rule.clone(),
+        said: c.said.clone(),
+        xattr: c.xattr.clone(),
+        pack: c.pack.clone(),
+    };
+    (said, files)
 }
 
 /// The policy for the run about to start in the project at `root` with these settings and the places in home
@@ -3328,7 +3349,7 @@ fn policy_computed(
     // one, taken there: the open network needs no proxy URL)
     p.supervised = here.os == Os::Linux;
     p.keys = Some(Vec::new());
-    p.redirected = p.supervised && p.network && here.redirects;
+    p.redirect(here.redirects);
     with_kept(&mut p, &env);
     (p, Found { real_home, above, own })
 }
@@ -3418,7 +3439,8 @@ fn for_its_run(
         .zip(vars.as_ref())
         .map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept, url.as_ref()));
     p.env = made.unwrap_or_default();
-    p.env.extend(vars.as_ref().map(|v| packs_env(v, here)).unwrap_or_default());
+    let asks_hosts = p.asks_hosts;
+    p.env.extend(vars.as_ref().map(|v| packs_env(v, here, asks_hosts)).unwrap_or_default());
     // What a run with a proxy URL gets of the packs besides (`[sandbox.proxy]`)
     let mut env = std::mem::take(&mut p.env);
     proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
@@ -3426,15 +3448,20 @@ fn for_its_run(
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
-/// isn't known (`{run}` without a run) is left out — and one waiting for a fact of the system (`on`), where
-/// `here` says it holds.
-fn packs_env(vars: &crate::sandboxpack::Vars, here: &Here) -> Vec<(String, String)> {
+/// isn't known (`{run}` without a run) is left out — and one waiting for a fact (`on`), where it holds: of the
+/// system as `here` says, of the run's policy as `asks_hosts` (`Policy.asks_hosts`).
+fn packs_env(vars: &crate::sandboxpack::Vars, here: &Here, asks_hosts: bool) -> Vec<(String, String)> {
+    use crate::sandboxpack::On;
     let filled = |v: &str| match v.starts_with('{') || v.starts_with("~/") {
         true => vars.place(v).map(|p| p.display().to_string()),
         false => Some(v.to_string()),
     };
+    let holds = |on| match on {
+        On::V4MappedRefused => here.v4_mapped_refused,
+        On::EachHostAsked => asks_hosts,
+    };
     let packs = crate::sandboxpack::get();
-    let on = packs.env_on.iter().filter(|e| here.holds(e.on)).map(|e| (&e.name, &e.value));
+    let on = packs.env_on.iter().filter(|e| holds(e.on)).map(|e| (&e.name, &e.value));
     packs
         .env
         .iter()
@@ -3976,7 +4003,8 @@ fn asks_for(root: &Path, home: Option<&Path>, here: &Here) -> Asks {
     let others: Vec<crate::sandboxpack::Ask> = t.ask.iter().filter(|a| has(&a.when)).cloned().collect();
     let mut set_by = tool.as_ref().map(|t| t.set_by(root, tool_home.as_deref())).unwrap_or_default();
     set_by.extend(others.iter().flat_map(|a| a.when.iter().map(|f| root.join(f))));
-    let env = home.map(|h| packs_env(&vars_in(h, here), here)).unwrap_or_default();
+    // (what a toolchain's `ask` runs fetches nothing: no host asked)
+    let env = home.map(|h| packs_env(&vars_in(h, here), here, false)).unwrap_or_default();
     Asks { tool, builder, said, own, others, env, set_by }
 }
 
@@ -4151,13 +4179,11 @@ pub fn run_env_of(here: &Here, llm: &crate::llm::LlmConfig) -> runenv::RunEnv {
     let colors = &crate::languages::get().color_off;
     let mut set: Vec<&str> = SET_IN_RUNS.to_vec();
     set.extend(colors.iter().map(|(k, _)| k.as_str()));
-    // (the network open goes through tarae's proxy — its variables take the user's own proxies' place, neither
-    // passed nor said; macOS: git's setting for it too)
-    if llm.sandbox_network {
-        set.extend(runenv::PROXIES);
-        if cfg!(not(target_os = "linux")) {
-            set.push("GIT_CONFIG_COUNT");
-        }
+    // (beyond this machine goes through tarae's proxy, the network open or each host asked (piece C) — its
+    // variables take the user's own proxies' place, neither passed nor said; macOS: git's setting for it too)
+    set.extend(runenv::PROXIES);
+    if cfg!(not(target_os = "linux")) {
+        set.push("GIT_CONFIG_COUNT");
     }
     runenv::of(here, &policy, &packs.pass, &llm.sandbox_env, &set)
 }
@@ -4638,6 +4664,7 @@ mod tests {
             write: vec!["~/Library/Caches/thing".into(), "/".into(), "/Users".into()],
             protect: vec!["secrets".into(), "../outside".into(), "/etc".into()],
             network: false,
+            asks_hosts: false,
             ports: Vec::new(),
             localhost: false,
             tmux_tmpdir: None,
@@ -5797,6 +5824,7 @@ mod tests {
             rule: "the cache".into(),
             said: "kept {caches}".into(),
             xattr: None,
+            pack: "rust".into(),
         };
         let place = crate::sandboxpack::CachePlace {
             at: modcache.clone(),
@@ -5814,6 +5842,7 @@ mod tests {
             ],
             runs_later: later.clone(),
             network,
+            asks_hosts: false,
             ..Env::default()
         };
         let closed = Policy::for_project(&env(false));
@@ -6975,10 +7004,10 @@ mod tests {
             let here = Here { env, tmp: Some(t.clone()), uid: 501, os, ..Here::default() };
             let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
             let p = policy_in(&t.join("p"), &llm, &[], &here);
-            assert_eq!(
+            // (piece C: closed, each host asked goes out the same way once the user says yes)
+            assert!(
                 p.egress.upstream.through(),
-                network,
-                "{os:?}: the proxy's own, from tarae's environment"
+                "{os:?}, {network}: the proxy's own, from tarae's environment"
             );
             let cmd = command(Some(&p), "true", &[]);
             let https = cmd.get_envs().find(|(k, _)| *k == "HTTPS_PROXY").and_then(|(_, v)| v?.to_str());
@@ -6987,7 +7016,8 @@ mod tests {
             let packs = proxied(&t, &t.join("run"), &[], p.proxy_url().as_ref());
             seen.extend(packs.into_iter().map(|(k, v)| format!("{k}={v}")));
             files(&t.join("run"), &mut seen);
-            assert!(network == seen.iter().any(|s| s.contains("proxyHost")), "{os:?}: the Java pack's lines");
+            // (closed too: each host asked goes through tarae's proxy — piece C)
+            assert!(seen.iter().any(|s| s.contains("proxyHost")), "{os:?} {network}: the Java pack's lines");
             for s in &seen {
                 assert!(
                     !s.contains("up.example.invalid") && !s.contains("tarae-fake-token-1"),
@@ -7060,8 +7090,10 @@ mod tests {
     /// credential, the same for every run.
     #[test]
     fn a_policys_proxy_url_is_its_own() {
+        // (piece C: the network closed, each host is asked — through the run's own port as when it's open)
         let (closed, t) = made_for(Os::Mac, false, "url-closed");
-        assert_eq!(closed.proxy_url(), None);
+        assert!(closed.asks_hosts && closed.proxy_url().is_some_and(|u| u.per_run));
+        assert_eq!(Policy { network: false, asks_hosts: false, ..closed.clone() }.proxy_url(), None);
         std::fs::remove_dir_all(&t).ok();
         let (mac, t) = made_for(Os::Mac, true, "url-mac");
         let port = mac.proxy.clone().expect("a port of the run's own");
@@ -7133,8 +7165,12 @@ mod tests {
                 "{tier_c_said}"
             );
         }
+        // (piece C: closed, each host asked goes the same way — taken, no proxy line)
         let (closed, vars) = made(Os::Linux, false, true);
-        assert!(!closed.redirected && closed.proxy_url().is_none() && vars.is_empty(), "{vars:?}");
+        assert!(
+            closed.asks_hosts && closed.redirected && closed.proxy_url().is_none() && vars.is_empty(),
+            "{vars:?}"
+        );
         let (mac, _) = made(Os::Mac, true, true);
         assert!(!mac.redirected && mac.proxy_url().is_some_and(|u| u.per_run));
     }
@@ -7183,6 +7219,111 @@ mod tests {
         answered.egress.answered.push(("example.invalid".into(), 443));
         assert_eq!(policy_key(&listed), policy_key(&answered), "nor an answer");
         assert_ne!(listed.run_id, p(true, list).run_id, "each run its own id");
+    }
+
+    /// Piece C: the network closed, beyond goes through tarae's proxy all the same — with an empty list, every host
+    /// asked: `llm.sandbox-hosts` doesn't apply, nor a host the project keeps (`A`, a host list's); the answers a
+    /// run carries are this run's, this conversation's and this session's. The network open, the kept ones apply.
+    #[test]
+    fn a_closed_network_goes_through_the_proxy_with_an_empty_list() {
+        use crate::allow::{Allowed, Grant};
+        use proxy::egress::Pattern;
+        let root = Path::new("/w/p");
+        let list = Some(vec![Pattern::parse("github.com").unwrap()]);
+        let closed = Policy::for_project(&Env { asks_hosts: true, hosts: list, ..env(root) });
+        assert!(closed.network && closed.asks_hosts, "beyond through the proxy, each host asked");
+        assert!(!closed.egress.any && closed.egress.hosts.is_empty(), "{:?}", closed.egress);
+        assert!(!closed.egress.allows("github.com", 443, 443), "the list is the open network's");
+        let open = Policy::for_project(&Env { network: true, asks_hosts: true, ..env(root) });
+        assert!(open.network && !open.asks_hosts && open.egress.any);
+        assert!(closed.egress.closed && !open.egress.closed, "the proxy's words follow which");
+        // The answers: the project's kept host only with the network open
+        let (mut kept, mut chat) = (Allowed::default(), Allowed::default());
+        kept.add(&Grant::Host("kept.example.invalid".into(), 443));
+        chat.add(&Grant::Host("chat.example.invalid".into(), 443));
+        let caps = crate::caps::Caps::granted(root, &kept, &Allowed::default(), &chat);
+        let hosts = |network| {
+            let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
+            crate::tools::with_allowed(&llm, &caps, Some(&Grant::Host("once.example.invalid".into(), 443)))
+                .hosts
+        };
+        let h = |s: &str| (s.to_string(), 443);
+        assert_eq!(hosts(false), [h("chat.example.invalid"), h("once.example.invalid")]);
+        assert_eq!(
+            hosts(true),
+            [h("kept.example.invalid"), h("chat.example.invalid"), h("once.example.invalid")]
+        );
+    }
+
+    /// Piece C1 (the user, 2026-10-17): the network closed, a tool's own retries of a host only keep the user
+    /// waiting on its card again (`c1-asks-results.txt`: cargo 11 s after a `n`, uv 7 s) — the packs' `on =
+    /// "each-host-asked"` variables turn them off (and npm's audit, a host a plain install doesn't need) in a closed
+    /// policy's runs only: the network open, each tool as it is. (pip keeps its retries: the proxy refuses a run's
+    /// next tries at once once one waited out the hold — `proxy::tests::a_runs_retry_after_an_unanswered_hold_…`.)
+    #[test]
+    fn each_host_asked_turns_the_tools_retries_off_in_closed_runs_only() {
+        let s = crate::scratch::Scratch::new("each-host-asked");
+        let (root, home) = (s.join("p"), s.join("home"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let mut here = Here::now();
+        here.env.insert("HOME".into(), home.into());
+        let env = |network| {
+            let llm = crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
+            policy_in(&root, &llm, &[], &here).env
+        };
+        let (closed, open) = (env(false), env(true));
+        let value =
+            |env: &[(String, String)], var: &str| env.iter().find(|(k, _)| k == var).map(|(_, v)| v.clone());
+        for (var, off) in [("CARGO_NET_RETRY", "0"), ("UV_HTTP_RETRIES", "0"), ("npm_config_audit", "false")]
+        {
+            assert_eq!(value(&closed, var).as_deref(), Some(off), "{var} in a closed run: {closed:?}");
+            assert_eq!(value(&open, var), None, "{var} with the network open: {open:?}");
+        }
+    }
+
+    /// Piece C: a pack's caches open to a run whose rules carry a yes for one of that pack's registries — the host
+    /// asked, or the `*.domain` the card suggested — and to no other run: another host's yes, a look-alike, a yes at
+    /// another port leave them as they are. The network open, they're open already.
+    #[test]
+    fn a_registry_grant_opens_its_packs_caches_for_the_run() {
+        use proxy::egress::Pattern;
+        let root = Path::new("/w/p");
+        let cache = |pack: &str, dir: &str| CachesSaid {
+            dirs: vec![PathBuf::from(dir)],
+            rule: format!("{pack}'s caches"),
+            said: String::new(),
+            xattr: None,
+            pack: pack.into(),
+        };
+        let caches = vec![cache("rust", "/h/.cargo/registry"), cache("go", "/h/go/pkg/mod")];
+        let registries: Vec<(String, Pattern)> =
+            [("rust", "crates.io"), ("rust", "*.crates.io"), ("go", "proxy.golang.org")]
+                .map(|(p, r)| (p.to_string(), Pattern::parse(r).unwrap()))
+                .into();
+        let run = |answered: &[(&str, u16)]| {
+            let mut p = Policy::for_project(&Env { asks_hosts: true, caches: caches.clone(), ..env(root) });
+            p.egress.answered = answered.iter().map(|(h, n)| (h.to_string(), *n)).collect();
+            p.open_granted_caches(&registries);
+            p
+        };
+        let closed = run(&[]);
+        assert_eq!(closed.caches.len(), 2, "kept as they are: {:?}", closed.caches);
+        for answered in [&[("static.crates.io", 443)][..], &[("*.crates.io", 443)]] {
+            let p = run(answered);
+            assert_eq!(p.caches, [PathBuf::from("/h/go/pkg/mod")], "{answered:?}");
+            assert!(p.write.contains(&PathBuf::from("/h/.cargo/registry")), "{answered:?}");
+            assert!(p.caches_said.iter().all(|c| c.pack == "go"), "said kept only while kept");
+        }
+        for answered in
+            [&[("example.invalid", 443)][..], &[("crates.io.example.invalid", 443)], &[("crates.io", 8443)]]
+        {
+            assert_eq!(run(answered).caches.len(), 2, "{answered:?}");
+        }
+        let mut open = Policy::for_project(&Env { network: true, caches: caches.clone(), ..env(root) });
+        assert!(open.caches.is_empty(), "the network open: they're open");
+        open.open_granted_caches(&registries);
+        assert!(open.caches.is_empty());
     }
 
     /// What Claude reads about Gradle (Java under P2): its writes in the user's Gradle home — the read-only
@@ -7813,9 +7954,10 @@ mod tests {
         let env = packs_env(
             &crate::sandboxpack::Vars { run: Some(run.path().to_path_buf()), ..vars.clone() },
             &here,
+            false,
         );
         assert!(
-            packs_env(&vars, &here).iter().all(|(k, _)| k != "npm_config_logs_dir"),
+            packs_env(&vars, &here, false).iter().all(|(k, _)| k != "npm_config_logs_dir"),
             "no run: no log folder"
         );
         let p = Policy { run: Some(run.clone()), env, ..p };
@@ -8287,6 +8429,7 @@ mod tests {
             caches: Vec::new(),
             caches_said: Vec::new(),
             network: false,
+            asks_hosts: false,
             ports: vec![port],
             localhost: false,
             run: None,
@@ -9331,6 +9474,7 @@ mod tests {
                 caches: Vec::new(),
                 caches_said: Vec::new(),
                 network,
+                asks_hosts: false,
                 ports: Vec::new(),
                 localhost: false,
                 run: Some(run.clone()),
@@ -9413,6 +9557,7 @@ mod tests {
             caches: Vec::new(),
             caches_said: Vec::new(),
             network: false,
+            asks_hosts: false,
             ports: Vec::new(),
             localhost: false,
             run: None,
@@ -9482,6 +9627,7 @@ mod tests {
             caches: Vec::new(),
             caches_said: Vec::new(),
             network: false,
+            asks_hosts: false,
             ports: Vec::new(),
             localhost: false,
             run: None,
@@ -10684,6 +10830,7 @@ mod tests {
             caches: Vec::new(),
             caches_said: Vec::new(),
             network,
+            asks_hosts: false,
             ports,
             localhost,
             run: None,

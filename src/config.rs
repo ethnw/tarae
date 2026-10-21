@@ -839,7 +839,12 @@ Z = ["move_line_down", ":sh touch marker"]
         assert!(ok.status.success());
         let (user, project, local) =
             (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
-        let yours_only = "environment-key = \"keep\"\nbilling = \"api\"\nreviewer-billing = \"api\"\nedit-tools = \"native\"\nclaude-sandbox = false\n";
+        // (`claude-sandbox` set the other way from this OS's default: on on macOS, off on Linux)
+        let default = crate::sandbox::claude::on_by_default(crate::sandbox::Os::HOST);
+        let yours_only = format!(
+            "environment-key = \"keep\"\nbilling = \"api\"\nreviewer-billing = \"api\"\nedit-tools = \"native\"\nclaude-sandbox = {}\n",
+            !default
+        );
         // (a risky setting beside them, so the project has a trust card to answer)
         fs::write(&project, format!("[llm]\nrun-allow = [\"make\"]\n{yours_only}")).unwrap();
         fs::write(&local, format!("[llm]\n{yours_only}")).unwrap();
@@ -853,7 +858,7 @@ Z = ["move_line_down", ":sh touch marker"]
                 && l.billing == Billing::Subscription
                 && l.reviewer_billing.is_none()
                 && l.edit_tools == crate::edittool::Arm::Tarae
-                && l.claude_sandbox
+                && l.claude_sandbox == default
         };
         let (c, w) = load(None, &Store::default());
         assert!(none_set(&c), "neither project file sets them");
@@ -881,7 +886,7 @@ Z = ["move_line_down", ":sh touch marker"]
                 && l.billing == Billing::Api
                 && l.reviewer_billing == Some(Billing::Api)
                 && l.edit_tools == crate::edittool::Arm::Native
-                && !l.claude_sandbox,
+                && l.claude_sandbox != default,
             "{w:?}"
         );
     }

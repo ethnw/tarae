@@ -65,3 +65,26 @@ expect = "refused"
 said = ["Makefile"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+[[entry]]
+name = "sync-plain"
+run = "uv sync"
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "test-plain"
+run = "uv run python -m pytest -q"
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "add"
+run = "uv pip install six==1.16.0"
+expect = "pass"
+timeout = 300
+asks = true

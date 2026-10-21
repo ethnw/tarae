@@ -73,7 +73,10 @@ reads = ["~/.npm", "{npm}", "{npm-upper}"]
 # writing its log and deleting the old ones its cleanup lists — in a folder of its own the cleanup finds none
 # of yours. (`logs-max=0` writes none but still tries to delete every old one.) Its "complete log" line names
 # a file there while the run's folder lasts
-env = { npm_config_logs_dir = "{run}" }
+#
+# The network closed (each host asked on a card): no audit in an install — a host it doesn't need (a plain
+# install passed with `n`, the audit alone went out); `npm audit` itself still asks. The network open: npm's own
+env = { npm_config_logs_dir = "{run}", npm_config_audit = { value = "false", on = "each-host-asked" } }
 # What of the user's environment a run gets for node and its package managers (npm's settings in both cases,
 # nvm, corepack, pnpm, yarn) — `npm_config__authToken`, `NODE_AUTH_TOKEN` left out as tokens. Measured: npm hands
 # its whole environment on to the scripts it runs, so what isn't passed here doesn't reach them either

@@ -1,4 +1,4 @@
-//! `cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all [--linux-only]] [--dry-run]` — the "must work"
+//! `cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux a+|c|all [--linux-only]] [--dry-run]` — the "must work"
 //! compatibility suite (`target/sb/compat-plan.md` §4–§5). tarae's tests built under `perf` (a debug supervisor
 //! serving every connect would skew the times), then the ignored driver (`compat::tests::driver`, `src/compat.rs`)
 //! run here and, asked, on Linux tiers in Docker through `cargo xtask linux` — A+ with `--userns`, C under Docker's
@@ -8,7 +8,8 @@
 //! home (`tarae-compat-<stack>-cache`: the caches its pre-warm fills, kept between runs). After them a line says
 //! what compat's images and volumes take against its 10 GB cap (§7 D4), and the disk. The driver makes each stack's project from
 //! its fixture (`compat/<stack>.toml`, `compat/<fixture>/`), runs its `prewarm` outside the sandbox, then each entry
-//! of the lane as Claude's run (`quick`: the entries marked so).
+//! of the lane as Claude's run (`quick`: the entries marked so; `asks`: the ones marked `asks`, which try the
+//! network — never in the gate or quick).
 //!
 //! Its `COMPAT` lines make the table — `target/compat/<date>-<os>.md`, one per stack, commands down and OS/tier
 //! across, `pending` entries' design in a column of its own — and a row each in `target/compat/history.tsv`,
@@ -23,7 +24,7 @@ use std::process::{Command, Stdio};
 use crate::linux::{COMPAT, quoted};
 use crate::{Result, root};
 
-const USAGE: &str = "usage: cargo xtask compat [stack …] [--lane gate|quick|net] [--linux a+|c|all [--linux-only]] [--dry-run]";
+const USAGE: &str = "usage: cargo xtask compat [stack …] [--lane gate|quick|asks|net] [--linux a+|c|all [--linux-only]] [--dry-run]";
 
 /// The manifests and fixtures, and where the tables and their history go, from the checkout's root.
 const MANIFESTS: &str = "compat";
@@ -45,10 +46,14 @@ const DRIVE: [&str; 6] =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
-    /// Every entry, the network closed and the caches warmed: what must work.
+    /// Every entry but the `asks` lane's, the network closed and the caches warmed: what must work.
     Gate,
     /// The entries marked `quick` (build and test).
     Quick,
+    /// The entries marked `asks`: everyday checks that try the network, run with it closed — which ask a host,
+    /// how many cards, how long a check waits (piece C1's measurement). Nothing leaves the machine: a test build's
+    /// proxy dials nothing past it, and these entries have no unsandboxed baseline.
+    Asks,
     /// Installs through tarae's proxy, hosts granted: piece 5.
     Net,
 }
@@ -58,6 +63,7 @@ impl Lane {
         match self {
             Lane::Gate => "gate",
             Lane::Quick => "quick",
+            Lane::Asks => "asks",
             Lane::Net => "net",
         }
     }
@@ -113,8 +119,14 @@ fn ask(args: &[String]) -> Result<Ask> {
                 a.lane = match it.next() {
                     Some("gate") => Lane::Gate,
                     Some("quick") => Lane::Quick,
+                    Some("asks") => Lane::Asks,
                     Some("net") => Lane::Net,
-                    l => return Err(format!("--lane {}: gate, quick or net — {USAGE}", l.unwrap_or("?"))),
+                    l => {
+                        return Err(format!(
+                            "--lane {}: gate, quick, asks or net — {USAGE}",
+                            l.unwrap_or("?")
+                        ));
+                    }
                 }
             }
             "--linux" => {
@@ -158,6 +170,8 @@ struct Stack {
 struct Row {
     name: String,
     quick: bool,
+    /// Tries the network: the `asks` lane's only.
+    asks: bool,
     pending: Option<String>,
 }
 
@@ -171,6 +185,7 @@ fn stack(name: &str, text: &str) -> Result<Stack> {
     let rows = entries.iter().filter_map(|e| e.as_table()).map(|e| Row {
         name: s(e, "name").unwrap_or_default(),
         quick: e.get("quick").and_then(|q| q.as_bool()).unwrap_or(false),
+        asks: e.get("asks").and_then(|q| q.as_bool()).unwrap_or(false),
         pending: s(e, "pending"),
     });
     let prewarm = t.get("prewarm").and_then(|p| p.as_array()).map(Vec::as_slice).unwrap_or_default();
@@ -210,7 +225,7 @@ fn stacks(dir: &Path, asked: &[String]) -> Result<Vec<Stack>> {
 
 /// A stack's rows in the lane.
 fn rows(s: &Stack, lane: Lane) -> impl Iterator<Item = &Row> {
-    s.rows.iter().filter(move |r| lane != Lane::Quick || r.quick)
+    s.rows.iter().filter(move |r| r.asks == (lane == Lane::Asks) && (lane != Lane::Quick || r.quick))
 }
 
 /// The driver's variables: which stacks, which lane.
@@ -268,6 +283,10 @@ fn linux_args(s: &Stack, lane: Lane, tier: Tier, image: Option<&str>) -> Vec<Str
         a.extend(["--env".into(), format!("{k}={v}")]);
     }
     a.extend(["--env".into(), format!("TARAE_COMPAT_TIER={}", tier.word())]);
+    // (host cards left unanswered, as here: the driver's `TARAE_COMPAT_HOSTS=wait`)
+    if let Ok(h) = std::env::var("TARAE_COMPAT_HOSTS") {
+        a.extend(["--env".into(), format!("TARAE_COMPAT_HOSTS={h}")]);
+    }
     a.extend(tier.args().iter().map(|t| t.to_string()));
     if let Some(i) = image {
         a.extend(["--image".into(), i.into()]);
@@ -608,7 +627,12 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = root();
-    let stacks = stacks(&root.join(MANIFESTS), &a.stacks)?;
+    let mut stacks = stacks(&root.join(MANIFESTS), &a.stacks)?;
+    // (a stack with no entry in the lane isn't run: its prewarm would be for nothing)
+    stacks.retain(|s| rows(s, a.lane).next().is_some());
+    if stacks.is_empty() {
+        return Err(format!("no stack asked has an entry in the {} lane", a.lane.word()));
+    }
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let base = base(&root)?;
     if a.dry {
@@ -748,6 +772,11 @@ name = "add"
 run = "npm install left-pad"
 expect = "refused"
 pending = "manifest-review"
+[[entry]]
+name = "audit"
+run = "npm audit"
+expect = "pass"
+asks = true
 "#;
 
     #[test]
@@ -768,9 +797,10 @@ pending = "manifest-review"
         assert_eq!((a.lane, a.linux.len(), a.dry), (Lane::Gate, 0, false));
         assert_eq!(ask(&args("--linux c")).unwrap().linux, vec![Tier::C]);
         assert_eq!(ask(&args("--lane net")).unwrap().lane, Lane::Net);
+        assert_eq!(ask(&args("--lane asks")).unwrap().lane, Lane::Asks);
         for (bad, why) in [
             ("--lane", "--lane ?"),
-            ("--lane fast", "gate, quick or net"),
+            ("--lane fast", "gate, quick, asks or net"),
             ("--linux b", "a+, c or all"),
             ("--repeat", "--repeat?"),
             ("../node", "a stack's name"),
@@ -789,6 +819,7 @@ pending = "manifest-review"
         let names = |lane| rows(&s, lane).map(|r| r.name.as_str()).collect::<Vec<_>>();
         assert_eq!(names(Lane::Gate), ["test", "lint", "add"]);
         assert_eq!(names(Lane::Quick), ["test"]);
+        assert_eq!(names(Lane::Asks), ["audit"]);
         assert_eq!(s.rows[2].pending.as_deref(), Some("manifest-review"));
         assert!(stack("node", NODE).is_err_and(|e| e.contains("stack = \"node\" expected")));
         let dir = std::env::temp_dir().join(format!("xtask-compat-stacks-{}", std::process::id()));

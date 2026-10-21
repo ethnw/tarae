@@ -880,6 +880,34 @@ fn snapshot_card_says_who_waits_behind_it() {
     s.frames_both("card_says_who_waits_behind");
 }
 
+/// Piece C: the host card with the network closed — a pack's registry asked, its others suggested (the yes grants
+/// them), the caches warning, `y` · `a` · `s` · `n` — made by `hosts::card` itself; at 100 columns and narrow.
+#[test]
+fn snapshot_host_card_closed() {
+    for (w, name) in [(100, "host_closed"), (72, "host_closed_narrow")] {
+        let mut s = Shot::new(w, 30);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        let a = crate::hosts::Ask {
+            session: s.ed.session.proxy_id(),
+            run: 1,
+            kind: crate::sandbox::proxy::Kind::Host,
+            host: "index.crates.io".into(),
+            port: 443,
+            asked: Vec::new(),
+            process: "cargo".into(),
+            label: "cargo build".into(),
+            users: false,
+            left: false,
+            open: false,
+            also: vec!["crates.io".into(), "*.crates.io".into()],
+        };
+        s.ed.push_offer(crate::hosts::card(a));
+        s.check(name);
+        s.frames_both(name);
+    }
+}
+
 /// A command Claude wants to run outside the sandbox — the run card P3 keeps — shown whole (a commit message past
 /// four lines too), its reason under it, `y Run` · `n No`.
 #[test]
@@ -3849,6 +3877,7 @@ fn snapshot_granted() {
     s.frames_both("granted_empty");
 }
 
+#[cfg(target_os = "macos")]
 fn blocked_npm_run(s: &mut Shot) {
     let cache = PathBuf::from("/private/tmp/tarae-shot-blocked/npm-cache");
     std::fs::create_dir_all(&cache).unwrap();

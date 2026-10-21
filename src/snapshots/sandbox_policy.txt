@@ -16,6 +16,7 @@ profile:
 (deny file-read-data file-write* (regex #"^/dev/ttys[0-9]+$") (with message "$TAG"))
 (deny network* (with message "$TAG"))
 (allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:$PROXY"))
 (deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
 (deny network-outbound (remote unix-socket) (with message "$TAG"))
 (allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
@@ -206,14 +207,19 @@ copies.left_out:
 copies.told:
     $HOME/.cargo/config.toml
 run env:
+    CARGO_NET_RETRY=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Dorg.gradle.daemon=false
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     PYTHONPYCACHEPREFIX=$RUN/pycache
     UV_CACHE_DIR=$RUN/uv
+    UV_HTTP_RETRIES=0
+    npm_config_audit=false
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle
@@ -235,6 +241,7 @@ profile:
 (deny file-read-data file-write* (regex #"^/dev/ttys[0-9]+$") (with message "$TAG"))
 (deny network* (with message "$TAG"))
 (allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:$PROXY"))
 (deny network-bind network-inbound (local unix-socket) (with message "$TAG"))
 (deny network-outbound (remote unix-socket) (with message "$TAG"))
 (allow network-bind network-inbound (require-all (local unix-socket) (require-any (subpath (param "ROOT")) (subpath (param "RUN")))))
@@ -423,13 +430,18 @@ copies.left_out:
     $HOME/Library/Application Support/go/env ($GOENV)
 copies.told:
 run env:
+    CARGO_NET_RETRY=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     PYTHONPYCACHEPREFIX=$RUN/pycache
     UV_CACHE_DIR=$RUN/uv
+    UV_HTTP_RETRIES=0
+    npm_config_audit=false
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $BASE/gradle-moved
@@ -861,14 +873,19 @@ copies.left_out:
 copies.told:
     $HOME/.cargo/config.toml
 run env:
+    CARGO_NET_RETRY=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Dorg.gradle.daemon=false
     GRADLE_RO_DEP_CACHE=$HOME/.gradle/caches
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     PYTHONPYCACHEPREFIX=$RUN/pycache
     UV_CACHE_DIR=$RUN/uv
+    UV_HTTP_RETRIES=0
+    npm_config_audit=false
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $HOME/.gradle
@@ -1078,13 +1095,18 @@ copies.left_out:
     $HOME/.npmrc ($NPM_CONFIG_USERCONFIG)
 copies.told:
 run env:
+    CARGO_NET_RETRY=0
     GOCACHE=$HOME/.cache/tarae/run-homes/go-build/$KEY
     GOLANGCI_LINT_CACHE=$HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     GOTOOLCHAIN=local
     GRADLE_OPTS=-Xmx1g -Dorg.gradle.daemon=false
     GRADLE_USER_HOME=$RUN/gradle
+    MAVEN_ARGS=-s $RUN/maven-settings.xml
+    NODE_USE_ENV_PROXY=1
     PYTHONPYCACHEPREFIX=$RUN/pycache
     UV_CACHE_DIR=$RUN/uv
+    UV_HTTP_RETRIES=0
+    npm_config_audit=false
     npm_config_logs_dir=$RUN
 tool homes:
     gradle $BASE/gradle-moved

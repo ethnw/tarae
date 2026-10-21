@@ -1760,7 +1760,7 @@ fn tarae_state_says_the_sandbox() {
         json!({
             "by": "landlock", "tier": "A+", "abi": 8, "partial": false,
             "namespaces": { "user": true, "net": true, "pid": true, "shm": true, "netns": true },
-            "network": { "open": false, "way": "tproxy" }, "kept": kept, "shared": [],
+            "network": { "open": false, "asked": false, "way": "tproxy" }, "kept": kept, "shared": [],
             "why": null, "hint": null, "line": line,
         })
     );

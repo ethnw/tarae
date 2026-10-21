@@ -81,3 +81,19 @@ expect = "refused"
 said = ["package.json"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+[[entry]]
+name = "install-plain"
+run = "pnpm install"
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "audit"
+run = "pnpm audit"
+expect = "pass"
+timeout = 300
+asks = true

@@ -271,11 +271,12 @@ pub fn sandboxed(on: bool, here: &crate::sandbox::Availability) -> bool {
     on && !matches!(here, Availability::Missing(_) | Availability::Partial(_))
 }
 
-/// Whether a sandboxed run of Claude's could reach beyond this machine: with the network closed nothing leaves
-/// it (D4). Open, which host a command reaches isn't known before it runs — the hosts let through (any,
-/// `llm.sandbox-hosts`, a session's or a kept grant) may be the one.
-pub fn reaches_out(llm: &crate::llm::LlmConfig) -> bool {
-    llm.sandbox_network
+/// Whether a sandboxed run of Claude's could reach beyond this machine unasked (D4): the network open — which host a
+/// command reaches isn't known before it runs (any, `llm.sandbox-hosts`, a session's or a kept grant may be the one)
+/// — or, closed (piece C), with a host this session or conversation let through (`granted`): every other host waits
+/// on its own card, which names the command.
+pub fn reaches_out(llm: &crate::llm::LlmConfig, granted: bool) -> bool {
+    llm.sandbox_network || granted
 }
 
 /// What a card asks for, in the capability model's terms.
@@ -824,13 +825,14 @@ mod tests {
         assert!(!sandboxed(true, &abi2) && !sandboxed(true, &Availability::Missing("x".into())));
         assert!(sandboxed(true, &Availability::Ready) && !sandboxed(false, &Availability::Ready));
         assert_eq!(run(Past::No, sandboxed(true, &abi2), &[]), Decision::NoSandbox);
-        // (D4: a warning that asks — `git push`, `cargo publish` — asks where the run could reach out: the
-        // network open; closed, it runs and fails in the sandbox)
+        // (D4: a warning that asks — `git push`, `cargo publish` — asks where the run could reach out unasked:
+        // the network open, or closed with a host let through (piece C); closed with none, the host's own card asks)
         let llm = |network| crate::llm::LlmConfig { sandbox_network: network, ..Default::default() };
         let warned =
             |reach| Request::Run { past: Past::No, sandboxed: true, reads: Vec::new(), outward: reach };
-        assert_eq!(decide(&warned(reaches_out(&llm(true)))), Decision::Outward);
-        assert_eq!(decide(&warned(reaches_out(&llm(false)))), Decision::None);
+        assert_eq!(decide(&warned(reaches_out(&llm(true), false))), Decision::Outward);
+        assert_eq!(decide(&warned(reaches_out(&llm(false), true))), Decision::Outward);
+        assert_eq!(decide(&warned(reaches_out(&llm(false), false))), Decision::None);
         assert_eq!(Decision::Outward.word(), "outward");
         assert_eq!(run(Past::No, true, &[Class::OtherCheckout, Class::Temp]), Decision::None);
         assert_eq!(run(Past::No, true, &[Class::Temp, Class::Home]), Decision::Grant(Verb::Read));

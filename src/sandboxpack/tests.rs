@@ -357,13 +357,20 @@ fn an_env_entry_may_wait_for_a_fact_the_core_knows() {
     let t = table(
         &[(
             "t",
-            "[sandbox]\nenv = { T_PLAIN = \"1\", T_OPTS = { value = \"-Dv4\", on = \"v4-mapped-refused\" } }\n",
+            "[sandbox]\nenv = { T_PLAIN = \"1\", T_OPTS = { value = \"-Dv4\", on = \"v4-mapped-refused\" }, \
+             T_RETRY = { value = \"0\", on = \"each-host-asked\" } }\n",
         )],
         &[],
     );
     assert_eq!(t.problems, Vec::<String>::new());
     assert_eq!(t.env, [("T_PLAIN".to_string(), "1".to_string())]);
-    assert_eq!(t.env_on, [EnvOn { name: "T_OPTS".into(), value: "-Dv4".into(), on: On::V4MappedRefused }]);
+    assert_eq!(
+        t.env_on,
+        [
+            EnvOn { name: "T_OPTS".into(), value: "-Dv4".into(), on: On::V4MappedRefused },
+            EnvOn { name: "T_RETRY".into(), value: "0".into(), on: On::EachHostAsked },
+        ]
+    );
     // (not a name a run gets from the user's environment: where the fact doesn't hold, theirs stays out)
     assert!(!t.env_names().any(|n| n == "T_OPTS"));
     for (text, said) in [

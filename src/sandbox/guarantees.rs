@@ -246,6 +246,8 @@ pub struct Guarantees {
     pub rows: Vec<Row>,
     /// Whether the policy opens the network, and how it goes.
     pub network: bool,
+    /// That network is each host asked on a card — `llm.sandbox-network` off (piece C, `Policy.asks_hosts`).
+    pub asks: bool,
     pub way: Way,
     /// Why not the top tier — the probe's, the supervisor's, no TPROXY's, Landlock's — None at the top.
     pub why: Option<String>,
@@ -402,6 +404,7 @@ impl Guarantees {
             ns: Some(f.ns),
             rows,
             network: f.network,
+            asks: false,
             way,
             why: (!why.is_empty()).then(|| why.join("; ")),
             brief: (!brief.is_empty()).then(|| brief.join(" · ")),
@@ -427,12 +430,18 @@ impl Guarantees {
                 Row::new(Part::Loopback, !ports, loopback),
             ],
             network,
+            asks: false,
             way: Way::Proxy,
             why: None,
             brief: None,
             hint: None,
             pool: None,
         }
+    }
+
+    /// Its network each host asked (`asks`), as the policy says.
+    pub fn asking(self, asks: bool) -> Guarantees {
+        Guarantees { asks: asks && self.network, ..self }
     }
 
     /// Its tier — None: Seatbelt's (no tiers).
@@ -504,7 +513,11 @@ impl Guarantees {
             (Way::Proxy, true) => "tarae's proxy",
             (Way::Copies, true) => "tarae's proxy, by copies",
         };
-        v.push(("network", network.to_string()));
+        let network = match (self.asks, self.way) {
+            (true, Way::NoSocket) | (false, _) => network.to_string(),
+            (true, _) => format!("each host asked, {network}"),
+        };
+        v.push(("network", network));
         let shared: Vec<&str> = self.shared().into_iter().map(|p| self.name(p)).collect();
         v.push(("shared", if shared.is_empty() { "nothing".into() } else { shared.join(", ") }));
         v
@@ -552,7 +565,7 @@ impl Guarantees {
             .map(|n| json!({ "user": n.user, "net": n.net, "pid": n.pid, "shm": n.shm, "netns": n.netns() }));
         json!({
             "by": by, "tier": tier, "abi": abi, "partial": abi.is_some_and(|a| a < 3), "namespaces": ns,
-            "network": { "open": self.network, "way": self.way.key() },
+            "network": { "open": self.network && !self.asks, "asked": self.asks, "way": self.way.key() },
             "kept": parts(true), "shared": parts(false),
             "why": self.why, "hint": self.hint.as_ref().map(|h| &h.said), "line": self.line(),
         })

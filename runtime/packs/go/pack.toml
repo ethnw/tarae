@@ -189,7 +189,7 @@ rule = "Go's module cache"
 said = """Go's module cache ({caches}) stays as it is while the network is closed: every project's build outside \
 the sandbox uses the modules there. A build that needs a module not downloaded yet fails here — that's not \
 something to fix in the code: tell the user. A build or `go mod download` of theirs puts it there, then run it \
-again; llm.sandbox-network opens the cache to your commands."""
+again; their yes for proxy.golang.org on its card opens the cache to your next run."""
 
 # Go's build cache, of the runs' own: kept across the project's runs (a cold one rebuilds the standard library),
 # never the user's — what a run compiles there never reaches their builds

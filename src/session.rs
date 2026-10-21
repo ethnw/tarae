@@ -350,6 +350,14 @@ impl Session {
         }
     }
 
+    /// The hosts its `s` let through over TLS or HTTP, at their ports — what its runs' rules carry (`caps::Basis`).
+    pub fn granted_hosts(&self) -> Vec<(String, u16)> {
+        let host = |(k, h, p): &(crate::sandbox::proxy::Kind, String, u16)| {
+            (*k == crate::sandbox::proxy::Kind::Host).then(|| (h.clone(), *p))
+        };
+        self.hosts.iter().filter_map(host).collect()
+    }
+
     /// The session as tarae's proxy names it — `proxy::session_of` its root, resolved as a run's policy resolves
     /// it: the answers the main loop sends (`hosts.rs`) reach the session its runs' connections are of, whatever
     /// way the root was given. Worked out when the session is made, and again only if its root is changed since.

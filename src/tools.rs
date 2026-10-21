@@ -2422,12 +2422,15 @@ fn run_request(
     crate::cards::Request::Run { past, sandboxed, reads, outward }
 }
 
-/// Whether a run of Claude's could reach beyond this machine (cardauto D4): with no sandbox here (a partial
-/// one included), past it (`past`: outside, a socket), or the network open (`cards::reaches_out`) — what a
-/// warning that `asks` asks about. Else it runs, and fails in the sandbox.
+/// Whether a run of Claude's could reach beyond this machine unasked (cardauto D4): with no sandbox here (a
+/// partial one included), past it (`past`: outside, a socket), or through tarae's proxy (`cards::reaches_out`:
+/// the network open, or a host this session or conversation let through — piece C) — what a warning that `asks`
+/// asks about. Else it runs, and any host it reaches waits on its own card.
 fn could_reach_out(ed: &Editor, past: bool) -> bool {
+    let chat = ed.session.chat.as_ref().is_some_and(|c| !c.allowed.hosts.is_empty());
+    let granted = !ed.session.hosts.is_empty() || chat;
     past || !crate::cards::sandboxed(ed.config.llm.sandbox, &ed.sandbox)
-        || crate::cards::reaches_out(&ed.config.llm)
+        || crate::cards::reaches_out(&ed.config.llm, granted)
 }
 
 /// A file Claude wrote unseen is shown on the card whole — at most this many lines, each at most this many
@@ -2664,6 +2667,8 @@ impl Widened {
     /// policy closes them: `Policy.keys`).
     pub fn onto(self, p: &mut crate::sandbox::Policy) {
         (p.granted, p.sockets, p.egress.answered) = (self.granted, self.sockets, self.hosts);
+        // (piece C: a grant naming a registry opens its pack's caches to this run — its rules are made once)
+        p.open_granted_caches(&crate::sandboxpack::get().registries);
         p.terminals = self.terminals;
         if let Some(keys) = p.keys.as_mut() {
             *keys = self.keys;
@@ -2680,7 +2685,7 @@ pub fn with_allowed(
 ) -> Widened {
     use crate::allow::Grant;
     let mut w = Widened { llm: llm.clone(), ..Widened::default() };
-    for g in caps.grants().into_iter().chain(once.cloned()) {
+    for g in caps.run_grants(llm.sandbox_network).into_iter().chain(once.cloned()) {
         match &g {
             Grant::Read(p) if !w.reads.contains(p) => w.reads.push(p.clone()),
             Grant::Write(p) => w.llm.sandbox_write.push(p.display().to_string()),
@@ -3013,7 +3018,13 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
         };
         let mut told = (Vec::new(), None);
         let policy = matches!(found, Availability::Ready | Availability::Partial(_)).then(|| {
-            let w = with_allowed(&llm, &basis.granted(), grant.as_ref());
+            let mut w = with_allowed(&llm, &basis.granted(), grant.as_ref());
+            // (the session's `s` hosts: the proxy has them already — here for the caches they open, piece C)
+            for h in &basis.hosts {
+                if !w.hosts.contains(h) {
+                    w.hosts.push(h.clone());
+                }
+            }
             let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
             let mut p = crate::sandbox::policy_from(&root, w, &here)?;
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
@@ -4724,8 +4735,9 @@ mod tests {
     }
 
     /// cardauto D4: a warning that asks (`git push`, `cargo publish`) asks where the run could reach beyond
-    /// this machine — no sandbox (a partial one too), past it, or the network open; with the network closed it
-    /// runs, and fails in the sandbox. The card's request says the same (`outward`), so its shadow is the gate.
+    /// this machine unasked — no sandbox (a partial one too), past it, the network open, or (piece C) closed with a
+    /// host the session let through; closed with none, it runs and the host's own card asks. The card's request
+    /// says the same (`outward`), so its shadow is the gate.
     #[test]
     fn a_warning_that_asks_asks_only_where_the_run_could_reach_out() {
         use crate::cards::{Decision, Why};
@@ -4734,10 +4746,14 @@ mod tests {
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         (ed.config.llm.sandbox, ed.sandbox, ed.config.llm.sandbox_network) =
             (true, Availability::Ready, false);
-        assert!(!super::could_reach_out(&ed, false), "closed: it runs, and fails in the sandbox");
+        assert!(!super::could_reach_out(&ed, false), "closed: the host's own card asks");
         assert!(super::could_reach_out(&ed, true), "past the sandbox");
         let why = Why::NotACheck("git".into());
         assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::None);
+        ed.session.hosts.push((crate::sandbox::proxy::Kind::Host, "crates.io".into(), 443));
+        assert!(super::could_reach_out(&ed, false), "closed, a host let through for the session");
+        assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::Outward);
+        ed.session.hosts.clear();
         ed.config.llm.sandbox_network = true;
         assert!(super::could_reach_out(&ed, false), "the network open");
         assert_eq!(decide(&super::run_request(&ed, None, &why, true)), Decision::Outward);

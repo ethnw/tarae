@@ -1186,25 +1186,36 @@ fn a_run_answer_leaves_the_other_runs_asked() {
     assert_eq!(status(&mut two), 200);
 }
 
-/// A connection whose hold ran out is no longer waiting: the next connection to that host is asked again, not
-/// left to wait out its own hold unasked.
+/// A connection whose hold ran out unanswered: its run's next connections to that host are refused at once while
+/// the card waits — a tool's retries don't each sit out a hold of their own (pip: six, 133 s) — and asked nothing
+/// more; another run's connection is held and asked as ever; the user's later `y` for the run lets its next one
+/// through.
 #[test]
-fn a_question_whose_connection_gave_up_is_asked_again() {
+fn a_runs_retry_after_an_unanswered_hold_is_refused_at_once() {
     let out = outside(echo);
     let (resolve, _) = resolver(vec![("ask.test", vec![vec![out.at]])]);
-    let f = start(resolve, Limits { hold: Duration::from_millis(300), ..limits() });
+    let hold = Duration::from_millis(600);
+    let f = start(resolve, Limits { hold, ..limits() });
     let (mut c, d) = connection(&f.proxy, 21, 1, rules(&[]));
     assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 403);
     assert!(said_host(&d).contains("didn't answer"));
     assert!(f.asks.recv_timeout(WAIT).is_ok());
-    let (mut c, _) = connection(&f.proxy, 21, 1, rules(&[]));
-    c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
-    let asked = f.asks.recv_timeout(WAIT).expect("asked again");
+    // The same run tries again: refused within a fraction of the hold, unasked, said why
+    let (mut c, d) = connection(&f.proxy, 21, 1, rules(&[]));
+    let at = Instant::now();
+    assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 403);
+    assert!(at.elapsed() < hold / 4, "refused at once: {:?}", at.elapsed());
+    assert!(said_host(&d).contains("hasn't answered its card yet"), "{}", said_host(&d));
+    assert!(f.asks.try_recv().is_err(), "not asked again for the same run");
+    // Another run's first connection: held and asked
+    let (mut other, _) = connection(&f.proxy, 21, 2, rules(&[]));
+    other.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
+    let asked = f.asks.recv_timeout(WAIT).expect("another run asked");
     assert_eq!(
         asked,
         FromProxy::Ask {
             session: 21,
-            run: 1,
+            run: 2,
             kind: Kind::Host,
             host: "ask.test".into(),
             port: 443,
@@ -1212,6 +1223,11 @@ fn a_question_whose_connection_gave_up_is_asked_again() {
             asked: vec![]
         }
     );
+    assert_eq!(status(&mut other), 403, "its own hold ran out");
+    // The first run's card answered `y` at last: its next try goes through
+    f.proxy.send(answer_for(21, 1, Scope::Run));
+    let (mut c, _) = connection(&f.proxy, 21, 1, rules(&[]));
+    assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 200);
 }
 
 /// Past a session's cap, and past the cap in all, a connection is answered 503 and said; once a tunnel ends,
@@ -1305,6 +1321,73 @@ fn an_unknown_host_is_held_and_asked() {
         "{why}"
     );
     assert!(f.asks.try_recv().is_err() && short.asks.try_recv().is_ok());
+}
+
+/// Piece C: with the network closed (`Egress.closed`) no list is the way through, so a host left unanswered says the
+/// user's card was — never `llm.sandbox-hosts`; a no says the user refused it, as with the network open.
+#[test]
+fn with_the_network_closed_a_refusal_names_the_users_card() {
+    let out = outside(echo);
+    let f = start(
+        resolver(vec![("ask.test", vec![vec![out.at]])]).0,
+        Limits { hold: Duration::from_millis(300), ..limits() },
+    );
+    let closed = || Egress { closed: true, ..rules(&[]) };
+    let (mut c, d) = connection(&f.proxy, 4, 1, closed());
+    assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 403);
+    let why = said_host(&d);
+    assert_eq!(
+        why,
+        "ask.test:443: with the network closed, each host waits on the user's yes on its card; the user was asked \
+         and didn't answer within 0.3 s"
+    );
+    assert!(f.asks.recv_timeout(WAIT).is_ok());
+    let (mut c, d) = connection(&f.proxy, 4, 2, closed());
+    c.write_all(connect_head("ask.test:443").as_bytes()).unwrap();
+    assert!(f.asks.recv_timeout(WAIT).is_ok(), "asked again");
+    f.proxy.send(ToProxy::Answer {
+        kind: Kind::Host,
+        session: 4,
+        run: 2,
+        host: "ask.test".into(),
+        port: 443,
+        scope: Scope::Refused,
+    });
+    assert_eq!(status(&mut c), 403);
+    let why = said_host(&d);
+    assert!(why.ends_with(": the user refused it") && !why.contains("llm.sandbox-hosts"), "{why}");
+}
+
+/// Piece C: a yes for a registry's `*.domain` (the host card's suggestion, a conversation's `a`) lets every name
+/// under it through unasked, at that port — not the domain itself, not another port, not another session — and
+/// taken back (`Taken`, the conversation over), they're asked again.
+#[test]
+fn a_registrys_suggestion_answered_lets_its_names_through() {
+    let out = outside(echo);
+    let at = vec![out.at];
+    let (resolve, _) = resolver(vec![("static.reg.test", vec![at.clone()]), ("reg.test", vec![at.clone()])]);
+    let f = start(resolve, limits());
+    let answer = |scope| ToProxy::Answer {
+        kind: Kind::Host,
+        session: 7,
+        run: 1,
+        host: "*.reg.test".into(),
+        port: 443,
+        scope,
+    };
+    f.proxy.send(answer(Scope::Chat));
+    let (mut c, _) = connection(&f.proxy, 7, 2, rules(&[]));
+    assert_eq!(ask(&mut c, &connect_head("static.reg.test:443")), 200, "under it: unasked");
+    assert!(f.asks.try_recv().is_err());
+    for (session, head) in [(7, "reg.test:443"), (7, "static.reg.test:8443"), (8, "static.reg.test:443")] {
+        let (mut c, _) = connection(&f.proxy, session, 2, rules(&[]));
+        c.write_all(connect_head(head).as_bytes()).unwrap();
+        assert!(f.asks.recv_timeout(WAIT).is_ok(), "{session} {head}: asked");
+    }
+    f.proxy.send(ToProxy::Taken { session: 7, kind: Kind::Host, host: "*.reg.test".into(), port: 443 });
+    let (mut c, _) = connection(&f.proxy, 7, 3, rules(&[]));
+    c.write_all(connect_head("static.reg.test:443").as_bytes()).unwrap();
+    assert!(f.asks.recv_timeout(WAIT).is_ok(), "taken back: asked again");
 }
 
 /// The user's answer for the session lets that run's next connections and the session's other runs through

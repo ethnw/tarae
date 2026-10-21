@@ -13,6 +13,7 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x000d $BASE/rustup-moved
     0x000d $BASE/tmp
     0x000d $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x000d $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x000d $HOME/.cargo/build
     0x000d $HOME/.cargo/build/ab/cdef0123
     0x000d $HOME/.cargo/git
@@ -38,6 +39,7 @@ ABI 3: handles files 0x07fff · network 0x0 · scopes 0x0
     0x7ffa $ROOT/src/tls
     0x7fff $BASE/tmp
     0x7fff $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x7fff $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x7fff $HOME/.cargo/build/ab/cdef0123
     0x7fff $RUN
     0x7fff $TMP
@@ -58,6 +60,7 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x000d $BASE/rustup-moved
     0x000d $BASE/tmp
     0x000d $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x000d $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x000d $HOME/.cargo/build
     0x000d $HOME/.cargo/build/ab/cdef0123
     0x000d $HOME/.cargo/git
@@ -83,6 +86,7 @@ ABI 4: handles files 0x07fff · network 0x3 · scopes 0x0
     0x7ffa $ROOT/src/tls
     0x7fff $BASE/tmp
     0x7fff $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x7fff $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x7fff $HOME/.cargo/build/ab/cdef0123
     0x7fff $RUN
     0x7fff $TMP
@@ -103,6 +107,7 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0x000d $BASE/rustup-moved
     0x000d $BASE/tmp
     0x000d $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x000d $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x000d $HOME/.cargo/build
     0x000d $HOME/.cargo/build/ab/cdef0123
     0x000d $HOME/.cargo/git
@@ -128,6 +133,7 @@ ABI 6: handles files 0x0ffff · network 0x3 · scopes 0x3
     0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0xffff $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
     0xffff $RUN
     0xffff $TMP
@@ -148,6 +154,7 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0x000d $BASE/rustup-moved
     0x000d $BASE/tmp
     0x000d $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x000d $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x000d $HOME/.cargo/build
     0x000d $HOME/.cargo/build/ab/cdef0123
     0x000d $HOME/.cargo/git
@@ -173,6 +180,7 @@ ABI 9: handles files 0x1ffff · network 0x3 · scopes 0x3
     0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0xffff $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
     0xffff $RUN
     0xffff $TMP
@@ -193,6 +201,7 @@ ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0x000d $BASE/rustup-moved
     0x000d $BASE/tmp
     0x000d $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0x000d $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0x000d $HOME/.cargo/build
     0x000d $HOME/.cargo/build/ab/cdef0123
     0x000d $HOME/.cargo/git
@@ -218,6 +227,7 @@ ABI 10: handles files 0x1ffff · network 0xf · scopes 0x3
     0xfffa $ROOT/src/tls
     0xffff $BASE/tmp
     0xffff $HOME/.cache/tarae/run-homes/go-build/$KEY
+    0xffff $HOME/.cache/tarae/run-homes/golangci-lint/$KEY
     0xffff $HOME/.cargo/build/ab/cdef0123
     0xffff $RUN
     0xffff $TMP

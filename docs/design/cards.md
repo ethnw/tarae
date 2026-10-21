@@ -441,7 +441,9 @@ All five recommendations taken:
 3. **Home closed by an allow-list**, the list measured in P2 (what the toolchains actually read), never
    guessed.
 4. **The network is grantable up to this session at most**; "always" stays the project's trusted
-   `llm.sandbox-network`.
+   `llm.sandbox-network`. Built in sandbox UX piece C1 (2026-10-16, `target/sb/sandbox-ux-pieceC-plan.md`): the
+   network closed, every host is asked — `y` this run · `a` this chat · `s` this session · `n`; `Caps::storable`
+   keeps a host to the session.
 5. **This repo's `llm.sandbox-localhost` narrows to its tests' ports** (`llm.sandbox-ports`), so one
    `curl` can't reach every local service. To do: which ports the tests use — the agent/attach tests'
    listeners are port 0, so the list is what they bind, found by running them in the narrowed sandbox.

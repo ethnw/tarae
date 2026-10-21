@@ -49,6 +49,15 @@ func main() {
 	fmt.Println(title("hello"))
 }
 """
+# (the asks lane's `new-import`: behind the `ignore` tag, so nothing else here builds it — and the prewarm's
+# `go mod tidy`, which takes every other tag, doesn't fetch what it imports)
+"need/need.go" = """
+//go:build ignore
+
+package need
+
+import _ "golang.org/x/mod/semver"
+"""
 "main_test.go" = """
 package main
 
@@ -102,3 +111,36 @@ expect = "refused"
 said = ["Makefile"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+[[entry]]
+name = "get"
+run = "go get golang.org/x/sync@v0.6.0"
+expect = "pass"
+timeout = 300
+asks = true
+
+# (go.sum emptied for the run, put back after: the module is in the cache, its sums are looked up — kept in a temp
+# file: on Linux no new file is made beside the project's protected names)
+[[entry]]
+name = "sums"
+run = "k=$(mktemp) && cp go.sum \"$k\" && : > go.sum && go mod download; s=$?; cp \"$k\" go.sum; rm -f \"$k\"; exit $s"
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "outdated"
+run = "go list -m -u all"
+expect = "pass"
+timeout = 300
+asks = true
+
+# (an import no module in go.mod provides — need/, behind its tag — resolved as `-mod=mod` lets it)
+[[entry]]
+name = "new-import"
+run = "GOFLAGS=-mod=mod go build -tags ignore ./need"
+expect = "pass"
+timeout = 300
+asks = true

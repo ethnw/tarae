@@ -625,6 +625,14 @@ impl Offer {
         }
     }
 
+    /// What its `v` shows after its text, if it's the closed network's host card (`hosts::details`).
+    pub fn host_details(&self) -> Option<String> {
+        match &self.what {
+            What::Host(a) if !a.open => Some(crate::hosts::details(a)),
+            _ => None,
+        }
+    }
+
     /// Whether `s` answers it — for this session: a host's card, or a card that grants what may be kept that
     /// long (`top`).
     pub fn for_session(&self) -> bool {
@@ -756,9 +764,9 @@ impl Offer {
         // (Docker's socket is never the chat's: a run card's `a` is then its command's, when it has one — #193)
         let as_outside = |s: &std::path::Path| crate::allow::Grant::Socket(s.to_path_buf()).as_outside();
         match &self.what {
-            // (a host lasts for the session, `s` — never the conversation's)
-            What::Grant { grant: crate::allow::Grant::Host(..), .. } => false,
             What::Grant { .. } => self.top() >= Some(crate::allow::Scope::ThisChat),
+            // (piece C: a host's `a` is this conversation's — `hosts::chat_ended`)
+            What::Host(_) | What::HostRaw(_) | What::Lookup(_) => true,
             What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
             What::Run(r) => {
@@ -775,7 +783,9 @@ impl Offer {
             What::Run(r) => r.keep,
             // (a socket is this conversation's at most — #119)
             What::Grant { grant, .. } => grant.keepable(),
-            What::Host(_) | What::EnvKey { .. } => true,
+            // (piece C: only a host list's — the network closed, always is the setting: cards.md decision 4)
+            What::Host(a) => a.open,
+            What::EnvKey { .. } => true,
             _ => self.lasts() && matches!(self.what, What::Read { .. }),
         }
     }
@@ -892,9 +902,9 @@ impl Offer {
                 vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('A', "Always"), ('n', "No")]
             }
             W::Read { keep: false, .. } => vec![('y', "Once"), ('n', "No")],
-            // (as the host's own card)
+            // (as the host's own card, the network closed: never kept past a session)
             W::Grant { grant: crate::allow::Grant::Host(..), .. } => {
-                vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")]
+                vec![('y', "This run"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
             }
             // (as far as it may be kept: Docker's socket and a key this run's only, another socket this chat's)
             W::Grant { .. } => match self.top() {
@@ -985,9 +995,26 @@ impl Offer {
                 vec![('y', "Accept all"), ('r', "One by one"), ('v', "See them"), ('n', "Decline all")]
             }
             W::Stuck(_) => vec![('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")],
-            W::Host(_) => vec![('y', "This run"), ('s', "This session"), ('A', "Always here"), ('n', "No")],
+            // (`A` only with the network open: cards.md decision 4 — piece C)
+            W::Host(a) if a.open => vec![
+                ('y', "This run"),
+                ('a', "This chat"),
+                ('s', "This session"),
+                ('A', "Always here"),
+                ('n', "No"),
+            ],
+            // (the network closed: the wait and how long a yes lasts are behind `v` — `hosts::details`)
+            W::Host(_) => vec![
+                ('y', "This run"),
+                ('a', "This chat"),
+                ('s', "This session"),
+                ('v', "Details"),
+                ('n', "No"),
+            ],
             // (F7: no `A` — a lasting allow is the user's own line in llm.sandbox-hosts)
-            W::HostRaw(_) | W::Lookup(_) => vec![('y', "This run"), ('s', "This session"), ('n', "No")],
+            W::HostRaw(_) | W::Lookup(_) => {
+                vec![('y', "This run"), ('a', "This chat"), ('s', "This session"), ('n', "No")]
+            }
             W::Containers(_) => vec![('y', "Stop them"), ('n', "Leave them")],
             W::BillingSwitch { money: true, .. } => vec![('y', "This session"), ('n', "Stay")],
             W::BillingSwitch { .. } => vec![('y', "Switch"), ('n', "Keep it")],
@@ -1274,6 +1301,7 @@ impl crate::editor::Editor {
             Code::Char('v') if o.made() => crate::tools::made_view(self),
             // (its detail, kept off the card — it stands beside the work while Claude runs held back)
             Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. }) => self.offer_view(),
+            Code::Char('v') if o.host_details().is_some() => self.offer_view(),
             Code::Char('r') if o.made() => self.offer_accept_by('r'),
             Code::Char('n') => self.offer_dismiss(),
             Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
@@ -1808,6 +1836,9 @@ impl crate::editor::Editor {
         if let Some(&What::ClaudeSettings { hash }) = self.offers.first().map(|o| &o.what) {
             return self.claude_settings_view(hash);
         }
+        if let Some(more) = self.offers.first().and_then(Offer::host_details) {
+            return self.offer_view_with(more);
+        }
         match self.offers.first().and_then(Offer::change_set) {
             Some(generation) => crate::refactor::view_all(self, generation),
             None => self.offer_view_all(),
@@ -1934,6 +1965,9 @@ impl crate::editor::Editor {
             What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
             What::Host(a) if scope == crate::allow::Scope::Always => {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Project)
+            }
+            What::Host(a) | What::HostRaw(a) | What::Lookup(a) => {
+                crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Chat)
             }
             What::EnvKey { session, message } if scope == crate::allow::Scope::Always => {
                 crate::envkey::answer(self, o.id, (session, message), crate::envkey::Answer::Always)

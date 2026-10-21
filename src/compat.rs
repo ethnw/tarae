@@ -55,6 +55,10 @@ pub struct Entry {
     pub timeout: Duration,
     /// In the quick lane (`cargo xtask compat --lane quick`: build and test) as well as the gate.
     pub quick: bool,
+    /// Tries the network: in the asks lane alone (`--lane asks`), never the gate's or quick's. Run with the
+    /// network closed, its host cards are what's measured — not failures — and it has no baseline (unsandboxed
+    /// it would reach the network).
+    pub asks: bool,
 }
 
 /// A stack's entries: what it needs on PATH, what's done outside the sandbox first (as the user's own build
@@ -78,7 +82,7 @@ pub struct Entry {
 /// cards = ["run"]
 /// settings = { llm = { sandbox-localhost = true } }
 /// writes = ["~/.npm/_cacache"]        # outside the project, expected to change
-/// # cwd, pending = "manifest-review", baseline = false, timeout = 600, quick = true
+/// # cwd, pending = "manifest-review", baseline = false, timeout = 600, quick = true, asks = true
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -111,7 +115,7 @@ const MANIFEST_KEYS: [&str; 11] =
 const LINUX_KEYS: [&str; 2] = ["watch", "writes"];
 const ENTRY_KEYS: [&str; 10] =
     ["name", "run", "cwd", "expect", "said", "cards", "settings", "writes", "pending", "baseline"];
-const ENTRY_KEYS_MORE: [&str; 2] = ["timeout", "quick"];
+const ENTRY_KEYS_MORE: [&str; 3] = ["timeout", "quick", "asks"];
 
 /// An entry's time limit when it names none.
 const TIMEOUT: Duration = Duration::from_secs(600);
@@ -229,10 +233,17 @@ fn entry(v: &toml::Value) -> Result<Entry, String> {
     if let Some(w) = writes.iter().find(|w| !w.starts_with('/') && !w.starts_with("~/")) {
         return Err(at(format!("writes: {w} — absolute or ~/")));
     }
+    let asks = match t.get("asks") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| at("asks: true or false".into()))?,
+    };
     let baseline = match t.get("baseline") {
-        None => true,
+        None => !asks,
         Some(v) => v.as_bool().ok_or_else(|| at("baseline: true or false".into()))?,
     };
+    if asks && baseline {
+        return Err(at("baseline: none for asks — unsandboxed it would reach the network".into()));
+    }
     let timeout = match t.get("timeout") {
         None => TIMEOUT,
         Some(v) => v
@@ -245,6 +256,9 @@ fn entry(v: &toml::Value) -> Result<Entry, String> {
         None => false,
         Some(v) => v.as_bool().ok_or_else(|| at("quick: true or false".into()))?,
     };
+    if asks && quick {
+        return Err(at("quick: an asks entry is in the asks lane alone".into()));
+    }
     Ok(Entry {
         cwd: string(t, "cwd").map_err(at)?,
         cards: strings(t, "cards").map_err(at)?,
@@ -257,6 +271,7 @@ fn entry(v: &toml::Value) -> Result<Entry, String> {
         baseline,
         timeout,
         quick,
+        asks,
     })
 }
 
@@ -383,6 +398,8 @@ pub struct Verdict {
     pub failed: Vec<Failure>,
     /// The protected names the snapshot found it made, its expected end on Linux (`judge_made`): `⊘ found`.
     pub found: Vec<String>,
+    /// An asks entry's host cards, how many came — None: not an asks entry.
+    pub asked: Option<usize>,
 }
 
 impl Verdict {
@@ -400,11 +417,14 @@ impl Verdict {
     }
 
     /// Its cell in the table (§5): `✓`, `✓ 1.7×` (slow), `⊘` (refused as expected), `✗ class` (the first by
-    /// `CLASSES`).
+    /// `CLASSES`), `● 2 hosts` (an asks entry's host cards).
     pub fn cell(&self) -> String {
         let rank = |c: &&str| CLASSES.iter().position(|k| k == c);
         if let Some(class) = self.failed.iter().map(Failure::class).min_by_key(rank) {
             return format!("✗ {class}");
+        }
+        if let Some(n) = self.asked.filter(|n| *n > 0) {
+            return format!("● {n} host{}", if n == 1 { "" } else { "s" });
         }
         if !self.found.is_empty() {
             return "⊘ found".into();
@@ -449,6 +469,9 @@ impl std::fmt::Display for Verdict {
         };
         let ran = self.ran.as_deref().map(|r| format!(", {r}")).unwrap_or_default();
         let verdict = match (self.ok(), &self.pending) {
+            (true, _) if let Some(n) = self.asked.filter(|n| *n > 0) => {
+                format!("asked {n} host card{}", if n == 1 { "" } else { "s" })
+            }
             (true, _) if !self.found.is_empty() => {
                 format!("made {}, found by the snapshot as expected on Linux", self.found.join(", "))
             }
@@ -516,6 +539,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
         cards: Vec::new(),
         failed: Vec::new(),
         found: Vec::new(),
+        asked: entry.asks.then_some(0),
     };
     // (no checkout, no snapshot: a protected name Landlock let it make would pass unseen)
     if !at.project.join(".git").exists() {
@@ -558,12 +582,25 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     if let Some(cwd) = &entry.cwd {
         args["cwd"] = json!(cwd);
     }
+    // (the proxy's questions go to a test's sender (`TEST_ASKS`): handed to the editor as its main loop takes
+    // them, so each host card comes as it would — piece C, the network closed: each host asked)
+    let asks = {
+        let session = ed.session.proxy_id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut to = crate::sandbox::proxy::TEST_ASKS.lock().unwrap_or_else(|e| e.into_inner());
+        to.retain(|(s, _)| *s != session);
+        to.push((session, tx));
+        rx
+    };
     let answer = match crate::tools::run(&mut ed, call, &args) {
         Err(e) => Some(Err(e)),
-        Ok(()) => answered_by_script(&mut ed, entry, &id, &mut v),
+        Ok(()) => answered_by_script(&mut ed, entry, &id, &asks, &mut v),
     };
     // (the record's lines written before it's judged, as tarae waits for them at its end)
     ed.cards_flush();
+    // (each entry its own session at the proxy: a host refused for the session (`n`) is refused at once, with no
+    // card, for the rest of it — the next entry, in the same project, is asked afresh)
+    crate::hosts::session_ended(&ed.session);
     let run = ed.session.task_run.as_ref().filter(|r| r.by_claude && r.task.cmd == entry.run);
     match answer {
         None => {
@@ -584,6 +621,11 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
     v.ended = Some(r.state.clone());
     v.took = r.took;
     judge_report(&mut v, entry, r);
+    // (an asks entry tries the network: its host cards, answered `n` or left, are what's measured — the exit
+    // they caused isn't its failure; a report that names no cause still is)
+    if v.asked.is_some_and(|n| n > 0) {
+        v.failed.retain(|f| f.check != Check::Exit);
+    }
     let made: Vec<String> = ed.session.made_protected.iter().map(|m| m.path.clone()).collect();
     judge_made(&mut v, entry, &made, cfg!(target_os = "linux"));
     // (before the baseline: what the same command writes outside the sandbox is the user's own build's)
@@ -630,22 +672,42 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
 }
 
 /// Events pumped until `id` is answered (None: not within the entry's time), the scripted user answering each
-/// card once as it comes to the front.
+/// card once as it comes to the front — a host's card too (`asks`: the proxy's questions), but with
+/// `TARAE_COMPAT_HOSTS=wait` a host card unlisted is left unanswered, as a user away would: the proxy holds the
+/// connection its time (`Limits::hold`), then refuses it. Each host card says when it came and how many times it
+/// was asked (the tool's retries join it).
 fn answered_by_script(
     ed: &mut Editor,
     entry: &Entry,
     id: &serde_json::Value,
+    asks: &std::sync::mpsc::Receiver<crate::sandbox::proxy::FromProxy>,
     v: &mut Verdict,
 ) -> Option<Result<String, String>> {
     let answered =
         || crate::tools::ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| i == id).map(|(_, r)| r.clone()));
-    let end = Instant::now() + entry.timeout;
+    let start = Instant::now();
+    let end = start + entry.timeout;
+    let wait = std::env::var("TARAE_COMPAT_HOSTS").is_ok_and(|w| w == "wait");
     let mut seen = BTreeSet::new();
+    // (each host card's words by its `host:port`, and the questions the proxy asked about each)
+    let (mut hosts, mut questions) = (Vec::<(String, String)>::new(), BTreeMap::<String, usize>::new());
+    let host_cards = |v: &mut Verdict, hosts: &[(String, String)], questions: &BTreeMap<String, usize>| {
+        for (at, said) in hosts {
+            v.cards.push(format!("{said} (asked {}×)", questions.get(at).copied().unwrap_or(0)));
+        }
+    };
     loop {
+        for a in asks.try_iter() {
+            let crate::sandbox::proxy::FromProxy::Ask { host, port, .. } = &a;
+            *questions.entry(format!("{host}:{port}")).or_default() += 1;
+            crate::hosts::asked(ed, a);
+        }
         if let Some(r) = answered() {
+            host_cards(v, &hosts, &questions);
             return Some(r);
         }
         if Instant::now() > end {
+            host_cards(v, &hosts, &questions);
             return None;
         }
         if let Some(o) = ed.offers.first().filter(|o| !o.installing() && !seen.contains(&o.id)) {
@@ -656,14 +718,33 @@ fn answered_by_script(
                 None => kind.to_string(),
             };
             let listed = entry.cards.iter().any(|c| c == kind || *c == said);
-            match listed {
-                true => ed.offer_accept(),
-                false => {
-                    ed.offer_dismiss();
-                    v.fail(Check::Card, format!("{said} — nobody listed it"));
+            let host = o.host().map(|a| {
+                let after = crate::term::duration(start.elapsed().as_secs_f32());
+                let at = format!("{}:{}", a.host, a.port);
+                (at.clone(), format!("{said} {at} by {}, after {after}", a.process))
+            });
+            let answer = match (listed, &host) {
+                (true, _) => {
+                    ed.offer_accept();
+                    "y"
                 }
+                (false, Some(_)) if wait => "left unanswered",
+                (false, _) => {
+                    ed.offer_dismiss();
+                    "n"
+                }
+            };
+            // (an asks entry's host cards are what it measures)
+            if !listed && !(entry.asks && host.is_some()) {
+                v.fail(Check::Card, format!("{said} — nobody listed it"));
             }
-            v.cards.push(format!("{said} → {}", if listed { "y" } else { "n" }));
+            if let (Some(n), Some(_)) = (v.asked.as_mut(), &host) {
+                *n += 1;
+            }
+            match host {
+                Some((at, h)) => hosts.push((at, format!("{h} → {answer}"))),
+                None => v.cards.push(format!("{said} → {answer}")),
+            }
             continue;
         }
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -690,10 +771,12 @@ fn judge_report(v: &mut Verdict, entry: &Entry, r: &crate::task::Run) {
         crate::sandbox::Guard::In(p) => p.said_in_output(&r.output, &seen),
         _ => Vec::new(),
     };
-    // (in Seatbelt's words too where the plain ones name no target: `opening apps` is a mach service)
+    // (in Seatbelt's words too where the plain ones name no target: `opening apps` is a mach service; an asks
+    // entry's hosts refused on their cards are what it measures)
     let denials: Vec<String> = seen
         .iter()
         .chain(&said)
+        .filter(|d| !(entry.asks && d.op == "network-host"))
         .map(|d| match d.plain() == d.shown() {
             true => d.reported(),
             false => format!("{} — {}", d.reported(), d.shown()),
@@ -1150,8 +1233,8 @@ const ASKED: &str = "a record of the variables a policy reads; the shipped twin 
 const RUNS: &str = "runs' folders in the temp folder (`Here::runs`), not tarae's cache: the same RunDir, another \
                     parent, and the check that every run may write there skipped";
 const CGROUP: &str = "Linux: a folder given in TARAE_TEST_CGROUP instead of systemd's: off unless set";
-const ASKS: &str = "the proxy's questions go to a test's sender (`TEST_ASKS`): no host card comes — the network \
-                    lane needs a seam (piece 5)";
+const ASKS: &str = "the proxy's questions go to a test's sender (`TEST_ASKS`): the driver's, which hands them to its \
+                    editor as the main loop does (`answered_by_script`) — each host card comes";
 const NAMES: &str = "names resolved from `TEST_NAMES`/`TEST_RECORDS` only, never the network — the network lane \
                      needs a seam (piece 5)";
 const BEYOND: &str = "macOS: addresses a test stands for beyond this machine (`TEST_BEYOND`): none";
@@ -1263,6 +1346,9 @@ timeout = 60
         assert_eq!(add.expect, Expect::Refused(vec!["package.json".into()]));
         assert_eq!(add.pending.as_deref(), Some("manifest-review"));
         assert!(!add.baseline && add.timeout == Duration::from_secs(60));
+        // (an asks entry has no baseline, and isn't quick)
+        let asks = entry("name = \"a\"\nrun = \"npm audit\"\nexpect = \"pass\"\nasks = true");
+        assert!(asks.asks && !asks.baseline && !t.asks);
         let files: Vec<(&str, &str)> = m.files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
         assert_eq!(files, [("package.json", "{}"), ("src/a.js", "export {};\n")]);
         // (the stack's writes are every entry's, after its own)
@@ -1278,6 +1364,9 @@ timeout = 60
             ("", "no expect"),
             ("expect = \"pass\"\nsettings = { llm = { sandbox-localhst = true } }", "unknown setting"),
             ("expect = \"pass\"\nwrites = [\"cache\"]", "absolute or ~/"),
+            ("expect = \"pass\"\nasks = true\nbaseline = true", "would reach the network"),
+            ("expect = \"pass\"\nasks = true\nquick = true", "the asks lane alone"),
+            ("expect = \"pass\"\nasks = 1", "asks: true or false"),
         ] {
             let r = refused(e);
             assert!(r.as_ref().is_err_and(|r| r.contains(why)), "{e}: {r:?}");
@@ -1452,6 +1541,45 @@ timeout = 60
         assert!(marker.exists(), "the baseline wrote it: {v}");
     }
 
+    /// Piece C: a closed run's connection reaches tarae's proxy, and its question comes to the driver's editor as
+    /// the host card — unlisted, answered `n` and failing the entry, said with what asked. The `n` ends the
+    /// connection that waits on it at once, and the run's next try of the host is refused for the session with no
+    /// card and no wait: the run is over well within the proxy's hold. (A made-up name: the proxy asks before any
+    /// lookup, and refused, nothing is looked up; no baseline — that would run it outside.)
+    #[test]
+    fn a_closed_runs_host_comes_to_the_driver_as_its_card() {
+        let test = "compat::tests::a_closed_runs_host_comes_to_the_driver_as_its_card";
+        if !sandboxed_here(test) || !on_path("curl") {
+            return;
+        }
+        let hold = crate::sandbox::proxy::Limits::default().hold;
+        let curl = "curl -s --max-time 30 -o /dev/null https://compat-c1.example.invalid/";
+        let run_ = format!("{curl}; {curl}");
+        let text = format!(
+            "name = \"out\"\nrun = \"{run_}\"\nexpect = \"pass\"\ncards = [\"run\"]\ntimeout = 60\nbaseline = false"
+        );
+        let s = Scratch::new("hostcard");
+        let v = run(&entry(&text), &s.place);
+        // (by the run's process as the proxy names it: `sh` on macOS, which knows no more)
+        let hosts: Vec<&String> =
+            v.cards.iter().filter(|c| c.contains("compat-c1.example.invalid:443 by ")).collect();
+        assert_eq!(hosts.len(), 1, "one card, the second try refused without one: {v}");
+        assert!(hosts[0].contains("→ n (asked 1×)"), "the host card, answered n: {v}");
+        assert!(failed(&v, Check::Card).iter().any(|f| f.starts_with("host")), "{v}");
+        assert_ne!(v.ended, Some(crate::task::State::Passed), "refused: {v}");
+        assert!(v.took.is_some_and(|t| t < hold / 4), "refused at once, not after the {hold:?} hold: {v}");
+        // (the asks lane's entry: the host card is what it measures — counted, not failed, nor its exit; a project
+        // of its own, so the session's refusal above isn't its)
+        let text = format!(
+            "name = \"out\"\nrun = \"{run_}\"\nexpect = \"pass\"\ncards = [\"run\"]\ntimeout = 60\nasks = true"
+        );
+        let s = Scratch::new("hostcard-asks");
+        let v = run(&entry(&text), &s.place);
+        assert_eq!((v.asked, v.cell()), (Some(1), "● 1 host".to_string()), "{v}");
+        assert!(v.to_string().contains("out: asked 1 host card"), "{v}");
+        assert!(v.took.is_some_and(|t| t < hold / 4), "{v}");
+    }
+
     fn e_text(cmd: &str) -> String {
         format!("name = \"out\"\nrun = \"{cmd}\"\nexpect = \"pass\"\ncards = [\"run\"]\ntimeout = 60")
     }
@@ -1571,6 +1699,7 @@ timeout = 60
             cards: Vec::new(),
             failed: Vec::new(),
             found: Vec::new(),
+            asked: None,
         };
         assert_eq!(v.cell(), "✓ 1.7×");
         v.took = Some(Duration::from_millis(1100));
@@ -1591,6 +1720,13 @@ timeout = 60
         assert_eq!(v.cell(), "✗ not-ours");
         v.fail(Check::Writes, "made x");
         assert_eq!(v.cell(), "✗ writes");
+        // (an asks entry: its host cards, after any failure)
+        v.asked = Some(2);
+        assert_eq!(v.cell(), "✗ writes");
+        v.failed.clear();
+        assert_eq!(v.cell(), "● 2 hosts");
+        v.asked = Some(0);
+        assert_eq!(v.cell(), "⊘", "it asked nothing");
     }
 
     /// A pass expected that fails in the sandbox and unsandboxed alike is the tool's own (§5 `not-ours`): its exit
@@ -1632,6 +1768,7 @@ timeout = 60
                 cards: Vec::new(),
                 failed: Vec::new(),
                 found: Vec::new(),
+                asked: None,
             };
             // (as `judge_report` leaves a refusal expected that passed)
             if matches!(e.expect, Expect::Refused(_)) {
@@ -1652,18 +1789,19 @@ timeout = 60
 
     /// The driver `cargo xtask compat` runs (ignored: it needs the stacks' toolchains, and runs their `prewarm`
     /// outside the sandbox): each stack of `TARAE_COMPAT_STACKS` (comma-separated, `compat/<stack>.toml`), its
-    /// entries in `TARAE_COMPAT_LANE` (`quick`: the quick ones; else all), each verdict on stderr and its cell on
+    /// entries in `TARAE_COMPAT_LANE` (`quick`: the quick ones; `asks`: the asks ones; else all but those), each
+    /// verdict on stderr and its cell on
     /// stdout as a `COMPAT` line (`line`) for the xtask's table — on a Linux tier's column (`TARAE_COMPAT_TIER`:
     /// `A+`, `C`) a run at another tier ends the stack there, said. Without the variable it does nothing.
     #[test]
     #[ignore]
     fn driver() {
         let Some(stacks) = std::env::var_os("TARAE_COMPAT_STACKS") else { return };
-        let quick = std::env::var("TARAE_COMPAT_LANE").is_ok_and(|l| l == "quick");
+        let lane = std::env::var("TARAE_COMPAT_LANE").unwrap_or_default();
         let root = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
         let root = root.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         for stack in stacks.to_string_lossy().split(',').filter(|s| !s.is_empty()) {
-            for (entry, cell) in drive(&root, stack, quick) {
+            for (entry, cell) in drive(&root, stack, &lane) {
                 println!("{}", line(stack, &entry, &cell));
             }
         }
@@ -1677,13 +1815,14 @@ timeout = 60
 
     /// One stack's entries in the lane, each with its cell (`Verdict::cell`) — or `– why` where none could run:
     /// a tool not on PATH, no sandbox here, its fixture or a prewarm failed.
-    fn drive(root: &Path, stack: &str, quick: bool) -> Vec<(String, String)> {
+    fn drive(root: &Path, stack: &str, lane: &str) -> Vec<(String, String)> {
         let text = std::fs::read_to_string(root.join(MANIFESTS).join(format!("{stack}.toml")));
         let m = match text.map_err(|e| e.to_string()).and_then(|t| Manifest::parse(&t)) {
             Ok(m) => m,
             Err(e) => return vec![("(manifest)".into(), format!("✗ manifest: {e}"))],
         };
-        let entries: Vec<&Entry> = m.entries.iter().filter(|e| !quick || e.quick).collect();
+        let entries: Vec<&Entry> =
+            m.entries.iter().filter(|e| e.asks == (lane == "asks") && (lane != "quick" || e.quick)).collect();
         let skip = |why: &str| -> Vec<(String, String)> {
             entries.iter().map(|e| (e.name.clone(), format!("– {why}"))).collect()
         };

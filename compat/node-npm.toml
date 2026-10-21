@@ -98,3 +98,21 @@ expect = "refused"
 said = ["package.json"]
 baseline = false
 timeout = 60
+
+# The asks lane (`cargo xtask compat --lane asks`, piece C1's measurement): everyday commands that try the
+# network, run with it closed — each host asked on its card. Never in the gate.
+# (no `--no-audit`, as people run it: the javascript pack turns the audit off in closed runs — `npm_config_audit`,
+# `each-host-asked` — so it asks for no host; `audit` below still does)
+[[entry]]
+name = "install-audit"
+run = "npm install --no-fund"
+expect = "pass"
+timeout = 300
+asks = true
+
+[[entry]]
+name = "audit"
+run = "npm audit"
+expect = "pass"
+timeout = 300
+asks = true

@@ -384,7 +384,7 @@ fn grant_offer(
     // (as far as it may be kept: a socket this conversation's at most, a key and Docker's socket this run's —
     // everything else stays in the sandbox)
     let lasts = match (&grant, crate::caps::Caps::storable(&grant)) {
-        (Grant::Host(..), _) => "This session lasts until you quit, always until :granted takes it back.",
+        (Grant::Host(..), _) => "This chat lasts until the conversation ends, this session until you quit.",
         (_, Scope::Always | Scope::Session) => {
             "s lasts until this session ends, A until :granted takes it back."
         }
@@ -909,7 +909,7 @@ mod tests {
             (Grant::Write(base.join("w")), all),
             (Grant::Port(5432), all),
             (Grant::Terminals, all),
-            (Grant::Host("example.invalid".into(), 443), "ysAn"),
+            (Grant::Host("example.invalid".into(), 443), "yasn"),
             (Grant::Socket(base.join("s.sock")), "yan"),
             (Grant::Socket("/run/docker.sock".into()), "yn"),
             (Grant::Key(base.join(".env")), "yn"),
