@@ -53,6 +53,8 @@ pub struct Pending {
     pub since: std::time::Instant,
     /// What looks like a token where it reads (`tokens::found_in`) — its card says so.
     pub found: crate::tokens::Found,
+    /// The repository outside the project it reads in, `a`/`A` may allow whole (`repository_of`, piece J).
+    pub repository: Option<PathBuf>,
     /// Not Claude's call: what the user's own act would send with a file named like a key (`Own`) — no call
     /// waits on it.
     pub own: Option<Own>,
@@ -90,6 +92,7 @@ pub struct Ask {
     look: Look,
     class: crate::cards::Class,
     found: crate::tokens::Found,
+    repository: Option<PathBuf>,
 }
 
 impl Ask {
@@ -146,7 +149,8 @@ impl Gate {
             return Ok(());
         }
         let found = look.at.as_deref().map(crate::tokens::found_in).unwrap_or_default();
-        Err(Box::new(Ask { look, class, found }))
+        let repository = look.at.as_deref().and_then(|at| repository_of(at, &caps));
+        Err(Box::new(Ask { look, class, found, repository }))
     }
 }
 
@@ -156,7 +160,7 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.generation() == generation) else {
         return crate::tools::answer(ed, then.call, Err("the chat it came from is gone".into()));
     };
-    let Ask { look, class, found } = ask;
+    let Ask { look, class, found, repository } = ask;
     c.reads.push_back(Pending {
         request_id: String::new(),
         generation,
@@ -165,6 +169,7 @@ pub fn tool_ask(ed: &mut Editor, then: Then, ask: Ask) {
         class,
         since: std::time::Instant::now(),
         found,
+        repository,
         own: None,
         then: Some(then),
     });
@@ -764,6 +769,7 @@ pub fn ask_own(ed: &mut Editor, keys: Vec<PathBuf>, own: Own) {
         class: crate::cards::Class::Secret,
         since: std::time::Instant::now(),
         found: Default::default(),
+        repository: None,
         own: Some(own),
         then: None,
     };
@@ -873,8 +879,8 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
         let ok = covered || by_default(class, &caps);
         // (asked: its card says first what looks like a token there — a folder in the project too: its yes
         // reads more than the keys it names)
-        let found = match (ok, &look.at) {
-            (false, Some(at)) => crate::tokens::found_in(at),
+        let (found, repository) = match (ok, &look.at) {
+            (false, Some(at)) => (crate::tokens::found_in(at), repository_of(at, &caps)),
             _ => Default::default(),
         };
         Box::new(move |ed: &mut Editor| {
@@ -892,6 +898,7 @@ pub fn request(ed: &mut Editor, request_id: &str, req: &Value) -> Option<Value> 
                 class,
                 since,
                 found,
+                repository,
                 own,
                 then: None,
             });
@@ -948,29 +955,88 @@ fn refold(ed: &mut Editor) {
     let others = others(c);
     let home = crate::allow::home();
     let front = !ed.background();
-    // (each card offering its file alone, and the folder it'd offer now)
-    let wants: Vec<(u64, PathBuf)> = ed
+    // (each card offering its place alone)
+    let alone: Vec<(u64, Pending)> = ed
         .session
         .parked
         .iter()
         .chain(ed.offers.iter().filter(|_| front))
-        .filter_map(|o| {
-            let crate::offer::What::Read { pending, keep: true, folder: None } = &o.what else { return None };
-            let at = pending.look.at.clone().filter(|_| pending.look.file && pending.look.keys.is_empty())?;
-            let f = crate::allow::grant_places(std::slice::from_ref(&at), &others, home.as_deref()).pop()?;
-            (f != at).then_some((o.id, f))
+        .filter_map(|o| match &o.what {
+            crate::offer::What::Read { pending, keep: true, folder: None } => {
+                Some((o.id, (**pending).clone()))
+            }
+            _ => None,
         })
         .collect();
-    for (id, f) in wants {
-        let Some(found) = scanned(ed, &f) else { continue };
+    for (id, p) in alone {
+        let Some((f, found)) = folder_for(ed, &p, &others, home.as_deref()) else { continue };
+        let (mut q, warning) = card_text(&p, true, Some((&f, &found)));
+        let what = crate::offer::What::Read { pending: Box::new(p), keep: true, folder: Some(f.clone()) };
+        if let Some(line) = ed.always_line(&what) {
+            q.push_str(&format!("\n\n{line}"));
+        }
         let cards = ed.session.parked.iter_mut().chain(ed.offers.iter_mut().filter(|_| front));
         for o in cards.filter(|o| o.id == id) {
-            let crate::offer::What::Read { pending, folder, .. } = &mut o.what else { continue };
-            (o.question, o.warning) = card_text(pending, true, Some((&f, &found)));
+            let crate::offer::What::Read { folder, .. } = &mut o.what else { continue };
+            (o.question, o.warning) = (q.clone(), warning.clone());
             *folder = Some(f.clone());
             o.rev += 1;
         }
     }
+}
+
+/// What `a`/`A` allow on `p`'s card besides its place, once looked through for tokens (`scanned` — till then
+/// None: the card offers the place alone, `refold` the rest later): the repository it reads in (piece J,
+/// `Pending.repository`) when all of it was looked through and nothing there looks like a token; else, for a
+/// file beside other reads, its folder (#102), with what that holds said.
+fn folder_for(
+    ed: &mut Editor,
+    p: &Pending,
+    others: &[PathBuf],
+    home: Option<&Path>,
+) -> Option<(PathBuf, crate::tokens::Found)> {
+    let at = p.look.at.as_ref().filter(|_| p.look.keys.is_empty())?;
+    // (never for a read that's itself a key's or named like one: outside the project `look.keys` is empty —
+    // review J 5)
+    let secret = p.class == crate::cards::Class::Secret || crate::secretnames::named_secret(at);
+    if let Some(r) = p.repository.as_ref().filter(|_| !secret) {
+        let found = scanned(ed, r)?;
+        if found.files.is_empty() && found.named.is_empty() && !found.cut {
+            return Some((r.clone(), found));
+        }
+    }
+    let places = crate::allow::grant_places(std::slice::from_ref(at), others, home);
+    let f = places.into_iter().next_back().filter(|f| f != at && p.look.file)?;
+    let found = scanned(ed, &f)?;
+    Some((f, found))
+}
+
+/// The top of the git checkout `at` (real, outside the project) is in, which `a`/`A` may allow whole (piece J): a
+/// repository's (git's links both ways — `allow::common_dir`), `at`'s folder or above, neither the project nor
+/// holding it, not home or above, not in or holding a place that holds keys or that runs never read
+/// (`allow::keepable`, `caps.kept`), nor where what's there runs later (`caps.later`). Whether it holds what looks
+/// like a token is looked at before it's offered (`folder_for`). A worker's: it reads the disk.
+pub fn repository_of(at: &Path, caps: &crate::caps::Caps) -> Option<PathBuf> {
+    let home = caps.home.as_deref();
+    if caps.root.as_os_str().is_empty() || at.starts_with(&caps.root) {
+        return None;
+    }
+    // (a folder searched is where the climb starts: one that's a repository's top is that repository — nothing
+    // wider is offered, review J 7)
+    let start = if at.is_dir() { at } else { at.parent()? };
+    let top = start
+        .ancestors()
+        .take_while(|a| home.is_none_or(|h| !h.starts_with(a)))
+        .find(|a| crate::allow::has_git(a))?;
+    if top == at {
+        return None;
+    }
+    let open = crate::allow::common_dir(top).is_some()
+        && !caps.root.starts_with(top)
+        && crate::allow::keepable(top, home)
+        && !caps.kept.iter().any(|k| k.starts_with(top) || top.starts_with(k))
+        && caps.later.refuses(top).is_none();
+    open.then(|| top.to_path_buf())
 }
 
 /// What folder `f` holds that looks like a token, once it's been looked through; else None — and it's
@@ -1000,7 +1066,8 @@ pub fn card_text(
     keep: bool,
     folder: Option<(&Path, &crate::tokens::Found)>,
 ) -> (String, Option<std::ops::Range<usize>>) {
-    let mut q = question(&p.look, keep, folder.map(|(f, _)| f));
+    let whole = folder.map(|(f, _)| (f, p.repository.as_deref() == Some(f)));
+    let mut q = question(&p.look, keep, whole);
     let said =
         [p.look.at.as_deref().and_then(|at| p.found.said(at)), folder.and_then(|(f, found)| found.said(f))];
     let mut lines = Vec::new();
@@ -1045,18 +1112,10 @@ pub fn next(ed: &mut Editor) {
     let key_kept =
         |k: &PathBuf| crate::caps::Caps::storable(&crate::allow::Grant::Key(k.clone())) == Scope::Always;
     let keep = p.look.at.as_deref().is_some_and(keepable) && p.look.keys.iter().all(key_kept);
-    // (beside another read waiting or let through once: its folder for longer — #102)
+    // (its repository, or — beside another read waiting or let through once — its folder for longer: #102;
+    // once it's been looked through for tokens — till then the place alone: `refold`)
     let others = others(c);
-    let folder = match (&p.look.at, keep) {
-        (Some(at), true) if p.look.file && p.look.keys.is_empty() => {
-            crate::allow::grant_places(std::slice::from_ref(at), &others, home.as_deref())
-                .pop()
-                .filter(|f| f != at)
-        }
-        _ => None,
-    };
-    // (the folder once it's been looked through for tokens — till then the file: `refold`)
-    let folder = folder.and_then(|f| scanned(ed, &f).map(|found| (f, found)));
+    let folder = keep.then(|| folder_for(ed, &p, &others, home.as_deref())).flatten();
     let (q, warning) = card_text(&p, keep, folder.as_ref().map(|(f, found)| (f.as_path(), found)));
     let asked = crate::cards::Asked::new(crate::cards::Why::Read, crate::cards::Request::Read(p.class))
         .about(&p.look.given);
@@ -1072,8 +1131,9 @@ pub fn next(ed: &mut Editor) {
 const KEYS_SHOWN: usize = 5;
 
 /// The card's text: exactly what's read (the files named like keys it opens by name), and where it goes —
-/// and, when `a`/`A` allow its folder rather than the file (`folder`), that.
-pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
+/// and, when `a`/`A` allow more than its place (`folder`: a folder, and whether it's the repository it reads
+/// in), that.
+pub fn question(look: &Look, keep: bool, folder: Option<(&Path, bool)>) -> String {
     let at = match &look.at {
         Some(at) => at.display().to_string(),
         None => format!("{} (where it leads can't be told)", look.given),
@@ -1112,8 +1172,16 @@ pub fn question(look: &Look, keep: bool, folder: Option<&Path>) -> String {
     if !keep && look.at.is_some() {
         q.push_str(" Only once — a place like this is never kept.");
     }
-    if let Some(f) = folder {
-        q.push_str(&format!("\n\na, s and A allow everything in {} — not only this file.", f.display()));
+    let only = if look.file || look.tool == "Read" { "this file" } else { "this folder" };
+    match folder {
+        Some((f, true)) => q.push_str(&format!(
+            "\n\na, s and A allow everything in {} — the repository it's in, not only {only}.",
+            f.display()
+        )),
+        Some((f, false)) => {
+            q.push_str(&format!("\n\na, s and A allow everything in {} — not only {only}.", f.display()))
+        }
+        None => {}
     }
     q
 }
@@ -1575,6 +1643,74 @@ mod tests {
             assert_eq!(named.keys, std::slice::from_ref(&env), "{input}");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Piece J: a read in a git checkout outside the project offers that checkout's top — but never home or above
+    /// it, nor one in or holding a place that holds keys (`SECRETS`, what runs never read), nor where something
+    /// runs later, nor the project or one holding it, nor a folder that isn't a repository's.
+    #[test]
+    fn a_reads_repository_is_offered_but_never_home_keys_or_what_runs_later() {
+        let s = crate::scratch::Scratch::new("reads-repo");
+        let base = std::fs::canonicalize(s.path()).unwrap();
+        let home = base.join("top/home");
+        let init = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::write(dir.join("sub/README"), "marker").unwrap();
+            let out =
+                std::process::Command::new("git").args(["init", "-q"]).current_dir(dir).output().unwrap();
+            assert!(out.status.success());
+        };
+        let (refr, keys, plain, project) =
+            (home.join("ref"), home.join(".ssh/repo"), home.join("plain"), home.join("work/p"));
+        for r in [&refr, &keys, &home.join("work")] {
+            init(r);
+        }
+        std::fs::create_dir_all(plain.join("sub")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let caps =
+            crate::caps::Caps { root: project.clone(), home: Some(home.clone()), ..Default::default() };
+        let file = |r: &Path| r.join("sub/README");
+        assert_eq!(repository_of(&file(&refr), &caps), Some(refr.clone()));
+        assert_eq!(repository_of(&refr.join("sub"), &caps), Some(refr.clone()), "a folder searched too");
+        assert_eq!(repository_of(&file(&keys), &caps), None, "in ~/.ssh");
+        assert_eq!(repository_of(&file(&plain), &caps), None, "no repository");
+        assert_eq!(repository_of(&home.join("work/x"), &caps), None, "holding the project");
+        assert_eq!(repository_of(&file(&project), &caps), None, "in the project");
+        let kept = crate::caps::Caps { kept: vec![refr.join("sub")], ..caps.clone() };
+        assert_eq!(repository_of(&file(&refr), &kept), None, "holding what runs never read");
+        let later = crate::sandbox::RunsLater { homes: vec![refr.clone()], ..Default::default() };
+        let later = crate::caps::Caps { later, ..caps.clone() };
+        assert_eq!(repository_of(&file(&refr), &later), None, "a toolchain's home");
+        // A folder searched that's a repository's top itself: nothing wider; a file in it: that one (review J 7)
+        init(&refr.join("sub"));
+        assert_eq!(repository_of(&refr.join("sub"), &caps), None, "the folder is that repository");
+        assert_eq!(repository_of(&refr.join("sub/sub/README"), &caps), Some(refr.join("sub")));
+        // Home and above repositories (dotfiles), the project elsewhere — so holding it refuses nothing: never
+        // home or above (review J 14)
+        let elsewhere = base.join("proj");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let caps = crate::caps::Caps { root: elsewhere, ..caps.clone() };
+        init(&base.join("top"));
+        assert_eq!(repository_of(&file(&plain), &caps), None, "above home");
+        init(&home);
+        assert_eq!(repository_of(&file(&plain), &caps), None, "home");
+        assert!(!crate::allow::keepable(&home, Some(&home)));
+    }
+
+    /// Review J 16: tarae's own tools reading in a repository outside the project wait on the read card with that
+    /// repository found on the gate's worker (`Gate::judge` → `Ask`).
+    #[test]
+    fn the_gate_finds_the_repository_a_read_is_in() {
+        let s = crate::scratch::Scratch::new("reads-gate-repo");
+        let base = std::fs::canonicalize(s.path()).unwrap();
+        let (project, repo) = (base.join("p"), base.join("ref"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/README"), "marker").unwrap();
+        let out = std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).output().unwrap();
+        assert!(out.status.success());
+        let ask = Gate::for_test(&project).judge(&repo.join("docs/README"), true).expect_err("it asks");
+        assert_eq!(ask.repository, Some(repo));
     }
 
     /// What a Grep of this whole repository waits for before it's answered: the walk for files named like

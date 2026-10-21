@@ -196,13 +196,11 @@ Done so far, under way, and the order after it (2026-10-17):
   - **E** — done: one list — the trust answers (tarae's, Claude's, git's, a hook's), the plugins' approvals, the
     packs' preflight told and the no-sandbox `s` join `:granted`, each taken back with `d`, what it let run held
     back at once; what's kept for the repository's other checkouts is counted, not used.
-  - **J**: "always" per repository, not per checkout. `sandbox.json` keeps an `A` by the checkout's path, so
-    another session's checkout of the same repository asks again (a reference repository's README answered in one
-    session, asked in the next). Share the grants that name nothing inside a checkout (reads and writes outside
-    every checkout, ports, hosts, variables) with every checkout of the repository; keep or rebase the ones inside
-    one (a key file, a write in it). With it, the read card offers the outside repository's root (never home or
-    above, nor a place holding keys) beside the file, and "Always here" says which: this checkout or this
-    repository.
+  - **J** — done: "always" per repository. What names no place in a checkout (reads and writes outside them all,
+    ports, hosts, variables, the terminals) is kept for every checkout; a key file or a place in a checkout stays
+    that checkout's own. The read card offers the outside repository's top (never home or above, keys, what runs
+    later, nor where a token-like file is), and says what `A` is for: every checkout of the repository, or this
+    one.
   - **I** — done: one trust card when tarae's, Claude's and git's wait together as the repository opens (each part
     joins it as it's found, nothing waits); a later change asks only about its own part. `:git-trust` asks git's
     part again.

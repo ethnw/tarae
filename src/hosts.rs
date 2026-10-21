@@ -408,10 +408,14 @@ fn keep(ed: &mut Editor, session: u64, run: u64, host: &str, also: &[String], po
             ed.set_success(format!("Commands may {doing} in this session — :granted lists it"));
         }
         Scope::Project => {
-            ed.session.checkpoints.tell.push(format!(
-                "The user let your commands {doing} — in this project, until they take it back."
-            ));
-            ed.set_success(format!("Commands may {doing} in this project — :granted lists it"));
+            // (for every checkout of the repository, said as the other cards say it — review J 3)
+            let grants: Vec<crate::allow::Grant> = std::iter::once(host)
+                .chain(also.iter().map(String::as_str))
+                .map(|h| crate::allow::Grant::Host(h.into(), port))
+                .collect();
+            let (when, toast) = crate::allow::lasting(ed, crate::allow::Scope::Always, &grants);
+            ed.session.checkpoints.tell.push(format!("The user let your commands {doing} — {when}."));
+            ed.set_success(format!("Commands may {doing}{toast}"));
         }
         Scope::Refused => {
             ed.session.checkpoints.tell.push(format!(

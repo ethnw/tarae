@@ -624,7 +624,7 @@ review) and run that.
 | `y` | Once | this one run or read, when the card offers more than once |
 | `a` | This chat | the rest of this conversation |
 | `s` | This session | until this session ends (or you quit) |
-| `A` | Always here | in this project, until `:granted` takes it back |
+| `A` | Always here | in this project, until `:granted` takes it back — in a repository, every checkout of it unless the answer names a place in one (the card says which) |
 | `n` | No | refused (Claude is told) |
 | `n` | Not now | an offer that comes again later |
 | `y` · `n` | Trust · Hold back | the project's `.tarae.toml`, its Claude settings, the repository's own git commands |
@@ -1249,13 +1249,16 @@ those, a card says exactly what would be read: the file, or the folder searched 
 for. What's read goes to Claude.
 
 - `y` once · `a` this conversation · `s` this session · `A` always here (in this project) · `n` no
-- "This conversation" and "always" cover the place: the file, or the folder and everything in it. The
-  "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`, per project), not in the
-  project's files. `:granted` lists them, and `d` on one takes it back
+- "This conversation" and "always" cover the place: the file, or the folder and everything in it. A read in a
+  git repository outside the project offers that repository's top instead (said on the card) — never home or
+  above, a place holding keys, a toolchain's home or a folder of programs, nor one where a token-like file was
+  found or that was too big to look through all of it; then it's the file, or its folder beside other reads.
+  The "always" answers are kept in your own state (`$XDG_STATE_HOME/tarae/sandbox.json`), not in the project's
+  files. `:granted` lists them, and `d` on one takes it back
 - `:granted` (or a click on the chat title's faint `› 3 granted`) is the whole list of what you've let through.
   The defaults come first — this checkout, the repository's other checkouts, the temp folders, the toolchains'
   own, outside home — each saying why. Then your answers to Claude's asks, under how long they last (always ·
-  this checkout · this session · this chat), newest first, each saying when you gave it; the session's no-sandbox
+  every checkout · always · this checkout · this session · this chat), newest first, each saying when you gave it; the session's no-sandbox
   `s` with this session's. `d` takes an answer back from the next run and the next read on, and Claude hears it
   with your next message; a default isn't an answer to take back, and its row says so. A kept answer that a
   default now covers is dropped from `sandbox.json`, and a toast names it
@@ -1267,8 +1270,15 @@ for. What's read goes to Claude.
   repository's commands. Each card asks again at the next look — `:project-trust`, `:claude-settings`,
   `:git-trust` ask now. Then the plugins' approvals (`d` = `:plugin-revoke`) and the packs' preflight you were
   told about (`d`: its card shows again before the next run)
-- "Always" is this checkout's: another session's checkout of the same repository keeps its own. The list's
-  last row counts what's kept for the other checkouts, faint — not used here
+- "Always" in a repository is every checkout's when the answer names no place in one — a read or a write
+  outside them all, a port, a host, a variable, the terminals — so another session's checkout uses it; the card
+  says "A is for every checkout of tarae." and the toast after it "for every checkout of tarae" One that names a place in or holding a checkout (a file named like a
+  key, a write in another checkout) is that checkout's own ("A is for this checkout only.") and never reaches
+  another's runs. Outside a repository it's the project's. The list's last row counts what the other checkouts
+  keep as their own, faint — not used here. `d` on a shared answer takes it back for every checkout — every session of this tarae, its conversation's copy
+  too (another tarae process's conversation keeps its copy until it ends; its next one asks). A
+  checkout ended with its session takes its own with it; one moved (`git worktree move`) asks again for its own
+  — the shared ones are kept by the repository's git folder, so moving the main checkout asks again for all
 - Home itself, the folders above it, and places that hold keys (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
   `~/.docker`, `~/.config/gh`, `~/.netrc`, …) are only ever allowed once
 - Each answer on a card is one `card` line in tarae's log (`~/.local/state/tarae/tarae.log`): the session, why

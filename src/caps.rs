@@ -90,6 +90,9 @@ fn entries<T: Clone>(v: &[T], source: Source) -> impl Iterator<Item = Entry<T>> 
     v.iter().map(move |what| Entry { what: what.clone(), source })
 }
 
+/// What `A` keeps a checkout's own answer for, as the card and the toast say it (piece J).
+const THIS_CHECKOUT: &str = "this checkout";
+
 /// What a session's Claude may do. Real paths.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Caps {
@@ -122,6 +125,12 @@ pub struct Caps {
     pub kept: Vec<PathBuf>,
     /// Where a write would run something later (`sandbox::RunsLater`): never a write's choice.
     pub later: crate::sandbox::RunsLater,
+    /// Where its kept answers are (`allow::Where::of` the root — the store's own): the repository's git common
+    /// folder when the checkout is one's, its checkouts — what the cards and toasts say `A` is for, by the store's
+    /// rule (review J 6, 10, 12).
+    pub here: crate::allow::Where,
+    /// The kept answers every checkout of the repository uses (the rest kept are this checkout's own).
+    pub shared: Vec<Grant>,
 }
 
 impl Caps {
@@ -137,6 +146,33 @@ impl Caps {
         c.add_answers(session, Source::Grant(Scope::Session));
         c.add_answers(chat, Source::Grant(Scope::ThisChat));
         c
+    }
+
+    /// What `A` on a card about `grants` keeps them for, in a repository's checkout (piece J): every checkout of it
+    /// when none names a place in or holding one (`allow::Where::shared`), else this checkout — None outside a
+    /// repository (there it's the project's, as "Always here" says).
+    pub fn always_said(&self, grants: &[Grant]) -> Option<String> {
+        let at = self.always_for(grants)?;
+        Some(match at.as_str() {
+            THIS_CHECKOUT => format!("A is for {at} only."),
+            _ => format!("A is for {at}."),
+        })
+    }
+
+    /// Who an answer kept about `grants` is for, as the card and the toast say it: "every checkout of tarae" or
+    /// "this checkout" — None outside a repository.
+    pub fn always_for(&self, grants: &[Grant]) -> Option<String> {
+        let (here, common) = (&self.here, self.here.repository.as_ref()?);
+        // (the main checkout's folder: a common folder is `<main>/.git`, a bare one `<name>.git`)
+        let name = match common.file_name().is_some_and(|n| n == ".git") {
+            true => common.parent().and_then(Path::file_name),
+            false => common.file_stem(),
+        };
+        let name = name.map_or_else(|| "this repository".into(), |n| n.to_string_lossy().into_owned());
+        Some(match grants.iter().all(|g| here.shared(g)) {
+            true => format!("every checkout of {name}"),
+            false => THIS_CHECKOUT.into(),
+        })
     }
 
     /// The longest an answer about `g` may last (plan §2.3) — the top scope its card offers, and what an answer
@@ -348,17 +384,22 @@ pub struct Basis {
 }
 
 impl Basis {
-    /// The answers only — the kept ones read from the store, by the checkout's real path. A worker's.
+    /// The answers only — the kept ones read from the store, the checkout's and its repository's. A worker's.
     pub fn granted(&self) -> Caps {
-        Caps::granted(&self.root, &self.kept(), &self.session, &self.chat)
+        let (here, kept) = self.kept();
+        let mut c = Caps::granted(&self.root, &kept.all, &self.session, &self.chat);
+        (c.here, c.shared) = (here, kept.shared);
+        c
     }
 
-    /// The answers kept for the project, but those being taken back. A worker's: it reads the store.
-    pub fn kept(&self) -> Allowed {
-        let mut kept =
-            crate::allow::Store::read(self.store.as_deref()).get(&crate::sandbox::profile_path(&self.root));
-        self.taking.iter().for_each(|w| kept.remove(w));
-        kept
+    /// The answers kept for the project (`allow::Where`), but those being taken back. A worker's: it reads the
+    /// store and git's files.
+    pub fn kept(&self) -> (crate::allow::Where, crate::allow::Kept) {
+        let here = crate::allow::Where::of(&self.root);
+        let mut kept = crate::allow::Store::read(self.store.as_deref()).kept(&here);
+        self.taking.iter().for_each(|w| kept.all.remove(w));
+        kept.shared.retain(|g| kept.all.grants().contains(g));
+        (here, kept)
     }
 
     /// The schema step (plan §2.2): what `caps` (made from this) keeps for the project that a default reads now
@@ -370,14 +411,16 @@ impl Basis {
             .read
             .iter()
             .filter(|e| e.source == Source::Grant(Scope::Always))
+            // (never one every checkout uses: a default here — a build folder, another checkout — may be none
+            // there, review J 4)
+            .filter(|e| !caps.shared.contains(&Grant::Read(e.what.clone())))
             .filter_map(|e| Some((e.what.clone(), caps.default_for(&e.what)?)))
             .collect();
         if covered.is_empty() {
             return covered;
         }
         let gone: Vec<String> = covered.iter().map(|(p, _)| p.display().to_string()).collect();
-        let project = crate::sandbox::profile_path(&self.root);
-        match crate::allow::keep(path, &project, |a| gone.iter().for_each(|w| a.remove(w))) {
+        match crate::allow::keep(path, &self.root, |a| gone.iter().for_each(|w| a.remove(w))) {
             Ok(()) => covered,
             Err(e) => {
                 crate::log::line("sandbox", "warning", &format!("couldn't drop what a default covers: {e}"));
@@ -569,6 +612,61 @@ mod tests {
         caps_landed(&mut ed, first, asked + 2, at("/newer"));
         caps_landed(&mut ed, first, asked + 1, at("/older"));
         assert_eq!(root(&mut ed, first), Path::new("/newer"));
+    }
+
+    /// Review J 4: what a default covers here is dropped from this checkout's own answers only — one every checkout
+    /// uses stays (the default — a build folder, another checkout — may be none in the others).
+    #[test]
+    fn a_shared_answer_a_default_covers_here_stays() {
+        let s = crate::scratch::Scratch::new("caps-drop-shared");
+        let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+        let store = s.path().join("sandbox.json");
+        let place = std::fs::canonicalize(s.path()).unwrap().join("deps/x");
+        crate::allow::keep(&store, &main, |a| a.add_read(place.clone())).unwrap();
+        let basis = Basis { root: wt.clone(), store: Some(store.clone()), ..Default::default() };
+        let mut caps = basis.granted();
+        assert!(caps.shared.contains(&Grant::Read(place.clone())));
+        let covering = place.parent().unwrap().to_path_buf();
+        caps.read.push(Entry { what: covering, source: Source::Default(Why::Toolchain) });
+        assert_eq!(basis.drop_covered(&caps), []);
+        assert_eq!(crate::allow::Store::read(Some(&store)).get(&main).read, [place]);
+    }
+
+    /// Review J 6, 10, 12, 13: what the card and the toast say `A` is for goes by the store's own rule — here for a
+    /// session started in a subfolder of its checkout: a place in the checkout, in another checkout, a key file,
+    /// a folder holding the checkouts or a list with one of them is this checkout's; a place outside them all is
+    /// every checkout's — and `keep` files it there.
+    #[test]
+    fn what_a_is_for_is_the_stores_rule() {
+        let s = crate::scratch::Scratch::new("caps-always-for");
+        let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+        let base = std::fs::canonicalize(s.path()).unwrap();
+        let sub = main.join("crates/core");
+        std::fs::create_dir_all(&sub).unwrap();
+        let store = base.join("sandbox.json");
+        let caps = Basis { root: sub.clone(), store: Some(store.clone()), ..Default::default() }.granted();
+        let (only, every) = ("A is for this checkout only.", "A is for every checkout of main.");
+        let outside = Grant::Read(base.join("outside"));
+        for (grants, said) in [
+            (vec![Grant::Read(main.join("README.md"))], only),
+            (vec![Grant::Read(wt.join("x"))], only),
+            (vec![Grant::Write(wt.join("out"))], only),
+            (vec![Grant::Key(sub.join(".env"))], only),
+            (vec![Grant::Read(base.clone())], only),
+            (vec![outside.clone(), Grant::Read(main.join("README.md"))], only),
+            (vec![outside.clone()], every),
+            (vec![Grant::Port(5432)], every),
+        ] {
+            assert_eq!(caps.always_said(&grants).as_deref(), Some(said), "{grants:?}");
+        }
+        crate::allow::keep(&store, &sub, |a| a.add_read(main.join("README.md"))).unwrap();
+        let kept = |p: &Path| crate::allow::Store::read(Some(&store)).get(p).read;
+        assert!(kept(&wt).is_empty() && kept(&sub) == [main.join("README.md")]);
+        // Outside a repository: nothing said ("Always here" is the project's)
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let caps = Basis { root: plain, ..Default::default() }.granted();
+        assert_eq!(caps.always_said(std::slice::from_ref(&outside)), None);
     }
 
     /// No checkout, nothing read by being in it: an empty path holds every path.

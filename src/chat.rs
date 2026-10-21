@@ -3461,6 +3461,7 @@ mod tests {
             class: crate::cards::Class::Elsewhere,
             since: std::time::Instant::now(),
             found: Default::default(),
+            repository: None,
             own: None,
             then: None,
         };
@@ -3504,6 +3505,140 @@ mod tests {
         assert_eq!(c.allowed.read, std::slice::from_ref(&shots));
         assert!(c.reads.is_empty() && ed.offers.is_empty(), "{:?}", ed.offers.first().map(|o| &o.title));
         std::fs::remove_dir_all(&shots).ok();
+    }
+
+    /// Piece J: a read in a repository outside the project offers that repository for `a`/`A` once it's been looked
+    /// through and nothing there looks like a token — said on the card, with what `A` keeps it for: every checkout
+    /// of the project's repository. `A` keeps it once, and the project's other checkout reads by it. A repository
+    /// holding a token-like file isn't offered: the file alone.
+    #[test]
+    fn a_read_in_a_repository_offers_the_repository() {
+        let s = crate::scratch::Scratch::new("chat-read-repo");
+        let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+        let base = std::fs::canonicalize(s.path()).unwrap();
+        let repo = |name: &str, token: bool| {
+            let r = base.join(name);
+            std::fs::create_dir_all(r.join("docs")).unwrap();
+            std::fs::write(r.join("docs/README"), "marker").unwrap();
+            if token {
+                std::fs::write(r.join("docs/app.conf"), "password = tarae-fake-token\n").unwrap();
+            }
+            let out =
+                std::process::Command::new("git").args(["init", "-q"]).current_dir(&r).output().unwrap();
+            assert!(out.status.success());
+            r
+        };
+        let (clean, tokened) = (repo("ref", false), repo("tokened", true));
+        let store = base.join("state/sandbox.json");
+        let mut ed = editor("");
+        (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+        ed.session.chat = Some(Chat::new());
+        let generation = ed.session.chat.as_ref().unwrap().generation;
+        let until = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done(ed) {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("timed out: {what}"));
+                ed.handle_event(ev);
+            }
+        };
+        ed.caps_sync();
+        until(&mut ed, "the session's caps", &|ed| {
+            ed.session.caps().is_some_and(|c| c.here.repository.is_some())
+        });
+        let pending =
+            |tool: &str, input: serde_json::Value, repository: Option<&Path>| crate::reads::Pending {
+                request_id: "r".into(),
+                generation,
+                look: crate::reads::look(tool, &input, &main),
+                input,
+                class: crate::cards::Class::Elsewhere,
+                since: std::time::Instant::now(),
+                found: Default::default(),
+                repository: repository.map(Path::to_path_buf),
+                own: None,
+                then: None,
+            };
+        let read =
+            |r: &Path| pending("Read", serde_json::json!({"file_path": r.join("docs/README")}), Some(r));
+        let card = |ed: &Editor| match ed.offers.first().map(|o| (&o.what, o.question.clone(), o.id)) {
+            Some((crate::offer::What::Read { folder, .. }, q, id)) => (folder.clone(), q, id),
+            other => panic!("{other:?}"),
+        };
+        // Claude's Read, through the request's worker: the repository found there (review J 16)
+        let input =
+            serde_json::json!({"tool_name": "Read", "input": {"file_path": clean.join("docs/README")}});
+        assert!(crate::reads::request(&mut ed, "r1", &input).is_none(), "it waits for the card");
+        until(&mut ed, "the repository offered", &|ed| !ed.offers.is_empty() && card(ed).0.is_some());
+        let asked = match &ed.offers[0].what {
+            crate::offer::What::Read { pending, .. } => (**pending).clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(asked.repository.as_ref(), Some(&clean));
+        let (folder, q, id) = card(&ed);
+        assert_eq!(folder.as_ref(), Some(&clean));
+        let whole = format!("a, s and A allow everything in {} — the repository it's in", clean.display());
+        assert!(q.contains(&whole) && q.contains("A is for every checkout of main."), "{q}");
+        crate::reads::answer(&mut ed, id, asked, Some(crate::allow::Scope::Always), true, folder);
+        let toast = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(toast.ends_with(" for every checkout of main — :granted lists it"), "{toast}");
+        until(&mut ed, "kept", &|_| {
+            crate::allow::Store::read(Some(&store)).get(&main).read == [clean.clone()]
+        });
+        assert_eq!(
+            crate::allow::Store::read(Some(&store)).get(&wt).read,
+            std::slice::from_ref(&clean),
+            "one answer, both"
+        );
+        // A token-like file in it: the file alone, once the repository's been looked through
+        ed.session.chat.as_mut().unwrap().reads.push_back(read(&tokened));
+        crate::reads::next(&mut ed);
+        let looked = |ed: &Editor| {
+            ed.session.chat.as_ref().unwrap().scanned.get(&tokened).is_some_and(|f| f.is_some())
+        };
+        until(&mut ed, "the repository looked through", &looked);
+        let (folder, q, id) = card(&ed);
+        assert_eq!(folder, None, "{q}");
+        assert!(!q.contains("everything in"), "{q}");
+        crate::reads::answer(&mut ed, id, read(&tokened), None, true, None);
+        // Each of these offers the file alone, never the repository (review J 5, 15): one that holds a file named
+        // like a key, a read of a file named like a key, a repository too big to look through all of it
+        let keyed = repo("keyed", false);
+        std::fs::create_dir_all(keyed.join("certs")).unwrap();
+        std::fs::write(keyed.join("certs/server.key"), "-----BEGIN TARAE FAKE KEY-----\n").unwrap();
+        let dotenv = repo("dotenv", false);
+        std::fs::write(dotenv.join(".env"), "MODE=dev\n").unwrap();
+        let big = repo("big", false);
+        let cut = crate::tokens::Found { cut: true, ..Default::default() };
+        let scanned = &mut ed.session.chat.as_mut().unwrap().scanned;
+        scanned.insert(big.clone(), Some(cut));
+        // (as if its walk had found nothing: the read itself named like a key is what keeps it the file's)
+        scanned.insert(dotenv.clone(), Some(Default::default()));
+        let env_read = pending("Read", serde_json::json!({"file_path": dotenv.join(".env")}), Some(&dotenv));
+        for (p, r) in [(read(&keyed), &keyed), (env_read, &dotenv), (read(&big), &big)] {
+            ed.session.chat.as_mut().unwrap().reads.push_back(p.clone());
+            crate::reads::next(&mut ed);
+            let looked = |ed: &Editor| {
+                let c = ed.session.chat.as_ref().unwrap();
+                c.scanned.get(r).is_some_and(|f| f.is_some())
+            };
+            until(&mut ed, "looked through", &looked);
+            let (folder, q, id) = card(&ed);
+            assert_eq!(folder, None, "{}: {q}", r.display());
+            crate::reads::answer(&mut ed, id, p, None, true, None);
+        }
+        // A folder holding the checkouts: this checkout's own — said on the card and the toast (review J 13)
+        let holding = pending("Grep", serde_json::json!({"pattern": "x", "path": base}), None);
+        ed.session.chat.as_mut().unwrap().reads.push_back(holding.clone());
+        crate::reads::next(&mut ed);
+        let (_, q, id) = card(&ed);
+        assert!(q.ends_with("A is for this checkout only."), "{q}");
+        crate::reads::answer(&mut ed, id, holding, Some(crate::allow::Scope::Always), true, None);
+        let toast = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
+        assert!(toast.ends_with(" for this checkout — :granted lists it"), "{toast}");
+        until(&mut ed, "kept", &|_| crate::allow::Store::read(Some(&store)).get(&main).reads(&base));
+        let there = crate::allow::Store::read(Some(&store)).get(&wt);
+        assert!(!there.reads(&base) && there.reads(&clean), "{there:?}");
     }
 
     /// #102: Claude's reads ask one after another — one beside the read on the card, come after the card went

@@ -187,6 +187,22 @@ impl Allowed {
         a
     }
 
+    /// Takes back `g` exactly, and its time.
+    pub fn take(&mut self, g: &Grant) {
+        match g {
+            Grant::Read(p) => self.read.retain(|x| x != p),
+            Grant::Write(p) => self.write.retain(|x| x != p),
+            Grant::Port(n) => self.ports.retain(|x| x != n),
+            Grant::Socket(s) => self.sockets.retain(|x| x != s),
+            Grant::Host(h, p) => self.hosts.retain(|(x, y)| x != h || y != p),
+            Grant::Terminals => self.terminals = false,
+            Grant::Key(k) => self.keys.retain(|x| x != k),
+            Grant::Localhost => self.localhost = false,
+            Grant::Env(n) => self.env.retain(|x| x != n),
+        }
+        self.granted.remove(g);
+    }
+
     /// Takes back a place, a port, a socket or the terminals (as `:granted` lists it).
     pub fn remove(&mut self, what: &str) {
         self.remove_only(what);
@@ -411,14 +427,131 @@ pub enum Scope {
     Always,
 }
 
-/// `sandbox.json`'s form: each project a list of entries, each with its `scope` and when it was `granted`
-/// (cardauto piece 6). A file without it is the old form: a list per kind, no times.
-const STORE_VERSION: u64 = 2;
+/// `sandbox.json`'s form (piece J): a repository's answers — those every checkout uses and each checkout's own —
+/// by its git common folder, a project outside one by its real path; each entry with its `scope` and when it was
+/// `granted`. A file of another version reads as nothing (asked again, written in this form at the next answer).
+const STORE_VERSION: u64 = 3;
 
-/// The "always" answers, per project (real path) — `$state/sandbox.json`.
+/// The "always" answers — `$state/sandbox.json`. A repository's (piece J) are kept for every checkout of it when
+/// they name no place in one (`Where::shared`: a place outside them, a port, a host, a variable, the terminals),
+/// else for the checkout they were answered in (a key file there, a place in or holding a checkout) — a place in
+/// another checkout never reaches this one's runs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Store {
+    /// Projects outside a repository, by real path.
     projects: BTreeMap<PathBuf, Allowed>,
+    /// Repositories, by their git common folder (real path).
+    repositories: BTreeMap<PathBuf, Repository>,
+}
+
+/// A repository's kept answers.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Repository {
+    /// Every checkout's.
+    shared: Allowed,
+    /// Each checkout's own, by its real path.
+    checkouts: BTreeMap<PathBuf, Allowed>,
+}
+
+/// Where a project's kept answers are (piece J): its checkout — the folder holding `.git` at or above it, not
+/// home or above; else the project itself — the repository's git common folder, and every checkout of it
+/// (`checkouts`, this one too). Real paths; git's own files read, no git run. A worker's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Where {
+    /// The project itself (the session's root, real).
+    pub project: PathBuf,
+    pub checkout: PathBuf,
+    pub repository: Option<PathBuf>,
+    pub checkouts: Vec<PathBuf>,
+    /// The repository's main checkout couldn't be found (a separate git dir: nothing names it from the git
+    /// folder) — a place may lie in it, so no place is shared.
+    pub main_unknown: bool,
+}
+
+/// Whether `dir` holds a `.git` of its own — a folder or a file, never a link: a `.git` linked to another
+/// repository's git folder doesn't make `dir` its checkout (review J 1).
+pub(crate) fn has_git(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(".git")).is_ok_and(|m| !m.file_type().is_symlink())
+}
+
+/// `[core] key` in a git config's text (the last one, lowercase keys, no includes) — what `Where::of` asks of a
+/// common folder: `worktree`, `bare`.
+fn git_config_core(config: &str, key: &str) -> Option<String> {
+    let mut core = false;
+    let mut found = None;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            core = line.trim_start_matches('[').trim_end_matches(']').trim().eq_ignore_ascii_case("core");
+        } else if core
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim().eq_ignore_ascii_case(key)
+        {
+            found = Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    found
+}
+
+impl Where {
+    pub fn of(project: &Path) -> Where {
+        let real = crate::sandbox::profile_path(project);
+        let home = home().map(|h| crate::sandbox::profile_path(&h));
+        let top = real
+            .ancestors()
+            .take_while(|a| home.as_deref().is_none_or(|h| !h.starts_with(a)))
+            .find(|a| has_git(a));
+        let Some((checkout, common)) = top.and_then(|c| Some((c.to_path_buf(), common_dir(c)?))) else {
+            return Where { project: real.clone(), checkout: real, ..Where::default() };
+        };
+        let mut checkouts = checkouts(&checkout);
+        // (a common folder not named `.git` is no main checkout's `.git`: a submodule's names its checkout
+        // in `core.worktree`, taken where that checkout's `.git` names it back; a separate git dir names none)
+        let mut main_unknown = false;
+        if common.file_name().is_none_or(|n| n != ".git") {
+            let config = std::fs::read_to_string(common.join("config")).unwrap_or_default();
+            let main = git_config_core(&config, "worktree")
+                .and_then(|w| std::fs::canonicalize(common.join(w)).ok())
+                .filter(|m| has_git(m) && worktree_dir(m).is_some_and(|d| same(&d, &common)));
+            match main {
+                Some(m) => checkouts.push(m),
+                None => main_unknown = git_config_core(&config, "bare").as_deref() != Some("true"),
+            }
+        }
+        if !checkouts.contains(&checkout) {
+            checkouts.push(checkout.clone());
+        }
+        Where { project: real, checkout, repository: Some(common), checkouts, main_unknown }
+    }
+
+    /// Whether an answer about `g` is kept for every checkout of the repository: it names no place in, or
+    /// holding, one of its checkouts or the project (`names`; a key file is in one; a socket is never kept).
+    pub fn shared(&self, g: &Grant) -> bool {
+        match g {
+            // (the main checkout not found: a place may be in it — kept for this checkout)
+            Grant::Read(_) | Grant::Write(_) if self.main_unknown => false,
+            Grant::Read(p) | Grant::Write(p) => self.names(p).is_none(),
+            Grant::Key(_) | Grant::Socket(_) => false,
+            Grant::Port(_) | Grant::Host(..) | Grant::Terminals | Grant::Localhost | Grant::Env(_) => true,
+        }
+    }
+
+    /// The checkout of the repository (or the project) place `p` lies in or holds, and which ("lies in" ·
+    /// "holds") — None: apart from them all.
+    pub fn names(&self, p: &Path) -> Option<(&'static str, &Path)> {
+        let places = self.checkouts.iter().chain(std::iter::once(&self.project));
+        places.filter(|c| !c.as_os_str().is_empty()).find_map(|c| match () {
+            _ if p.starts_with(c) => Some(("lies in", c.as_path())),
+            _ if c.starts_with(p) => Some(("holds", c.as_path())),
+            _ => None,
+        })
+    }
+}
+
+/// What's kept for a project: all of it, and which of it every checkout of its repository uses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Kept {
+    pub all: Allowed,
+    pub shared: Vec<Grant>,
 }
 
 impl Store {
@@ -426,78 +559,180 @@ impl Store {
         crate::config::state_dir().map(|d| d.join("sandbox.json"))
     }
 
-    /// Read from `path` (missing or unreadable = nothing allowed) — the old form too, each answer taking the
-    /// file's time (written in the new form at the next change).
+    /// Read from `path` (missing, unreadable or of another version = nothing allowed).
     pub fn read(path: Option<&Path>) -> Store {
         let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Store::default() };
         let Ok(json) = serde_json::from_str::<Json>(&text) else { return Store::default() };
+        if json["version"].as_u64() != Some(STORE_VERSION) {
+            return Store::default();
+        }
         let at = path
             .and_then(|p| std::fs::metadata(p).ok()?.modified().ok())
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
-        if json["version"].as_u64() == Some(STORE_VERSION) {
-            let projects = json["projects"].as_object().into_iter().flatten();
-            let projects = projects.map(|(p, e)| (PathBuf::from(p), Allowed::from_entries(e, at))).collect();
-            return Store { projects };
-        }
-        let mut projects = BTreeMap::new();
-        for (project, a) in json["projects"].as_object().into_iter().flatten() {
-            let paths = |k: &str| -> Vec<PathBuf> {
-                a[k].as_array().into_iter().flatten().filter_map(Json::as_str).map(PathBuf::from).collect()
-            };
-            let ports = a["ports"].as_array().into_iter().flatten().filter_map(Json::as_u64);
-            let ports = ports.filter_map(|p| u16::try_from(p).ok()).collect();
-            // (one the proxy can't read — a hand edit — is left out, and said)
-            let mut hosts = Vec::new();
-            for h in a["hosts"].as_array().into_iter().flatten().filter_map(Json::as_str) {
-                match host_port(h) {
-                    Some(hp) => hosts.push(hp),
-                    None => {
-                        crate::log::line("sandbox", "warning", &format!("sandbox.json: not a host:port: {h}"))
-                    }
-                }
-            }
-            let (read, write, sockets) = (paths("read"), paths("write"), Vec::new());
-            let terminals = a["terminals"].as_bool().unwrap_or(false);
-            let keys = paths("keys");
-            let mut a = Allowed { read, write, ports, sockets, hosts, terminals, keys, ..Allowed::default() };
-            a.granted = a.grants().into_iter().map(|g| (g, at)).collect();
-            projects.insert(PathBuf::from(project), a);
-        }
-        Store { projects }
+        let by_path = |v: &Json| -> BTreeMap<PathBuf, Allowed> {
+            let each = v.as_object().into_iter().flatten();
+            each.map(|(p, e)| (PathBuf::from(p), Allowed::from_entries(e, at))).collect()
+        };
+        let repositories = json["repositories"].as_object().into_iter().flatten();
+        let repositories = repositories
+            .map(|(r, v)| {
+                let shared = Allowed::from_entries(&v["shared"], at);
+                (PathBuf::from(r), Repository { shared, checkouts: by_path(&v["checkouts"]) })
+            })
+            .collect();
+        Store { projects: by_path(&json["projects"]), repositories }
     }
 
+    /// What applies to `project` (`Where::of` it — a worker's).
     pub fn get(&self, project: &Path) -> Allowed {
-        self.projects.get(project).cloned().unwrap_or_default()
+        self.kept(&Where::of(project)).all
     }
 
-    /// Every project's kept answers, by its real path.
-    pub fn projects(&self) -> impl Iterator<Item = (&Path, &Allowed)> {
-        self.projects.iter().map(|(p, a)| (p.as_path(), a))
+    /// What applies `here`: the checkout's own and what every checkout of its repository uses — but a shared one
+    /// that now names a place in or holding a checkout (one made since under a folder granted), left out and said.
+    pub fn kept(&self, here: &Where) -> Kept {
+        let Some(r) = here.repository.as_ref().map(|c| self.repositories.get(c).cloned().unwrap_or_default())
+        else {
+            return Kept {
+                all: self.projects.get(&here.checkout).cloned().unwrap_or_default(),
+                shared: vec![],
+            };
+        };
+        let mut all = r.checkouts.get(&here.checkout).cloned().unwrap_or_default();
+        let mut shared = Vec::new();
+        for g in r.shared.grants() {
+            if !here.shared(&g) {
+                // (a read or a write kept for every checkout that now lies in or holds one — a checkout added
+                // since under it, or the project itself)
+                let said = match &g {
+                    Grant::Read(p) | Grant::Write(p) => {
+                        let (how, c) = here.names(p).unwrap_or(("names", Path::new("")));
+                        let kind = if matches!(g, Grant::Read(_)) { "read" } else { "write" };
+                        format!(
+                            "a {kind} of {} kept for every checkout of {} now {how} {}: left out of {}'s answers",
+                            p.display(),
+                            here.repository.as_deref().unwrap_or(Path::new("")).display(),
+                            c.display(),
+                            here.checkout.display()
+                        )
+                    }
+                    _ => format!("a kept answer for every checkout that names one, left out: {g:?}"),
+                };
+                crate::log::line("sandbox", "warning", &said);
+                continue;
+            }
+            all.add(&g);
+            if let Some(at) = r.shared.granted.get(&g) {
+                all.granted.insert(g.clone(), *at);
+            }
+            shared.push(g);
+        }
+        Kept { all, shared }
+    }
+
+    /// How many answers the repository's other checkouts there now keep as their own — not used `here`.
+    pub fn elsewhere(&self, here: &Where) -> usize {
+        let Some(r) = here.repository.as_ref().and_then(|c| self.repositories.get(c)) else { return 0 };
+        let others = r.checkouts.iter().filter(|(c, _)| **c != here.checkout && here.checkouts.contains(c));
+        others.map(|(_, a)| a.grants().len()).sum()
+    }
+
+    /// `change` made to what applies `here`, each answer it adds kept where it belongs (`Where::shared`), each it
+    /// takes away taken from where it was kept.
+    fn change(&mut self, here: &Where, change: impl FnOnce(&mut Allowed)) {
+        let Some(common) = here.repository.clone() else {
+            return change(self.projects.entry(here.checkout.clone()).or_default());
+        };
+        let before = self.kept(here).all;
+        let mut after = before.clone();
+        change(&mut after);
+        let r = self.repositories.entry(common).or_default();
+        let own = r.checkouts.entry(here.checkout.clone()).or_default();
+        let now = after.grants();
+        // (one gone only because a new place covers it: taken from what every checkout uses only when that place
+        // is every checkout's too — else the others would lose it, never taken back: review J 9)
+        let covers = |n: &Grant, g: &Grant| match (n, g) {
+            (Grant::Read(a), Grant::Read(b)) | (Grant::Write(a), Grant::Write(b)) => {
+                a != b && b.starts_with(a)
+            }
+            _ => false,
+        };
+        for g in before.grants().iter().filter(|g| !now.contains(g)) {
+            own.take(g);
+            if now.iter().find(|n| covers(n, g)).is_none_or(|n| here.shared(n)) {
+                r.shared.take(g);
+            }
+        }
+        let was = before.grants();
+        for g in now.iter().filter(|g| !was.contains(g)) {
+            let to = if here.shared(g) { &mut r.shared } else { &mut *own };
+            to.add(g);
+            if let Some(at) = after.granted.get(g) {
+                to.granted.insert(g.clone(), *at);
+            }
+        }
+        r.checkouts.retain(|_, a| !a.is_empty());
+    }
+
+    /// A checkout's own answers forgotten (its checkout removed: one made at its path later starts with none).
+    pub fn forget_checkout(&mut self, here: &Where) {
+        if let Some(r) = here.repository.as_ref().and_then(|c| self.repositories.get_mut(c)) {
+            r.checkouts.remove(&here.checkout);
+        }
     }
 
     pub fn to_json(&self) -> String {
         // Inserted, not collected: a Map's `collect` sorts — a copy of the sort for each (~6 KB)
-        let mut projects = serde_json::Map::new();
-        for (p, a) in self.projects.iter().filter(|(_, a)| !a.is_empty()) {
-            projects.insert(p.to_string_lossy().into_owned(), json!(a.entries("always")));
+        let by_path = |m: &BTreeMap<PathBuf, Allowed>| {
+            let mut out = serde_json::Map::new();
+            for (p, a) in m.iter().filter(|(_, a)| !a.is_empty()) {
+                out.insert(p.to_string_lossy().into_owned(), json!(a.entries("always")));
+            }
+            out
+        };
+        let mut repositories = serde_json::Map::new();
+        for (c, r) in &self.repositories {
+            let checkouts = by_path(&r.checkouts);
+            if r.shared.is_empty() && checkouts.is_empty() {
+                continue;
+            }
+            let v = json!({ "shared": r.shared.entries("always"), "checkouts": checkouts });
+            repositories.insert(c.to_string_lossy().into_owned(), v);
         }
-        serde_json::to_string_pretty(&json!({ "version": STORE_VERSION, "projects": projects }))
-            .unwrap_or_default()
+        let v = json!({ "version": STORE_VERSION, "projects": by_path(&self.projects), "repositories": repositories });
+        serde_json::to_string_pretty(&v).unwrap_or_default()
     }
 }
 
-/// `keep`'s turn: one at a time (a test holds it to see what goes on before a write lands).
-pub(crate) static KEEP: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Changes what `project` always allows (on a worker — read, change, write; one at a time).
+/// Changes what `project` always allows (on a worker — read, change, write; one at a time): what it adds kept for
+/// the checkout or every checkout of the repository (`Where::shared`).
 pub fn keep(path: &Path, project: &Path, change: impl FnOnce(&mut Allowed)) -> Result<(), String> {
-    let _held = KEEP.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = Store::read(Some(path));
-    change(store.projects.entry(project.to_path_buf()).or_default());
+    keep_where(path, &Where::of(project), |s, here| s.change(here, change))
+}
+
+/// A removed checkout's own answers forgotten (on a worker).
+pub fn forget_checkout(path: &Path, here: &Where) -> Result<(), String> {
+    keep_where(path, here, Store::forget_checkout)
+}
+
+/// Read, change, write — one at a time, under the lock beside the file (this tarae's workers and another
+/// tarae's alike: two answered at once each read what the other hadn't written yet, and the later write lost the
+/// other's; a test holds it to see what goes on before a write lands). Keeps of other files don't wait.
+fn keep_where(path: &Path, here: &Where, change: impl FnOnce(&mut Store, &Where)) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    // (beside it, as `trust::change`'s: the file itself is replaced by each write, a new inode)
+    let lock = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).truncate(false).write(true).mode(0o600);
+        o.open(path.with_extension("lock")).map_err(|e| e.to_string())?
+    };
+    lock.lock().map_err(|e| e.to_string())?;
+    let mut store = Store::read(Some(path));
+    change(&mut store, here);
     let body = store.to_json();
     crate::disk::write_atomic(path, |w| std::io::Write::write_all(w, body.as_bytes()))
         .map_err(|e| e.to_string())
@@ -801,7 +1036,12 @@ pub fn checkouts(root: &Path) -> Vec<PathBuf> {
 /// checkout — the `commondir` of the folder its `.git` file names, when that folder names it back.
 pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
     let dot = root.join(".git");
-    if dot.is_dir() {
+    // (a `.git` that's a link is no repository's here: `x/.git -> ../main/.git` would make x main's checkout)
+    let meta = std::fs::symlink_metadata(&dot).ok()?;
+    if meta.file_type().is_symlink() {
+        return None;
+    }
+    if meta.is_dir() {
         return std::fs::canonicalize(dot).ok();
     }
     let dir = worktree_dir(root)?;
@@ -888,7 +1128,7 @@ fn keep_later_then(
     let Some(path) = ed.allow_path.clone() else { return then(ed) };
     let project = ed.session.root.clone();
     ed.events.jobs().spawn(move || {
-        let r = keep(&path, &crate::sandbox::profile_path(&project), change);
+        let r = keep(&path, &project, change);
         move |ed: &mut crate::editor::Editor| {
             then(ed);
             match r {
@@ -896,7 +1136,10 @@ fn keep_later_then(
                 // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
                 Ok(_) => {
                     crate::reads::kept_keys_load(ed);
-                    ed.caps_sync();
+                    // (every session's: one on another checkout of the repository may use what changed — piece J)
+                    let ids: Vec<_> =
+                        std::iter::once(&ed.session).chain(&ed.sessions).map(|s| s.id).collect();
+                    ids.into_iter().for_each(|id| ed.caps_sync_of(id));
                 }
             }
         }
@@ -926,14 +1169,26 @@ fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
     ed.caps_sync();
 }
 
-/// How long `scope` lasts, as Claude hears it and as the toast ends.
-fn lasting(scope: Scope) -> (&'static str, &'static str) {
+/// How long `scope` lasts for `grants`, as Claude hears it and as the toast ends — always in a repository's
+/// checkout: every checkout of it, or this checkout (`Caps::always_for`, piece J).
+pub(crate) fn lasting(ed: &crate::editor::Editor, scope: Scope, grants: &[Grant]) -> (String, String) {
     match scope {
-        Scope::Always => ("in this project, until they take it back", " in this project — :granted lists it"),
-        Scope::Session => {
-            ("in this session, until it ends or they take it back", " in this session — :granted lists it")
+        Scope::Always => match ed.session.caps().and_then(|c| c.always_for(grants)) {
+            Some(at) => {
+                (format!("for {at}, until they take it back"), format!(" for {at} — :granted lists it"))
+            }
+            None => (
+                "in this project, until they take it back".into(),
+                " in this project — :granted lists it".into(),
+            ),
+        },
+        Scope::Session => (
+            "in this session, until it ends or they take it back".into(),
+            " in this session — :granted lists it".into(),
+        ),
+        Scope::ThisChat | Scope::Once => {
+            ("for the rest of this conversation".into(), " in this conversation".into())
         }
-        Scope::ThisChat | Scope::Once => ("for the rest of this conversation", " in this conversation"),
     }
 }
 
@@ -946,7 +1201,8 @@ pub fn grant_reads(ed: &mut crate::editor::Editor, places: &[PathBuf], scope: Sc
     let grants: Vec<Grant> = places.iter().cloned().map(Grant::Read).collect();
     add_for(ed, &grants, scope);
     let shown = places.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
-    ed.set_success(format!("Claude may read {shown}{}", lasting(scope).1));
+    let toast = lasting(ed, scope, &grants).1;
+    ed.set_success(format!("Claude may read {shown}{toast}"));
 }
 
 /// `a`/`A` on a read card naming files in the project named like keys (`reads.rs`): Claude may read `keys`
@@ -964,7 +1220,7 @@ pub fn grant_keys(ed: &mut crate::editor::Editor, keys: &[PathBuf], scope: Scope
     }
     add_for(ed, &grants, scope);
     let shown = keys.iter().map(|k| tilde(k)).collect::<Vec<_>>().join(", ");
-    let (when, toast) = lasting(scope);
+    let (when, toast) = lasting(ed, scope, &grants);
     // (Claude's read was answered; that its commands may read it too is news to it — as `grant` says)
     let tell = format!("The user let you and your commands read {shown}, named like a key — {when}.");
     ed.session.checkpoints.tell.push(tell);
@@ -981,7 +1237,7 @@ pub fn grant(ed: &mut crate::editor::Editor, g: &Grant, scope: Scope) {
         return;
     }
     add_for(ed, std::slice::from_ref(g), scope);
-    let (when, toast) = lasting(scope);
+    let (when, toast) = lasting(ed, scope, std::slice::from_ref(g));
     ed.session.checkpoints.tell.push(format!("The user let your commands {} — {when}.", g.shown()));
     ed.set_success(format!("Claude's commands may {}{toast}", g.shown()));
 }
@@ -1009,23 +1265,42 @@ impl crate::editor::Editor {
         }
         // (what goes, as Claude was told it: every answer `what` names, whichever scope — the session's `Caps` has
         // the kept ones too)
-        let gone: Vec<String> = self.session.caps().map_or_else(Vec::new, |c| {
-            let named = |g: &Grant| {
-                let mut one = Allowed::default();
-                one.add(g);
-                one.remove(&what);
-                one.is_empty()
-            };
-            let mut gone: Vec<String> = c.grants().iter().filter(|g| named(g)).map(Grant::shown).collect();
+        let named = |g: &Grant| {
+            let mut one = Allowed::default();
+            one.add(g);
+            one.remove(&what);
+            one.is_empty()
+        };
+        let gone_in = |s: &crate::session::Session| -> Vec<String> {
+            let mut gone: Vec<String> = s.caps().map_or_else(Vec::new, |c| {
+                c.grants().iter().filter(|g| named(g)).map(Grant::shown).collect()
+            });
             gone.dedup();
             gone
-        });
-        if let Some(c) = self.session.chat.as_mut() {
-            c.allowed.remove(&what);
+        };
+        let (gone, self_id) = (gone_in(&self.session), self.session.id);
+        // Every session's: a kept answer may be every checkout's (piece J), and the conversation that answered it
+        // in another session holds a copy meanwhile (review J 8) — each taken out, each Claude told
+        let mut changed = false;
+        let sessions = std::iter::once(&mut self.session).chain(self.sessions.iter_mut());
+        for s in sessions {
+            let theirs = gone_in(s);
+            let had = (s.allowed.clone(), s.chat.as_ref().map(|c| c.allowed.clone()));
+            if let Some(c) = s.chat.as_mut() {
+                c.allowed.remove(&what);
+            }
+            s.allowed.remove(&what);
+            changed |= s.allowed != had.0;
+            let chat_had = had.1 != s.chat.as_ref().map(|c| c.allowed.clone());
+            if s.id != self_id && (!theirs.is_empty() || chat_had || s.allowed != had.0) {
+                let said = if theirs.is_empty() { what.clone() } else { theirs.join("; ") };
+                s.checkpoints.tell.push(format!(
+                    "The user took back what they had let you and your commands do: {said} — it's asked again from \
+                     the next run and the next read on."
+                ));
+            }
         }
-        let had = self.session.allowed.clone();
-        self.session.allowed.remove(&what);
-        if self.session.allowed != had {
+        if changed {
             self.sessions_keep();
         }
         if let Some((h, p)) = host {
@@ -1118,6 +1393,24 @@ pub(crate) mod tests {
         // Taken back: the project goes from the file
         keep(&path, Path::new("/p/two"), |a| a.read.clear()).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("/p/two"));
+    }
+
+    /// Another tarae keeping at the same time waits: while a change is made, the lock beside the store is held — a
+    /// second open of it (another process's, as far as the lock goes) is refused — and it's free again after.
+    #[test]
+    fn keeping_holds_the_lock_beside_the_store() {
+        let dir = crate::scratch::Scratch::new("allow-lock");
+        let path = dir.join("state/sandbox.json");
+        let other = || std::fs::OpenOptions::new().write(true).open(dir.join("state/sandbox.lock")).unwrap();
+        let mut refused = None;
+        keep(&path, Path::new("/p/one"), |a| {
+            refused = Some(matches!(other().try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+            a.add_read("/t/a".into());
+        })
+        .unwrap();
+        assert_eq!(refused, Some(true), "another open of sandbox.lock got it while keeping");
+        assert!(other().try_lock().is_ok(), "the lock is let go after");
+        assert_eq!(Store::read(Some(&path)).get(Path::new("/p/one")).read, [PathBuf::from("/t/a")]);
     }
 
     /// A project's hosts (the card's `A`) are kept in `sandbox.json` as `host:port`, read back into the next run's
@@ -1491,46 +1784,178 @@ pub(crate) mod tests {
         }
     }
 
-    /// cardauto 6: a `sandbox.json` of the old form (a list per kind, no times) is read with each answer at the
-    /// file's time, and written in the new form at the next change — each entry with its scope and when it was
-    /// granted, the old ones keeping the file's time, the new one its own.
+    /// Piece J, no backward compatibility: a `sandbox.json` of another version (the per-checkout form, the list
+    /// per kind) reads as nothing — each asks once — and the next answer writes this form, the old entries gone.
+    /// An entry with no time (a hand edit) has the file's; a new one its own, gone with it when taken back.
     #[test]
-    fn an_old_sandbox_json_reads_at_its_files_time_and_is_written_anew() {
+    fn a_sandbox_json_of_another_version_reads_as_nothing() {
         let dir = crate::scratch::Scratch::new("allow-old");
         let path = dir.join("sandbox.json");
-        let old = json!({ "projects": { "/p": {
-            "read": ["/t/r"], "write": ["/t/w"], "ports": [3000], "hosts": ["example.invalid:443"],
-            "terminals": true, "keys": ["/p/.env"] } } });
-        std::fs::write(&path, old.to_string()).unwrap();
-        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        let at = modified.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let a = Store::read(Some(&path)).get(Path::new("/p"));
-        let all = [
-            Grant::Read("/t/r".into()),
-            Grant::Write("/t/w".into()),
-            Grant::Port(3000),
-            Grant::Host("example.invalid".into(), 443),
-            Grant::Terminals,
-            Grant::Key("/p/.env".into()),
-        ];
-        assert_eq!(a.grants(), all);
-        assert!(all.iter().all(|g| a.granted.get(g) == Some(&at)), "{:?}", a.granted);
-        // Written anew at the next change
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let v2 = json!({ "version": 2, "projects": { "/p": [{ "kind": "read", "what": "/t/r", "scope": "always" }] } });
+        let v1 = json!({ "projects": { "/p": { "read": ["/t/r"], "ports": [3000] } } });
+        for old in [v2, v1] {
+            std::fs::write(&path, old.to_string()).unwrap();
+            assert!(Store::read(Some(&path)).get(Path::new("/p")).is_empty(), "{old}");
+        }
         keep(&path, Path::new("/p"), |a| a.add_port(8080)).unwrap();
         let v: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["version"], STORE_VERSION, "{v}");
-        let entries = v["projects"]["/p"].as_array().unwrap();
-        assert_eq!(entries.len(), 7, "{v}");
-        assert!(entries.iter().all(|e| e["scope"] == "always" && e["granted"].is_u64()), "{v}");
-        let b = Store::read(Some(&path)).get(Path::new("/p"));
-        assert_eq!(b.grants()[..3], [all[0].clone(), all[1].clone(), Grant::Port(3000)]);
-        assert_eq!(b.ports, [3000, 8080]);
-        assert!(all.iter().all(|g| b.granted.get(g) == Some(&at)), "the file's time kept: {:?}", b.granted);
-        assert!(b.granted[&Grant::Port(8080)] > at, "the new one's own");
+        assert_eq!(v["projects"]["/p"].as_array().map(Vec::len), Some(1), "the old ones gone: {v}");
+        // A hand edit with no time: the file's
+        let mut v = v;
+        v["projects"]["/p"].as_array_mut().unwrap().push(json!({ "kind": "port", "what": "3000" }));
+        std::fs::write(&path, v.to_string()).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let at = modified.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let a = Store::read(Some(&path)).get(Path::new("/p"));
+        assert_eq!((a.ports.clone(), a.granted.get(&Grant::Port(3000))), (vec![8080, 3000], Some(&at)));
         // Taken back: its time goes with it
         keep(&path, Path::new("/p"), |a| a.remove("port 8080")).unwrap();
         assert!(!Store::read(Some(&path)).get(Path::new("/p")).granted.contains_key(&Grant::Port(8080)));
+    }
+
+    /// Piece J: in a repository, an answer that names no place in a checkout — a read and a write outside every
+    /// checkout, a port, a host, a variable — is kept for every checkout: answered in `main`, used in `wt`. One
+    /// that names a place in one — a key file, a write in the other checkout — is the checkout's own and never
+    /// reaches the other's (`:granted` counts it there, not used). Taken back from either checkout, a shared one
+    /// is gone for both; a checkout removed takes its own with it; a shared write that now holds a checkout (made
+    /// later under a folder granted) or lies in one (made later above it) is left out.
+    #[test]
+    fn a_repositorys_answers_reach_every_checkout_but_those_naming_one() {
+        let dir = crate::scratch::Scratch::new("allow-repo");
+        let (main, wt) = repo_with_worktree(&dir);
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        let outside = std::fs::canonicalize(dir.join("outside")).unwrap();
+        let path = dir.join("state/sandbox.json");
+        let (key, in_wt) = (main.join(".env"), wt.join("out"));
+        keep(&path, &main, |a| {
+            a.add_read(outside.clone());
+            a.add_write(outside.join("w"));
+            a.add_write(outside.join("y/deep"));
+            a.add_port(3000);
+            a.add_host("static.example.invalid", 443);
+            a.add(&Grant::Env("FOO".into()));
+            a.add(&Grant::Key(key.clone()));
+            a.add_write(in_wt.clone());
+        })
+        .unwrap();
+        let store = Store::read(Some(&path));
+        assert_eq!(store.get(&main).grants().len(), 8, "all of it in main");
+        let there = store.get(&wt);
+        assert_eq!(
+            (there.read.clone(), there.write.clone()),
+            (vec![outside.clone()], vec![outside.join("w"), outside.join("y/deep")])
+        );
+        assert_eq!((there.ports, there.hosts.len(), there.env), (vec![3000], 1, vec!["FOO".to_string()]));
+        assert!(there.keys.is_empty(), "a key file is its checkout's");
+        assert_eq!(store.elsewhere(&Where::of(&wt)), 2, "main's own, counted from wt");
+        assert_eq!(store.elsewhere(&Where::of(&main)), 0);
+        let kept = store.kept(&Where::of(&wt));
+        assert!(
+            kept.shared.contains(&Grant::Read(outside.clone())) && !kept.shared.contains(&Grant::Key(key))
+        );
+        // Taken back from wt: gone for main too
+        keep(&path, &wt, |a| a.remove(&outside.display().to_string())).unwrap();
+        assert!(Store::read(Some(&path)).get(&main).read.is_empty());
+        // A checkout made under a folder granted to every checkout, and one above another: both left out
+        for at in [outside.join("w/later"), outside.join("y")] {
+            let git = std::process::Command::new("git")
+                .args(["worktree", "add", "-q"])
+                .arg(&at)
+                .current_dir(&main)
+                .output()
+                .unwrap();
+            assert!(git.status.success(), "{}", String::from_utf8_lossy(&git.stderr));
+        }
+        let now = Store::read(Some(&path)).get(&main);
+        assert_eq!(
+            now.write,
+            std::slice::from_ref(&in_wt),
+            "one holds a checkout, one lies in one (main's own stays)"
+        );
+        let here = Where::of(&main);
+        assert_eq!(here.names(&outside.join("w")).map(|(how, _)| how), Some("holds"));
+        assert_eq!(here.names(&outside.join("y/deep")).map(|(how, _)| how), Some("lies in"));
+        // main's checkout gone: its own go, what every checkout uses stays
+        forget_checkout(&path, &Where::of(&main)).unwrap();
+        let left = Store::read(Some(&path)).get(&main);
+        assert!(left.keys.is_empty() && !left.write.contains(&in_wt), "{left:?}");
+        assert_eq!(Store::read(Some(&path)).get(&wt).ports, [3000]);
+    }
+
+    /// Review J 1: a folder whose `.git` is a link to another repository's git folder is no checkout of it — no
+    /// repository, no checkouts, none of what that repository's checkouts share.
+    #[test]
+    fn a_linked_dot_git_is_no_checkout() {
+        let dir = crate::scratch::Scratch::new("allow-linked-git");
+        let (main, _wt) = repo_with_worktree(&dir);
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        let x = std::fs::canonicalize(dir.join("x")).unwrap();
+        std::os::unix::fs::symlink(main.join(".git"), x.join(".git")).unwrap();
+        let path = dir.join("state/sandbox.json");
+        keep(&path, &main, |a| a.add_port(3000)).unwrap();
+        assert_eq!(Store::read(Some(&path)).get(&main).ports, [3000], "main's");
+        let here = Where::of(&x);
+        assert_eq!((here.repository, here.checkouts.len()), (None, 0));
+        assert!(common_dir(&x).is_none() && checkouts(&x).is_empty());
+        assert!(Store::read(Some(&path)).get(&x).is_empty(), "none of main's");
+    }
+
+    /// Review J 2: a separate git dir names no main checkout — a place answered from one linked checkout stays that
+    /// checkout's own, never the other's; a submodule's git folder names its checkout (`core.worktree`), taken where
+    /// that checkout's `.git` names the folder back. git's files written by hand, no git run.
+    #[test]
+    fn a_separate_git_dir_keeps_places_to_the_checkout() {
+        let dir = crate::scratch::Scratch::new("allow-separate");
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let git = base.join("repo.git");
+        let write = |p: PathBuf, s: String| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, s).unwrap();
+        };
+        for w in ["wt1", "wt2"] {
+            let entry = git.join("worktrees").join(w);
+            write(base.join(w).join(".git"), format!("gitdir: {}\n", entry.display()));
+            write(entry.join("gitdir"), format!("{}\n", base.join(w).join(".git").display()));
+            write(entry.join("commondir"), "../..\n".into());
+        }
+        write(base.join("main/.git"), format!("gitdir: {}\n", git.display()));
+        write(git.join("config"), "[core]\n\tbare = false\n".into());
+        let (main, wt1, wt2) = (base.join("main"), base.join("wt1"), base.join("wt2"));
+        let here = Where::of(&wt1);
+        assert_eq!(here.repository.as_deref(), Some(git.as_path()));
+        assert!(here.main_unknown && !here.shared(&Grant::Read(base.join("elsewhere"))));
+        let path = dir.join("state/sandbox.json");
+        keep(&path, &wt1, |a| {
+            a.add_write(main.join("target"));
+            a.add_port(3000);
+        })
+        .unwrap();
+        let there = Store::read(Some(&path)).get(&wt2);
+        assert!(there.write.is_empty() && there.ports == [3000], "{there:?}");
+        // A submodule's: the checkout named, and naming it back
+        write(git.join("config"), "[core]\n\tworktree = ../main\n".into());
+        let here = Where::of(&wt1);
+        assert!(!here.main_unknown && here.checkouts.contains(&main), "{here:?}");
+        assert!(
+            here.shared(&Grant::Read(base.join("elsewhere"))) && !here.shared(&Grant::Write(main.join("x")))
+        );
+    }
+
+    /// Review J 9: an answer of this checkout's own that covers one every checkout uses (a folder holding the
+    /// checkouts) leaves the shared one to the others — it wasn't taken back.
+    #[test]
+    fn an_own_answer_covering_a_shared_one_leaves_it_shared() {
+        let dir = crate::scratch::Scratch::new("allow-cover");
+        let (main, wt) = repo_with_worktree(&dir);
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let ratatui = base.join("ratatui");
+        let path = dir.join("state/sandbox.json");
+        keep(&path, &main, |a| a.add_read(ratatui.clone())).unwrap();
+        keep(&path, &main, |a| a.add_read(base.clone())).unwrap();
+        assert_eq!(Store::read(Some(&path)).get(&wt).read, std::slice::from_ref(&ratatui), "still wt's");
+        let here = Store::read(Some(&path)).get(&main);
+        assert!(here.reads(&ratatui) && here.reads(&base), "{here:?}");
     }
 
     /// cardauto 6: `s` — a grant for this session is the session's (not the conversation's, not the project's),

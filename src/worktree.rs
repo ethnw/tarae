@@ -1584,8 +1584,18 @@ impl Editor {
             self.set_step("session", format!("Ending {}…", e.name));
         }
         let builds = self.session_store.builds.clone();
+        let allow = self.allow_path.clone();
         self.events.shared_jobs().spawn(move || {
+            // (where its own kept answers are, while its checkout is there to say)
+            let here = crate::allow::Where::of(&e.root);
             let result = remove(&e, both, builds.as_ref());
+            // (the checkout's own kept answers go with it — one made at its path later starts with none; what
+            // every checkout of the repository uses stays)
+            if let (Ok(_), Some(store)) = (&result, allow.as_deref())
+                && let Err(why) = crate::allow::forget_checkout(store, &here)
+            {
+                crate::log::line("sandbox", "warning", &format!("an ended checkout's kept answers: {why}"));
+            }
             move |ed: &mut Editor| {
                 ed.step_done("session");
                 match result {
@@ -2184,6 +2194,36 @@ mod tests {
             };
             ed.handle_key(key);
         }
+    }
+
+    /// Review J 17: ending a session forgets its checkout's own kept answers — a checkout made at its path later
+    /// starts with none — and what every checkout of the repository uses stays.
+    #[test]
+    fn an_ended_sessions_own_kept_answers_go_with_it() {
+        let (repo, dir) = place("forget");
+        let mut ed = editor(&repo, &dir);
+        let store = dir.join("state/sandbox.json");
+        ed.allow_path = Some(store.clone());
+        let wt = new_session(&mut ed, "own");
+        crate::allow::keep(&store, &wt, |a| {
+            a.add(&crate::allow::Grant::Key(wt.join(".env")));
+            a.add_port(3000);
+        })
+        .unwrap();
+        assert_eq!(crate::allow::Store::read(Some(&store)).get(&wt).keys.len(), 1);
+        feed(&mut ed, ":session-end<ret>");
+        settle_until(&mut ed, |ed| says(ed, "Ended own") || says(ed, "end own:"));
+        assert!(!wt.exists(), "{}", said(&ed));
+        // (its section, as a checkout made at its path would find it)
+        let here = crate::allow::Where {
+            project: wt.clone(),
+            checkout: wt.clone(),
+            repository: Some(std::fs::canonicalize(repo.join(".git")).unwrap()),
+            checkouts: vec![repo.clone(), wt.clone()],
+            main_unknown: false,
+        };
+        let kept = crate::allow::Store::read(Some(&store)).kept(&here).all;
+        assert!(kept.keys.is_empty() && kept.ports == [3000], "{kept:?}");
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {

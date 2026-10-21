@@ -319,8 +319,14 @@ today).
 
 **One list (sandbox UX piece E, 2026-10-17):** the trust answers join it — `trust.json` keeps each answer's
 kind and time — by kind, for every checkout of the repository, then the plugins' approvals and the packs'
-preflight told; the no-sandbox `s` with this session's; the answers `sandbox.json` keeps for the repository's
-other checkouts counted on a faint last row (`always` is the checkout's). `d` on a trust answer forgets its
+preflight told; the no-sandbox `s` with this session's; the answers `sandbox.json` keeps as the repository's
+other checkouts' own counted on a faint last row. **Per repository (piece J, 2026-10-17):** `sandbox.json`
+keeps a repository's answers by its git common folder — `shared` (every checkout uses them: what names no place
+in or holding a checkout) and each checkout's own (`allow::Where::shared`); a shared one that later holds a
+checkout (one added under a folder granted) is left out when read. srt has no project scope at all: one settings
+file for every command (`src/cli.ts`: `~/.srt-settings.json` or `--settings`), absolute entries the same
+everywhere, relative ones resolved from the current directory (README "Configuration"; `sandbox-utils.ts`) —
+J's split is the same: outside places shared, inside ones where they're made. `d` on a trust answer forgets its
 trusted versions and the running state follows (`granted::trust_take`): never left half-trusted. srt keeps no
 answers to take back — its policy is a settings file you edit (`~/.srt-settings.json`, or `--settings`; its
 README, "Configuration").
@@ -400,10 +406,12 @@ Net: about −1,000 product lines and −1,200 test lines; +600 product and +300
 
 ## 6. Migration
 
-- **`$state/sandbox.json`**: read, write and ports load as project-scope grants as they are. The
-  schema gains `scope` and `granted` (a time) per entry; old entries get the file's mtime. Read
-  entries now covered by a default (another checkout, temp, toolchain) are dropped on the first
-  write, and the toast says which.
+- **`$state/sandbox.json`**: each entry has its `scope` and `granted` (a time). Read entries now covered
+  by a default (another checkout, temp, toolchain) are dropped from the checkout's own answers on the
+  first write, and the toast says which — never one every checkout of the repository uses (a default
+  here may be none in another checkout). As built (piece J, 2026-10-17, version 3): versions 1–2 are no
+  longer read (no compatibility before the first release) — an old file reads as nothing, each answer
+  is asked once, and the next answer writes the new form.
 - **`Chat.allowed`** becomes chat-scope grants (it's the same type). `Chat.read_once`: gone.
 - **`Chat.run_allow`** patterns and `Chat.run_scripts` pins: dropped. They allowed *commands*, and
   every such command now runs without asking. If a chat had any, the first run after the update

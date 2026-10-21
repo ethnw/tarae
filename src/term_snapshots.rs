@@ -1050,6 +1050,53 @@ fn frames_of_the_answer_words() {
     });
 }
 
+/// Piece J: the read card offering the repository a read outside the project is in — `a`/`A` all of it, what `A`
+/// keeps it for said last — for its screenshots, wide and narrow; only with `TARAE_FRAMES_DIR` set (both themes
+/// there; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`).
+#[test]
+fn frames_of_the_read_card_with_its_repository() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    let (root, repo) = (PathBuf::from("/Users/me/src/tarae"), PathBuf::from("/Users/me/src/ratatui"));
+    for (w, wide) in [(100, ""), (80, "_narrow")] {
+        let mut s = Shot::new(w, 30);
+        s.ed.offer_popups = true;
+        s.file("src/demo.rs", DEMO_RS);
+        let here = crate::allow::Where {
+            project: root.clone(),
+            checkout: root.clone(),
+            repository: Some(root.join(".git")),
+            checkouts: vec![root.clone()],
+            main_unknown: false,
+        };
+        let caps = crate::caps::Caps { root: root.clone(), here, ..Default::default() };
+        s.ed.session.caps = Some((1, std::sync::Arc::new(caps)));
+        s.ed.session.chat = Some(crate::chat::Chat::new());
+        let input = json!({ "file_path": repo.join("src/layout/flex.rs") });
+        let mut look = crate::reads::look("Read", &input, &root);
+        look.at = Some(repo.join("src/layout/flex.rs"));
+        let p = crate::reads::Pending {
+            request_id: "r".into(),
+            generation: 0,
+            input,
+            look,
+            class: crate::cards::Class::Elsewhere,
+            since: Instant::now(),
+            found: Default::default(),
+            repository: Some(repo.clone()),
+            own: None,
+            then: None,
+        };
+        let (q, warning) = crate::reads::card_text(&p, true, Some((&repo, &Default::default())));
+        let what = crate::offer::What::Read { pending: Box::new(p), keep: true, folder: Some(repo.clone()) };
+        let mut o = crate::offer::Offer::new(crate::reads::TITLE.into(), &q, "", String::new(), what);
+        o.warning = warning;
+        s.ed.push_offer(o);
+        s.frames_both(&format!("j_read_repository{wide}"));
+    }
+}
+
 /// Piece I: the repository's card as its parts come — tarae's alone, Claude's joining, git's joining (each frame
 /// for jitter: it grows from where it stands), wide and narrow.
 fn frames_of_the_repository_card() {

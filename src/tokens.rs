@@ -674,6 +674,9 @@ pub struct Found {
     /// Not every file was looked at (more than `LOOK_MAX`, `BYTES_MAX` read, `VISIT_MAX` entries met) — or
     /// none: a place that's everything isn't walked.
     pub cut: bool,
+    /// The files named like keys met on the way (`secretnames`, below tools' output not walked) — `FOUND_MAX` at
+    /// most: a repository holding one is never offered whole (`reads::folder_for`, review J 5).
+    pub named: Vec<PathBuf>,
 }
 
 const FOUND_MAX: usize = 3;
@@ -769,6 +772,10 @@ fn found_under(place: &Path, home: Option<&Path>) -> Found {
             let Ok(rd) = std::fs::read_dir(&p) else { continue };
             stack.extend(rd.flatten().map(|e| e.path()));
             continue;
+        }
+        // (by its name, whatever its size or kind of content)
+        if meta.is_file() && crate::secretnames::named_secret(&p) && f.named.len() < FOUND_MAX {
+            f.named.push(p.clone());
         }
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
         if !meta.is_file() || meta.len() > FILE_MAX || (p != place && not_settings(&ext)) {
@@ -1180,7 +1187,8 @@ mod tests {
         write(&t.join("a/plain.toml"), "[x]\ny = 1\n");
         let a = t.join("a");
         let f = found_in(&a);
-        assert_eq!(f, Found { files: vec![a.join(".env"), a.join("hosts.yml")], more: 0, cut: false });
+        let named = vec![a.join(".env")];
+        assert_eq!(f, Found { files: vec![a.join(".env"), a.join("hosts.yml")], more: 0, cut: false, named });
         // (places as a card shows them, `~` for home: the test's temp folder is in home in a sandboxed run —
         // its own folder, in tarae's cache)
         let shown = crate::allow::tilde;

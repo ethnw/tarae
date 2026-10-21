@@ -249,8 +249,9 @@ fn granted_takes_each_part_back_and_what_it_let_run_follows() {
     assert!(!root.parent().unwrap().join("fsmonitor").exists(), "never run");
 }
 
-/// Piece E: answers `A` kept for another checkout of the repository aren't used here — `sandbox.json` keeps them
-/// by checkout — and the list counts them on its last row, faint.
+/// Pieces E and J: what another checkout of the repository keeps as its own (a place in it, a key file) isn't used
+/// here, and the list counts it on its last row, faint; what it kept that names no checkout is every checkout's,
+/// listed here.
 #[test]
 fn answers_kept_for_another_checkout_are_counted_not_used() {
     let (mut ed, root) = checkout("elsewhere", None);
@@ -264,7 +265,8 @@ fn answers_kept_for_another_checkout_are_counted_not_used() {
     let other = crate::sandbox::profile_path(&wt);
     crate::allow::keep(&store, &other, |a| {
         a.add_read("/opt/tarae-stand-in".into());
-        a.add_write("/opt/tarae-stand-in-w".into());
+        a.add_write(other.join("out"));
+        a.add(&crate::allow::Grant::Key(other.join(".env")));
     })
     .unwrap();
     ed.granted();
@@ -273,7 +275,11 @@ fn answers_kept_for_another_checkout_are_counted_not_used() {
     let last = items.last().unwrap();
     assert_eq!(last.label, "2 more kept for other checkouts — not used here");
     assert_eq!(last.action, crate::picker::Action::Heading, "faint, never the row in hand");
-    assert!(!items.iter().any(|i| i.label.contains("tarae-stand-in")), "not this checkout's");
+    assert!(items.iter().any(|i| i.label == "read /opt/tarae-stand-in"), "every checkout's");
+    assert!(
+        !items.iter().any(|i| i.label.contains(".env") || i.label.contains("wt/out")),
+        "not this checkout's"
+    );
 }
 
 /// `n` holds each part back, each kept so; the toast names the commands that ask again.

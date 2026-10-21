@@ -1173,10 +1173,35 @@ impl crate::editor::Editor {
         }
     }
 
+    /// What `A` on a card about `what` keeps (piece J: every checkout of the repository, or this checkout's own) —
+    /// None where it offers no `A`, or outside a repository (`Caps::always_said`).
+    pub fn always_line(&self, what: &What) -> Option<String> {
+        let grants: Vec<crate::allow::Grant> = match what {
+            What::Read { keep: true, pending, folder } => folder
+                .clone()
+                .or_else(|| pending.look.at.clone())
+                .map(crate::allow::Grant::Read)
+                .into_iter()
+                .collect(),
+            What::Grant { grant, .. } if grant.keepable() => vec![grant.clone()],
+            What::Run(r) if r.keep => r.grants.iter().cloned().map(crate::allow::Grant::Read).collect(),
+            // (the network open: a host list's `A` — review J 3)
+            What::Host(a) if a.open => std::iter::once(&a.host)
+                .chain(&a.also)
+                .map(|h| crate::allow::Grant::Host(h.clone(), a.port))
+                .collect(),
+            _ => return None,
+        };
+        self.session.caps()?.always_said(&grants)
+    }
+
     /// Stacks an offer (at the back). If one with the same title exists, keeps it (untouched while
     /// downloading; only its content is refreshed while asking) — not a command of Claude's: each waits for
     /// its own answer (#5: the second was refused, and Claude sent it again and again).
     pub fn push_offer(&mut self, mut o: Offer) {
+        if let Some(line) = self.always_line(&o.what) {
+            o.question.push_str(&format!("\n\n{line}"));
+        }
         self.offer_seq += 1;
         o.id = self.offer_seq;
         o.since = Instant::now();

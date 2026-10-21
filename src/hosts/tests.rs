@@ -302,6 +302,55 @@ fn a_process_left_by_a_run_thats_over_gets_a_card() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Review J 3: in a repository's checkout, the host card's `A` (the network open) is kept for every checkout of it
+/// — the card says so, the toast and Claude's note too — and the other checkout reads it back.
+#[test]
+fn a_hosts_always_in_a_repository_is_every_checkouts_and_says_so() {
+    let s = crate::scratch::Scratch::new("hosts-repo");
+    let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+    let store = s.path().join("state/sandbox.json");
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.config.llm.sandbox_network = true;
+    (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+    let until = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
+        let end = Instant::now() + std::time::Duration::from_secs(10);
+        while !done(ed) {
+            assert!(Instant::now() < end, "timed out: {what}");
+            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                ed.handle_event(ev);
+            }
+        }
+    };
+    ed.caps_sync();
+    until(&mut ed, "the caps", &|ed| ed.session.caps().is_some_and(|c| c.here.repository.is_some()));
+    let a = Ask {
+        session: ed.session.proxy_id(),
+        run: 1,
+        host: HOST.into(),
+        port: 443,
+        process: "curl".into(),
+        label: "curl -sS https://static.example.invalid".into(),
+        users: false,
+        left: false,
+        open: true,
+        hosts: Default::default(),
+        also: Vec::new(),
+    };
+    ed.push_offer(card(a.clone()));
+    let q = ed.offers[0].question.clone();
+    assert!(q.ends_with("A is for every checkout of main."), "{q}");
+    let id = ed.offers[0].id;
+    answer(&mut ed, id, a, Scope::Project);
+    let toast = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
+    assert_eq!(
+        toast,
+        format!("Commands may reach {HOST}:443 for every checkout of main — :granted lists it")
+    );
+    let tell = ed.session.checkpoints.tell.join("\n");
+    assert!(tell.contains("for every checkout of main, until they take it back"), "{tell}");
+    until(&mut ed, "kept", &|_| !crate::allow::Store::read(Some(&store)).get(&wt).hosts.is_empty());
+}
+
 /// Each key reaches as far as it says, for the card's own session and run: `y` this run, `s` the session (listed
 /// in it, Claude told), `a` this conversation (piece C), `A` the project (kept in `sandbox.json`, read back for the
 /// next runs — the network open), `n` refused for the session (no longer listed).

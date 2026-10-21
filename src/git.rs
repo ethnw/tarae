@@ -232,7 +232,7 @@ impl Editor {
             let kept = crate::allow::Store::read(store.as_deref());
             let mut all = Vec::new();
             for (root, session, chat) in &chats {
-                let project = kept.get(&crate::sandbox::profile_path(root));
+                let project = kept.get(root);
                 let caps = crate::caps::Caps::granted(root, &project, session, chat);
                 let w = crate::tools::with_allowed(&llm, &caps, None);
                 all.extend(crate::sandbox::write_places(root, &w.llm));

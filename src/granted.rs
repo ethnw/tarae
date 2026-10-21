@@ -1,12 +1,13 @@
 //! `:granted` — what you've let through here (card model P4, cardauto piece 7; plan §2.2; sandbox UX piece E): the
-//! defaults first, then your answers to Claude's asks by how long they last — always (kept for this checkout), this
-//! session, this chat —, then the trust answers kept for every checkout of the repository (tarae's project
+//! defaults first, then your answers to Claude's asks by how long they last — always (kept for every checkout of the
+//! repository, or this checkout's own: piece J), this session, this chat —, then the trust answers kept for every checkout of the repository (tarae's project
 //! settings, Claude's settings, git's own commands, a hook), the plugins' approvals and the packs' preflight told —
 //! each with where it applies and when it was answered. `d` takes an answer back: Claude's through
 //! `Editor::sandbox_disallow` (the next run and the next read ask again, and Claude hears it with the next message);
 //! a trust answer is forgotten (`trust::forget`), what it let run held back at once and its card asking at the next
 //! look (`trust_taken`); a plugin's through `plugin_revoke`. A default isn't an answer to take back, and its row
-//! says so. Answers kept for the repository's other checkouts are counted on a faint last row, not used here. The
+//! says so. Answers the repository's other checkouts keep as their own are counted on a faint last row, not used
+//! here. The
 //! chat's title says how many of Claude's answers there are (`› 3 granted`: `count`).
 
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub struct More {
     pub plugins: Vec<(String, String)>,
     /// The lines kept for the packs' preflight in this clone.
     pub preflight: Vec<String>,
-    /// Answers kept for the repository's other checkouts, not used here.
+    /// Answers the repository's other checkouts keep as their own, not used here.
     pub elsewhere: usize,
 }
 
@@ -76,13 +77,8 @@ impl More {
             let steps = [crate::packs::preflight(&l.root).steps, yours.clone()].concat();
             crate::preflight::told_kept(kept, &l.root, &steps)
         });
-        let here = crate::sandbox::profile_path(&l.root);
-        let elsewhere = common.as_ref().map_or(0, |c| {
-            let store = crate::allow::Store::read(l.allow.as_deref());
-            let others = store.projects().filter(|(p, _)| *p != here);
-            let ours = others.filter(|(p, _)| crate::allow::common_dir(p).as_ref() == Some(c));
-            ours.map(|(_, a)| a.grants().len()).sum()
-        });
+        let here = crate::allow::Where::of(&l.root);
+        let elsewhere = crate::allow::Store::read(l.allow.as_deref()).elsewhere(&here);
         More {
             no_sandbox: l.no_sandbox,
             repository: common.is_some(),
@@ -186,9 +182,19 @@ pub fn items(
             ..default("read outside home".into(), Why::Outside)
         });
     }
+    // (kept: what every checkout of the repository uses, then the checkout's own — piece J)
+    let (mut every, mut own) = (Allowed::default(), Allowed::default());
+    for g in kept.grants() {
+        let to = if caps.shared.contains(&g) { &mut every } else { &mut own };
+        to.add(&g);
+        if let Some(at) = kept.granted.get(&g) {
+            to.granted.insert(g, *at);
+        }
+    }
     let mut seen: Vec<Grant> = Vec::new();
     let mut answered = 0;
-    for (title, a) in [(ALWAYS, kept), ("this session", session), ("this chat", chat)] {
+    let groups = [(ALWAYS_SHARED, &every), (ALWAYS, &own), ("this session", session), ("this chat", chat)];
+    for (title, a) in groups {
         let mut rows: Vec<(u64, Item)> = Vec::new();
         for g in a.grants() {
             if seen.contains(&g) {
@@ -257,7 +263,9 @@ pub fn items(
     out
 }
 
-/// Claude's kept answers' heading: they're the checkout's (`sandbox.json` by its real path).
+/// Claude's kept answers' headings: those every checkout of the repository uses (`sandbox.json` by its git common
+/// folder), and the checkout's own (by its real path — a place in it, a key file).
+const ALWAYS_SHARED: &str = "always · every checkout";
 const ALWAYS: &str = "always · this checkout";
 /// The session's no-sandbox `s`, as its row says it.
 const NO_SANDBOX: &str = "run without a sandbox";
@@ -302,7 +310,7 @@ impl Editor {
         self.events.jobs().spawn(move || {
             let caps = basis.build();
             let more = More::look(&look);
-            let answers = [&basis.kept(), &basis.session, &basis.chat];
+            let answers = [&basis.kept().1.all, &basis.session, &basis.chat];
             let items = items(&caps, answers, &hosts, &more, crate::allow::now_s());
             move |ed: &mut Editor| ed.granted_open(items, again)
         });
@@ -522,7 +530,11 @@ mod tests {
         };
         pick(&mut ed, shown(&kept));
         {
-            let _held = crate::allow::KEEP.lock().unwrap();
+            // (the lock beside the store: the keep waits on it)
+            let mut held = std::fs::OpenOptions::new();
+            let held =
+                held.create(true).truncate(false).write(true).open(store.with_extension("lock")).unwrap();
+            held.lock().unwrap();
             key(&mut ed, 'd');
             assert!(
                 crate::allow::Store::read(Some(&store)).get(&project).write.contains(&kept),
@@ -734,6 +746,73 @@ mod tests {
             format!("No longer kept — read by default now: {} (this checkout)", crate::allow::tilde(&inside))
         );
         assert_eq!(crate::allow::Store::read(Some(&store)).get(&project).read, [outside]);
+    }
+
+    /// Piece J: in a repository's checkout, what every checkout uses is listed under its own heading and the
+    /// checkout's own under another; what another checkout keeps as its own is counted on the faint last row,
+    /// not used here; `d` on a shared one takes it back for every checkout.
+    #[test]
+    fn a_shared_answer_is_listed_apart_and_taken_back_for_every_checkout() {
+        let s = crate::scratch::Scratch::new("granted-repo");
+        let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+        let store = s.path().join("sandbox.json");
+        let outside = PathBuf::from("/opt/tarae-stand-in");
+        crate::allow::keep(&store, &main, |a| {
+            a.add_read(outside.clone());
+            a.add(&Grant::Key(main.join(".env")));
+        })
+        .unwrap();
+        crate::allow::keep(&store, &wt, |a| a.add(&Grant::Key(wt.join(".env")))).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+        ed.session.chat = Some(crate::chat::Chat::new());
+        open(&mut ed);
+        let listed = rows(&ed);
+        let at =
+            |label: &str| listed.iter().position(|r| r.0 == label).unwrap_or_else(|| panic!("{listed:?}"));
+        let (shared, own) = (at(ALWAYS_SHARED), at(ALWAYS));
+        assert_eq!(at("read /opt/tarae-stand-in"), shared + 1, "{listed:?}");
+        assert_eq!(
+            at(&format!("read {}, named like a key", crate::allow::tilde(&main.join(".env")))),
+            own + 1
+        );
+        assert_eq!(listed.last().unwrap().0, "1 more kept for other checkouts — not used here");
+        let p = ed.picker.as_mut().unwrap();
+        p.select_where(
+            |a| matches!(a, Action::Granted(Some(Taken::Grant(w))) if w.contains("tarae-stand-in")),
+        );
+        key(&mut ed, 'd');
+        until(&mut ed, "taken back for every checkout", |_| {
+            crate::allow::Store::read(Some(&store)).get(&wt).read.is_empty()
+        });
+        assert!(crate::allow::Store::read(Some(&store)).get(&main).read.is_empty());
+    }
+
+    /// Review J 8: `d` in one session on an answer every checkout uses takes it back in the other session too — its
+    /// conversation's copy (made as its `A` was answered) goes, its `Caps` no longer read it, and its Claude is told.
+    #[test]
+    fn d_takes_a_shared_answer_back_in_every_session() {
+        let s = crate::scratch::Scratch::new("granted-every-session");
+        let (main, wt) = crate::allow::tests::repo_with_worktree(s.path());
+        let store = s.path().join("sandbox.json");
+        let outside = PathBuf::from("/opt/tarae-stand-in");
+        let mut ed = Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+        ed.session.chat = Some(crate::chat::Chat::new());
+        crate::allow::grant_reads(&mut ed, std::slice::from_ref(&outside), Scope::Always);
+        until(&mut ed, "kept", |_| crate::allow::Store::read(Some(&store)).get(&wt).reads(&outside));
+        let main_id = ed.session.id;
+        let other = ed.session_add(wt.clone());
+        assert!(ed.session_switch(other));
+        ed.sandbox_disallow(&outside.display().to_string()).unwrap();
+        until(&mut ed, "taken back", |_| !crate::allow::Store::read(Some(&store)).get(&main).reads(&outside));
+        let m = ed.session_by_id(main_id).unwrap();
+        assert!(!m.chat.as_ref().unwrap().allowed.reads(&outside), "its conversation's copy");
+        assert!(m.checkpoints.tell.iter().any(|t| t.contains("took back") && t.contains("tarae-stand-in")));
+        until(&mut ed, "its caps", |ed| {
+            let m = ed.sessions.iter().find(|s| s.id == main_id).unwrap();
+            m.caps().is_some_and(|c| !c.reads(&outside))
+        });
     }
 
     /// The chip keeps its width whatever the count (`GRANTED_W` is its widest).
