@@ -537,13 +537,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Linux names the file: a neighbour's churn (git's index next to HEAD) doesn't wake anyone.
+    /// Linux names the file: a neighbour's churn (git's index next to HEAD) doesn't wake anyone. HEAD is made
+    /// without a descriptor (`mknod`): one written with `std::fs::write` says its close (`IN_CLOSE_WRITE`) only
+    /// when the last copy of the descriptor goes, and a child another test forked holds one till its exec — under
+    /// a full run that close came after the watch started, and woke it as HEAD's.
     #[cfg(target_os = "linux")]
     #[test]
     fn neighbours_dont_wake() {
         let dir = tmp("neighbour");
         let path = dir.join("HEAD");
-        std::fs::write(&path, "a").unwrap();
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a plain call with a path of ours.
+        assert_eq!(unsafe { libc::mknod(c.as_ptr(), libc::S_IFREG | 0o644, 0) }, 0, "{path:?}");
         let mut w = watching(|w| w.file(&path));
         std::fs::write(dir.join("index.lock"), "x").unwrap();
         std::fs::rename(dir.join("index.lock"), dir.join("index")).unwrap();

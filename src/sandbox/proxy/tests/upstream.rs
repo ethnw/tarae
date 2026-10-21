@@ -69,6 +69,34 @@ fn silent(mut s: TcpStream) -> Vec<u8> {
     got
 }
 
+/// A loopback address that refuses every connection while what it returns lives: the local port of a connection
+/// of ours — nothing listens there, and on Linux the client's socket holds the port (no `SO_REUSEADDR`), so no other
+/// bind takes it meanwhile. A port bound and let go at once was closed only until the next listener got it — under
+/// a full Linux run another test's `forbids` did, and "connection refused" read as its 403. (macOS lets a listener's
+/// `SO_REUSEADDR` bind take a connected socket's port, and drops a connection to one bound and never listening
+/// instead of refusing it: there the port is as free as a dropped one's.)
+fn refused_at() -> ((TcpStream, TcpStream), SocketAddr) {
+    let l = TcpListener::bind((LO, 0)).unwrap();
+    let client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+    let (server, _) = l.accept().unwrap();
+    let at = client.local_addr().unwrap();
+    ((client, server), at)
+}
+
+/// `refused_at`'s address refuses a connection, and on Linux no listener's bind (`SO_REUSEADDR`, as std's) takes
+/// its port while it's held.
+#[test]
+fn a_refusing_port_is_taken_by_no_other_bind() {
+    let (_held, closed) = refused_at();
+    let refused = TcpStream::connect(closed).map(|_| ());
+    assert_eq!(refused.map_err(|e| e.kind()), Err(std::io::ErrorKind::ConnectionRefused), "{closed}");
+    #[cfg(target_os = "linux")]
+    {
+        let again = TcpListener::bind(closed).map(|_| ());
+        assert_eq!(again.map_err(|e| e.kind()), Err(std::io::ErrorKind::AddrInUse), "{closed}");
+    }
+}
+
 /// `%XX` for every byte but the URL's unreserved ones — as a proxy URL holds credentials.
 fn pct(s: &str) -> String {
     s.bytes()
@@ -178,7 +206,7 @@ fn plain_http_goes_upstream_in_absolute_form() {
 /// never where the upstream is; `:sandbox-blocked` offers nothing, as no answer of the user's would lift it.
 #[test]
 fn the_upstreams_failures_are_said_as_its_own() {
-    let closed = TcpListener::bind((LO, 0)).unwrap().local_addr().unwrap();
+    let (_held, closed) = refused_at();
     let (basic, negotiate, refusing, quiet) =
         (outside(asks_basic), outside(asks_negotiate), outside(forbids), outside(silent));
     let f = start(resolver(Vec::new()).0, Limits { connect: Duration::from_millis(400), ..limits() });
@@ -455,7 +483,7 @@ fn plain_http_goes_through_a_socks5_upstream_in_origin_form() {
 /// that answers said as silent (#232).
 #[test]
 fn a_socks5_upstreams_failures_are_said_as_its_own() {
-    let closed = TcpListener::bind((LO, 0)).unwrap().local_addr().unwrap();
+    let (_held, closed) = refused_at();
     let (refusing, no_way, no_host, late, quiet) = (
         outside(socks_refuses_sign_in),
         outside(socks_takes_no_way),
@@ -554,7 +582,7 @@ fn upstream_credentials_go_only_to_the_upstream() {
     );
     let (socks_tunnel, socks_plain, socks_refusing) =
         (outside(socks_echo), outside(socks_web), outside(socks_refuses_sign_in));
-    let closed = TcpListener::bind((LO, 0)).unwrap().local_addr().unwrap();
+    let (_held, closed) = refused_at();
     let limits = Limits { hold: Duration::from_millis(200), connect: Duration::from_millis(300), ..limits() };
     let f = start(resolver(Vec::new()).0, limits);
     let mut rng = Rng(0x5ec2_e75e_ed00_0005);

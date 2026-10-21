@@ -83,8 +83,11 @@ struct State {
     ending: bool,
     /// It didn't end in time and tarae killed it (`ended_by`): what its runs left may outlive it.
     killed: bool,
-    /// A keeper of another policy took its place: no run more, and it ends once its last one has.
+    /// A keeper of another policy took its place: no run more but the held ones (`holds`), and it ends once its
+    /// last one has.
     superseded: bool,
+    /// The runs' policies made for it whose run hasn't started yet (`Hold`): their runs are still its own.
+    holds: usize,
     /// Its policy's key (`sandbox::policy_key`) — None: a probe's, any key takes it over.
     key: Option<String>,
     next: u64,
@@ -137,6 +140,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// `DEATHS_WITHIN` and none is made (D11). A birth that fails fails the run, saying why — never another tier
 /// (D-b: the probe's, until tarae starts again). Blocks (a worker's).
 pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, String> {
+    ready_in(root, key, ns, false)
+}
+
+/// `ready` for a run's policy (`sandbox::confined`): its keeper with a hold on it taken in the same step — no
+/// run of another key asked meanwhile can end it before this run has started there.
+pub fn ready_held(root: &Path, key: &str, ns: Ns) -> Result<Arc<Hold>, String> {
+    ready_in(root, Some(key), ns, true).map(|keeper| Arc::new(Hold { keeper, spent: Default::default() }))
+}
+
+fn ready_in(root: &Path, key: Option<&str>, ns: Ns, held: bool) -> Result<Arc<Keeper>, String> {
     let _births = lock(&BIRTHS);
     let current = {
         let mut keepers = lock(&KEEPERS);
@@ -145,16 +158,20 @@ pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, Stri
     };
     if let Some(k) = current {
         let mut s = lock(&k.state);
+        let take = |s: &mut State| {
+            s.holds += usize::from(held);
+            Ok(k.clone())
+        };
         match (&s.key, key) {
-            (_, None) => return Ok(k.clone()),
+            (_, None) => return take(&mut s),
             (None, Some(new)) if k.ns == ns => {
                 s.key = Some(new.to_string());
-                return Ok(k.clone());
+                return take(&mut s);
             }
-            (Some(was), Some(new)) if was == new && k.ns == ns => return Ok(k.clone()),
+            (Some(was), Some(new)) if was == new && k.ns == ns => return take(&mut s),
             _ => {
                 s.superseded = true;
-                let idle = s.runs.values().all(|r| r.exited.is_some() || r.started.is_none());
+                let idle = s.holds == 0 && s.runs.values().all(|r| r.exited.is_some() || r.started.is_none());
                 drop(s);
                 let k = k.clone();
                 crate::event::thread("tarae-kend", move || match idle {
@@ -183,8 +200,54 @@ pub fn ready(root: &Path, key: Option<&str>, ns: Ns) -> Result<Arc<Keeper>, Stri
         std::thread::sleep(Duration::from_secs(1));
     }
     let k = Keeper::born(root, key, ns).map_err(|e| format!("the session's keeper couldn't start: {e}"))?;
+    lock(&k.state).holds = usize::from(held);
     lock(&KEEPERS).push(k.clone());
     Ok(k)
+}
+
+/// A run's policy's hold on its session's keeper (`ready_held`), from the policy's making to its run's start —
+/// a queued run's wait among it. A run of another key superseding the keeper meanwhile (D14) leaves it this run's:
+/// its rules were made for it, so it starts there (`start_confined`, `start_served`), and the keeper ends only
+/// once nothing holds it and its runs have ended. Spent at that start (the run's slot keeps it from there), let go
+/// when the policy goes unrun. Clones of the policy share it.
+pub struct Hold {
+    keeper: Arc<Keeper>,
+    spent: std::sync::atomic::AtomicBool,
+}
+
+impl std::ops::Deref for Hold {
+    type Target = Keeper;
+    fn deref(&self) -> &Keeper {
+        &self.keeper
+    }
+}
+
+impl Hold {
+    /// Spent, or let go: the keeper no longer waits for this run — superseded and idle, it ends now.
+    fn release(&self) {
+        if self.spent.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let k = &self.keeper;
+        let mut s = lock(&k.state);
+        s.holds = s.holds.saturating_sub(1);
+        let idle = s.holds == 0 && s.runs.values().all(|r| r.exited.is_some());
+        if s.superseded && idle && !s.ending && s.gone.is_none() {
+            let k = k.clone();
+            crate::event::thread("tarae-kend", move || k.end());
+        }
+    }
+
+    /// Whether `k` is the keeper it holds, not spent yet: a run started there is still its own.
+    fn of(&self, k: &Keeper) -> bool {
+        std::ptr::eq(&*self.keeper, k) && !self.spent.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// A keeper for the probe (`tier.rs`): born with `ns`, kept by nobody but the caller.
@@ -497,7 +560,7 @@ impl Keeper {
                         slot.started = Some(Err(format!("it ended before it started ({status})")));
                     }
                 }
-                let idle = s.runs.values().all(|r| r.exited.is_some());
+                let idle = s.holds == 0 && s.runs.values().all(|r| r.exited.is_some());
                 if s.superseded && idle && !s.ending {
                     let k = self.clone();
                     crate::event::thread("tarae-kend", move || k.end());
@@ -690,13 +753,15 @@ impl Keeper {
         mut req: channel::Run,
         fds: &[BorrowedFd],
         hold: Option<Arc<OwnedFd>>,
+        held: bool,
     ) -> io::Result<(u32, Arc<OwnedFd>)> {
         let id = {
             let mut s = lock(&self.state);
             if let Some(why) = &s.gone {
                 return Err(io::Error::other(format!("the session's keeper ended: {why}")));
             }
-            if s.superseded {
+            // (a run its policy holds it for is still its own — `Hold`)
+            if s.superseded && !held {
                 return Err(io::Error::other("the session's keeper was replaced"));
             }
             s.next += 1;
@@ -756,7 +821,7 @@ impl Keeper {
             return Err(io::Error::other("a served run starts with its supervisor (start_served)"));
         }
         let asks = Asks { no_userns: super::tier::runs_refuse_userns(), ..Asks::default() };
-        self.start_with(cmd, comm, rules, net, asks).map(|(s, _)| s)
+        self.start_with(cmd, comm, rules, net, asks, false).map(|(s, _)| s)
     }
 
     /// `start` with the rules `c` made — and the files named like keys it hides by mounts (`linux::Covers`, 7d): a
@@ -773,7 +838,12 @@ impl Keeper {
         }
         let (rules, covers) = c.rules_and_covers();
         let asks = Asks { no_userns: super::tier::runs_refuse_userns(), ptys: false, covers: Some(covers) };
-        self.start_with(cmd, comm, rules, c.net, asks).map(|(s, _)| s)
+        let held = c.keeper.as_ref().filter(|h| h.of(self));
+        let started = self.start_with(cmd, comm, rules, c.net, asks, held.is_some()).map(|(s, _)| s);
+        if let Some(h) = held {
+            h.release();
+        }
+        started
     }
 
     /// Tests: `start`, new user namespaces refused (`no_userns`) as asked rather than as this system decides.
@@ -786,7 +856,7 @@ impl Keeper {
         net: RunNet,
         no_userns: bool,
     ) -> io::Result<Started> {
-        self.start_with(cmd, comm, rules, net, Asks { no_userns, ..Asks::default() }).map(|(s, _)| s)
+        self.start_with(cmd, comm, rules, net, Asks { no_userns, ..Asks::default() }, false).map(|(s, _)| s)
     }
 
     /// `start`, served or not; with a handoff socket when served or held (a keeper in a PID namespace — its
@@ -799,6 +869,7 @@ impl Keeper {
         rules: BorrowedFd,
         net: RunNet,
         asks: Asks<'_>,
+        held: bool,
     ) -> io::Result<(Started, Option<Arc<OwnedFd>>)> {
         let Asks { no_userns, ptys, covers } = asks;
         // (only a keeper in a user namespace can give its run a mount namespace of its own)
@@ -874,7 +945,7 @@ impl Keeper {
         fds.extend(handoff.as_ref().map(|(_, theirs)| theirs.as_fd()));
         let ours = handoff.as_ref().map(|(ours, _)| ours.clone());
         let hold = ours.clone().filter(|_| req.held);
-        let (pid, _pidfd) = self.run(req, &fds, hold)?;
+        let (pid, _pidfd) = self.run(req, &fds, hold, held)?;
         let spawned = crate::spawn::Spawned { pid, stdout: Some(out_r), stderr: Some(err_r) };
         Ok((Started { spawned }, ours))
     }
@@ -931,7 +1002,12 @@ impl Keeper {
         let no_userns = super::tier::runs_refuse_userns();
         let (rules, covers) = c.rules_and_covers();
         let asks = Asks { no_userns, ptys: c.ptys.is_some(), covers: Some(covers) };
-        let (started, ours) = self.start_with(cmd, comm, rules, net, asks)?;
+        let held = c.keeper.as_ref().filter(|h| h.of(self));
+        let started = self.start_with(cmd, comm, rules, net, asks, held.is_some());
+        if let Some(h) = held {
+            h.release();
+        }
+        let (started, ours) = started?;
         let ours = ours.ok_or_else(|| io::Error::other("a served run without its handoff"))?;
         crate::event::thread("tarae-handoff", move || {
             let Ok(listener) = recv_listener(&ours) else { return };
@@ -2848,6 +2924,54 @@ mod tests {
         let third = ready(&root, Some("key 3"), ns()).unwrap();
         assert!(gone_within(&new, END_WITHIN), "an idle one superseded ends at once");
         third.end();
+    }
+
+    /// D14 for a run asked for before the key changed: its policy holds the keeper it was made for (`Hold`) — a run
+    /// of another key asking between the policy's making and its run's start (a queued run's wait; concurrent tests
+    /// of one root) leaves it there, the run starts on it and it ends after that run. A policy that goes unrun lets
+    /// it go. (It ended under the run: `couldn't start sh` — "the session's keeper ended: its channel closed".)
+    #[test]
+    fn a_run_asked_before_a_key_change_starts_on_its_keeper() {
+        if open_rules("a_run_asked_before_a_key_change_starts_on_its_keeper").is_none() {
+            return;
+        }
+        let (p, root) = project_policy("held", Vec::new(), &[]);
+        let made = |p: &super::super::Policy| {
+            let p = super::super::confined(super::super::Policy {
+                run: super::super::RunDir::new().ok(),
+                ..p.clone()
+            });
+            let c = p.confine.as_ref().unwrap().as_ref().unwrap_or_else(|e| panic!("{e}"));
+            let k = c.keeper.as_ref().expect("its keeper").keeper.clone();
+            (p, k)
+        };
+        let (asked, k) = made(&p);
+        let other = ready(&root, Some("another key"), k.ns).unwrap();
+        assert_ne!(other.pid, k.pid, "a new keeper for the other key");
+        std::thread::sleep(LEFT_TERM);
+        assert!(!k.is_gone(), "kept for the run asked for on it");
+        let mut cmd = super::super::command(Some(&asked), "sh", &["-c".into(), "printf made > made".into()]);
+        cmd.current_dir(&root);
+        let s = super::super::spawn(Some(&asked), &cmd).unwrap_or_else(|e| panic!("it starts there: {e}"));
+        let mut err = String::new();
+        io::Read::read_to_string(&mut s.stderr.unwrap(), &mut err).ok();
+        assert!(crate::spawn::wait(s.pid).unwrap().success(), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("made")).ok().as_deref(),
+            Some("made"),
+            "in its project"
+        );
+        assert!(gone_within(&k, END_WITHIN), "ended after that run (its hold spent as it started)");
+        drop(asked);
+        // Asked for and never run: let go with its policy
+        let (unrun, k) = made(&p);
+        let third = ready(&root, Some("a third key"), k.ns).unwrap();
+        std::thread::sleep(LEFT_TERM);
+        assert!(!k.is_gone(), "held by the policy");
+        drop(unrun);
+        assert!(gone_within(&k, END_WITHIN), "let go with it");
+        third.end();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A tarae session for the keeper's lifetime tests: an editor on a project of its own, the sandbox on, and
@@ -7799,7 +7923,7 @@ mod tests {
                 abi,
                 Err("not watched".into()),
                 false,
-                Some(&k),
+                Some(&**k),
                 serve,
             )
             .unwrap();

@@ -442,7 +442,7 @@ fn sockets_tried() -> String {
                 std::net::TcpStream::connect_timeout(&at, std::time::Duration::from_secs(2)).map(drop)
             }
             "posix" => posix_opened(place, false),
-            "sysv" => sysv_attached(place.parse().unwrap(), false),
+            "sysv" => sysv_attached(place.parse().unwrap(), false).0,
             other => panic!("{other}?"),
         };
         tried(r)
@@ -457,7 +457,10 @@ fn sockets_tried() -> String {
     }
     let own = format!("/tarae-own-{}", std::process::id());
     said.push(format!("own-posix={}", tried(posix_opened(&own, true))));
-    said.push(format!("own-sysv={}", tried(sysv_attached(libc::IPC_PRIVATE, true))));
+    let (r, left) = sysv_attached(libc::IPC_PRIVATE, true);
+    said.push(format!("own-sysv={}", tried(r)));
+    // (made, and its removal refused too: the test removes it, from outside)
+    said.extend(left.map(|id| format!("own-sysv-left={id}")));
     for (what, place) in list("TARAE_TO") {
         said.push(format!("{what}={}", try_one(&what, &place)));
     }
@@ -480,22 +483,25 @@ fn posix_opened(name: &str, made: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// The System V segment of `key` attached — `made`: a new private one (then removed again).
-fn sysv_attached(key: libc::key_t, made: bool) -> io::Result<()> {
+/// The System V segment of `key` attached — `made`: a new private one (then removed again) — and the id of one
+/// made here whose removal was refused: Seatbelt lets `shmget` make it and refuses `shmat` and `IPC_RMID`, and
+/// a segment left lives until a reboot (32 of them fill a Mac's `kern.sysv.shmmni`: every `shmget` after is
+/// ENOSPC, before the sandbox is asked).
+fn sysv_attached(key: libc::key_t, made: bool) -> (io::Result<()>, Option<libc::c_int>) {
     let flags = if made { libc::IPC_CREAT | 0o600 } else { 0 };
     // SAFETY: a segment found or made by key, attached and detached at once (one made here removed).
     unsafe {
         let id = libc::shmget(key, if made { 4096 } else { 0 }, flags);
-        io_result(id)?;
+        if let Err(e) = io_result(id) {
+            return (Err(e), None);
+        }
         let at = libc::shmat(id, std::ptr::null(), 0);
         let r = if at as isize == -1 { Err(io::Error::last_os_error()) } else { Ok(()) };
         if r.is_ok() {
             libc::shmdt(at);
         }
-        if made {
-            libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut());
-        }
-        r
+        let left = made && libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) != 0;
+        (r, left.then_some(id))
     }
 }
 
@@ -564,12 +570,21 @@ fn two_sessions_cant_reach_each_others_sockets() {
     std::thread::sleep(WATCH_LAST * 2);
     let blocked = w.blocked();
     w.finish();
-    // SAFETY: this test's own name and segment, made above.
-    unsafe {
+    // The segment the run made and couldn't remove: removed from out here — gone, as asked (a test that left one
+    // a run filled the machine's segments in a month: its own try then ENOSPC, no refusal to hear)
+    let left: Option<libc::c_int> =
+        said.split_whitespace().find_map(|w| w.strip_prefix("own-sysv-left=")).and_then(|id| id.parse().ok());
+    // SAFETY: this test's own name and segment, made above — and the run's own, made by the helper it ran.
+    let left_alive = unsafe {
         libc::close(fd);
         libc::shm_unlink(name.as_ptr());
         libc::shmctl(seg, libc::IPC_RMID, std::ptr::null_mut());
-    }
+        if let Some(id) = left {
+            libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut());
+        }
+        let mut ds: libc::shmid_ds = std::mem::zeroed();
+        left.filter(|&id| libc::shmctl(id, libc::IPC_STAT, &mut ds) == 0)
+    };
     let report = mine.report();
     let g = super::seatbelt_guarantees(&mine.policy);
     mine.end();
@@ -587,6 +602,16 @@ fn two_sessions_cant_reach_each_others_sockets() {
     // (its own System V segment: refused too — the try reached the sandbox, its refusal heard)
     if got["own-sysv"] == "ok" {
         wrong.push("its own sysv: ok — the profile's default let it through".into());
+    }
+    if got["own-sysv"] == libc::ENOSPC.to_string() {
+        wrong.push(
+            "its own sysv: ENOSPC — this machine's System V segments are all taken (kern.sysv.shmmni; `ipcs -m` \
+             lists them): the try reached no sandbox"
+                .into(),
+        );
+    }
+    if let Some(id) = left_alive {
+        wrong.push(format!("its own sysv segment {id}: left behind — it lives until a reboot"));
     }
     if !blocked.seen.iter().any(|d| d.op == "ipc-sysv-shm") {
         wrong.push("its own sysv: no ipc-sysv-shm refusal heard — the try reaches nothing".into());

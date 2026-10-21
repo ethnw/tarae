@@ -134,7 +134,7 @@ pub struct Confine {
     /// The fileless folders under protected ones, made again after a run (`Kept`).
     pub kept: Arc<Kept>,
     /// The session's keeper, which forks the run (`sandbox::confined` finds or makes it) — None until then.
-    pub keeper: Option<Arc<super::keeper::Keeper>>,
+    pub keeper: Option<Arc<super::keeper::Hold>>,
     rules: Arc<Ruleset>,
 }
 

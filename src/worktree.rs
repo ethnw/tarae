@@ -3679,6 +3679,15 @@ mod tests {
         plant_hooks(&repo, &marks);
         let abs = repo.join(".githooks");
         git_in(&repo, &["config", "core.hooksPath", abs.to_str().unwrap()]);
+        // (the repository's own setting, trusted in both checkouts as its card's `y` does: the hooks would run but
+        // for `update-ref` — and the git status that sees it lands before the bring is asked, not whenever a worker
+        // gets to it: unanswered, its trust card stood in front of the bring card, one run in ten under load)
+        own_settings_trusted(&repo);
+        own_settings_trusted(&wt);
+        ed.git_refresh();
+        settle_until(&mut ed, |ed| {
+            ed.session.git_status.as_ref().is_some_and(|s| s.generation == ed.session.git_reads)
+        });
         git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "topic"]);
         marked_by_hand(&marks);
         let tip = git_in(&wt, &["rev-parse", "HEAD"]);
@@ -4156,8 +4165,21 @@ mod tests {
         let q = card(&ed, title).unwrap().question.clone();
         assert!(q.contains("None of them touch this session's own changes."), "{q}");
         assert!(ed.offers.iter().all(|o| !o.title.starts_with("CLAUDE.md")), "the session's own isn't asked");
+        // Answered while a look is out that read the file before the answer wrote it (the write held till that
+        // look is back, as a loaded machine may): its card isn't put up again — it's looked at after the write
+        settle_until(&mut ed, |ed| !ed.session.instructions.under_way());
+        let (write, held) = std::sync::mpsc::channel();
+        ed.session.instructions.held = Some(held);
+        crate::instructions::follow(&mut ed);
         ed.offer_accept();
-        settle_until(&mut ed, |ed| says(ed, "takes the main checkout's changes") || says(ed, "AGENTS.md:"));
+        settle_until(&mut ed, |ed| !ed.session.instructions.looking());
+        write.send(()).unwrap();
+        settle_until(&mut ed, |ed| !ed.session.instructions.under_way());
+        assert!(says(&ed, "AGENTS.md takes the main checkout's changes"), "{}", said(&ed));
+        assert!(
+            ed.offers.iter().all(|o| !o.title.starts_with("AGENTS.md")),
+            "a look out while it was answered doesn't ask it again"
+        );
         assert_eq!(read(&wt.join("AGENTS.md")), "a0\na1\na2\na3\na4\nmine\n", "{}", said(&ed));
         assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\nmine\n");
         // Asked once: looked at again, nothing found

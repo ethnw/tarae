@@ -261,8 +261,21 @@ const ENDING: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 /// Where `ENDING`'s handler writes the signal it took (a pipe's write end; -1: none yet).
 static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
-/// `ENDING`'s handler: the signal's number, one byte, on `SIGNALLED`'s pipe — all a handler may do.
+/// The `ENDING` signal taken (0: none) — `unless_signalled` reads it.
+static TAKEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// `ENDING`'s handler: the signal's number, one byte, on `SIGNALLED`'s pipe — all a handler may do (and an atomic
+/// store: `TAKEN`). A second one ends xtask at once: the first's `docker kill` may never return (a daemon that doesn't
+/// answer), and the main thread waits for it (`unless_signalled`).
 extern "C" fn took(sig: libc::c_int) {
+    if TAKEN.swap(sig, std::sync::atomic::Ordering::SeqCst) != 0 {
+        const SAID: &[u8] = b"a second signal: xtask ends now, its container may still run\n";
+        // SAFETY: write(2) and _exit(2) are async-signal-safe; a static's bytes.
+        unsafe {
+            libc::write(2, SAID.as_ptr().cast(), SAID.len());
+            libc::_exit(128 + sig);
+        }
+    }
     let fd = SIGNALLED.load(std::sync::atomic::Ordering::Relaxed);
     let b = sig as u8;
     // SAFETY: write(2) is async-signal-safe; one byte of the stack's.
@@ -295,6 +308,17 @@ fn stop_on_signal(name: String) {
         libc::sigemptyset(&mut act.sa_mask);
         for s in ENDING {
             libc::sigaction(s, &act, std::ptr::null_mut());
+        }
+    }
+}
+
+/// After the `docker run` a signal ends (`stop_on_signal`): taken one, this thread waits for that signal's thread —
+/// the container ended by name, then xtask 128 + the signal (or a second signal, at once: `took`). Going on, xtask ended on its own first as often as not:
+/// the run's failure (or a test scene's 0) for its code, and before `docker kill` was done.
+fn unless_signalled() {
+    if TAKEN.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        loop {
+            std::thread::park();
         }
     }
 }
@@ -484,6 +508,7 @@ pub fn run(args: &[String]) -> Result<()> {
         std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar))
     });
     let st = child.wait().map_err(|e| format!("docker: {e}"))?;
+    unless_signalled();
     if let Some(Ok(Err(e))) = feed.map(|f| f.join()) {
         eprintln!("the checkout didn't all go in: {e}");
     }
@@ -1801,13 +1826,17 @@ mod tests {
         let Ok(name) = std::env::var("XTASK_SCENE_NAME") else { return };
         stop_on_signal(name.clone());
         let st = Command::new("docker").args(["run", "--rm", "--name", &name, "rust:1"]).status();
+        unless_signalled();
         println!("scene: docker run ended unsignalled: {st:?}");
     }
 
     /// A signal to xtask — `timeout`'s SIGTERM, Ctrl-C's SIGINT — ends the checks' container by its name (`docker
     /// kill`), then xtask itself, 128 + the signal; killed alone, xtask left `docker run`'s client and the container
     /// going (6f′). A stand-in `docker` (a script in the test's own folder, first on PATH) logs its calls; its `run`
-    /// waits until its `kill` comes. The scene runs in a process of its own (signals, handlers: not this binary's).
+    /// waits until its `kill` comes, and its `kill` returns once xtask is gone (or after half a second): the run ends
+    /// before `docker kill` does, so an xtask that went on past it — and ended itself, 0 — fails every time, not one
+    /// run in 80 (`unless_signalled`). With a `kill` that hangs (`FAKE_HANG`: a daemon that doesn't answer), a second
+    /// signal ends xtask at once. The scene runs in a process of its own (signals, handlers: not this binary's).
     #[test]
     fn a_signal_ends_the_checks_container() {
         let dir = std::env::temp_dir().join(format!("xtask-signal-{}", std::process::id()));
@@ -1817,19 +1846,21 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\necho \"$*\" >> \"$FAKE_DIR/log\"\ncase \"$1\" in\n  run) sleep 30 & echo $! > \"$FAKE_DIR/run.pid\"; \
-             wait ;;\n  kill) kill \"$(cat \"$FAKE_DIR/run.pid\")\" ;;\nesac\n",
+             wait ;;\n  kill) kill \"$(cat \"$FAKE_DIR/run.pid\")\"; [ -n \"$FAKE_HANG\" ] && sleep 10; i=0; \
+             while kill -0 \"$PPID\" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.01; i=$((i + 1)); done ;;\nesac\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
         let log = dir.join("log");
-        for sig in [libc::SIGTERM, libc::SIGINT] {
-            let name = format!("xtask-test-{sig}-checks");
+        for (sig, hang) in [(libc::SIGTERM, false), (libc::SIGINT, false), (libc::SIGTERM, true)] {
+            let name = format!("xtask-test-{sig}-{hang}-checks");
             let _ = std::fs::remove_file(&log);
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "linux::tests::signalled_scene", "--ignored", "--nocapture"])
                 .env("PATH", &path)
                 .env("FAKE_DIR", &dir)
+                .env("FAKE_HANG", if hang { "1" } else { "" })
                 .env("XTASK_SCENE_NAME", &name)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -1843,14 +1874,24 @@ mod tests {
             }
             // SAFETY: a signal to a child of ours.
             unsafe { libc::kill(child.id() as i32, sig) };
-            let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if hang {
+                let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !logged().lines().any(|l| l == format!("kill {name}")) {
+                    assert!(std::time::Instant::now() < by, "the hanging kill never came: {}", logged());
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                // SAFETY: a signal to a child of ours.
+                unsafe { libc::kill(child.id() as i32, sig) };
+            }
+            // (the hanging kill takes 10 s: a second signal ends it well before)
+            let by = std::time::Instant::now() + std::time::Duration::from_secs(if hang { 3 } else { 10 });
             let st = loop {
                 if let Some(st) = child.try_wait().unwrap() {
                     break st;
                 }
                 if std::time::Instant::now() > by {
                     let _ = child.kill();
-                    panic!("signal {sig}: the scene didn't end within 10 s — {}", logged());
+                    panic!("signal {sig}: the scene didn't end in time (hang {hang}) — {}", logged());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             };

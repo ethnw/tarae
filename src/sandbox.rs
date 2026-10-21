@@ -4700,9 +4700,16 @@ fn run_homes_said(vars: &crate::sandboxpack::Vars) -> Vec<RunHomeSaid> {
 pub fn confined(mut p: Policy) -> Policy {
     let ns = tier::for_policy(&p);
     let key = policy_key(&p);
-    let made = keeper::ready(&p.root, Some(&key), ns).and_then(|k| {
+    let made = keeper::ready_held(&p.root, &key, ns).and_then(|k| {
         let made = crate::landlock::abi().and_then(|abi| {
-            linux::confine(&p, abi, linux::audit_readable(abi), true, Some(&k), linux::served_here(k.ns.user))
+            linux::confine(
+                &p,
+                abi,
+                linux::audit_readable(abi),
+                true,
+                Some(&**k),
+                linux::served_here(k.ns.user),
+            )
         });
         let mut c = made.map_err(|e| format!("the sandbox couldn't be made: {e}"))?;
         c.keeper = Some(k);

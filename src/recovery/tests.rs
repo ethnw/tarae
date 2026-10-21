@@ -56,14 +56,26 @@ fn copies_in(dir: &Path) -> Vec<PathBuf> {
     rd.flatten().flat_map(|e| copies(&e.path())).collect()
 }
 
-/// `project/a.txt` ("one"), edited in a tarae that then dies with the copy on disk — the file.
+/// The text of the one copy in `dir/state`, if there's one.
+fn copy_text(dir: &Path) -> Option<String> {
+    match copies_in(dir).as_slice() {
+        [one] => read_copy(one).map(|c| c.text),
+        _ => None,
+    }
+}
+
+/// `project/a.txt` ("one"), edited in a tarae that then dies with the copy of its last edit on disk — the file.
+/// The pause passes mid-edit first, as it does on a loaded machine between two keys: the copy written then
+/// ("ne") is replaced by the last edit's — what's waited for is that one, not a copy.
 fn left_behind(dir: &Path) -> PathBuf {
     let file = dir.join("project/a.txt");
     std::fs::write(&file, "one\n").unwrap();
     let mut ed = editor(dir);
     ed.open(&file).unwrap();
-    feed(&mut ed, "cTWO<esc>");
-    until("the copy is written", || copies_in(dir).len() == 1);
+    feed(&mut ed, "c");
+    until("the mid-edit copy is written", || copy_text(dir).as_deref() == Some("ne\n"));
+    feed(&mut ed, "TWO<esc>");
+    until("the last edit's copy is written", || copy_text(dir).as_deref() == Some("TWOne\n"));
     recovery(&mut ed).killed();
     file
 }

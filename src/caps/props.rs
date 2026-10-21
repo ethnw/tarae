@@ -577,13 +577,17 @@ fn settle(ed: &mut Editor, what: &str, from: usize, done: &dyn Fn(&Editor, &[Str
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         let said: Vec<String> = ed.messages.iter().skip(from).map(|m| m.2.clone()).collect();
+        // (what it waits for read first: a write whose turn ends on its worker between the two reads is then served
+        // in both — read the other way round it was still queued for `landed` and served for `done`, and the step
+        // was checked before its result came back, its `Caps` not made again: seed 2, step 18's `Land`)
+        let done = done(ed, &said);
         // (and the result of every store write that landed: those held are the steps' to land — a wait met by
         // another write's result put it in a later step)
         let landed = (ed.allow_writing + ed.trust_writing) as u64 == queued_here()
             && std::iter::once(&ed.session)
                 .chain(&ed.sessions)
                 .all(|s| s.caps_asked == 0 || s.caps.as_ref().is_some_and(|(g, _)| *g == s.caps_asked));
-        if landed && done(ed, &said) {
+        if done && landed {
             return;
         }
         assert!(Instant::now() < end, "{what}: never settled — said {said:?}");
@@ -1566,6 +1570,31 @@ fn a_take_back_whose_write_fails_stays_taken_back_until_you_quit() {
     take_back(&w, &mut ed, "port 5432", Failing::Store, "taken back");
     assert!(!granted_now(&ed).contains(&Grant::Port(5432)), "back after its write failed");
     assert!(ed.messages.iter().any(|m| m.2.contains("taken back until you quit")), "and it's said so");
+}
+
+/// `settle` waits for a store write whose turn ends while it looks (seed 2, step 18 — 6 in 120 runs of the loop
+/// under load): here the held write is let go and its turn ends inside `done`, every time — the step's check must
+/// come after its result, the `Caps` it asks for landed.
+#[test]
+fn settle_waits_for_a_write_whose_turn_ends_while_it_looks() {
+    let mut w = World::new("caps-settle-looks");
+    w.hold();
+    let mut ed = w.editor();
+    crate::allow::grant(&mut ed, &Grant::Port(5432), Scope::Always);
+    let path = w.allow.clone();
+    let target = crate::storewrite::served(&path) + 1;
+    let (end, from) = (Instant::now() + Duration::from_secs(20), ed.messages.len());
+    settle(&mut ed, "its turn ending as settle looks", from, &|_, _| {
+        crate::storewrite::release(&path, 1);
+        // (the worker takes its turn and ends it — no event of it applied meanwhile)
+        while crate::storewrite::served(&path) < target {
+            assert!(Instant::now() < end, "its turn never ended");
+            std::thread::yield_now();
+        }
+        true
+    });
+    assert_eq!(ed.allow_writing, 0, "settled before the write's result came back");
+    assert_eq!(ed.session.caps(), Some(&ed.caps_basis().build()), "the session's Caps is the one made now");
 }
 
 /// `f` true before long, the editor's events applied meanwhile (a background write brings none back).

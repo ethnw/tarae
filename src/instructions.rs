@@ -205,18 +205,33 @@ pub fn look(root: &Path, main: &Path, dirty: &[PathBuf]) -> Found {
 }
 
 /// A session's look under way, and another asked for meanwhile — one at a time, so two never write over each
-/// other (or over what the session wrote since the first read).
-#[derive(Clone, Copy, Debug, Default)]
+/// other (or over what the session wrote since the first read). A card's answer writes too: a look waits for the
+/// answers being written, and one out while a card was answered may have read the file before the answer wrote
+/// it — its cards would ask again what was just answered (seen under load: the stale card still up long after).
+#[derive(Debug, Default)]
 pub struct Look {
     under_way: bool,
     again: bool,
+    /// Cards answered so far (`answer`)
+    answered: u64,
+    /// Answers being written
+    answering: usize,
+    /// Tests: the next answer writes once this says so
+    #[cfg(test)]
+    pub held: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Look {
-    /// Whether a look is under way (or asked again after it) — tests wait for none.
+    /// Whether a look or an answer is under way (or a look asked again after it) — tests wait for none.
     #[cfg(test)]
     pub fn under_way(&self) -> bool {
-        self.under_way || self.again
+        self.under_way || self.again || self.answering > 0
+    }
+
+    /// Whether a look is out (tests).
+    #[cfg(test)]
+    pub fn looking(&self) -> bool {
+        self.under_way
     }
 }
 
@@ -227,11 +242,12 @@ pub fn follow(ed: &mut Editor) {
         return;
     }
     let state = &mut ed.session.instructions;
-    if state.under_way {
+    if state.under_way || state.answering > 0 {
         state.again = true;
         return;
     }
     state.under_way = true;
+    let asked = state.answered;
     let root = ed.session.root.clone();
     let dirty: Vec<PathBuf> =
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
@@ -242,13 +258,25 @@ pub fn follow(ed: &mut Editor) {
             .and_then(|r| crate::worktree::main_checkout(&r.common_dir, &real));
         let found = main.map(|main| look(&real, &main, &dirty)).unwrap_or_default();
         move |ed: &mut Editor| {
-            ed.session.instructions.under_way = false;
-            said(ed, found);
-            if std::mem::take(&mut ed.session.instructions.again) {
-                follow(ed);
+            let (state, mut found) = (&mut ed.session.instructions, found);
+            state.under_way = false;
+            // (answered meanwhile: what it read may be from before the answer's write — looked at again after it)
+            if state.answered != asked {
+                found.both.clear();
+                state.again = true;
             }
+            said(ed, found);
+            again(ed);
         }
     });
+}
+
+/// A look asked meanwhile, once nothing's being written.
+fn again(ed: &mut Editor) {
+    let state = &mut ed.session.instructions;
+    if state.answering == 0 && std::mem::take(&mut state.again) {
+        follow(ed);
+    }
 }
 
 /// What a look found, said: the files taken — a toast, and Claude told with the next message; a card for each
@@ -305,18 +333,39 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
             .and_then(|_| std::fs::write(dir.join(&b.rel), &b.main))
             .map_err(|e| e.to_string())
     };
+    let state = &mut ed.session.instructions;
+    (state.answered, state.answering) = (state.answered + 1, state.answering + 1);
+    #[cfg(test)]
+    let held = state.held.take();
     ed.events.jobs().spawn(move || {
+        #[cfg(test)]
+        if let Some(held) = held {
+            let _ = held.recv();
+        }
         let done = work();
-        move |ed: &mut Editor| match (done, take) {
-            (Ok(()), true) => {
-                ed.set_success(format!("{rel} takes the main checkout's changes — Claude reads it from its next start"));
-                ed.session.checkpoints.tell.push(format!(
-                    "The user took the main checkout's changes to {rel} into this session's; what you were started \
-                     with is older — read it again before you rely on it."
-                ));
-            }
-            (Ok(()), false) => ed.set_status(format!("{rel} kept as it is — only the main checkout's later changes are asked")),
-            (Err(e), _) => ed.set_warning(format!("{rel}: {e}")),
+        move |ed: &mut Editor| {
+            ed.session.instructions.answering -= 1;
+            answered(ed, rel, done, take);
+            again(ed);
         }
     });
+}
+
+/// An answer's write, said.
+fn answered(ed: &mut Editor, rel: String, done: Result<(), String>, take: bool) {
+    match (done, take) {
+        (Ok(()), true) => {
+            ed.set_success(format!(
+                "{rel} takes the main checkout's changes — Claude reads it from its next start"
+            ));
+            ed.session.checkpoints.tell.push(format!(
+                "The user took the main checkout's changes to {rel} into this session's; what you were started \
+                 with is older — read it again before you rely on it."
+            ));
+        }
+        (Ok(()), false) => {
+            ed.set_status(format!("{rel} kept as it is — only the main checkout's later changes are asked"))
+        }
+        (Err(e), _) => ed.set_warning(format!("{rel}: {e}")),
+    }
 }
