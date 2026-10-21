@@ -420,8 +420,9 @@ protocol — and on shuttle keys.
 ### 7. Plugin API 0.3
 
 One batch with the forge plugin: regions, cards, tools for Claude, a masked prompt, notes, the repository
-([plugins.md](plugins.md)). The database plugin waits for its regions; the to-do plugin waits for two calls not in this list yet, a search
-through tarae's engine and a file's comments ([queued](#queued-not-scheduled)).
+([plugins.md](plugins.md)). The database plugin waits for its regions; the to-do and knowledge-base plugins wait for calls not in this
+list yet — a search through tarae's engine for both, a file's comments for the to-do one, a project file written
+on a reviewed edit and a link followed by `gd`/`enter` for the knowledge base ([queued](#queued-not-scheduled)).
 
 ### 8. The forge plugin
 
@@ -577,6 +578,19 @@ git tab, search, a short Kubernetes one.
   of the project, readable without tarae, or the plugin's own folder); an item tied to a session; Claude adding or
   ticking items (API 0.3's tools for Claude, every write said). API 0.2 gives `find` and `read-file`
   ([plugins.md](plugins.md)); it needs a search through tarae's engine and where a file's comments are.
+- **Knowledge-base plugin** (user, 2026-10-20): notes as Markdown files linked with `[[wiki links]]`, read and
+  written in tarae as any file, on what tarae is and is building — its search engine for full text and backlinks, the file
+  tree and picker for notes by folder and tag, Markdown as tarae draws it (headings, links, code in its language,
+  pictures through the half-block image view), a side tab for a note's backlinks and outline, the diagram view
+  (style A) for its links as a graph. Claude reads and cites notes through tarae's `read`/`search` and adds or
+  links one on a reviewed edit (API 0.3's tools for Claude); a note tied to a session; a quote from the chat or the
+  code into a note (view mode's quoting). Open, for its plan: where notes live (in the project, or a folder of
+  yours outside it — reads there ask, as any read outside the project); Obsidian-compatible links and front
+  matter; one store or separate from the memory card and panel ([alongside](#alongside-not-ordered)) and
+  Orchestra's library of lessons in `.tarae/` (Part II, [§5](#5-a-remote-split)). It waits on three pieces not
+  built yet: the half-block image view ([alongside](#alongside-not-ordered)), the diagram's view (its plan's P4)
+  and view mode's quoting ([§4](#4-shuttle-keys)). Beyond API 0.2/0.3 it needs a search through tarae's engine (as
+  the to-do plugin), a project file written on a reviewed edit, and a link followed by `gd`/`enter`.
 - **Viewport-bounded injections**: branch `viewport-injections` (10 commits past main, last 2026-10-02; draft PR
   #1 on ethnw/tarae). Rebase and land, or drop: to decide with the user.
 - **Grammar distribution**: branch `grammar-wasm-proto` (15 commits; grammars as WebAssembly on tarae's own
