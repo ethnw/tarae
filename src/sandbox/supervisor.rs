@@ -124,7 +124,7 @@ fn served_from(
 /// same: the kernel asks the permission first.
 pub fn reaches(pid: u32, pidfd: BorrowedFd<'_>, program: &str) -> Result<(), String> {
     let ended = || Err("it ended before its exec".to_string());
-    let until = std::time::Instant::now() + EXEC_WITHIN;
+    let until = crate::clock::now() + EXEC_WITHIN;
     loop {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
         if exited(pidfd) {
@@ -133,10 +133,10 @@ pub fn reaches(pid: u32, pidfd: BorrowedFd<'_>, program: &str) -> Result<(), Str
         if comm.trim_end() == program {
             break;
         }
-        if std::time::Instant::now() >= until {
+        if crate::clock::now() >= until {
             return Err(format!("it wasn't running {program} within {} ms", EXEC_WITHIN.as_millis()));
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        crate::event::sleep(std::time::Duration::from_millis(5));
     }
     let mem = std::fs::OpenOptions::new().read(true).write(true).open(format!("/proc/{pid}/mem"));
     if exited(pidfd) {
