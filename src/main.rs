@@ -151,6 +151,7 @@ mod settings;
 mod sha256;
 mod share;
 mod shell;
+mod shuttle;
 mod sidebar;
 mod signature;
 #[cfg(test)]
@@ -212,6 +213,8 @@ usage: tarae [FILE]...
                                              (~/.config/tarae/plugins)
        tarae state [--json] [--pid PID]      a running tarae's UI state: where the keys go, its
                    [--after-input N]         cards, sessions and toasts (state --help)
+       tarae keys --expect-keys ID KEYS…     type into it, each step checked where it lands
+                                             (ui.shuttle-keys; keys --help)
 
 config: $XDG_CONFIG_HOME/tarae/config.toml (default ~/.config/tarae/config.toml)
         project overrides: .tarae.toml (searched upward from the current directory)
@@ -265,6 +268,10 @@ fn main() -> Result<()> {
             "state" if files.is_empty() => {
                 let rest: Vec<String> = std::env::args().skip(2).collect();
                 return uisocket::cli(&rest);
+            }
+            "keys" if files.is_empty() => {
+                let rest: Vec<String> = std::env::args().skip(2).collect();
+                return uisocket::keys_cli(&rest);
             }
             "-V" | "--version" => {
                 println!("tarae {}", env!("CARGO_PKG_VERSION"));

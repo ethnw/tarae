@@ -2738,6 +2738,10 @@ pub fn file_seen(ed: &mut Editor) {
 /// `hunk_seen` (the selections' changes), or `file_seen` (`whole_file`: every change of the file, each by
 /// whether all its lines were drawn).
 fn take(ed: &mut Editor, whole_file: bool) {
+    // (a look is a person's: a hold that waits for one isn't cleared by a program's keys — `shuttle.rs`)
+    if let Some(name) = ed.shuttles.stepping.clone() {
+        return ed.set_status(format!("not looked at — a look is a person's, not shuttle {name}'s keys"));
+    }
     // (the buffer of a bring's changes the review couldn't show: its own blocks)
     if held_seen(ed) {
         return;

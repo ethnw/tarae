@@ -363,7 +363,89 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "v", "C", "@?Start a board", "@1", "y", "@30?the board is done", "@2"],
     },
+    // (shuttle keys, `shuttle.rs`: a program started from the terminal panel says hello — its card; `y`, and its
+    // step lit on the status line's chip; then the person's key, and the chip says it's paused)
+    Scene { name: "shuttlecard", claude: "idle", files: MAIN, keys: SHUTTLE_HELLO },
+    Scene {
+        name: "shuttle",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "T",
+            "@?terminal",
+            SHUTTLE_RUN,
+            "\r",
+            "\x1c",
+            "@?asks to type",
+            "@1",
+            "y",
+            "@?k → pane",
+        ],
+    },
+    // (…and the same once its step went out: the chip as it was, nothing beside it moved)
+    Scene {
+        name: "shuttleunlit",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "T",
+            "@?terminal",
+            SHUTTLE_RUN,
+            "\r",
+            "\x1c",
+            "@?asks to type",
+            "@1",
+            "y",
+            "@?k → pane",
+            "@!k → pane",
+        ],
+    },
+    Scene {
+        name: "shuttlepaused",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "T",
+            "@?terminal",
+            SHUTTLE_RUN,
+            "\r",
+            "\x1c",
+            "@?asks to type",
+            "@1",
+            "y",
+            "@?j → pane",
+            "@3",
+            "k",
+            "@?paused",
+            "@1",
+        ],
+    },
 ];
+
+/// The shuttle scenes' program, run in the terminal panel: `shuttle.sh` beside the demo (`one`).
+const SHUTTLE_RUN: &str = "sh ../shuttle.sh &";
+
+const SHUTTLE_HELLO: &[&str] =
+    &["@1", " ", "T", "@?terminal", SHUTTLE_RUN, "\r", "\x1c", "@?asks to type", "@1"];
+
+/// It waits until the state says the keys are back in a pane (`C-\` left the terminal), and sends `j` there — its
+/// hello brings the card first; then, once no toast is up (the connect toast gone), `k`: the step lit alone, for
+/// the lit and the unlit shots. Its grant goes to the terminal's shell (`--for $PPID`), which lives on.
+fn shuttle_sh(bin: &Path) -> String {
+    let bin = bin.to_string_lossy().replace('\'', "'\\''");
+    format!(
+        "to=\nwhile [ -z \"$to\" ]; do\n  sleep 0.2\n  to=$('{bin}' state | sed -n 's/^keys → \\(pane#[0-9]*\\).*/\\1/p')\ndone\n\
+         '{bin}' keys --for $PPID --name claude-code --expect-keys \"$to\" j >/dev/null\n\
+         until '{bin}' state --json | grep -q '\"toasts\":\\[\\]'; do sleep 0.2; done\n\
+         exec '{bin}' keys --for $PPID --name claude-code --expect-keys \"$to\" k >/dev/null\n"
+    )
+}
 
 /// `scenes --compare A B`: each shot in `A` against `B`'s of its name, pixel for pixel — `same`, or the box the
 /// differing pixels lie in, to look at there (a turn's time or a temp path moves from run to run).
@@ -552,6 +634,11 @@ fn one(
         let theme = if bg == "dark" { "meok-transparent" } else { "hanji-transparent" };
         toml = format!("theme = \"{theme}\"\n{toml}");
     }
+    // (the shuttle scenes: a program may type, and the one that does)
+    if scene.name.starts_with("shuttle") {
+        toml.push_str("\n[ui]\nshuttle-keys = \"light\"\n");
+        write(&dir.0.join("shuttle.sh"), &shuttle_sh(bin))?;
+    }
     write(&config.join("tarae/config.toml"), &toml)?;
     let setup = Setup {
         bin: bin.to_path_buf(),
@@ -559,6 +646,14 @@ fn one(
         cwd: demo,
         config,
         background: Some(bg),
+        // (the shuttle scenes' terminal: a plain sh of the shot's own — a `$ ` prompt, no rc, no history, no user
+        // or host name; never the shell of whoever takes the shots)
+        env: match scene.name.starts_with("shuttle") {
+            true => {
+                vec![("SHELL", Some("/bin/sh")), ("PS1", Some("$ ")), ("HISTFILE", Some("")), ("ENV", None)]
+            }
+            false => Vec::new(),
+        },
     };
     let keys: Vec<String> = scene.keys.iter().map(|k| k.to_string()).collect();
     shot::take(&setup, &keys, size, &dir.0.join("state"), out)

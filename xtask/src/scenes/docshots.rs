@@ -340,6 +340,7 @@ fn one(scene: &Scene, d: &DocShot, bin: &Path, me: &Path, out: &Path) -> Result<
         cwd: demo,
         config,
         background: Some(d.bg.word()),
+        env: Vec::new(),
     };
     let keys: Vec<String> = scene.keys.iter().map(|k| k.to_string()).collect();
     shot::take_at(&setup, &keys, d.size, d.scale, &dir.0.join("state"), &dir.0.join("data"), out)

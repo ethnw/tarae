@@ -34,6 +34,7 @@ mod ptybroker;
 mod rebasemsg;
 mod reviews;
 mod sessions;
+mod shuttle;
 mod stuckstop;
 mod watchers;
 

@@ -58,11 +58,12 @@ pub const RISKY: [&str; 23] = [
 
 /// Settings only your own config sets — refused from a project's `.tarae.toml` and `.tarae.local.toml` alike,
 /// trusted or not (said): they decide whose credentials Claude uses and who pays, what Claude's chat edits
-/// with (`llm.edit-tools`), whether what you use is counted (`features.count`), whether your cards and your
+/// with (`llm.edit-tools`), whether what you use is counted (`features.count`), whether a program may type into
+/// tarae (`ui.shuttle-keys`), whether your cards and your
 /// time on reviewed changes are kept (`llm.card-record`, `review.record`), whether pings spend your usage to keep
 /// a conversation warm (`llm.keep-warm*`), what the board's Claudes are asked (`review.angles`) and how many of
 /// them run on your credential and memory (`review.skeptics-max`, `review.board-at-once`) — a project never does.
-pub const YOURS_ONLY: [&str; 13] = [
+pub const YOURS_ONLY: [&str; 14] = [
     "llm.card-record",
     "review.record",
     "llm.keep-warm",
@@ -73,6 +74,7 @@ pub const YOURS_ONLY: [&str; 13] = [
     "llm.reviewer-billing",
     "llm.edit-tools",
     "features.count",
+    "ui.shuttle-keys",
     // (what the board's Claudes are asked: a project's angle could talk its own reviewer into anything)
     "review.angles",
     // (how many of them: each is billed on your reviewer credential, ~200 MB while it reads)

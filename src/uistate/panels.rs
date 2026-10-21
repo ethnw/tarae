@@ -13,6 +13,8 @@ pub struct Row {
     pub id: String,
     pub label: String,
     pub selected: bool,
+    /// A review's file row: marked viewed (`space v m`) — a shuttle's step can expect it (`shuttle.rs`).
+    pub viewed: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +25,9 @@ pub struct Pane {
     pub lines: (usize, usize),
     pub focused: bool,
     pub cursor_line: usize,
+    /// Its document's version: bumped by every change, undo and redo too — what a shuttle's step expects text was
+    /// written for (`shuttle.rs`).
+    pub version: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -176,6 +181,7 @@ impl Editor {
                 lines: (lo + 1, hi + 1),
                 focused: *view == self.session.focus,
                 cursor_line: doc.text.byte_to_line(head) + 1,
+                version: doc.version(),
             });
         }
         // The side panel: the rows `term.rs` drew (screen row, list row)
@@ -193,6 +199,7 @@ impl Editor {
                         id: side_id(self, tab, l),
                         label: l.label.clone(),
                         selected: i == sb.selected,
+                        viewed: None,
                     })
                 })
                 .collect();
@@ -209,7 +216,12 @@ impl Editor {
                 .filter_map(|&(_, i)| {
                     let f = r.files.get(i)?;
                     let name = f.rel.rsplit('/').next().unwrap_or(&f.rel).to_string();
-                    Some(Row { id: format!("review:{}", f.rel), label: name, selected: Some(i) == marked })
+                    Some(Row {
+                        id: format!("review:{}", f.rel),
+                        label: name,
+                        selected: Some(i) == marked,
+                        viewed: Some(r.viewed(self, f)),
+                    })
                 })
                 .collect();
             p.review = Some(Review {
@@ -259,6 +271,7 @@ impl Editor {
                     id: format!("picker:{}", r.label),
                     label: r.label.clone(),
                     selected: r.selected,
+                    viewed: None,
                 })
                 .collect();
             p.picker = Some(Picker {
@@ -403,7 +416,16 @@ impl Editor {
 }
 
 fn rows_json(rows: &[Row]) -> Vec<Value> {
-    rows.iter().map(|r| json!({ "id": r.id, "label": r.label, "selected": r.selected })).collect()
+    rows.iter()
+        .map(|r| {
+            let mut v = json!({ "id": r.id, "label": r.label, "selected": r.selected });
+            // (a review's file row: viewed, and the file in hand — its selected row)
+            if let Some(viewed) = r.viewed {
+                (v["viewed"], v["in_hand"]) = (json!(viewed), json!(r.selected));
+            }
+            v
+        })
+        .collect()
 }
 
 impl Panels {
@@ -413,7 +435,7 @@ impl Panels {
             .iter()
             .map(|p| {
                 json!({ "id": p.id, "path": p.path, "lines": [p.lines.0, p.lines.1], "focused": p.focused,
-                        "cursor_line": p.cursor_line })
+                        "cursor_line": p.cursor_line, "version": p.version })
             })
             .collect();
         json!({

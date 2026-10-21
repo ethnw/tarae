@@ -1103,6 +1103,8 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     sb.git(&["add", "-A"]);
     sb.git(&["commit", "-q", "-m", "base"]);
     sb.write("a.txt", "one\ntwo\n");
+    // (a program may type into it: a shuttle connected, paused by the person's key, wakes nothing either)
+    sb.write_config(&format!("{BASE_CONFIG}\n[ui]\nshuttle-keys = \"light\"\n"));
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");
     // (the line's blame lands late — git on a worker; a loaded machine drew it inside the measured window)
@@ -1156,6 +1158,48 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     idle(&mut t, "a file, a watcher connected");
     assert_eq!(watching.events().len(), 1, "only its `watching` line: {:#?}", watching.events());
     drop(watching);
+    // A shuttle (`tarae keys`): its hello waits on the grant card, the `y` is the person's; its step lands where
+    // it said; the person's key pauses it — connected and paused, nothing wakes
+    // (its two calls under one lasting shell, the grant's `for`; the second waits for a line on its stdin)
+    let pane = t.state_json(0)["keys"]["to"].as_str().unwrap().to_string();
+    let script = "k() { \"$TARAE\" keys --pid \"$TARAE_PID\" --for $$ --name e2e --expect-keys \"$1\" k; echo \"exit $?\"; }\n\
+                  k \"$1\"; read go; k \"$1\"";
+    let mut shuttle = t.shuttle_shell(script, &[&pane]);
+    let mut said = std::io::BufRead::lines(std::io::BufReader::new(shuttle.stdout.take().unwrap()));
+    let mut answer = || -> Vec<String> {
+        let mut lines = Vec::new();
+        for l in said.by_ref().map_while(Result::ok) {
+            let end = l.starts_with("exit ");
+            lines.push(l);
+            if end {
+                break;
+            }
+        }
+        lines
+    };
+    // (in sight and settled: a weighty card's `y` typed as it came isn't one)
+    t.wait_state("the grant card, settled", |s| {
+        s["cards"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|c| c["kind"] == "shuttle" && c["settled"] == true))
+    });
+    t.send("y");
+    let first = answer();
+    assert_eq!(first.last().map(String::as_str), Some("exit 0"), "{first:?}");
+    assert!(first[0].starts_with(&format!("landed on {pane} (code)")), "{first:?}");
+    t.wait_for("its chip", |s| s.status().contains("◦ shuttle"));
+    t.send("j");
+    t.wait_state("paused by the person's key", |s| s["keys"]["shuttle"]["paused"] == true);
+    t.wait_for("its chip says so", |s| s.status().contains("◦ shuttle e2e paused"));
+    // (its `shuttle connected` toast fades on its own time — gone first, so what's measured is the shuttle)
+    t.wait_state("its toast gone", |s| s["toasts"].as_array().is_some_and(Vec::is_empty));
+    idle(&mut t, "a shuttle connected, paused");
+    use std::io::Write as _;
+    writeln!(shuttle.stdin.as_mut().unwrap(), "go").unwrap();
+    let second = answer();
+    assert_eq!(second.last().map(String::as_str), Some("exit 1"), "paused: refused — {second:?}");
+    assert!(second[0].starts_with("refused (paused): you typed at "), "{second:?}");
+    shuttle.wait().unwrap();
     t.send(" e");
     t.wait_state("the side panel has the keys", |s| s["keys"]["region"] == "side:files");
     idle(&mut t, "the side panel");

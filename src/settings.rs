@@ -643,6 +643,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.features_count = b(v),
     },
     Setting {
+        path: "ui.shuttle-keys",
+        kind: Kind::Enum(crate::shuttle::Level::NAMES),
+        doc: "Let a program you run (an assistant, a test script) type into tarae over its UI socket (tarae keys), each step saying where it must land — off · light: keys outside cards, light cards' answers, every n · weighty: weighty answers too, once read (not built yet: as light). A card asks once for each program; your own key pauses it, :shuttle-end ends it. Only your own config sets it",
+        get: |c| Value::from(c.shuttle_keys.name()),
+        set: |c, v| c.shuttle_keys = crate::shuttle::Level::of(s(v)),
+    },
+    Setting {
         path: "session.worktrees",
         kind: Kind::Str,
         doc: "Where sessions' checkouts go, a folder per repository (\"\" = $XDG_DATA_HOME/tarae/worktrees)",

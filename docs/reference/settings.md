@@ -95,6 +95,12 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 |---|---|---|---|
 | `features.count` | bool | `false` | Count which of tarae's features you use — each command, card, panel, picker and Claude tool's count and last day, never what it was used on — in features.json in tarae's state folder, on this machine only (:features shows them). Only your own config turns it on |
 
+## `[ui]`
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `ui.shuttle-keys` | `"off"` · `"light"` · `"weighty"` | `"off"` | Let a program you run (an assistant, a test script) type into tarae over its UI socket (tarae keys), each step saying where it must land — off · light: keys outside cards, light cards' answers, every n · weighty: weighty answers too, once read (not built yet: as light). A card asks once for each program; your own key pauses it, :shuttle-end ends it. Only your own config sets it |
+
 ## `[session]`
 
 | Setting | Type | Default | Description |

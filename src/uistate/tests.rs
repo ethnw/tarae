@@ -416,6 +416,144 @@ fn keys_to_is_where_handle_key_sends_every_key() {
     assert!(off.is_empty(), "{} of {}:\n{}", off.len(), SCENES.len() * PROBES.len(), off.join("\n"));
 }
 
+/// The routing test's second entrance (`shuttle.rs`): a shuttle isn't a handler of the chain — it comes in
+/// before it. Every scene × every probe key sent as a shuttle's step: written for another place, it's refused and
+/// nothing takes it; written for where `keys_to` says the keys go, the handler that takes it is the one that
+/// takes the person's key — or, at a card, it's refused as an answer that stays the person's (`weighty`,
+/// `never`), nothing taking it.
+fn shuttle_mismatches(scenes: &[Scene]) -> Vec<String> {
+    use crate::shuttle::{Input, Level, Step};
+    let mut off = Vec::new();
+    let ready = |setup: fn(&mut Editor), name: &str| {
+        let mut ed = editor();
+        setup(&mut ed);
+        frame(&mut ed);
+        if name.contains("settled") {
+            settle(&mut ed);
+        }
+        ed
+    };
+    for (name, setup) in scenes {
+        for probe in PROBES {
+            let mut ed = ready(*setup, name);
+            ed.focus_sync();
+            TOOK.set(None);
+            ed.handle_key(key(probe));
+            let person = TOOK.get();
+            let mut ed = ready(*setup, name);
+            let id = crate::shuttle::connect_for_test(&mut ed, "t", Level::Weighty);
+            ed.focus_sync();
+            let to = ed.keys_to().to;
+            let step = |to: &str| Step {
+                id,
+                input: Input::Keys(vec![key(probe)], probe.to_string()),
+                expect: serde_json::json!({ "keys": { "to": to } }),
+            };
+            let elsewhere = if to == "chat" { "prompt" } else { "chat" };
+            TOOK.set(None);
+            let (said, _) = crate::shuttle::run(&mut ed, step(elsewhere));
+            if said["refused"] != "expect" || TOOK.get().is_some() {
+                off.push(format!("{name} · {probe:?} for {elsewhere}: went ({said})"));
+                continue;
+            }
+            TOOK.set(None);
+            let (said, _) = crate::shuttle::run(&mut ed, step(&to));
+            let took = TOOK.get();
+            let yours = matches!(said["refused"].as_str(), Some("weighty" | "never"));
+            if yours && person == Some(crate::uistate::Handler::Card) && took.is_none() {
+                continue;
+            }
+            if took != person {
+                off.push(format!(
+                    "{name} · {probe:?}: the person's took {person:?}, the shuttle's {took:?} ({said})"
+                ));
+            }
+        }
+    }
+    off
+}
+
+/// Sequences the matrix sends: a prefix, the space menu, a count, insert mode, select mode.
+const SEQUENCES: &[&[&str]] = &[&["g", "g"], &[" ", "v"], &["3", "j"], &["i", "x"], &["v", "j"]];
+
+/// Every scene × every sequence: typed by a person, a key an event; sent by a shuttle as one step — the same
+/// handler takes the last key, and the keys and the cursor end the same. (A sequence whose place moves partway a
+/// shuttle stops on purpose — `moved`; at a card, an answer that stays the person's is refused: both skipped.)
+fn shuttle_sequence_mismatches(scenes: &[Scene]) -> Vec<String> {
+    use crate::shuttle::{Input, Level, Step};
+    let ready = |setup: fn(&mut Editor), name: &str| {
+        let mut ed = editor();
+        setup(&mut ed);
+        frame(&mut ed);
+        if name.contains("settled") {
+            settle(&mut ed);
+        }
+        ed.focus_sync();
+        ed
+    };
+    let end = |ed: &Editor| {
+        let k = ed.keys_to();
+        let at = ed.doc().selection().primary();
+        (k.to, k.region, k.takes, k.pending, k.held, ed.mode, at.anchor, at.head, ed.doc().text.to_string())
+    };
+    let mut off = Vec::new();
+    for (name, setup) in scenes {
+        for seq in SEQUENCES {
+            let mut ed = ready(*setup, name);
+            let to = ed.keys_to().to;
+            let mut stays = true;
+            for (i, k) in seq.iter().enumerate() {
+                stays &= i == 0 || ed.keys_to().to == to;
+                TOOK.set(None);
+                ed.handle_event(crate::event::Event::Key(key(k)));
+            }
+            let person = (TOOK.get(), end(&ed));
+            if !stays {
+                continue;
+            }
+            let mut ed = ready(*setup, name);
+            let id = crate::shuttle::connect_for_test(&mut ed, "t", Level::Weighty);
+            ed.focus_sync();
+            let keys = seq.iter().map(|k| key(k)).collect();
+            let step = Step {
+                id,
+                input: Input::Keys(keys, seq.join(" ")),
+                expect: serde_json::json!({ "keys": { "to": to } }),
+            };
+            TOOK.set(None);
+            let (said, _) = crate::shuttle::run(&mut ed, step);
+            if matches!(said["refused"].as_str(), Some("weighty" | "never")) {
+                continue;
+            }
+            let shuttle = (TOOK.get(), end(&ed));
+            if shuttle != person {
+                off.push(format!(
+                    "{name} · {seq:?}: the person's {person:?}, the shuttle's {shuttle:?} ({said})"
+                ));
+            }
+        }
+    }
+    off
+}
+
+#[test]
+fn a_shuttles_sequence_ends_where_a_persons_keys_would() {
+    if no_pty_here("a_shuttles_sequence_ends_where_a_persons_keys_would") {
+        return;
+    }
+    let off = shuttle_sequence_mismatches(SCENES);
+    assert!(off.is_empty(), "{} of {}:\n{}", off.len(), SCENES.len() * SEQUENCES.len(), off.join("\n"));
+}
+
+#[test]
+fn a_shuttles_step_lands_where_a_persons_key_would() {
+    if no_pty_here("a_shuttles_step_lands_where_a_persons_key_would") {
+        return;
+    }
+    let off = shuttle_mismatches(SCENES);
+    assert!(off.is_empty(), "{} of {}:\n{}", off.len(), SCENES.len() * PROBES.len(), off.join("\n"));
+}
+
 /// …and it would see a model that's off. In every scene, each case broken once: what has the keys named
 /// as another place; and where it leaves keys to the editor (`space`, `:`, `C-w`), it taking them all —
 /// either disagrees with `handle_key` for some probe.
@@ -454,6 +592,11 @@ fn the_routing_test_sees_each_case_broken() {
         }
     }
     assert!(leaves >= 5, "scenes whose place leaves keys to the editor: {leaves}");
+    // The shuttle's entrance, its check skipped: a step written for another place lands — and the test says so
+    crate::shuttle::SKIP_EXPECT.set(true);
+    let off = shuttle_mismatches(&SCENES[..2]);
+    crate::shuttle::SKIP_EXPECT.set(false);
+    assert!(!off.is_empty(), "the shuttle's check skipped, and the test passes");
 }
 
 /// The frame as text, as the user sees it.
@@ -1160,6 +1303,84 @@ fn the_socket_answers_snapshots_and_refuses_claudes_processes() {
     t.join().unwrap();
     let refused = asked.lock().unwrap()[4].clone();
     assert!(refused.contains("refused: under a process of Claude's"), "{refused}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A shuttle over the socket (`shuttle.rs`): refused while `ui.shuttle-keys` is off; on, its hello waits on the
+/// card and `y` connects it; a step lands after the frame that draws it, saying where and what took it; one written
+/// for another place is refused at once, nothing typed.
+#[test]
+fn a_shuttle_types_over_the_socket_once_you_said_yes() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = sock_dir("shuttle");
+    let listener = crate::uisocket::bind_in(&dir.join("ui"), 4343).unwrap();
+    let path = dir.join("ui/4343.sock");
+    let mut ed = editor();
+    // (its peer is this test, this process: as if another tarae's — a peer under tarae comes only from its terminal)
+    ed.shuttles.above = Some(vec![u32::MAX]);
+    crate::uisocket::serve(listener, ed.events.shared_sender());
+    frame(&mut ed);
+    let pane = ed.keys_to().to;
+    let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    // (a connection saying hello as this test's process, then sending `reqs`: every answer kept)
+    let shuttle = |reqs: Vec<Value>| {
+        let (path, got) = (path.clone(), got.clone());
+        std::thread::spawn(move || {
+            let mut s = std::os::unix::net::UnixStream::connect(&path).unwrap();
+            let mut lines = BufReader::new(s.try_clone().unwrap()).lines();
+            // (no `for`: the grant is this connection's process alone — here, this test)
+            let hello = serde_json::json!({ "shuttle": { "name": "t" } });
+            for r in std::iter::once(hello).chain(reqs) {
+                writeln!(s, "{r}").unwrap();
+                let v: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+                let done = v.get("refused").is_some() && r.get("shuttle").is_some();
+                got.lock().unwrap().push(v);
+                if done {
+                    return;
+                }
+            }
+        })
+    };
+    let n = |k: usize| {
+        let got = got.clone();
+        move || got.lock().unwrap().len() >= k
+    };
+    let t = shuttle(Vec::new());
+    pump_until(&mut ed, n(1));
+    t.join().unwrap();
+    assert_eq!(got.lock().unwrap()[0]["refused"], "off");
+    ed.config.shuttle_keys = crate::shuttle::Level::Light;
+    let step = |to: &str| serde_json::json!({ "keys": "j", "expect": { "keys": { "to": to } } });
+    let t = shuttle(vec![step(&pane), step("chat")]);
+    let end = Instant::now() + Duration::from_secs(10);
+    while !ed.offers.iter().any(|o| o.kind() == "shuttle") {
+        assert!(Instant::now() < end, "the card came");
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
+            ed.handle_event(ev);
+        }
+    }
+    frame(&mut ed);
+    settle(&mut ed);
+    assert_eq!(got.lock().unwrap().len(), 1, "the hello waits on you");
+    let card = ed.offers.iter().find(|o| o.kind() == "shuttle").unwrap();
+    let pid = std::process::id();
+    assert!(card.question.contains(&format!("(pid {pid}, started")), "its own process: {}", card.question);
+    assert!(!card.question.contains("Every program") && card.warning.is_none(), "{}", card.question);
+    feed(&mut ed, &["y"]);
+    let person = ed.person_seq;
+    pump_until(&mut ed, n(4));
+    t.join().unwrap();
+    let got = got.lock().unwrap();
+    assert_eq!(got[1]["shuttle"], "connected", "{}", got[1]);
+    assert_eq!(
+        (got[2]["landed"].as_str(), got[2]["took"].as_str()),
+        (Some(pane.as_str()), Some("code")),
+        "{}",
+        got[2]
+    );
+    assert!(got[2]["frame"].as_u64().is_some(), "answered after a frame: {}", got[2]);
+    assert_eq!(got[3]["refused"], "expect", "{}", got[3]);
+    assert_eq!((ed.cursor_line(), ed.person_seq), (1, person), "one j, not the person's");
     std::fs::remove_dir_all(&dir).ok();
 }
 

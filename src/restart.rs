@@ -136,6 +136,22 @@ pub struct Choice {
     work: Vec<Work>,
 }
 
+#[cfg(test)]
+impl Choice {
+    /// A card's choice in a test: `targets` checkouts to build in (none real), `under_way` named.
+    pub(crate) fn for_test(targets: usize, under_way: Vec<String>) -> Choice {
+        let target = |i: usize| Target {
+            label: format!("s{i}"),
+            root: std::path::PathBuf::from("/nowhere"),
+            bin: std::path::PathBuf::from("/nowhere/tarae"),
+            head: None,
+            head_time: None,
+            bin_time: None,
+        };
+        Choice { id: 1, targets: (0..targets).map(target).collect(), under_way, work: Vec::new() }
+    }
+}
+
 impl Restart {
     /// Tests: one gone ahead, the loop ending to run `bin`.
     #[cfg(test)]
@@ -864,6 +880,8 @@ pub fn exec(ed: Editor, bin: &Path) -> String {
 fn exec_with(mut ed: Editor, bin: &Path, file: &Path) -> String {
     use std::os::unix::process::CommandExt as _;
     crate::chat::keep_now(&ed);
+    // (a program waiting on its grant card hears the card is lost with this process — `shuttle.rs`)
+    crate::shuttle::restarting(&mut ed);
     let state = snapshot(&mut ed);
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);

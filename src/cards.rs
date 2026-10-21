@@ -452,12 +452,13 @@ fn read_classes(r: &Request) -> Vec<Class> {
 /// <answer> · <drawn → answered> · up <asked → answered>` (`run#` only for a card about a run — its trace's id,
 /// as its `timing` line names it; the kind as `tarae state` names it, `Offer::kind`; `class` only for reads;
 /// `same` only for a run card the same as one answered before — that card's id, `same=#41:changed` when
-/// something changed since; `warn` the warnings it said, by id). Its session is the log's column; the shadow
-/// is decided by its `caps` (`shadow`).
+/// something changed since; `warn` the warnings it said, by id; `by=shuttle:<name>` when a shuttle's key answered
+/// it — `shuttle.rs`; a person's says nothing). Its session is the log's column; the shadow is decided by its
+/// `caps` (`shadow`).
 pub fn line(
     o: &Offer,
     asked: &Asked,
-    answer: &str,
+    (answer, by): (&str, Option<&str>),
     now: Instant,
     caps: Option<&crate::caps::Caps>,
 ) -> String {
@@ -480,6 +481,10 @@ pub fn line(
     let took = |at: Instant| crate::term::duration(now.saturating_duration_since(at).as_secs_f32());
     let drawn = o.drawn.get().map_or_else(|| "not drawn".to_string(), took);
     let run = asked.run.map(|r| format!(" · run#{r}")).unwrap_or_default();
+    let answer = match by.filter(|b| b.starts_with("shuttle:")) {
+        Some(b) => format!("{answer} · by={b}"),
+        None => answer.to_string(),
+    };
     format!(
         "card#{}{run} · {} · why={}{class} · shadow={}{same} · {answer} · {drawn} · up {}",
         o.id,
@@ -492,19 +497,25 @@ pub fn line(
 
 /// Card `o` was answered (`y` `a` `A` `n`, or a letter of its own) or dropped unanswered: its line — what it
 /// asked, or `why=own · shadow=own` for tarae's own questions (cardburden 5: a preflight's, a stuck run's, a
-/// review's end were never measured). Its entry for the record is handed back (`Editor::cards_record`).
+/// review's end were never measured). `by`: who answered — `you`, or `shuttle:<name>` (a program's key over the
+/// UI socket, `shuttle.rs`); None for a card dropped. Its entry for the record is handed back
+/// (`Editor::cards_record`).
 pub fn said(
     session: &crate::log::Session,
     o: &Offer,
-    answer: &str,
+    (answer, by): (&str, Option<&str>),
     caps: Option<&crate::caps::Caps>,
 ) -> Value {
     let own = Asked::new(Why::Own, Request::Own);
     let asked = o.asked.as_ref().unwrap_or(&own);
     // (the card's times are on logic's clock: `Offer.since`, `drawn`)
     let now = crate::clock::now();
-    logged(session, "card", &line(o, asked, answer, now, caps));
-    record(o, asked, answer, (now, crate::clock::system()), session.name(), caps)
+    logged(session, "card", &line(o, asked, (answer, by), now, caps));
+    let mut v = record(o, asked, answer, (now, crate::clock::system()), session.name(), caps);
+    if let Some(by) = by {
+        v["by"] = json!(by);
+    }
+    v
 }
 
 // ── The record ─────────────────────────────────────────────────────────────────────────────
@@ -959,7 +970,8 @@ mod tests {
         let t0 = Instant::now();
         o.since = t0;
         let at = |s: u64| t0 + std::time::Duration::from_millis(s);
-        let line = |o: &Offer, a: &Asked, answer: &str, now: Instant| line(o, a, answer, now, None);
+        let line =
+            |o: &Offer, a: &Asked, answer: &str, now: Instant| line(o, a, (answer, Some("you")), now, None);
         assert_eq!(
             line(&o, &asked, "n", at(4200)),
             "card#12 · screen · why=reads-outside · class=temp,home · shadow=grant:read · n · not drawn · \
@@ -986,6 +998,9 @@ mod tests {
         let ran = a.clone().ran(Some(7), "awk 1 x", root, root);
         let l = line(&o, &ran, "y", at(4200));
         assert!(l.starts_with("card#12 · run#7 · screen · why=not-a-check:awk · "), "{l}");
+        // (shuttle keys: a program's key that answered it says whose — a person's says nothing)
+        let l = super::line(&o, &a, ("n", Some("shuttle:claude-code")), at(4200), None);
+        assert!(l.contains(" · shadow=none · n · by=shuttle:claude-code · 900ms · "), "{l}");
     }
 
     /// cardauto piece 1 (D2): every card goes in the record with what it was about — the command, where it

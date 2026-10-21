@@ -320,14 +320,17 @@ tarae means a session's own Claude.) Today a shuttle reads tarae's state as data
 let it send keys too, in a way that can't land somewhere it didn't mean:
 
 - Each key says where it must land (`card#N` at a given revision), or it is refused.
-- Off by default. On only through the user's own config (`ui.shuttle-keys`, a risky setting); never a project's.
-- While one is connected, the status line says so (`shuttle connected — a program is typing into tarae`), a key
-  cuts it off, and each card's record says who answered it: you or the shuttle.
+- Off by default. On only through the user's own config (`ui.shuttle-keys`, `trust::YOURS_ONLY`); never a
+  project's, trusted or not.
+- While one is connected, the status line says so (`shuttle connected — a program is typing into tarae`), the
+  person's key pauses it, `:shuttle-end` cuts it off, and each card's record says who answered it: you or the
+  shuttle.
 
 The person at the keyboard already has the same guards: a card ignores keys typed as it appears, `y` counts only
 after the text was in sight, and no key changes state in silence. This was "guarded keys", phase 4 of
-[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Its plan is under way
-(shuttleplan, a session of its own).
+[design/ui-state.md](design/ui-state.md), dropped there and now back under its new name. Phase 1 is built
+(2026-10-19: the protocol and its guards — [design/ui-state.md](design/ui-state.md#shuttle-keys)); weighty
+answers with proof the card was read (`read`) come next, then the zellij scripts move over.
 
 ### 5. A remote split
 

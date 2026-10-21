@@ -106,6 +106,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["keep-warm"], Arg::None, "Keep this session's Claude cache warm while it waits (on/off/now)"),
     c(&["features"], Arg::None, "Which features you use, and which never (features.count)"),
     c(&["features-reset"], Arg::None, "Empty the feature counts (a card asks first)"),
+    c(&["shuttle-end"], Arg::None, "Stop the program typing into tarae, and its grant"),
     c(&["redraw"], Arg::None, "Draw the whole screen again (when something else wrote over it)"),
     c(&["lsp-restart"], Arg::None, "Restart this file's language server"),
     c(&["plugin-permissions"], Arg::None, "What each plugin may do beyond the buffer"),

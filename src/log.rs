@@ -460,7 +460,7 @@ mod tests {
         let mut card =
             crate::offer::Offer::new("t".into(), "q", "", String::new(), crate::offer::What::Screen { call });
         card.id = 7;
-        crate::cards::said(&front.log(), &card, "y", None);
+        crate::cards::said(&front.log(), &card, ("y", Some("you")), None);
         crate::usage::message_sent(&behind.log(), 40, 10);
         let said = mine();
         assert!(said.iter().any(|l| l.starts_with(&format!("@{m}  tarae  card  card#7 · "))), "{said:#?}");

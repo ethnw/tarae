@@ -591,6 +591,17 @@ pub struct Ask {
     pub run: String,
 }
 
+#[cfg(test)]
+impl Ask {
+    /// A card's ask in a test: on an engine that is no program.
+    pub(crate) fn for_test(names: Vec<String>) -> Ask {
+        let (list, stop, settings) = (Vec::new(), Vec::new(), Vec::new());
+        let engine = Engine { program: "no-such-engine".into(), list, stop, settings, config: None };
+        let at = At { engine, path: "/nowhere".into(), set: Vec::new(), home: None };
+        Ask { at, names, run: "run#1".into() }
+    }
+}
+
 /// The card about them (`What::Containers`), in the run's session.
 fn asked(ed: &mut Editor, ask: Ask) {
     let list = ask.names.iter().map(|n| format!("    {n}")).collect::<Vec<_>>().join("\n");

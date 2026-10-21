@@ -511,6 +511,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:keep-warm` |  | Keep this session's Claude cache warm while it waits (on/off/now) |
 | `:features` |  | Which features you use, and which never (features.count) |
 | `:features-reset` |  | Empty the feature counts (a card asks first) |
+| `:shuttle-end` |  | Stop the program typing into tarae, and its grant |
 | `:redraw` |  | Draw the whole screen again (when something else wrote over it) |
 | `:lsp-restart` |  | Restart this file's language server |
 | `:plugin-permissions` |  | What each plugin may do beyond the buffer |

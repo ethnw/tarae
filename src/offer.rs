@@ -68,7 +68,7 @@ pub struct Offer {
     /// The front run card's group (cardburden 6): the cards stacked behind it asking for the very same run
     /// (`same_run`), by id — its last paragraph lists them, and `Y` answers them with it (`offer_group_sync`).
     pub like: Vec<u64>,
-    /// The user's input count (`Editor.input_seq`) when it came (`push_offer`).
+    /// The person's input count (`Editor.person_seq` — not a shuttle's keys) when it came (`push_offer`).
     pub came: u64,
     /// The user's own (`Offer::rank`, #205): a kind a command of theirs asks for, made by the input the user
     /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since).
@@ -270,6 +270,10 @@ pub enum What {
     /// A board asked for (`board::Ask`, frictions29 32 — the key that spends money): `y` starts it, holding for its
     /// session and conversation · `n` starts none. Its session's.
     Board(Box<crate::board::Ask>),
+    /// A program asks to type into tarae over its socket (`shuttle.rs`), the first time from its process: `y` it
+    /// may until that process ends · `n` not. Weighty (settled, drawn: when it comes is the program's), no
+    /// `a`/`A`: the grant is never kept; no shuttle answers it.
+    Shuttle,
 }
 
 /// Every card's kind (`Offer::kind`) — what `:features` lists, so a card never asked shows as 0
@@ -324,7 +328,55 @@ pub const KINDS: &[&str] = &[
     "features-reset",
     "left-running",
     "board",
+    "shuttle",
 ];
+
+/// What a letter does to the front card (`Offer::act`, done by `offer_key`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Act {
+    /// A weighty card's answer pressed as it came up or changed: said, not taken.
+    CameWithIt,
+    OneByOne(u64, crate::refactor::Whose),
+    ViewAll(crate::refactor::Whose),
+    View,
+    SeeAllFirst,
+    Remove(bool),
+    CommitFirst,
+    Compare,
+    Discard,
+    Accept,
+    AcceptLike,
+    StaleList,
+    MadeView,
+    AcceptBy(char),
+    Dismiss,
+    Never,
+    LimitAll,
+    SessionBilling,
+    ForChat,
+    Always,
+    PreflightFirst,
+    Message,
+    Held(char),
+    ForSession,
+    /// An answer letter the card doesn't take, said (not the code's: `a` there starts inserting).
+    Say(&'static str),
+    Abort,
+    SessionBase,
+    RestartOther,
+    RestartWait,
+    Highs,
+    Stuck,
+}
+
+/// How the front card stands, for a weighty one's answers: drawn (its answers on screen), settled (not just
+/// come up or changed), seen whole (not cut, or `v`'s buffer read to its end).
+#[derive(Clone, Copy, Debug)]
+pub struct Stands {
+    pub drawn: bool,
+    pub settled: bool,
+    pub whole: bool,
+}
 
 /// What becomes of a card waiting at `:restart` (`restart.rs`). Claude's can't be there — the restart waits
 /// for every turn, and their calls end with it.
@@ -402,7 +454,9 @@ impl What {
             | What::EnvKey { .. }
             // (the review it's for ends with the restart)
             | What::Board(_)
-            | What::Limit(_) => Lost,
+            | What::Limit(_)
+            // (its connection ends with the restart — a hello asks again)
+            | What::Shuttle => Lost,
         }
     }
 }
@@ -563,11 +617,12 @@ impl Offer {
         self
     }
 
-    /// Its `card` line: answered (`y` `a` `A` `n`) or dropped — in `session`; its entry for the record back.
+    /// Its `card` line: answered (`y` `a` `A` `n`, `by` whom) or dropped — in `session`; its entry for the record
+    /// back.
     fn said(
         &self,
         session: &crate::log::Session,
-        answer: &str,
+        answer: (&str, Option<&str>),
         caps: Option<&crate::caps::Caps>,
     ) -> serde_json::Value {
         crate::cards::said(session, self, answer, caps)
@@ -640,6 +695,8 @@ impl Offer {
                 | What::Limit(_)
                 // (its yes spends money — a key sent as it came up never starts a board)
                 | What::Board(_)
+                // (its yes lets a program type — when it comes is the program's: a `y` typed as it came isn't one)
+                | What::Shuttle
         )
     }
 
@@ -749,6 +806,49 @@ impl Offer {
         self.held().is_some_and(crate::rebase::Held::stashes)
     }
 
+    /// Every letter it acts on as it may stand (`act` — `Editor::offer_key` takes no other: a letter outside
+    /// these goes on to the code). A shuttle's key is checked against these before the card sees it
+    /// (`shuttle::card_refused`). Kept apart from `act` and checked against it for every card kind
+    /// (`acts_on_is_every_letter_a_card_acts_on`).
+    pub fn acts_on(&self, c: char) -> bool {
+        matches!(c, 'y' | 'n')
+            || (c == 'v' && (self.weighty() || matches!(self.what, What::Instructions(_))))
+            // (its letters a weighty card takes while it settles or is cut — `offer_key`'s weighty part)
+            || (self.weighty() && self.weighty_answer(c))
+            || (c == 'N'
+                && (self.weighty() || matches!(self.what, What::Install { .. } | What::Fetch { .. })))
+            || (c == 'r'
+                && (self.change_set().is_some()
+                    || self.made()
+                    || matches!(self.what, What::NotesStale { .. })))
+            || (c == 'R' && self.end_dirty())
+            || (c == 'c' && (self.commits_first() || self.recovers()))
+            || (c == 'D' && (self.recovers() || self.both()))
+            || (c == 'Y' && !self.like.is_empty())
+            || (c == 'a'
+                && (self.limit_all()
+                    || self.lasts()
+                    || self.weighty()
+                    || self.for_session()
+                    || matches!(self.what, What::NoSandbox { .. } | What::EnvKey { .. })))
+            || (c == 'A'
+                && (self.keeps()
+                    || self.lasts()
+                    || self.limit_all()
+                    || self.weighty()
+                    || matches!(self.what, What::NoSandbox { .. })))
+            || (c == '$' && self.bills())
+            || (c == 'p' && self.preflights())
+            || (c == 'm' && self.messages())
+            || (c == 's' && (self.stashes() || self.for_session()))
+            || (c == 'g' && self.held().is_some())
+            || (c == 'X' && self.aborts())
+            || (c == 'b' && self.base_steps())
+            || (c == 'f' && self.restart_other())
+            || (c == 'w' && (self.restart_waits() || self.stuck().is_some()))
+            || (c == 'h' && self.highs().is_some())
+    }
+
     /// Whether `key` is one of its answers that only a settled card in sight takes (`y`, and the letters
     /// that do something too).
     pub fn weighty_answer(&self, c: char) -> bool {
@@ -760,6 +860,87 @@ impl Offer {
             || (c == 'X' && self.aborts())
             || (c == 'f' && self.restart_other())
             || (c == 'w' && self.restart_waits())
+    }
+
+    /// What letter `c` does on it, standing as `st` says — None: nothing, the key goes on to the code. The one
+    /// place a card's letters are decided (`Editor::offer_key` does what it says); nothing done here.
+    pub fn act(&self, c: char, st: Stands) -> Option<Act> {
+        use Act as A;
+        // One that runs something: only from a card in sight (one too big for the screen isn't drawn) — and
+        // settled: a key pressed as it appeared or changed is swallowed, not an answer
+        if self.weighty() {
+            if !st.drawn {
+                return None;
+            }
+            if !st.settled && (matches!(c, 'n' | 'N') || self.weighty_answer(c)) {
+                return Some(A::CameWithIt);
+            }
+            // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text) — `r`
+            // refused there when a move or delete is among them: decided on the card only
+            if let Some(whose) = self.change_set() {
+                match c {
+                    'r' => return Some(A::OneByOne(self.id, whose)),
+                    'v' => return Some(A::ViewAll(whose)),
+                    _ => {}
+                }
+            }
+            // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
+            // select mode in the code)
+            if !st.whole {
+                match c {
+                    'v' => return Some(A::View),
+                    c if self.weighty_answer(c) => return Some(A::SeeAllFirst),
+                    _ => {}
+                }
+            }
+        }
+        // (Esc isn't an answer — #25: it's how one leaves an input or a mode, and a "no" by accident told Claude
+        // no; `n` says no)
+        Some(match c {
+            'R' if self.end_dirty() => A::Remove(false),
+            'c' if self.commits_first() => A::CommitFirst,
+            'c' if self.recovers() => A::Compare,
+            'D' if self.recovers() => A::Discard,
+            'y' => A::Accept,
+            'Y' if !self.like.is_empty() => A::AcceptLike,
+            // (the card stays: the list of its drafts over it, closed one by one there)
+            'r' if matches!(self.what, What::NotesStale { .. }) => A::StaleList,
+            // (the card stays while it's read)
+            'v' if self.made() => A::MadeView,
+            // (its detail, kept off the card — it stands beside the work while Claude runs held back)
+            'v' if matches!(self.what, What::ClaudeSettings { .. } | What::RepoTrust { .. }) => A::View,
+            'v' if self.host_details().is_some() || self.read_details().is_some() => A::View,
+            'v' if matches!(self.what, What::Instructions(_)) => A::View,
+            'r' if self.made() => A::AcceptBy('r'),
+            'n' => A::Dismiss,
+            'N' if matches!(self.what, What::Install { .. } | What::Fetch { .. }) => A::Never,
+            'a' if self.limit_all() => A::LimitAll,
+            '$' if self.bills() => A::SessionBilling,
+            'a' if self.lasts() => A::ForChat,
+            'A' if self.keeps() => A::Always,
+            'D' if self.both() => A::Remove(true),
+            'p' if self.preflights() => A::PreflightFirst,
+            'm' if self.messages() => A::Message,
+            's' if self.stashes() => A::Held('s'),
+            'g' if self.held().is_some() => A::Held('g'),
+            's' if self.for_session() => A::ForSession,
+            'a' | 'A' if matches!(self.what, What::NoSandbox { .. }) => A::Say("this card asks y, s or n"),
+            'a' if matches!(self.what, What::EnvKey { .. }) => A::Say("this card asks y, A or n"),
+            'a' if self.for_session() => A::Say("this card asks y, s, A or n"),
+            'X' if self.aborts() => A::Abort,
+            'b' if self.base_steps() => A::SessionBase,
+            'f' if self.restart_other() => A::RestartOther,
+            'w' if self.restart_waits() => A::RestartWait,
+            // (the card stays: what it waits on is yours to look at, then it's answered)
+            'h' if self.highs().is_some() => A::Highs,
+            // (the card stays: shown, it's still to answer)
+            'w' if self.stuck().is_some() => A::Stuck,
+            // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
+            // and the `y` after it was typed)
+            'a' | 'A' if self.lasts() || self.limit_all() => A::Say("this card asks y, a or n"),
+            'a' | 'A' if self.weighty() => A::Say("this card asks only y or n"),
+            _ => return None,
+        })
     }
 
     /// Its run, when it can be one of a group (cardburden 6): a run card still asking, in the sandbox — not
@@ -1130,6 +1311,7 @@ impl Offer {
             W::Limit(_) => vec![('y', "This session"), ('n', "Wait")],
             W::FeaturesReset => vec![('y', "Empty them"), ('n', "Keep them")],
             W::Board(_) => vec![('y', "Start it"), ('n', "Not now")],
+            W::Shuttle => vec![('y', "Until it ends"), ('n', "No")],
         }
     }
 
@@ -1186,6 +1368,7 @@ impl Offer {
             W::Limit(_) => "limit",
             W::FeaturesReset => "features-reset",
             W::Board(_) => "board",
+            W::Shuttle => "shuttle",
         }
     }
 }
@@ -1227,7 +1410,7 @@ impl crate::editor::Editor {
         let (mut dropped, mut kept) = (Vec::new(), Vec::new());
         for o in self.session.parked.iter().chain(self.offers.iter().filter(|_| front)) {
             if gone(&o.what) {
-                kept.push(o.said(&session, "dropped", self.session.caps()));
+                kept.push(o.said(&session, ("dropped", None), self.session.caps()));
                 dropped.push(o.id);
             }
         }
@@ -1275,7 +1458,7 @@ impl crate::editor::Editor {
         o.since = crate::clock::now();
         // (the user's own: the input that asked is the last one given — a card that comes after more typing,
         // or from work nobody's input started, waits its turn: #205)
-        o.came = self.input_seq;
+        o.came = self.person_seq;
         o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
         // One bring card a session: a new one takes the place of the one waiting for that checkout, wherever it
         // waits — its going said (the gone ring: one card replaced); one whose bring is under way stays
@@ -1317,7 +1500,10 @@ impl crate::editor::Editor {
         // (a host's card is joined by `hosts::asked` itself — by its host, never by its title)
         let own = o.asker().is_some()
             || o.host().is_some()
-            || matches!(o.what, What::PluginAsk { .. } | What::GitTrust(_) | What::RepoTrust { .. });
+            || matches!(
+                o.what,
+                What::PluginAsk { .. } | What::GitTrust(_) | What::RepoTrust { .. } | What::Shuttle
+            );
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
             if !old.installing() {
@@ -1368,114 +1554,67 @@ impl crate::editor::Editor {
         if o.installing() || key.ctrl || key.alt || self.plugin_panel_focused() {
             return false;
         }
-        // One that runs something: only from a card in sight (one too big for the screen isn't drawn) — and
-        // settled: a key pressed as it appeared or changed is swallowed, not an answer
-        if o.weighty() {
-            // (drawn: its answers are on screen — a digit is a card stacked behind)
-            if !self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()) {
-                return false;
-            }
-            if !self.offer_settled()
-                && matches!(key.code, Code::Char(c) if matches!(c, 'n' | 'N') || o.weighty_answer(c))
-            {
-                // (a key pressed as it came up isn't an answer — said, not swallowed in silence)
-                self.offer_refused(format!("{key} came as the card did — not taken; press it again"));
-                return true;
-            }
-            // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text)
-            if let Some(whose) = o.change_set() {
-                match key.code {
-                    // (refused there when a move or delete is among them: decided on the card only)
-                    Code::Char('r') => {
-                        let id = o.id;
-                        crate::refactor::one_by_one(self, id, whose);
-                        return true;
-                    }
-                    Code::Char('v') => {
-                        crate::refactor::view_all(self, whose);
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
-            // Cut to fit the screen: `v` shows it all, and `y` waits for that (not taken otherwise — it's
-            // select mode in the code)
-            if !self.offer_seen_whole() {
-                match key.code {
-                    Code::Char('v') => {
-                        self.offer_view();
-                        return true;
-                    }
-                    Code::Char(c) if o.weighty_answer(c) => {
-                        self.offer_see_all_first();
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
+        let Code::Char(c) = key.code else { return false };
+        // (only the letters it acts on — the list a shuttle's keys are checked against: `acts_on`)
+        if !o.acts_on(c) {
+            return false;
         }
-        // (Esc isn't an answer — #25: it's how one leaves an input or a mode, and a "no" by accident told Claude
-        // no; `n` says no)
-        match key.code {
-            Code::Char('R') if o.end_dirty() => self.offer_remove(false),
-            Code::Char('c') if o.commits_first() => self.offer_commit_first(),
-            Code::Char('c') if o.recovers() => crate::recovery::compare(self),
-            Code::Char('D') if o.recovers() => self.offer_discard(),
-            Code::Char('y') => self.offer_accept(),
-            Code::Char('Y') if !o.like.is_empty() => self.offer_accept_like(),
-            // (the card stays: the list of its drafts over it, closed one by one there)
-            Code::Char('r') if matches!(o.what, What::NotesStale { .. }) => crate::notes::stale_list(self),
-            // (the card stays while it's read)
-            Code::Char('v') if o.made() => crate::tools::made_view(self),
-            // (its detail, kept off the card — it stands beside the work while Claude runs held back)
-            Code::Char('v') if matches!(o.what, What::ClaudeSettings { .. } | What::RepoTrust { .. }) => {
-                self.offer_view()
-            }
-            Code::Char('v') if o.host_details().is_some() || o.read_details().is_some() => self.offer_view(),
-            Code::Char('v') if matches!(o.what, What::Instructions(_)) => self.offer_view(),
-            Code::Char('r') if o.made() => self.offer_accept_by('r'),
-            Code::Char('n') => self.offer_dismiss(),
-            Code::Char('N') if matches!(o.what, What::Install { .. } | What::Fetch { .. }) => {
-                self.offer_never()
-            }
-            Code::Char('a') if o.limit_all() => self.offer_limit_all(),
-            Code::Char('$') if o.bills() => self.offer_session_billing(),
-            Code::Char('a') if o.lasts() => self.offer_for_chat(),
-            Code::Char('A') if o.keeps() => self.offer_always(),
-            Code::Char('D') if o.both() => self.offer_remove(true),
-            Code::Char('p') if o.preflights() => self.offer_preflight_first(),
-            Code::Char('m') if o.messages() => self.offer_message(),
-            Code::Char(c @ ('s' | 'g')) if (c == 's' && o.stashes()) || (c == 'g' && o.held().is_some()) => {
-                self.offer_held(c)
-            }
-            Code::Char('s') if o.for_session() => self.offer_for_session(),
-            Code::Char('a' | 'A') if matches!(o.what, What::NoSandbox { .. }) => {
-                self.set_status("this card asks y, s or n")
-            }
-            Code::Char('a') if matches!(o.what, What::EnvKey { .. }) => {
-                self.set_status("this card asks y, A or n")
-            }
-            Code::Char('a') if o.for_session() => self.set_status("this card asks y, s, A or n"),
-            Code::Char('X') if o.aborts() => self.offer_abort(),
-            Code::Char('b') if o.base_steps() => self.offer_session_base(),
-            Code::Char('f') if o.restart_other() => self.offer_restart_other(),
-            Code::Char('w') if o.restart_waits() => self.offer_restart_wait(),
-            // (the card stays: what it waits on is yours to look at, then it's answered)
-            Code::Char('h') if o.highs().is_some() => crate::codereview::card_highs(self),
-            // (the card stays: shown, it's still to answer)
-            Code::Char('w') if o.stuck().is_some() => {
-                let s = o.stuck().cloned().expect("just seen");
-                crate::stuck::show(self, &s);
-            }
-            // An answer letter this card doesn't take isn't the code's either (`a`/`A` there start inserting —
-            // and the `y` after it was typed)
-            Code::Char('a' | 'A') if o.lasts() || o.limit_all() => {
-                self.set_status("this card asks y, a or n")
-            }
-            Code::Char('a' | 'A') if o.weighty() => self.set_status("this card asks only y or n"),
-            _ => return false,
-        }
+        // (how a weighty one stands: drawn — its answers on screen, a digit is a card stacked behind)
+        let stands = match o.weighty() {
+            true => Stands {
+                drawn: self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()),
+                settled: self.offer_settled(),
+                whole: self.offer_seen_whole(),
+            },
+            false => Stands { drawn: true, settled: true, whole: true },
+        };
+        let Some(act) = o.act(c, stands) else { return false };
+        self.offer_do(act, key);
         true
+    }
+
+    /// What `offer_key` chose for the front card, done.
+    fn offer_do(&mut self, act: Act, key: crate::key::Key) {
+        match act {
+            // (a key pressed as it came up isn't an answer — said, not swallowed in silence)
+            Act::CameWithIt => {
+                self.offer_refused(format!("{key} came as the card did — not taken; press it again"))
+            }
+            Act::OneByOne(id, whose) => crate::refactor::one_by_one(self, id, whose),
+            Act::ViewAll(whose) => crate::refactor::view_all(self, whose),
+            Act::View => self.offer_view(),
+            Act::SeeAllFirst => self.offer_see_all_first(),
+            Act::Remove(both) => self.offer_remove(both),
+            Act::CommitFirst => self.offer_commit_first(),
+            Act::Compare => crate::recovery::compare(self),
+            Act::Discard => self.offer_discard(),
+            Act::Accept => self.offer_accept(),
+            Act::AcceptLike => self.offer_accept_like(),
+            Act::StaleList => crate::notes::stale_list(self),
+            Act::MadeView => crate::tools::made_view(self),
+            Act::AcceptBy(c) => self.offer_accept_by(c),
+            Act::Dismiss => self.offer_dismiss(),
+            Act::Never => self.offer_never(),
+            Act::LimitAll => self.offer_limit_all(),
+            Act::SessionBilling => self.offer_session_billing(),
+            Act::ForChat => self.offer_for_chat(),
+            Act::Always => self.offer_always(),
+            Act::PreflightFirst => self.offer_preflight_first(),
+            Act::Message => self.offer_message(),
+            Act::Held(c) => self.offer_held(c),
+            Act::ForSession => self.offer_for_session(),
+            Act::Say(s) => self.set_status(s),
+            Act::Abort => self.offer_abort(),
+            Act::SessionBase => self.offer_session_base(),
+            Act::RestartOther => self.offer_restart_other(),
+            Act::RestartWait => self.offer_restart_wait(),
+            Act::Highs => crate::codereview::card_highs(self),
+            Act::Stuck => {
+                if let Some(s) = self.offers.first().and_then(Offer::stuck).cloned() {
+                    crate::stuck::show(self, &s);
+                }
+            }
+        }
     }
 
     /// Downloads the front card — it moves to the back while downloading (the next offer comes forward).
@@ -1655,6 +1794,7 @@ impl crate::editor::Editor {
             }
             What::Limit(a) => self.limit_answer(id, *a, false),
             What::FeaturesReset => self.features_reset_answer(id, true),
+            What::Shuttle => crate::shuttle::answer(self, id, true),
         }
     }
 
@@ -2165,9 +2305,18 @@ impl crate::editor::Editor {
     /// Card `o` answered by key `key`: its `card` line, how it went for the gone ring, its answer counted
     /// (`features.rs`) — every answer goes through here.
     fn offer_said(&mut self, o: &Offer, key: char) {
-        let entry = o.said(&self.session.log(), &key.to_string(), self.session.caps());
+        // (whose key: the person's, or a shuttle's step — `shuttle.rs`)
+        let by = match &self.shuttles.stepping {
+            Some(name) => format!("shuttle:{name}"),
+            None => "you".to_string(),
+        };
+        let entry = o.said(&self.session.log(), (&key.to_string(), Some(&by)), self.session.caps());
         self.cards_record(vec![entry]);
-        self.card_how(o.id, format!("answered {key}"));
+        let how = match &self.shuttles.stepping {
+            Some(name) => format!("answered {key} by shuttle {name}"),
+            None => format!("answered {key}"),
+        };
+        self.card_how(o.id, how);
         if self.counting() {
             self.features.answer(o.kind(), key);
         }
@@ -2271,6 +2420,7 @@ impl crate::editor::Editor {
             What::Limit(a) => self.limit_wait(&a),
             What::FeaturesReset => self.features_reset_answer(o.id, false),
             What::Board(a) => crate::board::answer(self, *a, false),
+            What::Shuttle => crate::shuttle::answer(self, o.id, false),
         }
     }
 

@@ -531,6 +531,26 @@ pub struct Found {
     pub removed: usize,
 }
 
+#[cfg(test)]
+impl Found {
+    /// A copy found, in a test: nothing on disk behind it.
+    pub(crate) fn for_test(path: PathBuf) -> Found {
+        let (file, dir) = (path.join("copy"), path.clone());
+        let (text, base) = (Rope::new(), Rope::new());
+        Found {
+            path,
+            file,
+            dir,
+            text,
+            at: SystemTime::UNIX_EPOCH,
+            disk: Disk::Same,
+            base,
+            added: 0,
+            removed: 0,
+        }
+    }
+}
+
 /// The copies left by taraes that are gone — those of this project (started in `origin`, or a file under
 /// one of `roots`) that differ from their file, the newest per file, their folders held; a copy that's its
 /// file already goes, and so does an older copy of a file offered. Another project's are left for a tarae

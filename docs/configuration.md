@@ -55,7 +55,15 @@ the [keymap reference](reference/keymap.md).
 - **Some settings are only yours.** Whose credentials Claude uses, and who pays for it, are never a project's to
   say: `llm.environment-key`, `llm.billing` and `llm.reviewer-billing` are read from your own config only — a
   project's `.tarae.toml` (trusted or not) and its `.tarae.local.toml` are refused them, with a warning at each
-  line; so is a key either file binds to `:session-billing`
+  line; so is a key either file binds to `:session-billing`. So is `ui.shuttle-keys`: whether a program you run
+  (an assistant, a test script) may type into tarae over its socket with `tarae keys` — `off` (the default),
+  `light` or `weighty`. Each step it sends says where it must land and is refused unless that holds when tarae
+  handles it; a card asks you first — for that one `tarae keys` alone, until it exits, or with `--for PID` for that
+  process and every program it starts (the card warns of it), until it ends; your own key pauses it, and
+  `:shuttle-end` (or a click on its `◦ shuttle` on the status line) ends it. A weighty card's answers,
+  those that widen trust, and editing this folder's files or a `.tarae.toml` stay yours — tarae won't do them
+  for the program; but it runs as you and could edit this file itself, so say yes only to one you'd let do that
+  ([design](design/ui-state.md#shuttle-keys))
 
 One file holds everything — editor, keys, languages, language servers, and Claude. There's no separate
 `languages.toml`.

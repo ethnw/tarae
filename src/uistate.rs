@@ -127,7 +127,8 @@ fn slot_name(s: Slot) -> &'static str {
     }
 }
 
-/// Which handler of `handle_key`'s chain took a key — recorded under `cfg(test)` (`took`).
+/// Which handler of `handle_key`'s chain took a key (`took`) — the routing test reads it, and a shuttle's answer
+/// says it (`shuttle.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handler {
     Point,
@@ -148,16 +149,36 @@ pub enum Handler {
     Code,
 }
 
-#[cfg(test)]
+impl Handler {
+    /// Its name in a shuttle's answer (`took`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Handler::Point => "point",
+            Handler::Card => "card",
+            Handler::NextCard => "next-card",
+            Handler::Program => "terminal-program",
+            Handler::Popup => "popup",
+            Handler::EditReview => "edit-review",
+            Handler::Picker => "picker",
+            Handler::Unfold => "chat-minimized",
+            Handler::Chat => "chat",
+            Handler::Rail => "review",
+            Handler::Side => "side",
+            Handler::Procs => "procs",
+            Handler::PluginPanel => "plugin",
+            Handler::Bottom => "slot",
+            Handler::Prompt => "prompt",
+            Handler::Code => "code",
+        }
+    }
+}
+
 thread_local!(pub static TOOK: std::cell::Cell<Option<Handler>> = const { std::cell::Cell::new(None) });
 
-/// `handle_key`'s handler `h` took the key (recorded in tests only — the routing test reads it).
+/// `handle_key`'s handler `h` took the key — the routing test reads it, a shuttle's step says it.
 #[inline]
 pub fn took(h: Handler) {
-    #[cfg(test)]
     TOOK.set(Some(h));
-    #[cfg(not(test))]
-    let _ = h;
 }
 
 /// What a region does with a letter.
@@ -201,7 +222,6 @@ pub enum Filter {
 }
 
 impl Filter {
-    #[cfg(test)]
     fn takes(&self, key: Key) -> bool {
         match self {
             Filter::All => true,
@@ -242,14 +262,32 @@ pub struct KeysTo {
     pub under: Option<Region>,
     /// The element id that takes the next key.
     pub to: String,
+    /// A program typing over the UI socket (`shuttle.rs`): its name, and whether your key paused it.
+    pub shuttle: Option<(String, bool)>,
 }
 
 impl KeysTo {
-    /// Where `key` goes now (the routing test's model — `handle_key` takes the same way).
-    #[cfg(test)]
+    /// Where `key` goes now (the routing test's model — `handle_key` takes the same way; a shuttle's step asks it
+    /// which card a key would answer).
     pub fn route(&self, key: Key) -> Region {
         self.chain.iter().find(|l| l.filter.takes(key)).map_or(Region::Code, |l| l.region)
     }
+}
+
+/// Where the keys go, as the state's JSON says it (`keys`) — what a shuttle's `expect.keys` is compared with.
+pub fn keys_json(k: &KeysTo) -> Value {
+    json!({
+        "to": k.to,
+        "region": k.region.name(),
+        "takes": k.takes.name(),
+        "answers": k.answers.iter().map(char::to_string).collect::<Vec<_>>(),
+        "held": k.held,
+        "pending": k.pending,
+        "char_next": k.char_next,
+        "drawn": k.drawn,
+        "under": k.under.map(Region::name),
+        "shuttle": k.shuttle.as_ref().map(|(name, paused)| json!({ "name": name, "paused": paused })),
+    })
 }
 
 /// Where the keys go, as the text forms name it: a pane with what it is — `pane#29, the code (commands)`;
@@ -401,7 +439,7 @@ impl Editor {
 
     /// The letters the front card takes now — `offer_key`'s cases: its answers, what a weighty card swallows
     /// while it settles, `v` while it's cut, `a`/`A` it refuses aloud.
-    fn card_takes(&self, o: &crate::offer::Offer) -> Vec<char> {
+    pub(crate) fn card_takes(&self, o: &crate::offer::Offer) -> Vec<char> {
         if o.installing() || self.plugin_panel_focused() {
             return Vec::new();
         }
@@ -503,6 +541,7 @@ impl Editor {
             under,
             to: self.element_id(region),
             chain,
+            shuttle: crate::shuttle::keys_said(self),
         }
     }
 
@@ -1360,18 +1399,7 @@ pub(crate) fn asks_line(asks: &str) -> String {
 impl UiState {
     /// The JSON drivers read (`v` is the schema's version).
     pub fn json(&self) -> Value {
-        let k = &self.keys;
-        let keys = json!({
-            "to": k.to,
-            "region": k.region.name(),
-            "takes": k.takes.name(),
-            "answers": k.answers.iter().map(char::to_string).collect::<Vec<_>>(),
-            "held": k.held,
-            "pending": k.pending,
-            "char_next": k.char_next,
-            "drawn": k.drawn,
-            "under": k.under.map(Region::name),
-        });
+        let keys = keys_json(&self.keys);
         let sessions: Vec<Value> = self
             .sessions
             .iter()
@@ -1557,6 +1585,9 @@ impl UiState {
         if let Some(u) = k.under {
             keys += &format!(" · under it: {}", u.name());
         }
+        if let Some((name, paused)) = &k.shuttle {
+            keys += &format!(" · shuttle {name}{}", if *paused { " (paused)" } else { "" });
+        }
         Some(keys)
     }
 
@@ -1650,6 +1681,8 @@ pub enum Asked {
     /// Which features get used (`tarae state --features`, `features.rs`) — the file read on a worker, answered
     /// from there.
     Features,
+    /// A shuttle's step that landed (`shuttle.rs`): its answer as JSON text, the frame that drew it put in.
+    Shuttle(String),
 }
 
 /// A session's last turn as its chat shows it (#204: a driver read the conversation's own files to know
@@ -1988,6 +2021,11 @@ pub fn after_frame(ed: &mut Editor) {
             (Asked::Features, _) => {
                 ed.features_answer(a.json, a.reply);
                 continue;
+            }
+            (Asked::Shuttle(said), _) => {
+                let mut v: Value = serde_json::from_str(said).unwrap_or_default();
+                v["frame"] = json!(ed.frames);
+                v.to_string()
             }
             // (after a frame: there is one)
             (Asked::Frame, _) => {

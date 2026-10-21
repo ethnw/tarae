@@ -6,7 +6,8 @@
 //!
 //! Keys are sent in order, 0.35 s apart (`\r` = Enter, `\t` = Tab, `\x1b` = Esc, `\xHH` = any byte; everything
 //! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates; `@?ready` waits until `ready` is
-//! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30.
+//! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30; `@!ready` (`@30!ready`) until it's
+//! gone from it.
 //!
 //! Environment:
 //! - `TARAE_SHOT_XDG` — config home (`tarae/config.toml` under it; default `/tmp/tarae-shot/xdg`). Point it at
@@ -76,14 +77,16 @@ pub fn run(args: &[String]) -> Result<()> {
     picture(&vt, scale, Path::new(out))
 }
 
-/// What a shot runs: the tarae, the files it opens and where, its config home, and the theme's background
-/// (`TARAE_BACKGROUND`; None: the shot's own environment's).
+/// What a shot runs: the tarae, the files it opens and where, its config home, the theme's background
+/// (`TARAE_BACKGROUND`; None: the shot's own environment's), and variables of the shot's own for tarae (a
+/// scene's terminal shell — `scenes.rs`; Some(""): set empty, None: taken out).
 pub struct Setup {
     pub bin: PathBuf,
     pub files: Vec<String>,
     pub cwd: PathBuf,
     pub config: PathBuf,
     pub background: Option<&'static str>,
+    pub env: Vec<(&'static str, Option<&'static str>)>,
 }
 
 impl Setup {
@@ -103,7 +106,7 @@ impl Setup {
         let cwd = folder("TARAE_SHOT_CWD", std::env::var_os("TARAE_SHOT_CWD"), true)?.unwrap_or(root);
         let config = folder("TARAE_SHOT_XDG", std::env::var_os("TARAE_SHOT_XDG"), true)?
             .unwrap_or_else(|| "/tmp/tarae-shot/xdg".into());
-        Ok(Setup { bin, files, cwd, config, background: None })
+        Ok(Setup { bin, files, cwd, config, background: None, env: Vec::new() })
     }
 }
 
@@ -290,6 +293,12 @@ fn drive(
     if let Some(bg) = setup.background {
         cmd.env("TARAE_BACKGROUND", bg);
     }
+    for (k, v) in &setup.env {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
     as_a_terminal(&mut cmd, setup.config.as_os_str(), state)
         .stdin(stdio()?)
         .stdout(stdio()?)
@@ -338,11 +347,11 @@ fn drive(
             }
         }
     };
-    // Until `text` is on screen (whole frames — `Vt::feed`) or `max` seconds pass
-    let pump_until = |vt: &mut Vt, text: &str, max: f64| -> bool {
+    // Until `text` is on screen (whole frames — `Vt::feed`) — or, `gone`, no longer is — or `max` seconds pass
+    let pump_until = |vt: &mut Vt, text: &str, max: f64, gone: bool| -> bool {
         let end = Instant::now() + Duration::from_secs_f64(max);
         loop {
-            if vt.parser.screen().contents().contains(text) {
+            if vt.parser.screen().contents().contains(text) != gone {
                 return true;
             }
             let Some(left) = end.checked_duration_since(Instant::now()) else { return false };
@@ -357,10 +366,19 @@ fn drive(
     for k in keys {
         if let Some((max, text)) = wait_key(k) {
             let t = Instant::now();
-            if pump_until(vt, text, max) {
+            if pump_until(vt, text, max, false) {
                 eprintln!("shot: {text:?} on screen after {:.1}s", t.elapsed().as_secs_f64());
             } else {
                 eprintln!("shot: {text:?} not on screen after {max}s — taking the shot as it is");
+            }
+            continue;
+        }
+        if let Some((max, text)) = gone_key(k) {
+            let t = Instant::now();
+            if pump_until(vt, text, max, true) {
+                eprintln!("shot: {text:?} gone from the screen after {:.1}s", t.elapsed().as_secs_f64());
+            } else {
+                eprintln!("shot: {text:?} still on screen after {max}s — taking the shot as it is");
             }
             continue;
         }
@@ -382,6 +400,13 @@ const WAIT_MAX: f64 = 120.0;
 /// `@?text` / `@30?text`: wait until `text` is on screen — at most `WAIT_MAX` seconds, or the ones given.
 fn wait_key(key: &str) -> Option<(f64, &str)> {
     let (secs, text) = key.strip_prefix('@')?.split_once('?')?;
+    let max = if secs.is_empty() { WAIT_MAX } else { secs.parse().ok()? };
+    (!text.is_empty()).then_some((max, text))
+}
+
+/// `@!text` / `@30!text`: wait until `text` is gone from the screen — as `wait_key`'s limits.
+fn gone_key(key: &str) -> Option<(f64, &str)> {
+    let (secs, text) = key.strip_prefix('@')?.split_once('!')?;
     let max = if secs.is_empty() { WAIT_MAX } else { secs.parse().ok()? };
     (!text.is_empty()).then_some((max, text))
 }
@@ -813,6 +838,8 @@ mod tests {
             (wait_key("@3"), wait_key("@?"), wait_key("@x?y"), wait_key("?y")),
             (None, None, None, None)
         );
+        assert_eq!((gone_key("@!lit"), gone_key("@5!a b")), (Some((WAIT_MAX, "lit")), Some((5.0, "a b"))));
+        assert_eq!((gone_key("@?x"), gone_key("@!")), (None, None));
         let mut vt = Vt { parser: vt100::Parser::new(2, 10, 0), held: Vec::new() };
         vt.feed(b"\x1b[?2026hab\x1b[?2026l\x1b[?2026hcd");
         assert_eq!(vt.parser.screen().contents(), "ab");

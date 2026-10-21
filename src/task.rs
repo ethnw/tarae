@@ -417,6 +417,12 @@ pub struct After {
 
 #[cfg(test)]
 impl Run {
+    /// As if its process were `pid` (tests of who runs under it — `shuttle.rs`); nothing is started.
+    pub fn with_pid(mut self, pid: u32) -> Run {
+        self.pid = Some(pid);
+        self
+    }
+
     /// A finished run with no process — for tests of what's made of one.
     pub fn for_test(task: Task) -> Run {
         Run {

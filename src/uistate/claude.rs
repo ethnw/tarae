@@ -111,7 +111,8 @@ impl Editor {
         // card and in the inbox; any other card's ask cut as the one-line forms cut it: the whole is for scripts —
         // Claude's level doesn't grow with a long card)
         let by_title = |kind: &str| {
-            kind.starts_with("plugin") || matches!(kind, "git-trust" | "claude-settings" | "repo-trust")
+            kind.starts_with("plugin")
+                || matches!(kind, "git-trust" | "claude-settings" | "repo-trust" | "shuttle")
         };
         for c in &mut s.cards {
             c.asks = match by_title(c.kind) {
@@ -138,6 +139,17 @@ impl Editor {
         s.procs = Default::default();
         s.gone = self.ui_gone.iter().rev().filter(|g| g.session == own).take(3).cloned().collect();
         s.front = own;
+        // (a shuttle's name, in a toast or how a card went: taken out — `shuttle.rs`)
+        for t in &mut s.toasts {
+            t.text = crate::shuttle::for_claude(&self.shuttles, &t.text);
+        }
+        for g in &mut s.gone {
+            g.how = crate::shuttle::for_claude(&self.shuttles, &g.how);
+        }
+        // (a program typing into tarae: that one is, never its name or its steps — `shuttle.rs`)
+        if let Some((name, _)) = s.keys.shuttle.as_mut() {
+            *name = "connected".into();
+        }
         s
     }
 }

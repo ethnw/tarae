@@ -755,6 +755,25 @@ impl Term {
         stdout.into_owned()
     }
 
+    /// A shuttle: `/bin/sh -c script sh args…` in its environment, started beside the test, its stdin and stdout
+    /// piped — `$TARAE` is this tarae's binary and `$TARAE_PID` its pid, so its `tarae keys` calls run under one
+    /// lasting process (`--for $$`). Never this test as the `for`: it started tarae, and what runs tarae never is
+    /// one (`shuttle.rs`).
+    pub fn shuttle_shell(&self, script: &str, args: &[&str]) -> std::process::Child {
+        Command::new("/bin/sh")
+            .args(["-c", script, "sh"])
+            .args(args)
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .env("TARAE", &self.bin)
+            .env("TARAE_PID", self.pid().to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the shuttle's shell")
+    }
+
     /// The state as JSON — once the input so far (`input` keys and clicks) is handled and drawn.
     pub fn state_json(&self, after_input: u64) -> serde_json::Value {
         let s = self.state(&["--json", "--after-input", &after_input.to_string()]);
