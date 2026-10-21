@@ -5142,7 +5142,7 @@ mod tests {
         std::fs::write(dir.join("gen.sh"), "echo marker\n").unwrap();
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.session.root = dir.clone();
-        for cmd in [
+        let lines = [
             "cat ../a/x.txt ../a/y.txt",
             "git diff --no-index --stat a.txt b.txt",
             "ls $(rustc --print sysroot)/lib/rustlib/src/rust/library",
@@ -5152,8 +5152,20 @@ mod tests {
             "awk -f gen.awk data.txt",
             "python3 tools/gen.py --fast",
             "sh gen.sh",
-        ] {
-            assert_eq!(decided(&mut ed, json!({ "command": cmd })), None, "{cmd}: a card");
+            // (f24: names set in front, loops — what they run is held by the sandbox as the command alone is)
+            "TARAE_BLESS=1 cargo test -q -- x 2>&1 | grep -E 'a|b'",
+            "for i in 1 2 3; do cargo test -q; done",
+            "sh -c 'A=1 cargo test; git diff --stat'",
+            "PATH=./bin:$PATH make",
+        ];
+        // (each one that came to a card named — not only the first)
+        let carded: Vec<&str> =
+            lines.into_iter().filter(|cmd| decided(&mut ed, json!({ "command": cmd })).is_some()).collect();
+        assert!(carded.is_empty(), "a card for {carded:?}");
+        // (what runs later stays closed: a line with names set in front, or a loop, never feeds the user's list —
+        // which runs outside the sandbox)
+        for cmd in ["RUSTC_WRAPPER=x cargo build", "for i in 1; do cargo test; done"] {
+            assert!(!super::is_check(cmd), "{cmd}: a check");
         }
         // Written unseen this turn: run outside, it's on the card whole; in the sandbox it runs
         let unseen = |ed: &mut crate::editor::Editor, f: &str| {

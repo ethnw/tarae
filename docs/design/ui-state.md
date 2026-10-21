@@ -141,7 +141,8 @@ side git · 4 rows · in hand git:src/term.rs
   waiting for `doing: idle` waits for the chat's turn, not a review), and `reviewer_run`, how its reviewer's
   last run went, from its start until the next one, whether or not its review is open:
   - `state`: `reading` · `done` · `stopped`; `ms`: how long it read (so far, while it reads); `reads`.
-  - `findings`: those still pinned; `answered`: those you or the author answered.
+  - `findings`: those still pinned; `answered`: those you or the author answered; `unsent`: those not sent to
+    the author yet (`space v s`).
   - `high`: those on a high-risk change, `null` when its review isn't the one open.
   - `verdict`: its first line; `why`: why it stopped; `by_you`: you stopped it (`:reviewer-stop`); `of`: what
     its review was of.
@@ -149,13 +150,19 @@ side git · 4 rows · in hand git:src/term.rs
 
   Claude's level keeps every session's state and counts, its own session's too, and never the reviewer's
   words (`verdict`, `why`, `of`). Nothing of the reviewer reaches the author until you send its findings
-  (`space v s`), and its verdict never does. Then come
+  (`space v s`), and its verdict never does; its `reviewer:` line says when findings aren't sent yet, and how
+  they come (f24). Then come
   cards waiting, `rebasing n/m`, the reloaded `•`, and once its Claude compacted its
   conversation (`compaction.rs`), `compacted`: `count` since tarae started, the `last` one's `at_ms`, `trigger`
   (`auto` · `manual`), `pre_tokens`, `post_tokens`, and `unseen` (it came behind, not in front since). Claude's
   level has only its own session's. `key_source_seen` (apibill): the last `apiKeySource` its chat's claude
   reported (`none` · `apiKeyHelper` · `ANTHROPIC_API_KEY` · `/login managed key`) — absent before one; Claude's
   level has only its own session's.
+- **`notes`** (f24, `notes.rs`) — the front session's notes in the order pinned, where each is, never what it
+  says: `id` (`note#4`), `path` (from the session's root), `line` (1-based), `kind` (`finding` the reviewer's ·
+  `comment` yours · `claude` its Claude's), `sent` (not a draft `space v s` hasn't sent), `state` (`waiting` for
+  Claude's answer · `answered` · `open`). Claude's level lists only the sent ones (`notes sent to you: …`) —
+  what `reply_to` answers; `reply_to` on a draft is refused.
 - **`limits`** (apibill, `limits.rs`) — the account's plan limits as any claude said them: each window known now
   by Claude Code's name (`five_hour`, `seven_day`, `seven_day_<family>`, `seven_day:<model_scoped name>`) →
   `percent` (whole), `resets_at` and `seen_at` (unix ms), `status` (`allowed` · `allowed_warning` · `rejected`,

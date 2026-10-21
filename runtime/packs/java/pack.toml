@@ -216,10 +216,12 @@ kept = ["{gradle}/daemon"]
 # only writes a run makes in the user's Gradle home
 write-files = ["{gradle}/wrapper/dists/{a}/{b}/{a}.zip.lck"]
 # What of the user's environment a run gets for the JDK, Gradle and Maven. Not `ORG_GRADLE_PROJECT_*` (a
-# project's properties — signing keys and repository passwords live there) nor `JAVA_TOOL_OPTIONS` (agents
-# loaded into every JVM). An options variable giving one of those as an option (`GRADLE_OPTS=-Dorg.gradle.project.
-# signingPassword=…`, `-Dpassword=…` in `MAVEN_OPTS`) is token-like and left out whole (`tokens::option_secret`)
-pass =["JAVA_HOME", "JAVA_OPTS", "JDK_JAVA_OPTIONS", "GRADLE_*", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_HOME", "M2_HOME"]
+# project's properties — signing keys and repository passwords live there) nor what every JVM or `java` launcher
+# reads as its options — `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`: agents loaded into it, and a
+# `-Djava.net.preferIPv4Stack=false` there undoes tarae's value below (f24). An options variable giving one of
+# those as an option (`GRADLE_OPTS=-Dorg.gradle.project.signingPassword=…`, `-Dpassword=…` in `MAVEN_OPTS`) is
+# token-like and left out whole (`tokens::option_secret`)
+pass =["JAVA_HOME", "JAVA_OPTS", "GRADLE_*", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_HOME", "M2_HOME"]
 # A JVM's sockets are IPv6 ones (dual-stack) unless told otherwise: its 127.0.0.1 is `::ffff:127.0.0.1`, which
 # macOS's Seatbelt below 27 takes as no `localhost` — every connect and bind of a JVM on this machine's ports
 # refused: the proxy, Gradle's client to its daemon and the daemon's listener, a test's server (measured on

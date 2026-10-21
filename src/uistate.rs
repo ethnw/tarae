@@ -592,6 +592,60 @@ pub struct UiState {
     pub procs: ProcsState,
     /// The plan's limits as claude said them, each window known now (`limits.rs`) — the account's.
     pub limits: Vec<crate::limits::Reading>,
+    /// The front session's notes (`notes.rs`), in the order pinned — where each is, never what it says.
+    pub notes: Vec<NoteState>,
+}
+
+/// A note as the state lists it: by id and place, who began it, and how its thread stands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoteState {
+    /// `note#4`.
+    pub id: String,
+    /// From the session's root.
+    pub path: String,
+    /// Its first line, 1-based.
+    pub line: usize,
+    /// `finding` (the reviewer's) · `comment` (yours) · `claude` (pinned by its Claude).
+    pub kind: &'static str,
+    /// Gone to Claude: not a draft `space v s` hasn't sent (`notes::unsent`).
+    pub sent: bool,
+    /// `waiting` (for Claude's answer) · `answered` (Claude replied on it) · `open`.
+    pub state: &'static str,
+}
+
+impl NoteState {
+    fn of(root: &std::path::Path, n: &crate::notes::Note) -> NoteState {
+        use crate::notes::By;
+        let first = n.thread.first().map(|e| e.by);
+        NoteState {
+            id: format!("note#{}", n.id),
+            path: crate::chat::shown(root, &n.path).to_string(),
+            line: n.lines.start + 1,
+            kind: match first {
+                Some(By::Reviewer) => "finding",
+                Some(By::Author) => "claude",
+                _ => "comment",
+            },
+            sent: !crate::notes::unsent(n),
+            state: match n.waiting {
+                true => "waiting",
+                false if n.thread.iter().skip(1).any(|e| e.by == By::Author) => "answered",
+                false => "open",
+            },
+        }
+    }
+
+    pub fn json(&self) -> Value {
+        json!({
+            "id": self.id, "path": self.path, "line": self.line, "kind": self.kind, "sent": self.sent,
+            "state": self.state,
+        })
+    }
+
+    /// `note#4 src/a.rs:12 · finding · waiting`.
+    pub fn text(&self) -> String {
+        format!("{} {}:{} · {} · {}", self.id, self.path, self.line, self.kind, self.state)
+    }
 }
 
 /// `:procs`' rows and the checks holding now, as of its last look.
@@ -766,9 +820,10 @@ pub struct ReviewerState {
     /// How long it read — so far, while it reads.
     pub ms: u64,
     pub reads: usize,
-    /// Its findings still pinned, and those answered (by you or the author).
+    /// Its findings still pinned, those answered (by you or the author), and those not sent to the author yet.
     pub findings: usize,
     pub answered: usize,
+    pub unsent: usize,
     /// Those on a high-risk change — None when its review isn't the one open (the grades are the open
     /// review's).
     pub high: Option<usize>,
@@ -803,6 +858,7 @@ impl ReviewerState {
             reads: r.reads,
             findings: t.findings,
             answered: t.answered,
+            unsent: t.unsent,
             high: open.then_some(t.high),
             verdict: r.verdict.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string(),
             why,
@@ -815,12 +871,13 @@ impl ReviewerState {
     pub fn json(&self) -> Value {
         json!({
             "state": self.state, "ms": self.ms, "reads": self.reads, "findings": self.findings,
-            "answered": self.answered, "high": self.high, "verdict": self.verdict, "why": self.why,
+            "answered": self.answered, "unsent": self.unsent, "high": self.high, "verdict": self.verdict,
+            "why": self.why,
             "by_you": self.by_you, "of": self.of, "news": self.news,
         })
     }
 
-    /// One line: `done in 1m 20s · 14 reads · 2 findings ▲1 · 1 answered — <verdict>`.
+    /// One line: `done in 1m 20s · 14 reads · 2 findings ▲1 · 1 not sent · 1 answered — <verdict>`.
     pub fn text(&self) -> String {
         let took = crate::term::duration(self.ms as f32 / 1000.0);
         let how = match (self.state, &self.why) {
@@ -831,6 +888,10 @@ impl ReviewerState {
             _ => format!("done in {took}"),
         };
         let high = self.high.filter(|&h| h > 0).map(|h| format!(" ▲{h}")).unwrap_or_default();
+        let unsent = match self.unsent {
+            0 => String::new(),
+            n => format!(" · {n} not sent"),
+        };
         let answered = match self.answered {
             0 => String::new(),
             n => format!(" · {n} answered"),
@@ -840,7 +901,7 @@ impl ReviewerState {
             false => format!(" — {}", self.verdict),
         };
         format!(
-            "{how} · {} · {}{high}{answered}{verdict}",
+            "{how} · {} · {}{high}{unsent}{answered}{verdict}",
             crate::nav::count(self.reads, "read"),
             crate::nav::count(self.findings, "finding")
         )
@@ -1117,6 +1178,7 @@ impl Editor {
             gone: watch::recent(&self.ui_gone, GONE_SHOWN),
             procs: ProcsState::of(&self.procs),
             limits: self.limits.known(now_ms).into_iter().cloned().collect(),
+            notes: front.notes.list.iter().map(|n| NoteState::of(&front.root, n)).collect(),
         }
     }
 
@@ -1331,6 +1393,7 @@ impl UiState {
             })).collect::<Vec<_>>(),
             "procs": self.procs.json(),
             "limits": crate::limits::json(&self.limits.iter().collect::<Vec<_>>()),
+            "notes": self.notes.iter().map(NoteState::json).collect::<Vec<_>>(),
         })
     }
 

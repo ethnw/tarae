@@ -1554,8 +1554,10 @@ never sees that conversation. It isn't continued from it, and nothing of the cha
 - While it reads, its session says so wherever a working chat would, beside what the chat does: its tab
   (`main ● ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
   How its last run went stays in `tarae state` after it ends, the review open or not: `reviewer_run` (reading,
-  done or stopped, how long, its reads, findings, those answered and those on a high-risk change, and its
-  verdict's first line). `tarae state --watch reviewer` says when it starts and ends.
+  done or stopped, how long, its reads, findings, those answered, those not sent yet and those on a high-risk
+  change, and its verdict's first line). The author's Claude sees the counts only, told that a finding
+  reaches it when you send it; once sent, its `ui` tool lists it by id (`notes sent to you: note#4 a.txt:2 ·
+  finding · waiting`), and `reply_to` on one not sent is refused. `tarae state --watch reviewer` says when it starts and ends.
 - When it ends in a session behind, that session gets a `•` on its tab (the status line's `•1` with the chat
   closed) and an item in the inbox (`space I`, `C-q`). It's news, not a question, so `▲ waiting` doesn't count it. The item says how many findings and that `space v r` reads them, or why it stopped. When you come to
   the session, the toast says it again, and the item and the `•` go.

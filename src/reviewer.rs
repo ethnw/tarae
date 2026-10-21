@@ -587,6 +587,8 @@ pub struct Tally {
     pub findings: usize,
     pub high: usize,
     pub answered: usize,
+    /// Not sent to the author yet (`space v s`): still a draft.
+    pub unsent: usize,
 }
 
 /// The tally of the reviewer's findings still here; `high` says whether a finding's lines (path, 0-based)
@@ -605,6 +607,7 @@ fn tally_in(
         t.findings += 1;
         t.high += usize::from(high(&n.path, &n.lines));
         t.answered += usize::from(answered(n));
+        t.unsent += usize::from(crate::notes::unsent(n));
     }
     Some(t)
 }
@@ -1057,7 +1060,8 @@ mod tests {
         );
         let text = ed.ui_state().text();
         assert!(
-            text.contains("reviewer s0: done in ") && text.contains(" · 1 finding — One finding"),
+            text.contains("reviewer s0: done in ")
+                && text.contains(" · 1 finding · 1 not sent — One finding"),
             "{text}"
         );
         // Behind: the same
@@ -1138,6 +1142,40 @@ mod tests {
         assert!(r.verdict.is_empty() && r.why.is_none() && r.of.is_empty(), "{r:?}");
         let text = st.text_claude(false);
         assert!(!text.contains("One finding") && !text.contains("\nreviewer:"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// f24: a finding not sent yet is a count at Claude's level that says so, and how it comes (`space v s`) — no
+    /// id to answer, and `reply_to` on it is refused (a guessed id would have put Claude's reply under a finding
+    /// you hadn't sent, and out with it). Sent, it's listed by its id, where it is, and whether it waits for an
+    /// answer: Claude can answer it after the review's message has left its context.
+    #[test]
+    fn claudes_level_says_a_finding_isnt_sent_and_lists_the_sent_ones_by_id() {
+        let (dir, repo) = place("sent");
+        let mut ed = Editor::new(crate::config::Config::default());
+        one_finding(&mut ed, &dir);
+        reviewed(&mut ed, &repo);
+        ed.session.root = repo.clone();
+        let id = ed.session.notes.list.first().expect("the finding").id;
+        let note = format!("note#{id}");
+        let text = crate::uistate::claude::tool_call(&mut ed).unwrap();
+        assert!(text.contains(" · 1 finding · 1 not sent — ") && text.contains("space v s"), "{text}");
+        assert!(!text.contains(&note), "not sent: no id — {text}");
+        let reply = json!({ "reply_to": id, "text": "Tested in a_test." });
+        let refused = crate::notes::tool_call(&mut ed, &reply).expect_err("a finding not sent");
+        assert!(refused.contains("isn't sent to you") && refused.contains("space v s"), "{refused}");
+        assert_eq!(ed.session.notes.list[0].thread.len(), 1, "nothing added to it");
+        // Sent (as `codereview::send_as` leaves it: its drafts sent, waiting for the author)
+        for n in &mut ed.session.notes.list {
+            n.thread.iter_mut().for_each(|e| e.draft = false);
+            n.waiting = true;
+        }
+        let text = crate::uistate::claude::tool_call(&mut ed).unwrap();
+        assert!(text.contains(&format!("notes sent to you: {note} a.txt:2 · finding · waiting")), "{text}");
+        assert!(!text.contains("not sent") && !text.contains("is this tested"), "{text}");
+        assert_eq!(crate::notes::tool_call(&mut ed, &reply), Ok(format!("replied on note #{id}")));
+        let text = crate::uistate::claude::tool_call(&mut ed).unwrap();
+        assert!(text.contains(&format!("{note} a.txt:2 · finding · answered")), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1244,7 +1282,7 @@ mod tests {
         let r = run_of(&ed, 0);
         assert_eq!((&r["findings"], &r["high"]), (&json!(1), &json!(1)), "{r}");
         let text = ed.ui_state().text();
-        assert!(text.contains(" · 1 finding ▲1 — One finding"), "{text}");
+        assert!(text.contains(" · 1 finding ▲1 · 1 not sent — One finding"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

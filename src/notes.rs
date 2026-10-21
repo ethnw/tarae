@@ -90,6 +90,12 @@ pub struct Note {
     pub pinned: Option<[u8; 32]>,
 }
 
+/// Whether note `n` hasn't gone to Claude yet: it began as a draft (yours, or the reviewer's finding) that
+/// `space v s` hasn't sent.
+pub fn unsent(n: &Note) -> bool {
+    n.thread.first().is_some_and(|e| e.draft)
+}
+
 impl Note {
     /// The first thing said — what the line end shows.
     pub fn gist(&self) -> &str {
@@ -374,6 +380,10 @@ pub fn tool_call(ed: &mut Editor, args: &Value) -> Result<String, String> {
     let text = args["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("text is required")?;
     if let Some(id) = args["reply_to"].as_u64() {
         let n = find_mut(ed, id).ok_or(format!("there's no note #{id}"))?;
+        // (a draft — yours, or the reviewer's finding — is the user's until sent: a reply would go out with it)
+        if unsent(n) {
+            return Err(format!("note #{id} isn't sent to you yet — the user sends it with space v s"));
+        }
         n.thread.push(Entry { by: By::Author, text: text.to_string(), draft: false });
         n.waiting = false;
         return Ok(format!("replied on note #{id}"));

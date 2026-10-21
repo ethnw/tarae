@@ -126,6 +126,8 @@ impl Editor {
             };
         }
         s.runs.retain(|r| r.session == own);
+        // (only what went to it: a draft — yours, or a finding — is the user's until `space v s` sends it)
+        s.notes.retain(|n| n.sent);
         // (its `procs` tool says these, each process's command line and folder with them)
         s.procs = Default::default();
         s.gone = self.ui_gone.iter().rev().filter(|g| g.session == own).take(3).cloned().collect();
@@ -169,7 +171,17 @@ impl UiState {
         if let Some(r) =
             self.sessions.iter().find(|s| s.id == self.front).and_then(|s| s.reviewer_run.as_ref())
         {
-            out.push(format!("reviewer: {}", r.text()));
+            let unsent = match r.unsent {
+                0 => "",
+                _ => " — a finding reaches you when the user sends it (space v s)",
+            };
+            out.push(format!("reviewer: {}{unsent}", r.text()));
+        }
+        // (the notes that went to it, by id: `reply_to` answers one — also once the message that brought it has
+        // left its context)
+        if !self.notes.is_empty() {
+            let notes: Vec<String> = self.notes.iter().map(super::NoteState::text).collect();
+            out.push(format!("notes sent to you: {}", notes.join("   ")));
         }
         // (its own session's sandbox, decision 13 — here, not in the context's `ui:` line every request reads: the
         // run reports say it once a conversation)

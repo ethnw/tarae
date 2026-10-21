@@ -601,11 +601,11 @@ fn env_name(s: &str) -> bool {
 /// finds programs and libraries, what shells read at their start, what the sandbox sets or reads
 /// (`sandbox::inside_env`, its home and temp folders), and what makes a program run another program or
 /// load code (rustc and cargo's wrappers, runners, linkers and flags — `-C linker=` runs one —, git's ssh,
-/// helpers and config, interpreters' startup options and paths, editors, pagers and password askers). A
+/// helpers and config, interpreters' and JVMs' startup options and paths, editors, pagers and password askers). A
 /// name ending in `_` is a prefix, one starting with `_` a suffix (`CARGO_TARGET_<triple>_RUNNER`). Also
 /// what picks the toolchain, cargo's config and aliases, or git's repository. (A pattern takes only the
 /// names its card showed — #132 — so this list needn't be whole; it keeps such a name off any card.)
-const ENV_NEVER: [&str; 46] = [
+const ENV_NEVER: [&str; 48] = [
     "CARGO_HOME",
     "CARGO_ALIAS_",
     "RUSTUP_HOME",
@@ -641,6 +641,11 @@ const ENV_NEVER: [&str; 46] = [
     "GIT_CONFIG",
     "GIT_CONFIG_",
     "NODE_OPTIONS",
+    // (the `java` launcher's options and HotSpot's — `JAVA_TOOL_OPTIONS` is the Java pack's own `env`, kept off
+    // patterns by `env_allowed`; `_JAVA_OPTIONS` is a suffix here: it covers `JDK_JAVA_OPTIONS` too, named for
+    // finding it)
+    "JDK_JAVA_OPTIONS",
+    "_JAVA_OPTIONS",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PERL5OPT",
@@ -1511,6 +1516,8 @@ mod tests {
             "GIT_EDITOR",
             "SSH_ASKPASS",
             "NODE_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "_JAVA_OPTIONS",
             "PYTHONPATH",
             "PYTHONSTARTUP",
             "PERL5OPT",

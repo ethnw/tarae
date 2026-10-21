@@ -6471,8 +6471,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("build.gradle"), "").unwrap();
         let options = |os: Os, refused: bool| {
-            let env =
-                [("HOME", home.clone().into()), ("JAVA_TOOL_OPTIONS", "-javaagent:/x/agent.jar".into())];
+            // (the user's own options variables, each loading an agent: none reaches a run — the launcher's
+            // `JDK_JAVA_OPTIONS` and HotSpot's `_JAVA_OPTIONS` would also undo tarae's v4 value)
+            let env = [
+                ("HOME", home.clone().into()),
+                ("JAVA_TOOL_OPTIONS", "-javaagent:/x/agent.jar".into()),
+                ("JDK_JAVA_OPTIONS", "-javaagent:/x/a.jar".into()),
+                ("_JAVA_OPTIONS", "-javaagent:/x/b.jar".into()),
+            ];
             let here = Here {
                 env: env.map(|(k, v): (&str, std::ffi::OsString)| (k.to_string(), v)).into(),
                 os,
@@ -6483,6 +6489,10 @@ mod tests {
             let p =
                 run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
             let c = command(Some(&p), "java", &[]);
+            for other in ["JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"] {
+                let given = c.get_envs().any(|(k, v)| k == other && v.is_some());
+                assert!(!given, "{os:?}, v4-mapped refused {refused}: the user's {other} reached the run");
+            }
             let set = c.get_envs().filter(|(k, _)| *k == "JAVA_TOOL_OPTIONS").filter_map(|(_, v)| v);
             set.map(|v| v.to_string_lossy().into_owned()).collect::<Vec<_>>()
         };
@@ -6493,6 +6503,10 @@ mod tests {
             !crate::readonly::env_allowed("JAVA_TOOL_OPTIONS"),
             "no command line of Claude's sets it unasked"
         );
+        // (the other two: no pattern carries them, no pack sets them)
+        for n in ["JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"] {
+            assert!(!crate::readonly::env_core(n) && !crate::readonly::env_allowed(n), "{n}");
+        }
         #[cfg(target_os = "macos")]
         {
             let major = macos_major().expect("this Mac's version");

@@ -94,11 +94,14 @@ In this order.
 First (decided 2026-10-15), because the Cyber Verification Program's approval unblocks the fuzzing work in §2
 that the model's safeguards stopped (the control messages); stabilization (§9) waits.
 
-1. **What's in flight finishes**: the card model's P3 piece 4 and the diagram's P3 layout.
+Items 1–3 are done (2026-10-16); 4 and 5 are the user's: the repository made public, then the application.
+
+1. **What's in flight finishes** — done: the card model's P3 piece 4 and the diagram's P3 layout.
 2. **`SECURITY.md`** at the repository's root — done: where to report (`security@sinabro.io`), what's in scope,
    how reports are handled. The address receives mail: it's forwarded like the project's other addresses, and the
    user's test mail arrived (2026-10-15).
-3. **One draft pull request**: CI's checks run locally first, CI dispatched once; merged when green.
+3. **The pull requests** — done: PR #4 and PR #5 merged on GitHub; Q1 (§2) is in, before the repository goes
+   public.
 4. **The repository made public** — by the user.
 5. **Anthropic's Cyber Verification Program**, applied for by the user as an individual, on the open-source track
    ("Maintainer of a widely depended-on open-source project"; an individual with maintainer authority can apply).
@@ -125,7 +128,8 @@ The aim is to state what the sandbox guarantees and show that it holds.
    the proxy's parsers (seeded loops in `cargo test`, `cargo fuzz` targets by hand —
    [sandbox-keeper.md](design/sandbox-keeper.md), threat model G12). Steps 1–3 done (`bc1b91e6`): what the
    supervisor reads of a run's memory is `wire.rs`, built and tested on every OS; `sendmmsg`'s offsets can't
-   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 next. Q1
+   wrap; a unix name is bound by the bytes it was checked by; property loops over all of it. Steps 4–7 wait for
+   the Cyber Verification Program's answer (§1). Q1
    done (2026-10-16): of the control messages it forwards only descriptors go (`SCM_RIGHTS`, at most 253), every
    other type refused and named in the run's report, and `sendmsg` gets a buffer tarae built. Still open: fuzzing
    that forwarding further waits for Anthropic's Cyber Verification Program (§1; the model's safeguards stopped
@@ -136,6 +140,22 @@ The aim is to state what the sandbox guarantees and show that it holds.
 5. **A speed comparison** against a bubblewrap-style sandbox.
 
 ### 3. Frictions, and lighter cards and reviews
+
+Done so far, under way, and the order after it (2026-10-16):
+
+- **The compatibility suite** (below): pieces 0–3 done, up to the first macOS table and its findings B1–B7.
+  Under way: piece 4 (the Linux images) and piece 6's first round (B1–B4). B3 is decided: uv gets a run home per
+  project for `UV_CACHE_DIR`; the user's cache is never opened to runs.
+- **The card model**: P3 done (cardauto pieces 1–4). Under way: P4 (pieces 6–7, scopes and the grant list). Piece 5
+  is §9.3's.
+- Then, in this order, after P4 (decided 2026-10-15):
+  1. **Code mode**: fewer round trips a turn. Each tool call reads the whole conversation again, which is most of a
+     turn's cost (measured 2026-10-14). Research: `target/sb/research-auto-code-mode.md`; a plan first.
+  2. **The review lens** (below).
+- **Auto mode** is built only if the card record shows it's worth it: one to two weeks of `$state/cards` after P3
+  runs in the user's tarae, each class's residual rate held against D1's bar (at least one card of a class per
+  session-hour; then the 300-card safety bar). Likely not built.
+- **Frictions**: batch 24 under way.
 
 Small fixes found while using tarae every day:
 
@@ -151,8 +171,8 @@ Small fixes found while using tarae every day:
 **IMPORTANT — the card and review burden.** Cards and reviews must stay few enough to read, or they protect
 nothing. Risk marks precise enough to trust (one large review had well over a hundred high-risk marks); like
 cards and marks grouped; fewer wrong cards. This includes the card model's last two phases: **P3**, deciding by
-what the session may do rather than by what a command looks like, and **P4**, scopes and a list of grants
-([design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
+what the session may do rather than by what a command looks like (done), and **P4**, scopes and a list of grants
+(under way — [design/cards.md](design/cards.md)). And a review lens: links between what Claude claims and the code, an
 evidence panel, "explain this hunk".
 
 **A "must work" compatibility suite for the sandbox** (2026-10-15), ahead of §2's items 3–5 in priority. The sandbox
