@@ -207,7 +207,6 @@ impl Editor {
     /// worked out on the worker, only then). Runs not sandboxed (`llm.sandbox` off, no sandbox here): none —
     /// such a file's own repository is found from its folder, nothing held back.
     pub(crate) fn git_places(&self, path: &Path) -> crate::gitrepo::Places {
-        use crate::sandbox::Availability;
         let id = self.session_of(path);
         let all = || std::iter::once(&self.session).chain(&self.sessions);
         let mut roots: Vec<PathBuf> = all().filter(|s| Some(s.id) == id).map(|s| s.root.clone()).collect();
@@ -216,6 +215,14 @@ impl Editor {
                 roots.push(s.root.clone());
             }
         }
+        crate::gitrepo::Places { roots, writes: self.sessions_writes() }
+    }
+
+    /// Where a sandboxed run of any session may write (`sandbox::write_places`, with what's been granted: kept for
+    /// its project, its chat's) — worked out when it's called (a worker's). None: runs aren't sandboxed.
+    pub(crate) fn sessions_writes(&self) -> crate::gitrepo::Writes {
+        use crate::sandbox::Availability;
+        let all = || std::iter::once(&self.session).chain(&self.sessions);
         let sandboxed = self.config.llm.sandbox
             && !matches!(self.sandbox, Availability::Missing(_) | Availability::Bypass);
         let (llm, store) = (self.config.llm.clone(), self.allow_path.clone());
@@ -225,7 +232,7 @@ impl Editor {
                 (s.root.clone(), s.allowed.clone(), chat)
             })
             .collect();
-        let writes: crate::gitrepo::Writes = std::sync::Arc::new(move || {
+        std::sync::Arc::new(move || {
             if !sandboxed {
                 return None;
             }
@@ -238,8 +245,7 @@ impl Editor {
                 all.extend(crate::sandbox::write_places(root, &w.llm));
             }
             Some(all)
-        });
-        crate::gitrepo::Places { roots, writes }
+        })
     }
 
     /// (Re)load the document's index content — on open, on regaining focus (may have staged outside), after

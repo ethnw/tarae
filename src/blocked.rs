@@ -897,6 +897,7 @@ mod tests {
             vars: Vec::new(),
             tokens: vec!["MY_API_TOKEN".into()],
             others: vec!["RUSTFLAGS".into(), "DATABASE_URL".into()],
+            ..Default::default()
         };
         let said = format!("MY_API_TOKEN={value} refused; RUSTFLAGS and DATABASE_URL unset");
         let named = env.named(&[(true, said)]);

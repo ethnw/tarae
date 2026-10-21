@@ -61,6 +61,36 @@ pub fn token_like(line: &str) -> bool {
     url_secret(line) || header_secret(&lower) || key_secret(&lower) || option_secret(&lower) || prefixed(line)
 }
 
+/// Whether variable `name` set to `value` looks like a token: `token_like` of `name=value`, a token's known
+/// prefix looked for anywhere in the value but inside a path segment or a name — never in the variable's name
+/// (`npm_config_store_dir` is `npm_` and 16 more: compat8, every `npm_config_*` that long was left out of runs, and
+/// `/x/npm_config_store_dir` with it — review note 11; `-Dgpr.key=ghp_…`, `user:glpat-…` still are: verify5 N3).
+pub fn var_token_like(name: &str, value: &str) -> bool {
+    let line = format!("{name}={value}");
+    let lower = line.to_ascii_lowercase();
+    url_secret(&line)
+        || header_secret(&lower)
+        || key_secret(&lower)
+        || option_secret(&lower)
+        || prefixed_word(value)
+}
+
+/// A token by its known prefix in `s` where a word starts — not after a letter, a digit, `_`, `-`, `.` or `/`
+/// (inside a name or a path segment) — with at least 16 characters after it.
+fn prefixed_word(s: &str) -> bool {
+    let inside = |c: char| c.is_ascii_alphanumeric() || "_-./".contains(c);
+    PREFIXES.iter().any(|p| {
+        s.match_indices(p).any(|(i, _)| {
+            !s[..i].chars().next_back().is_some_and(inside) && token_tail(&s[i + p.len()..]) >= 16
+        })
+    })
+}
+
+/// How many characters a token's prefix is followed by.
+fn token_tail(s: &str) -> usize {
+    s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').count()
+}
+
 /// An option among `lower`'s words that gives a secret: `-Dkey=value` (a JVM's system property), `-Pkey=value`
 /// (Gradle's project property), `--key=value` — a key named for a secret, a value written there. Where options
 /// are a variable's or a setting's value (`GRADLE_OPTS=-D…`, `org.gradle.jvmargs=-D…`) the word starts with it.
@@ -131,15 +161,7 @@ pub fn secret_name(name: &str) -> bool {
 
 /// A token by its known prefix, with at least 16 characters after it.
 fn prefixed(s: &str) -> bool {
-    PREFIXES.iter().any(|p| {
-        s.match_indices(p).any(|(i, _)| {
-            s[i + p.len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                .count()
-                >= 16
-        })
-    })
+    PREFIXES.iter().any(|p| s.match_indices(p).any(|(i, _)| token_tail(&s[i + p.len()..]) >= 16))
 }
 
 /// Headers whose value is a secret, lowercased (`header_secret`'s).
@@ -302,11 +324,14 @@ pub struct Tool {
     form: Form,
     /// The copy's name in the run's folder.
     file: String,
+    /// Keys the copy leaves out besides token-like lines (a setting's `out-keys`).
+    out_keys: Vec<String>,
 }
 
 /// git's: `GIT_CONFIG_GLOBAL`, else `$XDG_CONFIG_HOME/git/config`, then `~/.gitconfig`.
 fn git() -> Tool {
-    Tool { name: "git".into(), var: "GIT_CONFIG_GLOBAL".into(), form: Form::Git, file: "gitconfig".into() }
+    let (name, var, file) = ("git".into(), "GIT_CONFIG_GLOBAL".into(), "gitconfig".into());
+    Tool { name, var, form: Form::Git, file, out_keys: Vec::new() }
 }
 
 /// Where each tool reads its user settings, in the order it reads them (the later wins), as it finds them
@@ -325,7 +350,8 @@ pub fn sources_on(home: &Path, var: &dyn Fn(&str) -> Option<String>, os: Os) -> 
     for s in &t.settings {
         let (Some(name), Some(file)) = (&s.var, &s.copy) else { continue };
         let form = if s.form == "ini" { Form::Ini } else { Form::Lines };
-        let tool = Tool { name: s.tool.clone(), var: name.clone(), form, file: file.clone() };
+        let (out_keys, file) = (s.out_keys.clone(), file.clone());
+        let tool = Tool { name: s.tool.clone(), var: name.clone(), form, file, out_keys };
         let named = std::iter::once(name).chain(&s.var_also).find_map(|v| set(v));
         let named = named.filter(|f| !s.var_if_there || f.exists());
         let files = match named {
@@ -370,6 +396,8 @@ pub struct Copies {
     /// The settings of tools that take no copy that hold one, left as they are (`told_holders` — cargo's), and
     /// what the user is told of each (its pack's `tell`).
     pub told: Vec<(PathBuf, String)>,
+    /// Each tool's variable a copy is for — made or not (no folder to make it in: `:sandbox-env`'s page).
+    pub for_vars: Vec<String>,
 }
 
 impl Copies {
@@ -391,12 +419,15 @@ impl Copies {
     }
 }
 
-/// Making one tool's copy: where the copies go, which files held a token, how many copies were made.
+/// Making one tool's copy: where the copies go, which files held a token, how many copies were made, the keys
+/// left out besides (`Tool.out_keys`) and how many lines they took.
 struct Making<'a> {
     dir: Option<&'a Path>,
     home: &'a Path,
     held: Vec<PathBuf>,
     made: usize,
+    out_keys: &'a [String],
+    keys_gone: usize,
 }
 
 /// The deepest include followed (git's own limit is 10).
@@ -404,9 +435,22 @@ const INCLUDES_MAX: usize = 8;
 
 impl Making<'_> {
     /// A settings file's text without its token-like lines — and git's includes made whole (`git_line`).
-    /// None: not there, or not readable.
+    /// None: not there, or not readable. (Read as the tools read it: a byte that isn't UTF-8 is no reason to pass
+    /// a file holding a token as it is — verify4 F5.)
     fn file(&mut self, src: &Path, form: Form, depth: usize) -> Option<String> {
-        let text = std::fs::read_to_string(src).ok()?;
+        let mut text = String::from_utf8_lossy(&std::fs::read(src).ok()?).into_owned();
+        // (a key left out besides: `key = value` lines, any case, `_` as `-` — npm's own proxy settings)
+        if !self.out_keys.is_empty() {
+            let fold = |k: &str| k.trim().trim_matches(['"', '\'']).to_ascii_lowercase().replace('_', "-");
+            let out: Vec<String> = self.out_keys.iter().map(|k| fold(k)).collect();
+            let lines = text.lines().filter(|l| {
+                let key = l.split_once('=').map(|(k, _)| fold(k));
+                let gone = key.is_some_and(|k| out.contains(&k));
+                self.keys_gone += usize::from(gone);
+                !gone
+            });
+            text = lines.map(|l| format!("{l}\n")).collect();
+        }
         let base = src.parent().unwrap_or(Path::new("/")).to_path_buf();
         let (out, gone) = match form {
             Form::Git => strip(&text, form, |section, line| self.git_line(section, line, &base, depth)),
@@ -548,11 +592,18 @@ pub fn copies(
     for (tool, files) in sources {
         let real: Vec<PathBuf> =
             files.iter().filter(|f| f.is_file()).map(|f| crate::sandbox::profile_path(f)).collect();
-        let mut m = Making { dir: folder.as_deref(), home, held: Vec::new(), made: 0 };
+        let mut m = Making {
+            dir: folder.as_deref(),
+            home,
+            held: Vec::new(),
+            made: 0,
+            out_keys: &tool.out_keys,
+            keys_gone: 0,
+        };
         let texts: Vec<(PathBuf, String)> =
             real.iter().filter_map(|f| Some((f.clone(), m.file(f, tool.form, 0)?))).collect();
         let is_kept = |f: &Path| kept.iter().any(|k| f.starts_with(k));
-        if m.held.is_empty() && !real.iter().any(|f| is_kept(f)) {
+        if m.held.is_empty() && m.keys_gone == 0 && !real.iter().any(|f| is_kept(f)) {
             continue;
         }
         let text = match tool.form {
@@ -561,6 +612,7 @@ pub fn copies(
             }
             _ => texts.iter().map(|(f, t)| copy_head(f, t)).collect::<Vec<_>>().join("\n"),
         };
+        out.for_vars.push(tool.var.clone());
         let head = match (tool.form, texts.len()) {
             (Form::Ini, 2..) => format!("# tarae: {} merged, without their token-like lines\n", texts.len()),
             _ => String::new(),
@@ -955,6 +1007,38 @@ mod tests {
         }
     }
 
+    /// A variable's known token prefix is looked for in its value, never its name: `npm_config_store_dir` is
+    /// npm's prefix and 16 more, and was left out of runs as a token (compat8); one holding a token still is.
+    #[test]
+    fn a_variables_name_is_no_token() {
+        for name in ["npm_config_store_dir", "pnpm_config_store_dir", "npm_config_userconfig"] {
+            assert!(!var_token_like(name, "/workspace/.pnpm-store"), "{name}");
+            // (a path naming one: no token — review note 11)
+            assert!(!var_token_like(name, &format!("/x/{name}")), "{name} in a path");
+        }
+        let fake = "npm_0123456789abcdefABCDEFghij";
+        assert!(var_token_like("NPM_REGISTRY_KEY_VALUE", fake), "a token in the value");
+        assert!(var_token_like("NPM_REGISTRY_KEY_VALUE", &format!("'{fake}'")), "quoted");
+        // (one past the value's start, a word of its own: still a token — review note 3, verify5 N3, N6)
+        // (in two parts: a 20-character `glpat-` literal reads as a real token to GitHub's push protection)
+        let lab = concat!("glpat-", "0123456789abcdefABCD");
+        for (name, value) in [
+            ("SOME_USER", format!("user:{lab}")),
+            ("SOME_LIST", format!("a,{fake}")),
+            ("SOME_WORDS", format!("x {fake}")),
+            ("JAVA_OPTS", format!("-Dgpr.key={fake}")),
+            ("GOFLAGS", format!("-ldflags=-X=main.ghToken={fake}")),
+        ] {
+            assert!(var_token_like(name, &value), "{name}={value}");
+        }
+        // (inside a name or a path segment: none)
+        for value in ["/x/npm_config_store_dir", "a.npm_config_store_dir_more", "x-npm_config_store_dir"] {
+            assert!(!var_token_like("SOME_PATH", value), "{value}");
+        }
+        assert!(var_token_like("GITHUB_TOKEN", "x1234"), "a name for one");
+        assert!(var_token_like("npm_config__authToken", "x1234"), "npm's own");
+    }
+
     /// git's form: a header holding one drops its section; a key holding one drops itself and what goes on
     /// it (`\`); the rest stays, comments and all.
     #[test]
@@ -1019,7 +1103,6 @@ mod tests {
         let set = |n: &str| match n {
             "GIT_CONFIG_GLOBAL" => Some("/x/gitconfig".to_string()),
             "GOENV" => Some("off".to_string()),
-            "npm_config_userconfig" => Some("/x/npmrc".to_string()),
             "PIP_CONFIG_FILE" => Some(given.display().to_string()),
             "XDG_CONFIG_HOME" => Some("/xdg".to_string()),
             _ => None,
@@ -1027,8 +1110,18 @@ mod tests {
         let all = sources(&home, &set);
         assert_eq!(get(&all, "git"), [PathBuf::from("/x/gitconfig")]);
         assert!(get(&all, "go").is_empty());
-        assert_eq!(get(&all, "npm"), [PathBuf::from("/x/npmrc")]);
         assert_eq!(get(&all, "pip"), std::slice::from_ref(&given));
+        // (npm's `userconfig`, read in any case — `Here::var` folds it: compat8)
+        let by_var =
+            |all: &[(Tool, Vec<PathBuf>)], v: &str| all.iter().find(|(x, _)| x.var == v).unwrap().1.clone();
+        for user in ["npm_config_userconfig", "NPM_CONFIG_USERCONFIG", "Npm_Config_UserConfig"] {
+            let here = crate::sandbox::Here {
+                env: [(user.to_string(), "/x/npmrc".into())].into(),
+                ..Default::default()
+            };
+            let all = sources(&home, &|n| here.var(n));
+            assert_eq!(by_var(&all, "NPM_CONFIG_USERCONFIG"), [PathBuf::from("/x/npmrc")], "{user}");
+        }
         // (`PIP_CONFIG_FILE` naming no file: pip reads its own, as without it)
         let gone = |n: &str| (n == "PIP_CONFIG_FILE").then(|| "/x/none.conf".to_string());
         assert_eq!(get(&sources(&home, &gone), "pip")[0], home.join(".pip/pip.conf"));

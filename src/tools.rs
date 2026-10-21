@@ -1078,6 +1078,14 @@ fn also_env(
         "no run of yours yet in this session — run it without also first; its report says what's left out of its \
          environment",
     )?;
+    // (tarae's own stands in for it — the one spelling a run gets, a token-free copy of the settings, or a file of
+    // the run's own: a grant of the user's would change nothing, so no card offers one)
+    if env.replaced.iter().any(|l| l == n) {
+        return Err(format!(
+            "{n} is left out because tarae's own stands in for it (the one spelling a run gets, a token-free copy \
+             of the settings it names, or a file of the run's own) — no card passes the user's. If the command needs it, tell the user"
+        ));
+    }
     if env.left_out().any(|l| l == n) {
         return Ok(Some(crate::allow::Grant::Env(n.to_string())));
     }
@@ -3388,7 +3396,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     let basis = crate::caps::Basis { root: root.clone(), ..ed.caps_basis() };
     let grant = ride.extra.grant.clone();
     let said = ed.tokens_said.clone();
-    let here = ed.sandbox_here.clone();
+    let here = run_here(ed);
     let (job_run, base, session_root) =
         (job.clone(), ride.extra.base.as_ref().map(|b| b.tree.clone()), ed.session.root.clone());
     ed.events.jobs().spawn(move || {
@@ -3405,7 +3413,7 @@ pub(crate) fn guard_then_go(ed: &mut Editor, who: For, job: Job, ride: Ride) {
                     w.hosts.push(h.clone());
                 }
             }
-            let here = here.map_or_else(crate::sandbox::Here::now, |h| h());
+            let here = here();
             let mut p = crate::sandbox::policy_from(&root, w, &here)?;
             p.cwd = run_folder(&job_run, base.as_deref(), &session_root, &p.root);
             // (settings holding a token that take no copy — cargo's: the user hears once — `tokens::tell_holders`)
@@ -4310,6 +4318,19 @@ fn rules_told(ed: &mut Editor, said: Option<&crate::sandbox::Report>) {
     }
 }
 
+/// What a sandboxed run's policy is made from of tarae's surroundings (`Here::now`, or a test's
+/// `Editor.sandbox_here`) — with, worked out on the worker, where other sessions' runs and the write grants kept
+/// for any project may write (`Here.others_write`: a store there isn't told — compat B12).
+fn run_here(ed: &Editor) -> impl FnOnce() -> crate::sandbox::Here + Send + 'static {
+    let (here, others, store) = (ed.sandbox_here.clone(), ed.sessions_writes(), ed.allow_path.clone());
+    move || {
+        let mut here = here.map_or_else(crate::sandbox::Here::now, |h| h());
+        here.others_write = others().unwrap_or_default();
+        here.others_write.extend(crate::allow::Store::read(store.as_deref()).writes());
+        here
+    }
+}
+
 /// What a sandboxed run's report adds of the variables left out of its environment (`sandbox::runenv`): the
 /// ones the chat's conversation hasn't heard of yet, and those its output names (`env`: the run's, and its
 /// output).
@@ -4324,7 +4345,14 @@ fn env_left_out(
         chat.env_said = (chat.conversation.clone(), Vec::new());
     }
     let new = e.said(&mut chat.env_said.1).map(|s| format!("\n{s}\n")).unwrap_or_default();
-    format!("{new}{named}")
+    let mut notes = String::new();
+    for n in &e.notes {
+        if !chat.env_said.1.contains(n) {
+            notes.push_str(&format!("\n{n}\n"));
+            chat.env_said.1.push(n.clone());
+        }
+    }
+    format!("{new}{notes}{named}")
 }
 
 /// A run Claude waited on is gone before it ended (stopped, or another task took its place).
@@ -6837,7 +6865,7 @@ mod tests {
 
     /// `also` takes every port here, a variable and the terminals (piece D): each a grant when it's closed, none
     /// when it's open already; a variable judged by the session's last run — left out: its card; passed: it runs;
-    /// not set or one no card passes: said to Claude.
+    /// not set, one no card passes, or one tarae's own stands in for: said to Claude.
     #[test]
     fn also_asks_for_localhost_a_variable_and_the_terminals() {
         use serde_json::{Value, json};
@@ -6872,8 +6900,15 @@ mod tests {
             vars: vec![("LANG".into(), "C".into(), crate::sandbox::runenv::By::Floor)],
             tokens: vec!["GITHUB_TOKEN".into()],
             others: vec!["DATABASE_URL".into()],
+            replaced: vec!["TARAE_TEST_STOOD_IN".into(), "npm_config_userconfig".into()],
+            notes: Vec::new(),
         };
         let var = |n: &str, e: Option<&RunEnv>| grant(super::AlsoAsk::Env(n.into()), false, e);
+        // (one tarae's own stands in for: no card — a yes would change nothing; review note 9)
+        for stood_in in ["TARAE_TEST_STOOD_IN", "npm_config_userconfig"] {
+            assert!(var(stood_in, Some(&env)).is_err(), "{stood_in}");
+        }
+        assert!(var("TARAE_TEST_STOOD_IN", Some(&env)).is_err_and(|e| e.contains("stands in")));
         assert_eq!(var("DATABASE_URL", Some(&env)), Ok(Some(Grant::Env("DATABASE_URL".into()))));
         assert_eq!(var("GITHUB_TOKEN", Some(&env)), Ok(Some(Grant::Env("GITHUB_TOKEN".into()))));
         assert_eq!(var("LANG", Some(&env)), Ok(None), "passed already: it runs");
@@ -8368,16 +8403,49 @@ mod tests {
         let e = crate::sandbox::runenv::RunEnv {
             tokens: vec!["GITHUB_TOKEN".into()],
             others: vec!["DATABASE_URL".into()],
+            notes: vec!["An empty one stands in.".into()],
             ..Default::default()
         };
         let ran = |l: &str| Some((e.clone(), vec![(false, l.to_string())]));
         let first = super::env_left_out(&mut ed, ran("ok"));
         assert!(first.contains("token-like: GITHUB_TOKEN; the rest: DATABASE_URL."), "{first}");
+        assert!(first.contains("\nAn empty one stands in.\n"), "a run home's note: {first}");
         assert_eq!(super::env_left_out(&mut ed, ran("ok")), "", "said once");
         let named = super::env_left_out(&mut ed, ran("error: DATABASE_URL must be set"));
         assert!(named.contains("Its output names DATABASE_URL") && !named.contains("token-like"), "{named}");
         ed.session.chat.as_mut().unwrap().conversation = Some("c2".into());
         assert!(super::env_left_out(&mut ed, ran("ok")).contains("GITHUB_TOKEN"), "a new conversation");
         assert_eq!(super::env_left_out(&mut ed, None), "", "outside the sandbox");
+    }
+
+    /// What a run's policy is made from holds where other sessions' runs and every kept write grant may write
+    /// (`run_here`: `Editor::sessions_writes` and `allow::Store::writes`) — a store there isn't told (compat B12,
+    /// review note 4, verify5 N7).
+    #[test]
+    fn a_runs_surroundings_hold_what_other_sessions_and_kept_grants_write() {
+        let scratch = crate::scratch::Scratch::new("run-here");
+        let dir = std::fs::canonicalize(&*scratch).unwrap();
+        let (front, back, elsewhere) = (dir.join("front"), dir.join("back"), dir.join("elsewhere"));
+        let (back_w, kept_w) = (dir.join("back-w"), dir.join("kept-w"));
+        for f in [&front, &back, &elsewhere, &back_w, &kept_w] {
+            std::fs::create_dir_all(f).unwrap();
+        }
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = front.clone();
+        ed.config.llm.sandbox = true;
+        ed.sandbox = crate::sandbox::Availability::Ready;
+        let store = dir.join("state/sandbox.json");
+        ed.allow_path = Some(store.clone());
+        crate::allow::keep(&store, &elsewhere, |a| a.write.push(kept_w.clone())).unwrap();
+        ed.session_open(&back).unwrap();
+        assert!(ed.session_switch(0));
+        let behind = ed.sessions.iter_mut().find(|s| s.root == back).expect("the session behind");
+        behind.allowed.write.push(back_w.clone());
+        ed.sandbox_here = Some(std::sync::Arc::new(crate::sandbox::Here::default));
+        let here = super::run_here(&ed)();
+        for w in [&back, &back_w, &kept_w] {
+            let named = here.others_write.iter().any(|o| o == w);
+            assert!(named, "{}: {:?}", w.display(), here.others_write);
+        }
     }
 }

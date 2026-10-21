@@ -664,7 +664,10 @@ const ENV_NEVER: [&str; 48] = [
 /// `sandboxpack::Packs::env_names`: `GRADLE_USER_HOME=~/.gradle` would point a run back at the user's).
 pub fn env_allowed(name: &str) -> bool {
     let packs = crate::sandboxpack::get();
-    env_core(name) && !packs.env_names().any(|n| n == name) && !packs.env_on.iter().any(|e| e.name == name)
+    env_core(name)
+        && !packs.env_names().any(|n| n == name)
+        && !packs.env_on.iter().any(|e| e.name == name)
+        && !packs.any_case.iter().any(|a| a.eq_ignore_ascii_case(name))
 }
 
 /// `env_allowed` with `ENV_NEVER` alone — what the packs' own variables are checked against as they're read.
@@ -1542,6 +1545,10 @@ mod tests {
         // setting's file, a cache's variable, what a toolchain is asked — though `ENV_NEVER` doesn't name them
         // (a pack may set them itself)
         for n in ["GRADLE_USER_HOME", "GRADLE_OPTS", "GRADLE_RO_DEP_CACHE", "npm_config_logs_dir", "GOENV"] {
+            assert!(!env_allowed(n) && env_core(n), "{n}");
+        }
+        // (and what a tool reads in any case, in every spelling: npm's settings files, its store — compat8)
+        for n in ["npm_config_userconfig", "Npm_Config_GlobalConfig", "PNPM_CONFIG_STORE_DIR"] {
             assert!(!env_allowed(n) && env_core(n), "{n}");
         }
         // (every name the packs' caches and `ask` read, whatever pack: none of them a pattern's)

@@ -240,6 +240,10 @@ pub struct Policy {
     /// What the run's environment gets from the packs: the variables that point a tool at a home of the run's
     /// own (`run_homes_made` — Gradle's), and their `env` (npm's log folder in the run's).
     pub env: Vec<(String, String)>,
+    /// The packs' tools' stores on the project's filesystem (`sandbox::disk_stores_in`, compat B12): those told,
+    /// each with the variables that tell its tool — in `env` for a run — and those passed over, with why (the
+    /// run's report says both). None told sits where a run may write (`DiskStores::written_passed`).
+    pub disk_stores: super::DiskStores,
     /// What the run gets of tarae's own environment (`runenv.rs`) — it starts from nothing else — and the names
     /// of what it doesn't.
     pub run_env: runenv::RunEnv,
@@ -1170,6 +1174,7 @@ impl Policy {
             named_by: env.builder.who.clone(),
             reads,
             env: Vec::new(),
+            disk_stores: env.disk_stores.clone(),
             run_env: env.run_env.clone(),
             run_homes: env.run_homes.clone(),
             kept: Vec::new(),

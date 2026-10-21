@@ -839,6 +839,8 @@ impl Guard {
                     false => "",
                 };
                 // (said only where a token was there: nothing more to read on a machine without one)
+                // (a tool's store on the project's filesystem: told, or passed over and why — compat B12)
+                let stores: String = p.disk_stores.said().iter().map(|s| format!(" {s}")).collect();
                 let copies = match p.reads.copies.said() {
                     Some((files, vars)) => {
                         format!(" The tools read copies of {files} without their token lines ({vars}).")
@@ -870,7 +872,7 @@ impl Guard {
                 format!(
                     "In tarae's sandbox: it could {reads}write only in the project — not {names}, {names_where} \
                      (your edits change those) — temp folders and the toolchain's own{crates}{net}.{granted}{refused}\
-                     {keys}{copies}{linux}"
+                     {keys}{copies}{stores}{linux}"
                 )
             }
             Guard::Without(why) => {
@@ -1036,6 +1038,9 @@ impl Os {
 pub struct Here {
     pub env: HashMap<String, std::ffi::OsString>,
     pub tmp: Option<PathBuf>,
+    /// The shared temp folder (`TMP`), which every project's runs write but one it holds — None: a test's
+    /// stand-in has none (its Scratch folder is in `/tmp` on Linux).
+    pub shared_tmp: Option<PathBuf>,
     pub uid: u32,
     pub os: Os,
     /// Linux: `/etc/resolv.conf`'s text — the resolvers a run reaches on port 53 with the network open (D-c,
@@ -1052,6 +1057,18 @@ pub struct Here {
     /// taken as 26). Linux's supervisor reads the address itself: false. The packs' `env` `on = "v4-mapped-refused"`
     /// (`holds`).
     pub v4_mapped_refused: bool,
+    /// Which filesystem a path is on (None: not there) — None: as the disk says (`disk_stores_in`); a test's
+    /// stand-in tree gives its own.
+    pub devices: Option<fn(&Path) -> Option<u64>>,
+    /// Which filesystem a path is on (`Filesystem`) — None: as `statfs` says; a test's stand-in tree gives its
+    /// own.
+    pub filesystems: Option<fn(&Path) -> Option<Filesystem>>,
+    /// A test's stand-in tree's top: nothing above it is read for a store (`Who.top`). None: `/`.
+    pub stand_in: Option<PathBuf>,
+    /// What runs besides this project's may write (real paths): every open session's write places with what's
+    /// been granted there, the write grants kept for any project (`Editor::others_write`) — a store in or holding
+    /// one isn't told (`DiskStores::written_passed`). Another tarae's sessions aren't seen.
+    pub others_write: Vec<PathBuf>,
     /// Tests: every variable asked (`path`, `var`) — what a policy reads of the environment
     /// (`every_variable_the_policy_reads_reaches_the_run`).
     #[cfg(test)]
@@ -1073,9 +1090,14 @@ impl Here {
         Here {
             env: env.collect(),
             tmp: std::fs::canonicalize(std::env::temp_dir()).ok(),
+            shared_tmp: Some(PathBuf::from(TMP)),
             // SAFETY: getuid has no preconditions and can't fail.
             uid: unsafe { libc::getuid() },
             os: Os::HOST,
+            devices: None,
+            filesystems: None,
+            stand_in: None,
+            others_write: Vec::new(),
             #[cfg(target_os = "linux")]
             resolv: std::fs::read_to_string("/etc/resolv.conf").ok(),
             #[cfg(target_os = "linux")]
@@ -1099,13 +1121,27 @@ impl Here {
     /// A variable naming a place, when it's set and not empty.
     pub fn path(&self, name: &str) -> Option<PathBuf> {
         self.asked(name);
-        self.env.get(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+        self.spelled(name).map(|(_, v)| v).filter(|v| !v.is_empty()).map(PathBuf::from)
     }
 
     /// A variable as it's set (empty too), in UTF-8 — what `tokens::sources` reads (`std::env::var`'s).
     pub fn var(&self, name: &str) -> Option<String> {
         self.asked(name);
-        self.env.get(name).and_then(|v| v.clone().into_string().ok())
+        self.spelled(name).and_then(|(_, v)| v.clone().into_string().ok())
+    }
+
+    /// Variable `name` as its tool reads it, and the spelling it's set in: itself — or, for one the packs' tools
+    /// read in any case (`any-case`: npm's `npm_config_*`), the first set and not empty of every spelling, the
+    /// packs' own first, then the rest sorted (else the first set) — the one a run gets (`runenv::of`).
+    pub fn spelled(&self, name: &str) -> Option<(&String, &std::ffi::OsString)> {
+        let packs = crate::sandboxpack::get();
+        let Some(own) = packs.any_case.iter().find(|a| a.eq_ignore_ascii_case(name)) else {
+            return self.env.get_key_value(name);
+        };
+        let mut all: Vec<(&String, &std::ffi::OsString)> =
+            self.env.iter().filter(|(k, _)| k.eq_ignore_ascii_case(own)).collect();
+        crate::sorting::by(&mut all, |(a, _), (b, _)| (*a != own).cmp(&(*b != own)).then(a.cmp(b)));
+        all.iter().find(|(_, v)| !v.is_empty()).or(all.first()).copied()
     }
 
     #[cfg(test)]
@@ -1264,6 +1300,633 @@ pub fn ask_dir_verdict(d: &Path, root: &Path, home: Option<&Path>, later: &RunsL
     Ok(())
 }
 
+/// What `disk_store` found: the store told to its tool, or the one its tool would use, passed over and why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskStoreSeen {
+    pub told: Option<PathBuf>,
+    pub passed: Option<(PathBuf, String)>,
+}
+
+/// A tool's store on the project's own filesystem (`sandboxpack::DiskStore`, compat B12; pnpm's `.pnpm-store`), as
+/// the tool finds it outside the sandbox (pnpm's `storePathRelativeToHome`): where no place the tool's home may be
+/// (`home-env`, else `homes`) is on the project's filesystem, the topmost folder above the project on it — the
+/// climb stops at its edge (`dev`: a path's filesystem, None: not there); the project's own folder is never it —
+/// that user `uid` can write (pnpm's test: a link made there). Its `folder` is told when it's there, a folder and
+/// not a link, on a local disk's filesystem whose owners are who may write (`owners_unreal`: never a network or
+/// FUSE one), the user's and no one else's to write (`Who`), nor to rename away (each folder from the store's up
+/// to `/` the user's alone to change, or sticky and the user's or root's) — else passed over, said why (one
+/// another user made in a shared `/tmp` would have their
+/// files linked into the project); never home nor what holds it (a store in `/` is one; no card offers it:
+/// `RunsLater.stores`). Nothing where a store is named already: `named-env`; a `named-keys` line in a `named-in`
+/// file — the project's and those above it on its filesystem, read through no link, or a place; or in the file a
+/// `named-in-env` variable names (one that can't be read counts as naming it). Reads files: a worker's.
+pub(crate) fn disk_store(
+    d: &crate::sandboxpack::DiskStore,
+    root: &Path,
+    home: &Path,
+    who: &Who,
+    vars: &crate::sandboxpack::Vars,
+    var: &dyn Fn(&str) -> Option<String>,
+    dev: &dyn Fn(&Path) -> Option<u64>,
+) -> DiskStoreSeen {
+    use std::os::unix::fs::MetadataExt;
+    let none = DiskStoreSeen::default();
+    if d.named_env.iter().any(|n| var(n).is_some_and(|v| !v.is_empty())) {
+        return none;
+    }
+    // (named in a file: not there — not named; there but not a regular file to read — can't tell, named)
+    let names = |f: &Path, follow: bool, missing: bool| match settings_text(f, follow) {
+        Ok(Some(t)) => names_a_key(&t, &d.named_keys),
+        Ok(None) => missing,
+        Err(()) => true,
+    };
+    let in_named = d.named_in_env.iter().filter_map(|n| var(n).filter(|v| !v.is_empty()));
+    if in_named.map(PathBuf::from).any(|f| names(&f, true, true)) {
+        return none;
+    }
+    let Some(here) = dev(root) else { return none };
+    let homes: Vec<PathBuf> = match var(&d.home_env).map(PathBuf::from).filter(|p| p.is_absolute()) {
+        Some(h) => vec![h],
+        None => d.homes.iter().filter_map(|p| vars.place(p)).collect(),
+    };
+    // (a home not made yet: the tool makes it where its nearest folder is)
+    let reached = |p: &Path| p.ancestors().find_map(dev);
+    if homes.is_empty() || homes.iter().any(|h| reached(h) == Some(here)) {
+        return none;
+    }
+    let climb: Vec<&Path> = root.ancestors().take_while(|a| dev(a) == Some(here)).collect();
+    // (the user's own files followed through a link, the project's and those above it not — a run can make those)
+    let named_already = d.named_in.iter().any(|f| match f.starts_with('{') || f.starts_with("~/") {
+        true => vars.place(f).is_some_and(|p| names(&p, true, false)),
+        false => climb.iter().any(|dir| names(&dir.join(f), false, false)),
+    });
+    if named_already {
+        return none;
+    }
+    let Some(at) = climb.iter().skip(1).rev().find(|a| writable(a)) else { return none };
+    let store = at.join(&d.folder);
+    let Ok(m) = store.symlink_metadata() else { return none };
+    let why = match () {
+        _ if home.starts_with(&store) => return none,
+        _ if m.file_type().is_symlink() => "it's a link".to_string(),
+        _ if !m.is_dir() => "it isn't a folder".into(),
+        _ if let Some(why) = owners_unreal((who.filesystem)(&store).as_ref()) => why,
+        _ if m.uid() != who.uid => format!("it's another user's (uid {})", m.uid()),
+        _ if others_write(m.mode(), m.gid(), who) => "others may write it".into(),
+        _ if acl_lets_others_write(&store, who, m.gid()) => "an ACL lets others write it".into(),
+        _ => match changed_from_above(at, who) {
+            Some(why) => why,
+            None => return DiskStoreSeen { told: Some(store), passed: None },
+        },
+    };
+    DiskStoreSeen { told: None, passed: Some((store, why)) }
+}
+
+/// Why what's at a store in folder `at` could be swapped after it's checked — by another user or another
+/// project's runs — from `at` up to `/` (real paths): a folder owned by neither root nor the user (its owner may
+/// rename what's in it, whatever its mode), or one another may write that isn't sticky (with the owner rule,
+/// sticky is root's or the user's: only an entry's owner renames it), or one an ACL lets others change, or a
+/// repository's top (it holds `.git`: a session there, of this repository's checkouts or another's, has its runs
+/// write its root — a store they make or fill in it would be told here; a worktree's `.git` is a file). None: none
+/// of them. (A test's stand-in tree ends the walk at its top, `Who.top`: nothing above it is read.)
+fn changed_from_above(at: &Path, who: &Who) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let ends = |a: &Path| who.top.is_some_and(|t| !a.starts_with(t));
+    at.ancestors().take_while(|a| !ends(a)).find_map(|a| {
+        let shown = home_shown(&a.display().to_string());
+        let Ok(m) = a.symlink_metadata() else { return Some(format!("{shown} can't be read")) };
+        Some(match () {
+            _ if m.uid() != 0 && m.uid() != who.uid => {
+                format!("{shown} is another user's (uid {}), who may rename what's in it", m.uid())
+            }
+            _ if others_write(m.mode(), m.gid(), who) && m.mode() & 0o1000 == 0 => {
+                format!("another user may rename what's in {shown}")
+            }
+            _ if acl_lets_others_write(a, who, m.gid()) => format!("an ACL lets others change {shown}"),
+            _ if a.join(".git").symlink_metadata().is_ok() => {
+                format!("{shown} is a repository's top, which runs of a session there write")
+            }
+            _ => return None,
+        })
+    })
+}
+
+/// Whose a store may be (`disk_store`): the user's — `uid`, and their own private group (`private_gid`,
+/// `private_group`: a group's write is theirs alone then — a umask of 002 makes every folder so; with an ACL the
+/// group bits are its mask, so its entries are read: `acl_lets_others_write`) — and which filesystem a path is on
+/// (`filesystem`, `filesystem_of`; a test's stand-in), and where a test's stand-in tree ends (`top`: None, `/`).
+pub(crate) struct Who<'a> {
+    pub uid: u32,
+    pub private_gid: Option<u32>,
+    pub filesystem: &'a dyn Fn(&Path) -> Option<Filesystem>,
+    pub top: Option<&'a Path>,
+}
+
+impl Who<'_> {
+    /// The user tarae runs as, on this machine's filesystems.
+    pub fn now(uid: u32) -> Who<'static> {
+        Who { uid, private_gid: private_group(uid), filesystem: &filesystem_of, top: None }
+    }
+}
+
+/// A filesystem as `statfs` names it (`filesystem_of`): macOS's `f_fstypename`, Linux's `f_type` by its name
+/// (`MAGIC`; one not there `f_type 0x…`) — and whether it's mounted ignoring ownership (macOS's
+/// `MNT_IGNORE_OWNERSHIP`, an external disk's default: every file shows as the caller's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Filesystem {
+    pub name: String,
+    pub ignores_ownership: bool,
+}
+
+/// The local disks' filesystems, whose owners and modes say who may write: Linux's ext2/3/4, xfs, btrfs, f2fs,
+/// zfs; macOS's apfs, hfs.
+const OWNED: [&str; 7] = ["ext4", "xfs", "btrfs", "f2fs", "zfs", "apfs", "hfs"];
+
+/// Linux's `f_type`s by name: the local disks' (ext2, 3 and 4 share one), then others said by name — nfs, cifs,
+/// smb2, fuse (sshfs, virtiofs, rclone…), 9p, overlay, tmpfs.
+#[cfg(not(target_os = "macos"))]
+const MAGIC: [(u64, &str); 12] = [
+    (0xEF53, "ext4"),
+    (0x5846_5342, "xfs"),
+    (0x9123_683E, "btrfs"),
+    (0xF2F5_2010, "f2fs"),
+    (0x2FC1_2FC1, "zfs"),
+    (0x6969, "nfs"),
+    (0xFF53_4D42, "cifs"),
+    (0xFE53_4D42, "smb2"),
+    (0x6573_5546, "fuse"),
+    (0x0102_1997, "9p"),
+    (0x794C_7630, "overlay"),
+    (0x0102_1994, "tmpfs"),
+];
+
+/// Why the owners a filesystem shows aren't who may write on it — None: they are (a local disk's, `OWNED`). A
+/// network or FUSE filesystem shows the mounting user (or the mount's options) as every file's owner, whoever
+/// writes it on the server or through another mount, and its ACLs aren't POSIX ones; anything else isn't known to
+/// be better. Can't tell (None in): not.
+fn owners_unreal(fs: Option<&Filesystem>) -> Option<String> {
+    match fs {
+        None => Some("its filesystem can't be told".into()),
+        Some(f) if f.ignores_ownership => {
+            Some("its volume ignores ownership (every file shows as the user's)".into())
+        }
+        Some(f) if OWNED.contains(&f.name.as_str()) => None,
+        Some(f) => Some(format!(
+            "its filesystem ({}) isn't a local disk's — a network or FUSE filesystem's owners aren't who can write",
+            f.name
+        )),
+    }
+}
+
+/// The filesystem `path` is on (`statfs`, followed) — None: it can't be told.
+fn filesystem_of(path: &Path) -> Option<Filesystem> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: a zeroed C struct statfs fills, a C string we own.
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: statfs ends the name with a NUL inside the array.
+        let name = unsafe { std::ffi::CStr::from_ptr(s.f_fstypename.as_ptr()) };
+        let ignores_ownership = s.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 != 0;
+        Some(Filesystem { name: name.to_string_lossy().into_owned(), ignores_ownership })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // (a magic is 32 bits; `f_type` is signed and as wide as a word)
+        let magic = s.f_type as u64 & 0xFFFF_FFFF;
+        let name = MAGIC.iter().find(|(m, _)| *m == magic).map(|(_, n)| n.to_string());
+        Some(Filesystem {
+            name: name.unwrap_or_else(|| format!("f_type {magic:#x}")),
+            ignores_ownership: false,
+        })
+    }
+}
+
+/// Whether a file of mode `mode` and group `gid` lets someone but `who` write it: others' write, or the group's
+/// unless it's the user's own private group.
+fn others_write(mode: u32, gid: u32, who: &Who) -> bool {
+    mode & 0o002 != 0 || mode & 0o020 != 0 && who.private_gid != Some(gid)
+}
+
+/// User `uid`'s own private group, when it has one (`private_in`, from the system's own account files): their
+/// account and primary group as the system says (`getpwuid_r`), checked against `/etc/passwd` and `/etc/group`
+/// where `/etc/nsswitch.conf` says those are every account (none there — macOS: none).
+fn private_group(uid: u32) -> Option<u32> {
+    use std::ffi::CStr;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: a zeroed C struct, filled by the reentrant call into `buf`, which outlives every pointer read.
+    let (name, gid) = unsafe {
+        let (mut pw, mut pr): (libc::passwd, *mut libc::passwd) = (std::mem::zeroed(), std::ptr::null_mut());
+        if libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), buf.len(), &mut pr) != 0 || pr.is_null() {
+            return None;
+        }
+        (CStr::from_ptr(pw.pw_name).to_str().ok()?.to_string(), pw.pw_gid)
+    };
+    let nss = std::fs::read_to_string("/etc/nsswitch.conf").ok()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    let group = std::fs::read_to_string("/etc/group").ok()?;
+    private_in((uid, &name, gid), &nss, &passwd, &group)
+}
+
+/// Whether `nsswitch.conf`'s text takes the accounts and their groups (`passwd`, `group`, and `initgroups` where
+/// it's named) from the files alone — and systemd's, whose users and groups only root adds — each named: any
+/// other source (sss, ldap, nis, winbind, compat, a `[…]` action that merges) may hold accounts or members the
+/// files don't list (verify4 F3).
+fn accounts_in_files(nss: &str) -> bool {
+    let (mut passwd, mut group) = (false, false);
+    for line in nss.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let Some((db, sources)) = line.split_once(':') else { continue };
+        let db = db.trim();
+        if !matches!(db, "passwd" | "group" | "initgroups") {
+            continue;
+        }
+        let mut each = sources.split_whitespace().peekable();
+        if each.peek().is_none() || !each.all(|s| s == "files" || s == "systemd") {
+            return false;
+        }
+        passwd |= db == "passwd";
+        group |= db == "group";
+    }
+    passwd && group
+}
+
+/// Group `gid`, user `name`'s (`uid`) primary one, as private to them by the account files' texts (`passwd`,
+/// `group`, where `nss` says they hold every account: `accounts_in_files`): listed in both — a directory's
+/// accounts (LDAP, sssd, NIS's `+` lines, macOS's) can't be listed, so not — named as they are, no member but
+/// them, and no other account with it as its primary group (one is never among the group's members).
+fn private_in((uid, name, gid): (u32, &str, u32), nss: &str, passwd: &str, group: &str) -> Option<u32> {
+    if !accounts_in_files(nss) {
+        return None;
+    }
+    // (each entry's fields; None: one that can't be read, or a directory's `+`/`-` line — not all listed)
+    let entries = |t: &str| -> Option<Vec<Vec<String>>> {
+        let lines = t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
+        let entries: Vec<Vec<String>> = lines.map(|l| l.split(':').map(String::from).collect()).collect();
+        entries.iter().all(|e| e.len() >= 4 && !e[0].starts_with(['+', '-'])).then_some(entries)
+    };
+    let num = |s: &String| s.parse::<u32>().ok();
+    let mut own = false;
+    for e in entries(passwd)? {
+        if num(&e[3]) == Some(gid) {
+            match e[0] == name && num(&e[2]) == Some(uid) {
+                true => own = true,
+                false => return None,
+            }
+        }
+    }
+    let groups = entries(group)?;
+    let mut same = groups.iter().filter(|e| num(&e[2]) == Some(gid)).peekable();
+    same.peek()?;
+    let alone =
+        |e: &Vec<String>| e[0] == name && e[3].split(',').map(str::trim).all(|m| m.is_empty() || m == name);
+    (own && same.all(alone)).then_some(gid)
+}
+
+/// Whether an ACL on `path` (not followed; its group `gid`) may let someone but `who` write it, add to it, or
+/// delete in it — macOS's extended ACLs, which the mode bits don't show (an allow entry giving any of those to
+/// another); Linux's POSIX ACLs, the access one and the default one new entries take (`posix_acl_others_write`:
+/// with one the group bits are its mask, which the private group's allowance can't tell from the group's own —
+/// `others_write`). Can't tell: it does.
+fn acl_lets_others_write(path: &Path, who: &Who, gid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gid;
+        macos_acl::lets_others_write(path, who.uid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        [c"system.posix_acl_access", c"system.posix_acl_default"].iter().any(|name| match xattr(path, name) {
+            Ok(None) => false,
+            Ok(Some(bytes)) => posix_acl_others_write(&bytes, who, gid),
+            Err(()) => true,
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (path, who, gid);
+        true
+    }
+}
+
+/// Extended attribute `name` of `path` (not followed) — Ok(None): none, or none the filesystem keeps
+/// (`ENODATA`, `ENOTSUP`); Err: can't tell.
+#[cfg(target_os = "linux")]
+fn xattr(path: &Path, name: &std::ffi::CStr) -> Result<Option<Vec<u8>>, ()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| ())?;
+    let none =
+        || matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENODATA | libc::ENOTSUP));
+    // SAFETY: C strings we own; a size query (no buffer), then a buffer of that size.
+    let n = unsafe { libc::lgetxattr(c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if n < 0 {
+        return if none() { Ok(None) } else { Err(()) };
+    }
+    let mut buf = vec![0u8; n as usize];
+    // SAFETY: as above, into a buffer we own of the length given.
+    let got = unsafe { libc::lgetxattr(c.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    // (changed between the two calls: can't tell)
+    if got < 0 || got as usize != buf.len() {
+        return Err(());
+    }
+    Ok(Some(buf))
+}
+
+/// Whether a POSIX ACL in the kernel's xattr form (`bytes`: version 2, then entries of tag, permissions — u16
+/// each — and id, u32, little-endian) on a file of group `gid` gives write to someone but `who` or root: a named
+/// user's entry but theirs and root's, a named group's or the file's group's but their private group's, others'
+/// — the mask aside (its owner may widen it). udisks2's `user:$USER:r-x` on `/media/$USER` gives none. One that
+/// can't be read: it does.
+#[cfg(any(target_os = "linux", test))]
+fn posix_acl_others_write(bytes: &[u8], who: &Who, gid: u32) -> bool {
+    const WRITE: u16 = 2;
+    let (head, entries) = bytes.split_at(4.min(bytes.len()));
+    if head != 2u32.to_le_bytes() || entries.len() % 8 != 0 {
+        return true;
+    }
+    entries.as_chunks::<8>().0.iter().any(|e| {
+        let tag = u16::from_le_bytes([e[0], e[1]]);
+        let perm = u16::from_le_bytes([e[2], e[3]]);
+        let id = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+        perm & WRITE != 0
+            && match tag {
+                // (the owner — the user's or root's, checked before — and the mask)
+                0x01 | 0x10 => false,
+                0x02 => id != who.uid && id != 0,
+                0x04 => who.private_gid != Some(gid),
+                0x08 => who.private_gid != Some(id),
+                _ => true,
+            }
+    })
+}
+
+/// macOS's ACL calls (`sys/acl.h`, `membership.h`) — not in the libc crate.
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    use std::path::Path;
+
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    const ACL_FIRST_ENTRY: libc::c_int = 0;
+    const ACL_NEXT_ENTRY: libc::c_int = -1;
+    const ACL_EXTENDED_ALLOW: libc::c_int = 1;
+    /// Write data / add a file, delete, append / add a folder, delete a child, change the ACL, change the owner.
+    const WRITES: u64 = 1 << 2 | 1 << 4 | 1 << 5 | 1 << 6 | 1 << 12 | 1 << 13;
+
+    unsafe extern "C" {
+        fn acl_get_link_np(path: *const libc::c_char, ty: libc::c_int) -> *mut libc::c_void;
+        fn acl_get_entry(
+            acl: *mut libc::c_void,
+            id: libc::c_int,
+            entry: *mut *mut libc::c_void,
+        ) -> libc::c_int;
+        fn acl_get_tag_type(entry: *mut libc::c_void, tag: *mut libc::c_int) -> libc::c_int;
+        fn acl_get_permset_mask_np(entry: *mut libc::c_void, mask: *mut u64) -> libc::c_int;
+        fn acl_get_qualifier(entry: *mut libc::c_void) -> *mut libc::c_void;
+        fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+        fn mbr_uid_to_uuid(uid: libc::uid_t, uu: *mut u8) -> libc::c_int;
+    }
+
+    pub(super) fn lets_others_write(path: &Path, uid: u32) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return true };
+        // (the user's own UUID asked only for an entry that lets someone write: no ACL, no directory lookup)
+        let mut me: Option<[u8; 16]> = None;
+        // SAFETY: the calls as sys/acl.h declares them; every object they hand out freed with acl_free once read.
+        unsafe {
+            let acl = acl_get_link_np(c.as_ptr(), ACL_TYPE_EXTENDED);
+            if acl.is_null() {
+                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+            }
+            let (mut id, mut entry, mut others) = (ACL_FIRST_ENTRY, std::ptr::null_mut(), false);
+            while !others && acl_get_entry(acl, id, &mut entry) == 0 {
+                id = ACL_NEXT_ENTRY;
+                let (mut tag, mut mask) = (0, 0u64);
+                if acl_get_tag_type(entry, &mut tag) != 0 || acl_get_permset_mask_np(entry, &mut mask) != 0 {
+                    others = true;
+                    break;
+                }
+                if tag != ACL_EXTENDED_ALLOW || mask & WRITES == 0 {
+                    continue;
+                }
+                if me.is_none() {
+                    let mut uu = [0u8; 16];
+                    if mbr_uid_to_uuid(uid, uu.as_mut_ptr()) != 0 {
+                        others = true;
+                        break;
+                    }
+                    me = Some(uu);
+                }
+                let q = acl_get_qualifier(entry);
+                others = q.is_null()
+                    || Some(std::slice::from_raw_parts(q as *const u8, 16)) != me.as_ref().map(|m| &m[..]);
+                if !q.is_null() {
+                    acl_free(q);
+                }
+            }
+            acl_free(acl);
+            others
+        }
+    }
+}
+
+/// Whether user tarae runs as may write in folder `dir` (`access(2)`, the real user's).
+fn writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    // SAFETY: a plain call on a C string we own.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// A settings file's text, for the keys it names: Ok(None) — not there; Err — there, but not a regular file of at
+/// most `SETTINGS_MAX` bytes (a FIFO, `/dev/zero`, a link where `follow` is false). Opened without waiting (a
+/// FIFO's open would), checked on what was opened.
+fn settings_text(path: &Path, follow: bool) -> Result<Option<String>, ()> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut flags = libc::O_NONBLOCK;
+    if !follow {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(flags).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let m = f.metadata().map_err(|_| ())?;
+    if !m.is_file() || m.len() > SETTINGS_MAX {
+        return Err(());
+    }
+    let mut text = String::new();
+    f.take(SETTINGS_MAX).read_to_string(&mut text).map_err(|_| ())?;
+    Ok(Some(text))
+}
+
+/// The most of a settings file `settings_text` reads.
+const SETTINGS_MAX: u64 = 1 << 20;
+
+/// Whether a settings file's text gives one of `keys` a value: `key=…` (`.npmrc`) or `key: …` (YAML), quoted or
+/// not, not in a comment.
+fn names_a_key(text: &str, keys: &[String]) -> bool {
+    text.lines().map(str::trim).filter(|l| !l.starts_with(['#', ';'])).any(|l| {
+        let l = l.trim_start_matches(['"', '\'']);
+        keys.iter().any(|k| {
+            l.strip_prefix(k.as_str()).is_some_and(|rest| {
+                let rest = rest.trim_start_matches(['"', '\'']).trim_start();
+                rest.starts_with('=') || rest.starts_with(':')
+            })
+        })
+    })
+}
+
+/// The packs' tools' stores on the project's filesystem (`disk_store`) as this machine has them: those told, each
+/// with the variables its tool's version reads (`tool_major`; can't tell: every one) — its path the climb's own,
+/// from the project's real path, not resolved again — and those passed over, with why. A worker's.
+pub(crate) fn disk_stores_in(
+    root: &Path,
+    home: &Path,
+    vars: &crate::sandboxpack::Vars,
+    here: &Here,
+) -> DiskStores {
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| match here.devices {
+        Some(on) => on(p),
+        None => std::fs::metadata(p).ok().map(|m| m.dev()),
+    };
+    let var = |n: &str| here.var(n);
+    let root = profile_path(root);
+    let fs = |p: &Path| here.filesystems.map_or_else(|| filesystem_of(p), |on| on(p));
+    let who = Who { filesystem: &fs, top: here.stand_in.as_deref(), ..Who::now(here.uid) };
+    let mut out = DiskStores::default();
+    for d in &crate::sandboxpack::get().disk_stores {
+        let seen = disk_store(d, &root, home, &who, vars, &var, &dev);
+        if let Some(s) = seen.told {
+            let top = here.stand_in.as_deref();
+            let major =
+                d.version.as_ref().and_then(|v| tool_major(v, (&root, top), &path_dirs_in(here), vars));
+            let env = d.env.iter().filter(|e| e.read_by(major)).map(|e| e.var.clone()).collect();
+            if major.is_none() && d.version.is_some() {
+                out.unknown.push(s.clone());
+            }
+            out.told.push((s, env));
+        }
+        out.passed.extend(seen.passed);
+    }
+    out
+}
+
+/// The packs' tools' stores on the project's filesystem (`disk_stores_in`): told — each with the variables that
+/// tell it — and passed over, each with why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiskStores {
+    pub told: Vec<(PathBuf, Vec<String>)>,
+    pub passed: Vec<(PathBuf, String)>,
+    /// Those told whose tool's version couldn't be told (`tool_major`): told in what its newest reads.
+    pub unknown: Vec<PathBuf>,
+}
+
+impl DiskStores {
+    /// What the run's report says of them.
+    pub fn said(&self) -> Vec<String> {
+        let told = self.told.iter().map(|(s, env)| {
+            let unknown = match self.unknown.contains(s) {
+                true => " — its version unknown, in what its newer versions read",
+                false => "",
+            };
+            format!(
+                "{} is told to its tool ({}{unknown}): its store on the project's filesystem, read — no run of \
+                 this tarae's session, nor of the others open, writes it (another tarae's grants aren't seen).",
+                home_shown(&s.display().to_string()),
+                env.join(", ")
+            )
+        });
+        let passed = self.passed.iter().map(|(s, why)| {
+            let s = home_shown(&s.display().to_string());
+            format!("{s} isn't told to its tool — {why}: its tool uses its home's store.")
+        });
+        told.chain(passed).collect()
+    }
+
+    /// Those told that sit in or hold a place runs may write (`writes`: the policy's write places — the temp
+    /// folders, the folders granted — and other sessions' and kept grants, `Here.others_write`): passed over — a store an earlier run could fill isn't "read, never written",
+    /// and Landlock can't carve a deny out of a grant, so passing over is the one rule on both systems.
+    pub fn written_passed(&mut self, writes: &[PathBuf]) -> Vec<PathBuf> {
+        let mut gone = Vec::new();
+        self.told.retain(|(s, _)| {
+            let Some(w) = writes.iter().find(|w| s.starts_with(w) || w.starts_with(s)) else { return true };
+            let why = format!("runs may write {}", home_shown(&w.display().to_string()));
+            self.passed.push((s.clone(), why));
+            gone.push(s.clone());
+            false
+        });
+        gone
+    }
+}
+
+/// The major version of the tool a run in the project at `root` (real; `top`: a test's stand-in tree's, nothing
+/// above it read) starts (`ToolVersion`, as the tool and its shims choose it). The project's pin: the nearest
+/// `pinned` file above it (one naming none, or another program, pins nothing). The `program` first on the run's
+/// PATH (`path`, real folders): a package's (a `package.json` above its real path, among the first four folders,
+/// named in `packages`) runs the pin from `follows_pin_from` on, its own version before; a shim's (named in
+/// `shims`) runs the nearest pin there is (corepack climbs past a `package.json` with none), else the version its
+/// `known` file names for the program; one of neither kind (a copied binary, another manager's shim), or none on
+/// PATH, runs the pin. None: can't tell — a shim knowing none good runs its own default, which corepack keeps
+/// only inside its bundled code (verify5 N2), so that's taken as unknown.
+fn tool_major(
+    v: &crate::sandboxpack::ToolVersion,
+    (root, top): (&Path, Option<&Path>),
+    path: &[PathBuf],
+    vars: &crate::sandboxpack::Vars,
+) -> Option<u32> {
+    let json = |f: &Path| -> Option<serde_json::Value> {
+        serde_json::from_str(&settings_text(f, true).ok().flatten()?).ok()
+    };
+    let version = |v: &str| -> Option<(u32, u32)> {
+        let mut parts = v.trim_start_matches(['v', '^', '~', '=']).split(['.', '+', '-']);
+        Some((parts.next()?.parse().ok()?, parts.next().and_then(|m| m.parse().ok()).unwrap_or(0)))
+    };
+    // (the pin: the closest manifest's — or, `climb`, the closest that has the key: corepack's shim climbs past one
+    // with none; never above a test's stand-in tree, `top`)
+    let pin_in = |climb: bool| {
+        let (file, key) = v.pinned.as_ref()?;
+        let within = |a: &&Path| top.is_none_or(|t| a.starts_with(t));
+        let mut manifests = root.ancestors().take_while(within).map(|a| a.join(file)).filter(|f| f.is_file());
+        let pinned = match climb {
+            false => json(&manifests.next()?)?.get(key)?.as_str()?.to_string(),
+            true => manifests.find_map(|m| Some(json(&m)?.get(key)?.as_str()?.to_string()))?,
+        };
+        version(pinned.strip_prefix(&format!("{}@", v.program))?)
+    };
+    let program = path.iter().map(|d| d.join(&v.program)).find(|p| p.is_file());
+    let real = program.and_then(|p| std::fs::canonicalize(p).ok());
+    let manifest = real.as_deref().and_then(|real| {
+        real.ancestors().skip(1).take(4).find_map(|a| {
+            let m = json(&a.join("package.json"))?;
+            let name = m.get("name")?.as_str()?.to_string();
+            Some((m, name, a.to_path_buf()))
+        })
+    });
+    let ran = match manifest {
+        Some((m, name, _)) if v.packages.contains(&name) => {
+            let own = m.get("version").and_then(|s| s.as_str()).and_then(version);
+            match (own, pin_in(false), v.follows_pin_from) {
+                (Some(own), Some(pin), Some(from)) if own >= from => Some(pin),
+                (own, ..) => own,
+            }
+        }
+        // (a shim's: the pin, else the version it last knew good)
+        Some((_, name, _)) if v.shims.contains(&name) => pin_in(true).or_else(|| {
+            let known = json(&vars.place(v.known.as_deref()?)?)?;
+            version(known.get(&v.program)?.as_str()?)
+        }),
+        _ => pin_in(false),
+    };
+    ran.map(|(major, _)| major)
+}
+
 /// Where programs land by convention in home, whatever the toolchain (install scripts', pipx's).
 pub const USER_BIN: &str = ".local/bin";
 
@@ -1283,6 +1946,9 @@ pub struct RunsLater {
     /// The places in a home a cache being judged has there (`but_cache`) — a folder in one isn't refused for
     /// being in that home.
     pub own: Vec<PathBuf>,
+    /// A tool's store on the project's filesystem, told to its runs (`disk_store`, compat B12) — its files are
+    /// hard-linked into the user's projects. Real paths.
+    pub stores: Vec<PathBuf>,
 }
 
 impl RunsLater {
@@ -1303,7 +1969,8 @@ impl RunsLater {
         }
         crate::sorting::sort(&mut caches);
         caches.dedup();
-        let mut r = RunsLater { bins: bins.collect(), caches, homes: homes.collect(), own: Vec::new() };
+        let mut r =
+            RunsLater { bins: bins.collect(), caches, homes: homes.collect(), ..RunsLater::default() };
         real(&mut r.bins);
         real(&mut r.homes);
         r
@@ -1321,6 +1988,13 @@ impl RunsLater {
 
     /// Why folder `d` (real) is never written — None: not for this.
     pub fn refuses(&self, d: &Path) -> Option<String> {
+        if let Some(s) = self.stores.iter().find(|s| s.starts_with(d) || d.starts_with(s)) {
+            let how = if d.starts_with(s) { "it's in" } else { "it holds" };
+            return Some(format!(
+                "{how} a package store the user's projects link to ({})",
+                crate::allow::tilde(s)
+            ));
+        }
         if let Some(b) = self.bins.iter().find(|b| b.starts_with(d) || d.starts_with(b)) {
             let how = if d.starts_with(b) { "it's where" } else { "it holds where" };
             return Some(format!("{how} programs you run are ({})", crate::allow::tilde(b)));
@@ -3241,6 +3915,9 @@ pub struct Env {
     pub asked_caches: Vec<(String, String, CachesSaid)>,
     /// What no folder opened for writing is or holds (`ask_dir_verdict`).
     pub runs_later: RunsLater,
+    /// The packs' tools' stores on the project's filesystem (`disk_stores_in`): those told, each with the
+    /// variables that tell its tool — read, never written (`runs_later.stores`) — and those passed over.
+    pub disk_stores: DiskStores,
     /// The tools' homes kept across the project's runs (the packs' `run-home` with `keep` — `kept_homes`): the
     /// tool's name, the folder (real; made by the run that needs it).
     pub kept_homes: Vec<(String, PathBuf)>,
@@ -3423,12 +4100,22 @@ pub(crate) fn env_in(
     let key_spared = vars.as_ref().map(installs_in).unwrap_or_default();
     let above: Vec<PathBuf> = real_home.iter().flat_map(|h| reads_above(&profile_path(root), h)).collect();
     also.extend(above.iter().cloned());
+    // (a tool's store on the project's filesystem: read where it is, never written — compat B12)
+    let disk_stores = real_home
+        .as_deref()
+        .zip(vars.as_ref())
+        .map(|(h, v)| disk_stores_in(root, h, v, here))
+        .unwrap_or_default();
+    also.extend(disk_stores.told.iter().map(|(s, _)| s.clone()));
     let reads = real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| reads_for(h, &also, v));
-    let runs_later =
-        real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| RunsLater::new(h, v, &path_dirs_in(here)));
+    let runs_later = real_home.as_deref().zip(vars.as_ref()).map(|(h, v)| RunsLater {
+        stores: disk_stores.told.iter().map(|(s, _)| s.clone()).collect(),
+        ..RunsLater::new(h, v, &path_dirs_in(here))
+    });
     let mut env = Env {
         asked_caches: Vec::new(),
         runs_later: runs_later.unwrap_or_default(),
+        disk_stores,
         kept_homes: kept_homes(root, real_home.as_deref(), here, false),
         daemon_homes: kept_homes(root, real_home.as_deref(), here, true),
         runs: runs_root(real_home.as_deref(), here),
@@ -3736,6 +4423,23 @@ fn policy_computed(
     p.supervised = here.os == Os::Linux;
     p.keys = Some(Vec::new());
     with_kept(&mut p, &env);
+    // (a store told that runs may write — a folder granted, the temp folders, which every other project's runs
+    // write where this one's don't (they hold it), the folders the user's settings grant every project (this one
+    // drops those holding its root: N7), other sessions' write places and the grants kept for any project
+    // (`Here.others_write`) — is passed over, and not read for being found: `DiskStores::written_passed`)
+    let mut writes = p.write_places();
+    writes.extend(here.shared_tmp.iter().cloned().chain(here.tmp.as_deref().map(user_temp)));
+    let home = here.path("HOME");
+    let everywhere = llm.sandbox_write.iter().filter_map(|w| match (w.strip_prefix("~/"), &home) {
+        (Some(rest), Some(h)) => Some(h.join(rest)),
+        _ => Some(PathBuf::from(w)).filter(|w| w.is_absolute()),
+    });
+    writes.extend(everywhere.map(|w| profile_path(&w)).chain(here.others_write.iter().cloned()));
+    for s in p.disk_stores.written_passed(&writes) {
+        if !reads.contains(&s) {
+            p.reads.allow.retain(|a| *a != s);
+        }
+    }
     (p, Found { real_home, above, own })
 }
 
@@ -3790,6 +4494,11 @@ fn for_its_run(
         p.reads.copies = crate::tokens::copies(&sources, dir, h, reads, &p.reads.kept);
         p.reads.copies.told = crate::tokens::told_holders(&vars_in(h, here), &found.above);
     }
+    // A copy handed: the user's own variables naming the settings it stands in for stay out, said (their
+    // `NPM_CONFIG_USERCONFIG` naming the real `~/.npmrc` — `var` is tarae's then, and `var-also`; the other
+    // spellings of one read in any case are `runenv::of`'s)
+    let copied: Vec<&String> = p.reads.copies.env.iter().map(|(var, _)| var).collect();
+    copies_stand_in(&mut p.run_env, &copied, here);
     let url = p.proxy_url();
     // The kept homes held (their stamps, before they're made: a prune can't take one between) — one that can't
     // be is no kept home for this run: the run's own, and its folder not written (`policy_key` leaves the
@@ -3818,18 +4527,74 @@ fn for_its_run(
         run: p.run.as_ref().map(|r| r.path().to_path_buf()),
         ..vars_in(h, here)
     });
+    // (what those homes set stands in for the user's own: they leave the run, named — review note 7)
+    if p.run.is_some() {
+        let set = run_homes_set(vars.as_ref());
+        p.run_env.stand_in(&set.iter().collect::<Vec<_>>(), &|k| here.env.contains_key(k));
+    }
     let made = p
         .run
         .as_ref()
         .zip(vars.as_ref())
         .map(|(r, v)| run_homes_made(r.path(), v, &p.run_env, &p.kept, url.as_ref()));
     p.env = made.unwrap_or_default();
+    // What those homes give instead of the user's own, said once a conversation in the tool's projects (`note`)
+    if p.run.is_some() {
+        let homes = &crate::sandboxpack::get().run_homes;
+        let notes = homes.iter().filter_map(|h| h.note.as_ref());
+        let ours = |when: &[String]| when.iter().any(|f| p.root.join(f).exists());
+        let notes = notes.filter(|(when, _)| ours(when)).map(|(_, say)| say.clone()).collect();
+        p.run_env.notes = notes;
+    }
     let asks_hosts = p.asks_hosts;
     p.env.extend(vars.as_ref().map(|v| packs_env(v, here, asks_hosts)).unwrap_or_default());
+    // A tool's store on the project's filesystem, told to it (`disk_store`)
+    for (store, names) in &p.disk_stores.told {
+        p.env.extend(names.iter().map(|n| (n.clone(), store.display().to_string())));
+    }
     // What a run with a proxy URL gets of the packs besides (`[sandbox.proxy]`)
     let mut env = std::mem::take(&mut p.env);
     proxy_made(p.run.as_ref().map(|r| r.path()), url.as_ref(), &mut env, &p.run_env);
     p.env = env;
+}
+
+/// What copies of the settings handed to a run (each tool's variable, `tokens::Copies`) take out of its `env`: each
+/// setting's `var` and `var-also` — the user's own named as left out (`RunEnv::stand_in`).
+fn copies_stand_in(env: &mut runenv::RunEnv, copied: &[&String], here: &Here) {
+    let settings = &crate::sandboxpack::get().settings;
+    for var in copied {
+        let Some(s) = settings.iter().find(|s| s.var.as_ref() == Some(*var)) else { continue };
+        let out: Vec<&String> = std::iter::once(*var).chain(&s.var_also).collect();
+        env.stand_in(&out, &|k| here.env.contains_key(k));
+    }
+}
+
+/// `:sandbox-env`'s environment: `run_env_of`, and what a run's copies of the settings stand in for, as
+/// `for_its_run` takes them out (verify4 F6: the page said Passed what the report said left out). A worker's.
+pub fn run_env_shown(here: &Here, llm: &crate::llm::LlmConfig) -> runenv::RunEnv {
+    let mut env = run_env_of(here, llm);
+    let Some(h) = here.path("HOME").and_then(|h| std::fs::canonicalize(h).ok()) else { return env };
+    let sources = crate::tokens::sources_on(&h, &|name| here.var(name), here.os);
+    let copies = crate::tokens::copies(&sources, None, &h, &[], &kept_reads(&h, &vars_in(&h, here)));
+    copies_stand_in(&mut env, &copies.for_vars.iter().collect::<Vec<_>>(), here);
+    let set = run_homes_set(Some(&vars_in(&h, here)));
+    env.stand_in(&set.iter().collect::<Vec<_>>(), &|k| here.env.contains_key(k));
+    env
+}
+
+/// The variables the packs' run homes `set` for a run (`run_homes_made`: its `if` there, its value a place —
+/// `{home}/…` always): tarae's value goes in after the user's environment, so the user's own leaves the run,
+/// named as one tarae's own stands in for (review note 7: `:sandbox-env` said the user's
+/// `NPM_CONFIG_GLOBALCONFIG` reached the run).
+fn run_homes_set(vars: Option<&crate::sandboxpack::Vars>) -> Vec<String> {
+    let there = |p: &str| vars.and_then(|v| v.place(p));
+    let sets = crate::sandboxpack::get().run_homes.iter().flat_map(|h| &h.set);
+    sets.filter(|(_, value, when)| {
+        when.as_deref().is_none_or(|w| there(w).is_some_and(|w| w.exists()))
+            && (value.starts_with("{home}") || there(value).is_some())
+    })
+    .map(|(k, ..)| k.clone())
+    .collect()
 }
 
 /// The packs' `env` for a run, its places filled in (`vars` knows the run's folder): one naming a place that
@@ -3973,8 +4738,12 @@ fn run_homes_made(
             crate::log::line("tarae", "warning", &format!("a run's {} home: {s}", h.name));
         }
         for (var, value, when) in &h.set {
+            let value = match value.strip_prefix("{home}") {
+                Some(inside) => Some(profile_path(&home.join(inside.trim_start_matches('/')))),
+                None => at(value),
+            };
             if when.as_deref().is_none_or(|w| at(w).is_some_and(|w| w.exists()))
-                && let Some(value) = at(value)
+                && let Some(value) = value
             {
                 env.push((var.clone(), value.display().to_string()));
             }
@@ -6494,6 +7263,833 @@ mod tests {
         }
     }
 
+    /// compat B12: pnpm's store on the project's filesystem (the JavaScript pack's `disk-store`), as pnpm finds it —
+    /// where pnpm's home is on another filesystem, the topmost folder above the project on its own that the user can
+    /// write (never the project's own; above home too, as the container's `/.pnpm-store`), its `.pnpm-store` told
+    /// when it's a folder of the user's no one else may write — else passed over, said why; never one holding home;
+    /// never written nor offered on a card; none on one filesystem, nor where a store is named already — each
+    /// variable, each settings file (a FIFO or a link in the project read as can't tell). (A stand-in tree in a
+    /// folder of the Scratch one, which stays 0700: its filesystems passed in, nothing above it read — `Who.top`,
+    /// verify4 N12, N13.)
+    #[test]
+    fn a_tools_store_on_the_projects_filesystem_is_found_unless_named() {
+        let d =
+            crate::sandboxpack::get().disk_stores.first().expect("the JavaScript pack's disk-store").clone();
+        let scratch = crate::scratch::Scratch::new("disk-store");
+        // (every mode set: a umask of 002 would make them the group's to write — N2)
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m| std::fs::set_permissions(p, PermissionsExt::from_mode(m)).unwrap();
+        let base = std::fs::canonicalize(&*scratch).unwrap().join("t");
+        std::fs::create_dir(&base).unwrap();
+        mode(&base, 0o755);
+        let (home, mnt) = (base.join("home"), base.join("mnt"));
+        let root = mnt.join("work/app");
+        for f in [&root, &mnt.join(".pnpm-store"), &mnt.join("work/.pnpm-store"), &home] {
+            std::fs::create_dir_all(f).unwrap();
+        }
+        for f in
+            [&mnt, &mnt.join("work"), &root, &mnt.join(".pnpm-store"), &mnt.join("work/.pnpm-store"), &home]
+        {
+            mode(f, 0o755);
+        }
+        let env = |extra: &[(&str, &Path)]| -> HashMap<String, std::ffi::OsString> {
+            let mut e: HashMap<String, std::ffi::OsString> = [("HOME".into(), home.clone().into())].into();
+            e.extend(extra.iter().map(|(k, v)| (k.to_string(), v.as_os_str().to_owned())));
+            e
+        };
+        // (the mount's files on filesystem 2, the rest of the Scratch folder on 1; nothing above it, nor where
+        // nothing is: the climb never leaves the test's tree)
+        let two =
+            |p: &Path| (p.starts_with(&base) && p.exists()).then(|| if p.starts_with(&mnt) { 2 } else { 1 });
+        // SAFETY: a plain call.
+        let uid = unsafe { libc::getuid() };
+        // (a local disk's filesystem, ext4; no private group — `strict` the same, taking no group's write as theirs)
+        let ext4 = |_: &Path| Some(Filesystem { name: "ext4".into(), ignores_ownership: false });
+        let me = Who { uid, private_gid: None, filesystem: &ext4, top: Some(&base) };
+        let strict = Who { private_gid: None, ..me };
+        let seen_as = |root: &Path, (home, who): (&Path, &Who), e, dev: &dyn Fn(&Path) -> Option<u64>| {
+            let here = Here { env: e, os: Os::Linux, ..Here::default() };
+            disk_store(&d, root, home, who, &vars_in(home, &here), &|n| here.var(n), dev)
+        };
+        let found =
+            |root: &Path, e, dev: &dyn Fn(&Path) -> Option<u64>| seen_as(root, (&home, &me), e, dev).told;
+        let store = found(&root, env(&[]), &two).expect("the store on the project's filesystem");
+        assert_eq!(store, mnt.join(".pnpm-store"), "the topmost on its filesystem, not above it");
+        let later = RunsLater { stores: vec![store.clone()], ..RunsLater::default() };
+        assert!(later.refuses(&store).is_some() && later.refuses(&store.join("v11")).is_some());
+        assert!(crate::allow::write_choices(&store.join("v11/x"), &home, &root, &later).is_empty());
+        let one = |p: &Path| (p.starts_with(&base) && p.exists()).then_some(1);
+        assert_eq!(found(&root, env(&[]), &one), None, "one filesystem");
+        let pnpm_home = mnt.join("pnpm-home");
+        assert_eq!(found(&root, env(&[("PNPM_HOME", &pnpm_home)]), &two), None, "its home on the project's");
+        // (named already: each variable, in any case — npm and pnpm fold them; the user's own is theirs to keep)
+        let spellings = |v: &str| {
+            let mixed: String = v
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c })
+                .collect();
+            [v.to_ascii_lowercase(), v.to_ascii_uppercase(), mixed]
+        };
+        for v in d.named_env.iter().flat_map(|v| spellings(v)) {
+            assert_eq!(found(&root, env(&[(&v, Path::new("/elsewhere"))]), &two), None, "{v}");
+        }
+        // (named already: each of the pack's files — the project's, and above it on its filesystem; pnpm's global
+        // ones, ~/.npmrc — as the pack lists them: N10)
+        let here_of = Here { env: env(&[]), os: Os::Linux, ..Here::default() };
+        let places = vars_in(&home, &here_of);
+        let pack_files = [
+            ".npmrc",
+            "pnpm-workspace.yaml",
+            "~/.npmrc",
+            "{xdg-config}/pnpm/rc",
+            "{xdg-config}/pnpm/config.yaml",
+            "~/Library/Preferences/pnpm/rc",
+            "~/Library/Preferences/pnpm/config.yaml",
+        ];
+        assert_eq!(d.named_in, pack_files, "the files pnpm and npm read a store's place from");
+        let mut named: Vec<(PathBuf, String)> = Vec::new();
+        for f in &d.named_in {
+            let text = match f.ends_with(".yaml") {
+                true => "packages: []\nstoreDir: '/elsewhere'\n".to_string(),
+                false => {
+                    "//registry.example/:_authToken=tarae-fake-token\nstore-dir = /elsewhere\n".to_string()
+                }
+            };
+            match places.place(f) {
+                Some(p) if f.starts_with(['{', '~']) => named.push((p, text)),
+                None if f.starts_with('{') => panic!("{f}: no place"),
+                _ => named.extend([(root.join(f), text.clone()), (mnt.join("work").join(f), text)]),
+            }
+        }
+        assert_eq!(named.len(), d.named_in.len() + 2, "two in the project, the rest places: {named:?}");
+        for (f, text) in &named {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+            assert_eq!(found(&root, env(&[]), &two), None, "{}", f.display());
+            std::fs::remove_file(f).unwrap();
+        }
+        // (named in the settings file npm's variables name — or one that can't be read to tell)
+        let userconfig = base.join("xdg/npmrc");
+        std::fs::create_dir_all(userconfig.parent().unwrap()).unwrap();
+        std::fs::write(&userconfig, "store-dir=/elsewhere\n").unwrap();
+        for v in d.named_in_env.iter().flat_map(|v| spellings(v)) {
+            assert_eq!(found(&root, env(&[(&v, &userconfig)]), &two), None, "{v}");
+            assert_eq!(found(&root, env(&[(&v, &base.join("gone"))]), &two), None, "{v}, unreadable");
+        }
+        std::fs::write(&userconfig, "color=false\n").unwrap();
+        let named_nothing = found(&root, env(&[("npm_config_userconfig", &userconfig)]), &two);
+        assert_eq!(named_nothing, Some(mnt.join(".pnpm-store")), "a settings file naming no store");
+        // (a project's settings file that isn't a regular file: can't tell, so named — never read through a
+        // link, never waited on: a FIFO, a link to /dev/zero)
+        let npmrc = root.join(".npmrc");
+        let fifo = std::ffi::CString::new(npmrc.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a plain call on a C string we own.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(found(&root, env(&[]), &two), None, "a FIFO");
+        std::fs::remove_file(&npmrc).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", &npmrc).unwrap();
+        assert_eq!(found(&root, env(&[]), &two), None, "a link to a device");
+        std::fs::remove_file(&npmrc).unwrap();
+        // (never followed: a link to a plain file naming no store is still can't tell)
+        std::fs::write(base.join("plain"), "color=false\n").unwrap();
+        std::os::unix::fs::symlink(base.join("plain"), &npmrc).unwrap();
+        assert_eq!(found(&root, env(&[]), &two), None, "a link to a plain file");
+        std::fs::remove_file(&npmrc).unwrap();
+        // (pnpm's own rule: a store of the user's, no one else's to write — else passed over, said why)
+        let passed = |s: DiskStoreSeen| {
+            (s.told, s.passed.map(|(p, why)| (p, why.split(' ').next().map(String::from))))
+        };
+        let store = mnt.join(".pnpm-store");
+        mode(&store, 0o777);
+        let anyone = passed(seen_as(&root, (&home, &me), env(&[]), &two));
+        assert_eq!(anyone, (None, Some((store.clone(), Some("others".into())))), "anyone's to write");
+        // (umask 002: the group's to write — fine when it's the user's own private group, N5)
+        use std::os::unix::fs::MetadataExt;
+        mode(&store, 0o775);
+        let gid = store.metadata().unwrap().gid();
+        let grouped = passed(seen_as(&root, (&home, &strict), env(&[]), &two));
+        assert_eq!(grouped, (None, Some((store.clone(), Some("others".into())))), "a group's to write");
+        let private = Who { private_gid: Some(gid), ..me };
+        assert_eq!(seen_as(&root, (&home, &private), env(&[]), &two).told.as_ref(), Some(&store), "its own");
+        mode(&store, 0o755);
+        let other = Who { uid: uid + 1, ..me };
+        let theirs = seen_as(&root, (&home, &other), env(&[]), &two);
+        assert!(theirs.told.is_none() && theirs.passed.is_some_and(|(_, w)| w.contains("another user's")));
+        // (only a local disk's filesystem: a network or FUSE one shows the mounting user as every file's owner,
+        // one mounted ignoring ownership every file as the user's — nobody's is told there; N4, verify4 F1, N1, N8)
+        let by_name = |name: &str, ignores_ownership| Filesystem { name: name.into(), ignores_ownership };
+        let local = ["ext4", "xfs", "btrfs", "f2fs", "zfs", "apfs", "hfs"].map(|n| by_name(n, false));
+        let others = ["nfs", "cifs", "smb2", "fuse", "9p", "overlay", "tmpfs", "smbfs", "f_type 0x1234"];
+        let others =
+            others.map(|n| Some(by_name(n, false))).into_iter().chain([Some(by_name("apfs", true)), None]);
+        // (Linux names each by its `f_type`: the local disks' among them)
+        #[cfg(not(target_os = "macos"))]
+        for n in ["ext4", "xfs", "btrfs", "f2fs", "zfs", "nfs", "cifs", "fuse", "9p"] {
+            assert!(MAGIC.iter().any(|(_, m)| *m == n), "{n}");
+        }
+        for (fs, told) in local.into_iter().map(|f| (Some(f), true)).chain(others.map(|f| (f, false))) {
+            let on = |_: &Path| fs.clone();
+            let s = seen_as(&root, (&home, &Who { filesystem: &on, ..me }), env(&[]), &two);
+            let why = s.passed.map(|(_, w)| w).unwrap_or_default();
+            let said = ["isn't a local disk's", "ignores ownership", "can't be told"];
+            assert_eq!(s.told.is_some(), told, "{fs:?}: {why}");
+            assert!(told || said.iter().any(|w| why.contains(w)), "{fs:?}: {why}");
+        }
+        // (a folder another user may rename an entry in, from the store's up — not sticky, or sticky and
+        // another user's: their own store where this one was; sticky and the user's, or the user's private
+        // group's, is safe — N5)
+        let mnt_shown = home_shown(&mnt.display().to_string());
+        let renamed = |who: &Who| {
+            let s = seen_as(&root, (&home, who), env(&[]), &two);
+            s.passed
+                .map(|(_, w)| w)
+                .filter(|w| w.contains("rename what's in"))
+                .map(|w| w.contains(&mnt_shown))
+        };
+        mode(&mnt, 0o777);
+        assert_eq!(renamed(&me), Some(true), "anyone may rename in its folder");
+        mode(&mnt, 0o1777);
+        assert_eq!(
+            seen_as(&root, (&home, &me), env(&[]), &two).told.as_ref(),
+            Some(&store),
+            "sticky, the user's"
+        );
+        mode(&mnt, 0o775);
+        assert_eq!(renamed(&strict), Some(true), "its group may rename in its folder");
+        let mnt_gid = mnt.metadata().unwrap().gid();
+        let own_group = Who { private_gid: Some(mnt_gid), ..me };
+        assert_eq!(renamed(&own_group), None, "the user's own group");
+        mode(&mnt, 0o755);
+        mode(&base, 0o777);
+        assert_eq!(renamed(&me), Some(false), "a folder further up");
+        mode(&base, 0o755);
+        // (a folder on the way up owned by another user — neither root nor the user: its owner may rename what's
+        // in it whatever its mode, sticky too — F1 A; a stand-in user, as the folders can't be given away)
+        if uid != 0 {
+            let stranger = Who { uid: uid + 1, ..me };
+            for m in [0o755, 0o1777] {
+                mode(&mnt, m);
+                let why = changed_from_above(&mnt, &stranger).unwrap_or_default();
+                assert!(why.contains(&mnt_shown) && why.contains("another user's (uid"), "{m:o}: {why}");
+            }
+            mode(&mnt, 0o755);
+        }
+        // (a repository's top on the way up: a session there writes it — F2; a worktree's `.git` is a file, N5)
+        for (top, file) in [&mnt, &base].into_iter().flat_map(|t| [(t, false), (t, true)]) {
+            let git = top.join(".git");
+            match file {
+                true => std::fs::write(&git, "gitdir: /elsewhere/.git/worktrees/w\n").unwrap(),
+                false => std::fs::create_dir(&git).unwrap(),
+            }
+            let s = seen_as(&root, (&home, &me), env(&[]), &two);
+            let why = s.passed.map(|(_, w)| w).unwrap_or_default();
+            assert!(
+                s.told.is_none() && why.contains("a repository's top"),
+                "{} {file}: {why}",
+                top.display()
+            );
+            match file {
+                true => std::fs::remove_file(&git).unwrap(),
+                false => std::fs::remove_dir(&git).unwrap(),
+            }
+        }
+        // (Linux: a POSIX ACL on the store or a folder above that lets another write — its group bits are the ACL's
+        // mask, so even the user's private group's write isn't theirs alone then; F1 B, N1, N6 — or a default one
+        // new entries take, N9; udisks2's `user:$USER:r-x` lets no one, N2)
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            // (user::rwx user:4242:rwx group::r-x mask::rwx other::r-x — the kernel's xattr form)
+            let acl = posix_acl_bytes(&[
+                (1, 7, u32::MAX),
+                (2, 7, 4242),
+                (4, 5, u32::MAX),
+                (0x10, 7, u32::MAX),
+                (0x20, 5, u32::MAX),
+            ]);
+            let set = |p: &Path, name: &std::ffi::CStr, acl: &[u8]| {
+                let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+                // SAFETY: C strings and a buffer we own.
+                let r =
+                    unsafe { libc::lsetxattr(c.as_ptr(), name.as_ptr(), acl.as_ptr().cast(), acl.len(), 0) };
+                (r == 0).then_some(()).ok_or_else(std::io::Error::last_os_error)
+            };
+            let (access, default) = (c"system.posix_acl_access", c"system.posix_acl_default");
+            match set(&store, access, &acl) {
+                Err(e) => {
+                    let line = format!(
+                        "{}sandbox::tests::a_tools_store_on_the_projects_filesystem_is_found_unless_named's POSIX ACL \
+                         part — its filesystem takes none ({e})\n",
+                        crate::test_results::SELF_SKIP
+                    );
+                    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+                }
+                Ok(()) => {
+                    let gid = store.metadata().unwrap().gid();
+                    let own = Who { private_gid: Some(gid), ..me };
+                    let s = seen_as(&root, (&home, &own), env(&[]), &two);
+                    let why = s.passed.map(|(_, w)| w).unwrap_or_default();
+                    assert!(s.told.is_none() && why.contains("an ACL"), "the store's: {why}");
+                    std::fs::remove_dir(&store).unwrap();
+                    std::fs::create_dir(&store).unwrap();
+                    mode(&store, 0o755);
+                    set(&store, default, &acl).unwrap();
+                    let s = seen_as(&root, (&home, &own), env(&[]), &two);
+                    let why = s.passed.map(|(_, w)| w).unwrap_or_default();
+                    assert!(s.told.is_none() && why.contains("an ACL"), "the store's default: {why}");
+                    std::fs::remove_dir(&store).unwrap();
+                    std::fs::create_dir(&store).unwrap();
+                    mode(&store, 0o755);
+                    set(&mnt, access, &acl).unwrap();
+                    let why = changed_from_above(&mnt, &own).unwrap_or_default();
+                    assert!(why.contains("an ACL") && why.contains(&mnt_shown), "its folder's: {why}");
+                    // (udisks2's: the user alone may read in it)
+                    let udisks2 = posix_acl_bytes(&[
+                        (1, 7, u32::MAX),
+                        (2, 5, uid),
+                        (4, 5, u32::MAX),
+                        (0x10, 5, u32::MAX),
+                        (0x20, 0, u32::MAX),
+                    ]);
+                    set(&mnt, access, &udisks2).unwrap();
+                    assert_eq!(changed_from_above(&mnt, &own), None, "udisks2's");
+                    // SAFETY: C strings we own.
+                    let c = std::ffi::CString::new(mnt.as_os_str().as_bytes()).unwrap();
+                    assert_eq!(unsafe { libc::lremovexattr(c.as_ptr(), access.as_ptr()) }, 0);
+                    mode(&mnt, 0o755);
+                }
+            }
+        }
+        // (macOS: an ACL lets another write the store, or a folder above it — N4, N9)
+        #[cfg(target_os = "macos")]
+        for at in [&store, &mnt, &base] {
+            let acl = |op: &str| {
+                let mut c = std::process::Command::new("/bin/chmod");
+                assert!(
+                    c.args([op, "everyone allow add_file"]).arg(at).status().unwrap().success(),
+                    "chmod {op}"
+                );
+            };
+            acl("+a");
+            assert!(acl_lets_others_write(at, &me, 0), "{}", at.display());
+            let s = seen_as(&root, (&home, &me), env(&[]), &two);
+            assert!(
+                s.told.is_none() && s.passed.is_some_and(|(_, w)| w.contains("an ACL")),
+                "{}",
+                at.display()
+            );
+            acl("-a");
+            assert!(!acl_lets_others_write(at, &me, 0));
+        }
+        assert_eq!(found(&root, env(&[]), &two), Some(store.clone()), "back as it was");
+        std::fs::remove_dir(mnt.join(".pnpm-store")).unwrap();
+        std::os::unix::fs::symlink(mnt.join("work/.pnpm-store"), mnt.join(".pnpm-store")).unwrap();
+        let link = seen_as(&root, (&home, &me), env(&[]), &two);
+        assert!(link.told.is_none() && link.passed.is_some_and(|(_, w)| w.contains("link")), "a link");
+        std::fs::remove_file(mnt.join(".pnpm-store")).unwrap();
+        std::fs::create_dir(mnt.join(".pnpm-store")).unwrap();
+        mode(&mnt.join(".pnpm-store"), 0o755);
+        // (a comment names nothing)
+        std::fs::write(&npmrc, "# store-dir=/elsewhere\n").unwrap();
+        assert_eq!(found(&root, env(&[]), &two), Some(mnt.join(".pnpm-store")), "a comment");
+        // (the topmost the user can write — pnpm's link test; never the project's own folder. Root writes
+        // everywhere: there, not tried)
+        if uid != 0 {
+            mode(&mnt, 0o555);
+            assert_eq!(found(&root, env(&[]), &two), Some(mnt.join("work/.pnpm-store")), "mnt not writable");
+            mode(&mnt.join("work"), 0o555);
+            std::fs::create_dir(root.join(".pnpm-store")).unwrap();
+            assert_eq!(found(&root, env(&[]), &two), None, "the project's own folder is never it");
+            mode(&mnt.join("work"), 0o755);
+            mode(&mnt, 0o755);
+        }
+        // (never home nor what holds it: home inside the store, pnpm's home elsewhere)
+        let (in_store, ph) = (mnt.join(".pnpm-store/h"), base.join("ph"));
+        std::fs::create_dir_all(&in_store).unwrap();
+        std::fs::create_dir_all(&ph).unwrap();
+        let holds_home = seen_as(&root, (&in_store, &me), env(&[("PNPM_HOME", &ph)]), &two);
+        assert_eq!(holds_home, DiskStoreSeen::default(), "a store holding home");
+        // (above home — the container's `/.pnpm-store`: a project in home, home on the project's filesystem, pnpm's
+        // home elsewhere; found, a card never offers it)
+        std::fs::create_dir_all(base.join(".pnpm-store")).unwrap();
+        mode(&base.join(".pnpm-store"), 0o755);
+        let in_home = home.join("work/app");
+        std::fs::create_dir_all(&in_home).unwrap();
+        std::fs::create_dir_all(&pnpm_home).unwrap();
+        let all_two = |p: &Path| {
+            (p.starts_with(&base) && p.exists()).then(|| if p.starts_with(&pnpm_home) { 3 } else { 2 })
+        };
+        let above = found(&in_home, env(&[("PNPM_HOME", &pnpm_home)]), &all_two);
+        assert_eq!(above.as_deref(), Some(base.join(".pnpm-store").as_path()), "above home");
+        let later = RunsLater { stores: vec![base.join(".pnpm-store")], ..RunsLater::default() };
+        let offered = crate::allow::write_choices(&base.join(".pnpm-store/v11/x"), &home, &in_home, &later);
+        assert!(offered.is_empty(), "offered {offered:?}");
+    }
+
+    /// compat8 N4, N8: a private group is one only the account files show as the user's alone — named as they
+    /// are, no member but them, no other account's primary group, both files listing every account (a
+    /// directory's `+` line, or a user not in them, can't be listed: none). And this system's: macOS's users are a
+    /// directory's, and their primary group (staff) every local user's — none.
+    #[test]
+    fn a_private_group_is_the_users_alone() {
+        let nss =
+            "# comment\npasswd:         files systemd\ngroup:          files systemd\nhosts: files dns\n";
+        let passwd = "root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n";
+        let group = "root:x:0:\nalice:x:1000:\nstaff:x:50:alice,bob\n";
+        let alice = (1000, "alice", 1000);
+        let private_in = |user, passwd: &str, group: &str| private_in(user, nss, passwd, group);
+        assert_eq!(private_in(alice, passwd, group), Some(1000), "alice's own");
+        let bob_primary = format!("{passwd}bob:x:1001:1000::/home/bob:/bin/sh\n");
+        assert_eq!(private_in(alice, &bob_primary, group), None, "bob's primary group too");
+        let member = group.replace("alice:x:1000:", "alice:x:1000:alice,bob");
+        assert_eq!(private_in(alice, passwd, &member), None, "bob a member");
+        assert_eq!(
+            private_in(alice, passwd, &group.replace("alice:x:1000:", "alice:x:1000:alice")),
+            Some(1000)
+        );
+        let renamed = group.replace("alice:x:1000:", "devs:x:1000:");
+        assert_eq!(private_in(alice, passwd, &renamed), None, "named otherwise");
+        assert_eq!(
+            private_in(alice, &passwd.replace("alice", "carol"), group),
+            None,
+            "not listed: a directory's"
+        );
+        // (the user's own account not in the files, nothing else with that group — `own` alone: verify4 N4)
+        let root_only = "root:x:0:0:root:/root:/bin/sh\n";
+        assert_eq!(private_in(alice, root_only, group), None, "the user not listed");
+        assert_eq!(private_in(alice, &format!("{passwd}+::::::\n"), group), None, "NIS: can't list");
+        assert_eq!(private_in(alice, passwd, "root:x:0:\n"), None, "the group not listed");
+        assert_eq!(private_in((1000, "alice", 50), passwd, group), None, "staff");
+        // (the accounts from the files alone, as nsswitch.conf says — a directory's groups may hold members the
+        // files don't: verify4 F3, N3)
+        for (nss, files) in [
+            ("passwd: files\ngroup: files\n", true),
+            ("passwd: files systemd\ngroup: files systemd\ninitgroups: files\n", true),
+            ("passwd: sss files systemd\ngroup: sss files systemd\n", false),
+            ("passwd: files\ngroup: files [SUCCESS=merge] sss\n", false),
+            ("passwd: files\ngroup: files\ninitgroups: files ldap\n", false),
+            ("passwd: compat\ngroup: compat\n", false),
+            ("passwd: files\ngroup:\n", false),
+            ("passwd: files\n", false),
+            ("", false),
+        ] {
+            let want = files.then_some(1000);
+            assert_eq!(super::private_in(alice, nss, passwd, group), want, "{nss:?}");
+        }
+        // SAFETY: a plain call.
+        let uid = unsafe { libc::getuid() };
+        if cfg!(target_os = "macos") {
+            assert_eq!(private_group(uid), None, "macOS: staff, a directory's user");
+        }
+    }
+
+    /// A POSIX ACL's entries, in the kernel's xattr form: (tag, permissions, id).
+    #[cfg(any(target_os = "linux", test))]
+    fn posix_acl_bytes(entries: &[(u16, u16, u32)]) -> Vec<u8> {
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            acl.extend(tag.to_le_bytes().iter().chain(&perm.to_le_bytes()).chain(&id.to_le_bytes()));
+        }
+        acl
+    }
+
+    /// verify4 N2, N9: a POSIX ACL lets someone but the user write only by an entry that gives write — a named
+    /// user but them or root, a named group or the file's group but their private one, others; the owner's and
+    /// the mask's aside. udisks2's `user:$USER:r-x` gives none; what can't be read gives it.
+    #[test]
+    fn a_posix_acl_lets_others_write_only_by_its_entries() {
+        let none = |_: &Path| None;
+        let me = Who { uid: 1000, private_gid: Some(1000), filesystem: &none, top: None };
+        let (owner, mask, other) = ((1, 7, u32::MAX), (0x10, 7, u32::MAX), (0x20, 5, u32::MAX));
+        let with = |extra: &[(u16, u16, u32)], gid| {
+            let mut e = vec![owner, (4, 5, u32::MAX), mask, other];
+            e.extend(extra);
+            posix_acl_others_write(&posix_acl_bytes(&e), &me, gid)
+        };
+        assert!(!with(&[], 1000), "the base entries");
+        assert!(!with(&[(2, 5, 1000)], 1000), "udisks2's: the user may read");
+        assert!(!with(&[(2, 7, 1000), (2, 7, 0)], 1000), "the user and root");
+        assert!(!with(&[(8, 7, 1000)], 1000), "the user's private group");
+        assert!(with(&[(2, 7, 4242)], 1000), "another user");
+        assert!(with(&[(2, 2, 4242)], 1000), "write alone");
+        assert!(with(&[(8, 7, 4242)], 1000), "another group");
+        let group_writes = posix_acl_bytes(&[owner, (4, 7, u32::MAX), mask, other]);
+        assert!(!posix_acl_others_write(&group_writes, &me, 1000), "the file's group, private");
+        assert!(posix_acl_others_write(&group_writes, &me, 50), "the file's group, shared");
+        assert!(posix_acl_others_write(&posix_acl_bytes(&[owner, (0x20, 7, u32::MAX)]), &me, 1000), "others");
+        let mut torn = posix_acl_bytes(&[owner]);
+        torn.pop();
+        assert!(posix_acl_others_write(&torn, &me, 1000), "can't be read");
+        assert!(posix_acl_others_write(&[1, 0, 0, 0], &me, 1000), "another version");
+    }
+
+    /// verify5 N4, N8: `filesystem_of` on real paths — the Scratch folder's is the filesystem the system says it
+    /// is on (macOS: APFS, owned, not ignoring ownership; Linux: the type `/proc/self/mountinfo` gives its mount,
+    /// by `f_type`), a local disk's where that's one, and `/dev`'s is none whose owners say who may write.
+    #[test]
+    fn the_filesystem_a_path_is_on_is_the_one_the_system_says() {
+        let scratch = crate::scratch::Scratch::new("filesystem-of");
+        let at = std::fs::canonicalize(&*scratch).unwrap();
+        let fs = filesystem_of(&at).expect("the Scratch folder's filesystem");
+        assert!(!fs.ignores_ownership, "{fs:?}");
+        #[cfg(target_os = "macos")]
+        let said = {
+            assert_eq!(fs.name, "apfs", "{fs:?}");
+            fs.name.clone()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let said = {
+            // (the last mount whose point holds it, its type after ` - `; ext2 and ext3 share ext4's magic)
+            let info = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+            let unescaped = |s: &str| s.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\");
+            let mounts = info.lines().filter_map(|l| {
+                let (head, tail) = l.split_once(" - ")?;
+                Some((PathBuf::from(unescaped(head.split(' ').nth(4)?)), tail.split(' ').next()?.to_string()))
+            });
+            // (`max_by_key`: the last of the deepest — the mount over the others there)
+            let holding = mounts.filter(|(point, _)| at.starts_with(point));
+            let (_, kind) = holding.max_by_key(|(p, _)| p.components().count()).expect("a mount holding it");
+            let said = match kind.as_str() {
+                "ext2" | "ext3" => "ext4".to_string(),
+                "nfs4" => "nfs".to_string(),
+                k if k.starts_with("fuse.") => "fuse".to_string(),
+                k => k.to_string(),
+            };
+            // (a type `MAGIC` doesn't list is said by its number)
+            match MAGIC.iter().any(|(_, n)| *n == said) {
+                true => assert_eq!(fs.name, said, "the system says {said}"),
+                false => assert!(fs.name.starts_with("f_type 0x"), "the system says {said}: {fs:?}"),
+            }
+            said
+        };
+        assert_eq!(owners_unreal(Some(&fs)).is_none(), OWNED.contains(&said.as_str()), "{fs:?}");
+        let dev = filesystem_of(Path::new("/dev")).expect("/dev's filesystem");
+        assert!(owners_unreal(Some(&dev)).is_some(), "{dev:?}");
+        assert_eq!(filesystem_of(&at.join("none")), None, "no such path");
+    }
+
+    /// compat8 review 3: npm reads `npm_config_*` in any case (pnpm `pnpm_config_*` too) — the user's
+    /// `userconfig`, `globalconfig` and `store-dir`, each spelled lower, upper or mixed, naming stand-in files: a
+    /// run gets each in tarae's spelling alone, the user's other spellings left out and named (`replaced`, said);
+    /// the userconfig's copy without `tarae-fake-token` (found under any spelling), the globalconfig's the same
+    /// while it holds one — else the user's file as it is — and the run's command never points at a file holding
+    /// the token.
+    #[test]
+    fn a_users_own_npm_settings_variable_never_points_a_run_past_the_copy() {
+        let scratch = crate::scratch::Scratch::new("npmrc-past-copy");
+        let base = std::fs::canonicalize(&*scratch).unwrap();
+        let (home, root) = (base.join("home"), base.join("home/work/p"));
+        let (npmrc, global) = (base.join("dots/npmrc"), base.join("dots/npmrc-g"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(npmrc.parent().unwrap()).unwrap();
+        let fake = "//registry.example/:_authToken=tarae-fake-token\n";
+        // (npm's own proxy settings leave the copies too, any spelling of their keys — N3)
+        let corp = "https-proxy=http://corp-proxy.example:3128\nNO_PROXY = .example\n";
+        std::fs::write(&npmrc, format!("{fake}{corp}color=false\n")).unwrap();
+        let spellings = |v: &str| {
+            let mixed: String =
+                v.split('_').map(|w| w[..1].to_ascii_uppercase() + &w[1..]).collect::<Vec<_>>().join("_");
+            [v.to_ascii_lowercase(), v.to_ascii_uppercase(), mixed]
+        };
+        let (user, glob) = (spellings("npm_config_userconfig"), spellings("npm_config_globalconfig"));
+        let (npm_store, pnpm_store) = (spellings("npm_config_store_dir"), spellings("pnpm_config_store_dir"));
+        std::fs::write(&global, format!("{fake}{corp}registry=https://npm.example/\n")).unwrap();
+        for i in 0..3 {
+            let (u, g, ns, ps) = (&user[i], &glob[i], &npm_store[i], &pnpm_store[i]);
+            let here = Here {
+                env: [
+                    ("HOME".to_string(), home.clone().into_os_string()),
+                    (u.clone(), npmrc.clone().into_os_string()),
+                    (g.clone(), global.clone().into_os_string()),
+                    (ns.clone(), "/stores/npm".into()),
+                    (ps.clone(), "/stores/pnpm".into()),
+                ]
+                .into(),
+                os: Os::HOST,
+                ..Here::default()
+            };
+            let what = format!("{u}, {g}");
+            let p =
+                run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+            let copy = |var: &str| p.reads.copies.env.iter().find(|(v, _)| v == var).map(|(_, c)| c.clone());
+            let user_copy = copy("NPM_CONFIG_USERCONFIG").expect("npm's copy handed");
+            let text = std::fs::read_to_string(&user_copy).unwrap();
+            assert!(!text.contains("tarae-fake-token") && text.contains("color=false"), "{what}: {text}");
+            assert!(!text.contains("corp-proxy") && !text.contains(".example\n"), "{what}: {text}");
+            let spelled = |name: &str| -> Vec<(String, String)> {
+                let vars = p.run_env.vars.iter().filter(|(k, ..)| k.eq_ignore_ascii_case(name));
+                vars.map(|(k, v, _)| (k.clone(), v.to_string_lossy().into())).collect()
+            };
+            let replaced = |name: &str| p.run_env.replaced.iter().any(|n| n == name);
+            assert_eq!(spelled("npm_config_userconfig"), [], "{what}: tarae's copy stands in");
+            assert!(replaced(u), "{what}: {u} not said: {:?}", p.run_env);
+            // (npm's global settings are never a run's — no copy of them, its own empty file: verify5 N1)
+            assert_eq!(copy("NPM_CONFIG_GLOBALCONFIG"), None, "{what}: no copy");
+            // (the user's own, in any spelling, named as left out: tarae's file stands in — review note 7)
+            assert_eq!(spelled("npm_config_globalconfig"), [], "{what}: none passed as the user's");
+            assert!(replaced(g), "{what}: {g} not said");
+            for (name, s, value) in
+                [("npm_config_store_dir", ns, "/stores/npm"), ("pnpm_config_store_dir", ps, "/stores/pnpm")]
+            {
+                assert_eq!(spelled(name), [(name.to_string(), value.to_string())], "{what}: {s}");
+                assert_eq!(replaced(s), s != name, "{what}: {s}");
+            }
+            let said = p.run_env.said(&mut Vec::new()).unwrap_or_default();
+            assert!(said.contains("tarae's own stands in") && said.contains(u.as_str()), "{said}");
+            // (`:sandbox-env`'s page says what the run's report says, and names nothing the user didn't set —
+            // verify4 F6)
+            let shown = run_env_shown(&here, &crate::llm::LlmConfig::default());
+            let names = |e: &runenv::RunEnv| {
+                let mut v: Vec<String> = e.vars.iter().map(|(k, ..)| k.clone()).collect();
+                let mut r = e.replaced.clone();
+                v.sort();
+                r.sort();
+                (v, r)
+            };
+            assert_eq!(names(&shown), names(&p.run_env), "{what}");
+            assert!(p.run_env.replaced.iter().all(|n| here.env.contains_key(n)), "{what}: {:?}", p.run_env);
+            let c = command(Some(&p), "/bin/sh", &[]);
+            let envs: Vec<(String, Option<String>)> = c
+                .get_envs()
+                .map(|(k, v)| (k.to_string_lossy().into(), v.map(|v| v.to_string_lossy().into())))
+                .collect();
+            let user_copy = user_copy.display().to_string();
+            assert!(envs.contains(&("NPM_CONFIG_USERCONFIG".into(), Some(user_copy))), "{envs:?}");
+            for f in [&npmrc, &global].map(|f| f.display().to_string()) {
+                assert!(!envs.iter().any(|(_, v)| v.as_deref() == Some(f.as_str())), "{what}: {envs:?}");
+            }
+            // (the global settings npm reads: an empty file in the run's own folder, in npm's spelling alone)
+            let globals: Vec<&(String, Option<String>)> =
+                envs.iter().filter(|(k, _)| k.eq_ignore_ascii_case("npm_config_globalconfig")).collect();
+            let [(k, Some(own))] = globals.as_slice() else { panic!("{what}: {globals:?}") };
+            let run = p.run.as_ref().expect("a run's folder").path();
+            assert!(k == "NPM_CONFIG_GLOBALCONFIG" && Path::new(own).starts_with(profile_path(run)), "{own}");
+            assert_eq!(std::fs::read(own).unwrap(), b"", "{what}: empty");
+            assert!(p.run_env.notes.is_empty(), "{what}: no package.json, nothing said");
+        }
+        // (in a project of npm's the report says so, once a conversation — `RunHome::note`)
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let here = Here {
+            env: [("HOME".to_string(), home.clone().into_os_string())].into(),
+            os: Os::HOST,
+            ..Here::default()
+        };
+        let p = run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+        assert!(
+            matches!(p.run_env.notes.as_slice(), [n] if n.contains("global npm settings")),
+            "{:?}",
+            p.run_env
+        );
+    }
+
+    /// Review note 12: two spellings of one variable npm reads in any case, set to different values — the packs' own
+    /// wins, then the rest sorted, one empty passed over; what the policy reads (`Here::var`) is what the run gets
+    /// (`runenv::of`), in the packs' spelling, the others left out and named.
+    #[test]
+    fn two_spellings_set_differently_agree_in_policy_and_run() {
+        let cases = [
+            (
+                "NPM_CONFIG_USERCONFIG",
+                &[("NPM_CONFIG_USERCONFIG", "/a"), ("npm_config_userconfig", "/b")],
+                "/a",
+            ),
+            (
+                "NPM_CONFIG_USERCONFIG",
+                &[("npm_config_userconfig", "/b"), ("Npm_Config_Userconfig", "/c")],
+                "/c",
+            ),
+            (
+                "NPM_CONFIG_USERCONFIG",
+                &[("NPM_CONFIG_USERCONFIG", ""), ("npm_config_userconfig", "/b")],
+                "/b",
+            ),
+            (
+                "npm_config_store_dir",
+                &[("NPM_CONFIG_STORE_DIR", "/s2"), ("npm_config_store_dir", "/s1")],
+                "/s1",
+            ),
+        ];
+        for (own, set, want) in cases {
+            let env = set.iter().map(|(k, v)| (k.to_string(), std::ffi::OsString::from(v))).collect();
+            let here = Here { env, os: Os::HOST, ..Here::default() };
+            for (name, _) in set {
+                assert_eq!(here.var(name).as_deref(), Some(want), "{set:?}: the policy, as {name}");
+            }
+            let run = run_env_of(&here, &crate::llm::LlmConfig::default());
+            assert_eq!(run.var(own).as_deref(), Some(want), "{set:?}: the run");
+            let spelled: Vec<&String> =
+                run.vars.iter().map(|(k, ..)| k).filter(|k| k.eq_ignore_ascii_case(own)).collect();
+            assert_eq!(spelled, [own], "{set:?}: one spelling");
+            for (name, _) in set.iter().filter(|(n, _)| n != &own) {
+                assert!(run.replaced.iter().any(|r| r == name), "{set:?}: {name} named");
+            }
+        }
+    }
+
+    /// compat8 review 3: a store found reaches what uses it — a run's environment gets each of its variables, the
+    /// run reads it (in home: read only because it was found) and never writes it, and the session's caps refuse it
+    /// on a card. (A stand-in tree: the folder `dev2` and below on filesystem 2 — `Here.devices`.)
+    #[test]
+    fn a_found_store_reaches_the_runs_policy_and_the_caps() {
+        fn on_two(p: &Path) -> Option<u64> {
+            p.exists().then(|| if p.components().any(|c| c.as_os_str() == "dev2") { 2 } else { 1 })
+        }
+        let scratch = crate::scratch::Scratch::new("disk-store-wired");
+        let base = std::fs::canonicalize(&*scratch).unwrap();
+        let home = base.join("home");
+        let (store, root) = (home.join("dev2/.pnpm-store"), home.join("dev2/app"));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m| std::fs::set_permissions(p, PermissionsExt::from_mode(m)).unwrap();
+        for d in [&store, &root] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for d in [&home, &home.join("dev2"), &store, &root] {
+            mode(d, 0o755);
+        }
+        // (the closest `package.json` above the project is the Scratch folder's, pinning nothing: none above it is
+        // read — N7)
+        std::fs::write(base.join("package.json"), "{}").unwrap();
+        let here = Here {
+            env: [("HOME".to_string(), home.clone().into_os_string())].into(),
+            os: Os::HOST,
+            // SAFETY: a plain call.
+            uid: unsafe { libc::getuid() },
+            devices: Some(on_two),
+            // (a local disk's filesystem, ext4, and nothing above the Scratch folder read — verify4 N13)
+            filesystems: Some(|_| Some(Filesystem { name: "ext4".into(), ignores_ownership: false })),
+            stand_in: Some(base.clone()),
+            ..Here::default()
+        };
+        let p = run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+        let set = |v: &str| p.env.iter().any(|(k, val)| k == v && *val == store.display().to_string());
+        assert!(set("pnpm_config_store_dir"), "{:?}", p.env);
+        let f = store.join("v11/index/x.json");
+        assert!(p.reads_allow(&f) && !p.writes_allow(&f), "read, never written: {:?}", p.reads.allow);
+        let caps =
+            crate::caps::Basis { root: root.clone(), ..Default::default() }.build_in(Some(&home), &here);
+        assert!(caps.later.refuses(&store).is_some(), "{:?}", caps.later.stores);
+        assert!(crate::allow::write_choices(&store.join("v11/x"), &home, &root, &caps.later).is_empty());
+        // (the run's command gets them — nothing on the way strips them — and its report says which store)
+        // (no pnpm on PATH, no pin: its version unknown — the variable its newer versions read alone, said; F3)
+        let c = command(Some(&p), "/bin/sh", &[]);
+        let shown = store.display().to_string();
+        let got =
+            |v: &str| c.get_envs().any(|(k, val)| k == v && val.is_some_and(|val| val == shown.as_str()));
+        assert!(got("pnpm_config_store_dir") && !got("npm_config_store_dir"));
+        let said = p.disk_stores.said();
+        assert!(
+            said.iter().any(|s| s.contains("is told to its tool") && s.contains("version unknown")),
+            "{said:?}"
+        );
+        // (one passed over: not told, said why)
+        mode(&store, 0o777);
+        let p = run_policy_in(&root, &crate::llm::LlmConfig::default(), &[], &here).expect("a run's policy");
+        assert!(!p.env.iter().any(|(k, _)| k == "pnpm_config_store_dir"), "{:?}", p.env);
+        let said = p.disk_stores.said().join(" ");
+        assert!(said.contains("isn't told to its tool") && said.contains("others may write it"), "{said}");
+        mode(&store, 0o755);
+        // (never written: one where runs may write — the shared temp folder, the user's, a folder granted — is
+        // passed over, not read for being found, its tool never told; reviewer 1, 3)
+        let llm = crate::llm::LlmConfig::default();
+        std::fs::create_dir_all(store.join("v11")).unwrap();
+        mode(&store.join("v11"), 0o755);
+        let granted = crate::llm::LlmConfig {
+            sandbox_write: vec![store.join("v11").display().to_string()],
+            ..llm.clone()
+        };
+        let shared = Here { shared_tmp: Some(store.clone()), ..here.clone() };
+        let own = Here { tmp: Some(home.join("dev2")), ..here.clone() };
+        // (a folder the user's settings grant every project, holding this one's root and the store: dropped from
+        // this policy, written by others' — verify4 N7; other sessions' write places and kept grants, a project
+        // there that's no repository among them — reviewer note 10)
+        let everywhere = crate::llm::LlmConfig {
+            sandbox_write: vec![home.join("dev2").display().to_string()],
+            ..llm.clone()
+        };
+        let others = Here { others_write: vec![home.join("dev2")], ..here.clone() };
+        for (what, llm, here) in [
+            ("granted", &granted, &here),
+            ("shared temp", &llm, &shared),
+            ("temp", &llm, &own),
+            ("granted every project", &everywhere, &here),
+            ("another session's", &llm, &others),
+        ] {
+            let p = run_policy_in(&root, llm, &[], here).expect("a run's policy");
+            assert!(!p.env.iter().any(|(k, _)| k.ends_with("_store_dir")), "{what}: {:?}", p.env);
+            assert!(!p.reads.allow.contains(&store), "{what}: read for being found");
+            let said = p.disk_stores.said().join(" ");
+            assert!(said.contains("isn't told") && said.contains("runs may write"), "{what}: {said}");
+        }
+        // (only the variable the pnpm a run starts reads — npm warns of `store-dir` in every run that has it, N6:
+        // pnpm 11 on `pnpm_config_*`, before `npm_config_*`; its version the project's `packageManager`, else
+        // the package of the `pnpm` on PATH, or for corepack's shim the version corepack last knew good)
+        let bin = base.join("bin");
+        let told = |here: &Here| -> Vec<String> {
+            let p = run_policy_in(&root, &llm, &[], here).expect("a run's policy");
+            p.env.iter().filter(|(k, _)| k.ends_with("_store_dir")).map(|(k, _)| k.clone()).collect()
+        };
+        let with_path = |extra: &[(&str, &Path)]| {
+            let mut h = here.clone();
+            h.env.insert("PATH".into(), bin.clone().into_os_string());
+            h.env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.as_os_str().to_owned())));
+            h
+        };
+        let package = |dir: &Path, name: &str, version: &str| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin/pnpm.cjs"), "").unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(r#"{{"name": "{name}", "version": "{version}"}}"#),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&bin).unwrap();
+            let _ = std::fs::remove_file(bin.join("pnpm"));
+            std::os::unix::fs::symlink(dir.join("bin/pnpm.cjs"), bin.join("pnpm")).unwrap();
+        };
+        package(&base.join("pnpm10"), "pnpm", "10.11.0");
+        assert_eq!(told(&with_path(&[])), ["npm_config_store_dir"], "pnpm 10");
+        package(&base.join("pnpm12"), "pnpm", "12.11.2");
+        assert_eq!(told(&with_path(&[])), ["pnpm_config_store_dir"], "pnpm 12");
+        let corepack = base.join("corepack-home");
+        std::fs::create_dir_all(&corepack).unwrap();
+        std::fs::write(corepack.join("lastKnownGood.json"), r#"{"pnpm": "10.11.0+sha512.abc"}"#).unwrap();
+        package(&base.join("corepack"), "corepack", "0.34.0");
+        assert_eq!(told(&with_path(&[("COREPACK_HOME", &corepack)])), ["npm_config_store_dir"], "corepack's");
+        let pin = |v: &str| {
+            std::fs::write(root.join("package.json"), format!(r#"{{"packageManager": "pnpm@{v}"}}"#))
+        };
+        pin("12.1.0+sha512.abc").unwrap();
+        assert_eq!(told(&with_path(&[("COREPACK_HOME", &corepack)])), ["pnpm_config_store_dir"], "pinned");
+        // (a pnpm package on PATH: from 10 it switches to the pin, before it runs its own — F3)
+        package(&base.join("pnpm10"), "pnpm", "10.11.0");
+        assert_eq!(told(&with_path(&[])), ["pnpm_config_store_dir"], "pnpm 10, a pin of 12");
+        package(&base.join("pnpm9"), "pnpm", "9.15.0");
+        assert_eq!(told(&with_path(&[])), ["npm_config_store_dir"], "pnpm 9, a pin of 12");
+        // (a copied binary — pnpm's own install script, another manager's shim: the pin)
+        std::fs::remove_file(bin.join("pnpm")).unwrap();
+        std::fs::write(bin.join("pnpm"), "").unwrap();
+        pin("10.2.0").unwrap();
+        assert_eq!(told(&with_path(&[])), ["npm_config_store_dir"], "a copied binary, a pin of 10");
+        // (the closest package.json pins nothing: no pin — as corepack reads it)
+        std::fs::write(home.join("dev2/package.json"), r#"{"packageManager": "pnpm@9.0.0"}"#).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert_eq!(told(&with_path(&[])), ["pnpm_config_store_dir"], "the closest pins nothing");
+        std::fs::remove_file(home.join("dev2/package.json")).unwrap();
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        // (corepack's own pin: the closest `package.json` that has one — it climbs past one with none; verify4 F4)
+        package(&base.join("corepack"), "corepack", "0.34.0");
+        std::fs::write(home.join("dev2/package.json"), r#"{"packageManager": "pnpm@12.0.0"}"#).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let known = [("COREPACK_HOME", corepack.as_path())];
+        assert_eq!(told(&with_path(&known)), ["pnpm_config_store_dir"], "corepack climbs past");
+        std::fs::remove_file(home.join("dev2/package.json")).unwrap();
+        std::fs::remove_file(root.join("package.json")).unwrap();
+        // (can't tell: the variable its newer versions read, alone — F3; corepack's own default is in its bundled
+        // code alone, unknown — verify5 N2)
+        assert_eq!(told(&with_path(&[])), ["pnpm_config_store_dir"], "corepack, nothing known");
+    }
+
     /// What a run home appends to (the java pack's `GRADLE_OPTS`) is the user's value as the run gets it: one
     /// holding a fake password (`-D…Password=`, left out as token-like) gives the run only tarae's append — the
     /// fake never comes back through it, on either system's appends; a harmless one still comes first.
@@ -6824,6 +8420,7 @@ mod tests {
             hidden: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL".into())],
             left_out: vec![(gitconfig.clone(), "GIT_CONFIG_GLOBAL".into())],
             told: vec![],
+            for_vars: vec!["GIT_CONFIG_GLOBAL".into()],
         };
         let p = Policy::for_project(&e);
         let text = p.profile();
@@ -9682,6 +11279,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            disk_stores: DiskStores::default(),
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
@@ -11026,6 +12624,7 @@ mod tests {
                 refused_asked: Vec::new(),
                 reads: Reads::default(),
                 env: Vec::new(),
+                disk_stores: DiskStores::default(),
                 run_env: Default::default(),
                 run_homes: Vec::new(),
                 kept: Vec::new(),
@@ -11111,6 +12710,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            disk_stores: DiskStores::default(),
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
@@ -11183,6 +12783,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            disk_stores: DiskStores::default(),
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
@@ -12472,6 +14073,7 @@ mod tests {
             refused_asked: Vec::new(),
             reads: Reads::default(),
             env: Vec::new(),
+            disk_stores: DiskStores::default(),
             run_env: Default::default(),
             run_homes: Vec::new(),
             kept: Vec::new(),
@@ -12525,7 +14127,11 @@ mod tests {
             let names: Vec<&str> = p.run_env.vars.iter().map(|(k, ..)| k.as_str()).collect();
             for n in &now {
                 if !["TMUX_TMPDIR", "ZELLIJ_SOCKET_DIR"].contains(&n.as_str()) && env.contains_key(n) {
-                    assert!(names.contains(&n.as_str()), "{n}: the policy reads it, the run doesn't get it");
+                    assert!(
+                        names.contains(&n.as_str()),
+                        "{n}: the policy reads it, the run doesn't get it (left out as token-like: {:?})",
+                        p.run_env.tokens
+                    );
                 }
             }
             let new: Vec<String> = now.into_iter().filter(|n| !asked.contains(n)).collect();

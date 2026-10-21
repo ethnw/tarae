@@ -33,13 +33,14 @@
 //! - `run-home.<name> = { env, keep, when, make, link, set, append, daemon, fresh, said }`: a home of the
 //!   run's own for the tool named, made in the run's folder (`{run}/<name>`) — or, `keep`, kept across the
 //!   project's runs in tarae's cache folder (`run-homes/<name>/<the project's>`) where it has one of `when` —
-//!   `env` pointing at it (or none, where `{home}` in what's appended does): folders made in it, links from it into the tool's home (read only), variables `set`
-//!   (`{ value, if }`: when `if` is there) and `append`ed to the run's own (`{home}`: this home's folder);
+//!   `env` pointing at it (or none, where `{home}` in what's set or appended does): folders made in it, links from it into the tool's home (read only), variables `set`
+//!   (`{ value, if }`: when `if` is there; `{home}/…`: in this home) and `append`ed to the run's own (`{home}`: this home's folder);
 //!   `daemon = { make, append }` (kept ones): the tool leaves a daemon serving later runs from it — kept per
 //!   project *and policy* where tarae ends what runs leave (Linux; elsewhere the run's own), and that made and
 //!   appended then; `fresh = { append }`: appended only to a home of the run's own; `files = { path = text }`:
 //!   files in it that are tarae's whole, written at every run (a few settings, `FILE_TEXT_MAX`); `said` what
-//!   Claude reads when a write in the user's home of the tool was kept.
+//!   Claude reads when a write in the user's home of the tool was kept; `note = { when, say }` what a run's report
+//!   says once a conversation in a project with one of `when`.
 //!   `proxy = { file, lines }`: a file in the home that's tarae's whole, written for a run with a proxy URL
 //!   (`sandbox::Policy::proxy_url`) and removed for one without — `{proxy.<value>}` in its lines
 //!   (`proxy::URL_VALUES`; a line whose value is empty for the run is left out). A run whose URL is its own
@@ -121,6 +122,8 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     // (narrows)
     ("kept", Reach::Added),
     ("caches", Reach::BuiltIn),
+    // (a variable set for runs, a place read)
+    ("disk-store", Reach::BuiltIn),
     ("write-files", Reach::BuiltIn),
     ("ask", Reach::BuiltIn),
     ("builds-said", Reach::BuiltIn),
@@ -149,6 +152,8 @@ pub(crate) const SANDBOX_KEYS: &[(&str, Reach)] = &[
     // (widen: files named like keys read there)
     ("installs", Reach::BuiltIn),
     ("packages", Reach::BuiltIn),
+    // (what of the user's environment a run gets, in which spelling)
+    ("any-case", Reach::BuiltIn),
 ];
 
 /// `[claude]`'s keys and how a runtime folder's pack counts for each.
@@ -199,6 +204,61 @@ pub struct Caches {
     pub said: String,
     /// The pack it's of: a host grant for one of that pack's `registries` opens it to the runs under it (piece C).
     pub pack: String,
+}
+
+/// A tool's store on the project's own filesystem (`disk-store`, compat B12): where a hard link from the project
+/// can't reach the tool's home (`home-env`, else `homes` — another filesystem), the tool keeps its store in
+/// `folder` at the topmost folder of the project's filesystem it can link into, and a run, refused there, falls
+/// back to its home's — `sandbox::disk_store` finds the one there and tells the tool (`env`), unless a store is named
+/// already: a variable (`named-env`) or a key (`named-keys`) in a file (`named-in`: in the project and the folders
+/// above it on its filesystem, or a place; `named-in-env`: the file a variable names — one that can't be read
+/// counts as naming it). Of `env`, only what the tool's version reads (`version`; can't tell: what its newer
+/// versions read — npm warns of a key it doesn't know in every run that has `npm_config_store_dir`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiskStore {
+    pub folder: String,
+    pub home_env: String,
+    pub homes: Vec<String>,
+    pub env: Vec<StoreVar>,
+    pub named_env: Vec<String>,
+    pub named_in: Vec<String>,
+    pub named_in_env: Vec<String>,
+    pub named_keys: Vec<String>,
+    pub version: Option<ToolVersion>,
+}
+
+/// A variable that tells a tool its store, and the tool's major versions that read it (`from`, `below`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoreVar {
+    pub var: String,
+    pub from: Option<u32>,
+    pub below: Option<u32>,
+}
+
+impl StoreVar {
+    /// Whether the tool at major version `major` reads it (None: can't tell — taken as its newer versions, one
+    /// with no `below`).
+    pub fn read_by(&self, major: Option<u32>) -> bool {
+        match major {
+            Some(m) => self.from.is_none_or(|f| m >= f) && self.below.is_none_or(|b| m < b),
+            None => self.below.is_none(),
+        }
+    }
+}
+
+/// Where a tool's version is found, as the tool itself finds which one runs (`disk-store`'s `version`,
+/// `sandbox::tool_major`): the project's `pinned` file nearest above it naming `<program>@<version>` (its
+/// `packageManager`), and the `program` first on the run's `PATH` — the package it's in (`packages`: its version,
+/// or the pin from `follows-pin-from` on), or a shim's (`shims`: the pin, else its `known` file's version for it,
+/// a JSON file of `program: version`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolVersion {
+    pub program: String,
+    pub pinned: Option<(String, String)>,
+    pub packages: Vec<String>,
+    pub follows_pin_from: Option<(u32, u32)>,
+    pub shims: Vec<String>,
+    pub known: Option<String>,
 }
 
 /// What a toolchain is asked (`ask`): by JSON key, the folders it writes (`json`), its shared caches
@@ -254,6 +314,9 @@ pub struct RunHome {
     /// home's too (`files`: Gradle's init script).
     pub files: Vec<(String, String)>,
     pub said: String,
+    /// What a run's report says once a conversation in a project with one of these files (`note = { when, say }`:
+    /// what the run gets instead of the user's own — npm's global settings).
+    pub note: Option<(Vec<String>, String)>,
 }
 
 /// The longest text a run home's `files` entry holds (a few settings, not a program).
@@ -315,6 +378,9 @@ pub struct Proxy {
     pub append: Vec<(String, String)>,
     /// Files in the run's own folder.
     pub files: Vec<ProxyLines>,
+    /// The tools' own proxy settings in the user's environment (`out`, matched in any case, `-` as `_`): never
+    /// a run's, as the core's proxy variables — a tool's own wins over those, and goes direct (`runenv::of`).
+    pub out: Vec<String>,
 }
 
 /// What a home a daemon lives from gets besides (`run-home`'s `daemon`).
@@ -345,6 +411,9 @@ pub struct Setting {
     pub form: String,
     pub copy: Option<String>,
     pub tell: Option<String>,
+    /// Keys left out of the copy besides token-like lines (`out-keys`, any case, `_` as `-`): the tool's own
+    /// proxy settings, which would go past tarae's proxy. A file holding one gets a copy, though it holds no token.
+    pub out_keys: Vec<String>,
 }
 
 /// A `$(…)` a command line may hold (`expand`).
@@ -432,6 +501,10 @@ pub struct Packs {
     pub reads_above: Vec<String>,
     pub kept: Vec<String>,
     pub caches: Vec<Caches>,
+    pub disk_stores: Vec<DiskStore>,
+    /// Variables their tools read in any case (`any-case`, npm's `npm_config_*`): read so, and a run gets each in
+    /// this spelling alone (`sandbox::Here::spelled`, `runenv::of`).
+    pub any_case: Vec<String>,
     pub write_files: Vec<String>,
     pub ask: Vec<Ask>,
     pub builds_said: Vec<BuildsSaid>,
@@ -490,9 +563,11 @@ pub struct Packs {
 
 impl Packs {
     /// The variables the packs set or read for a run: their homes', their run homes' (and what those set and
-    /// append to), their `env` (and their `proxy`'s), their settings', their caches' `var`, what their `ask` reads (a toolchain's
-    /// variable of the same name moves that folder) — no command of Claude's sets one unasked
-    /// (`readonly::env_allowed`).
+    /// append to), their `env` (and their `proxy`'s), their settings', their caches' `var`, their disk stores'
+    /// (the home's, those naming a store — the user's own reaches the run; the settings files a variable names are
+    /// the settings' own), what they read in any case, what their `ask` reads (a toolchain's variable of the
+    /// same name moves that folder) — no command of Claude's sets one unasked (`readonly::env_allowed`, any case
+    /// for `any_case`'s).
     pub fn env_names(&self) -> impl Iterator<Item = &str> {
         let homes = self.homes.iter().map(|h| h.env.as_str());
         let runs = self.run_homes.iter().flat_map(|r| {
@@ -507,7 +582,14 @@ impl Packs {
         let settings = self.settings.iter().flat_map(|s| s.var.iter().chain(&s.var_also).map(String::as_str));
         let caches = self.caches.iter().filter_map(|c| c.var.as_deref());
         let asked = self.ask.iter().flat_map(Ask::keys).map(String::as_str);
-        homes.chain(runs).chain(env).chain(settings).chain(caches).chain(asked)
+        let stores = self.disk_stores.iter().flat_map(|d| std::iter::once(&d.home_env).chain(&d.named_env));
+        homes
+            .chain(runs)
+            .chain(env)
+            .chain(settings)
+            .chain(caches)
+            .chain(stores.chain(&self.any_case).map(String::as_str))
+            .chain(asked)
     }
 }
 
@@ -708,6 +790,59 @@ fn read_key_of(
             }
             out.caches.push(c);
         }
+        ("sandbox", "disk-store") => {
+            let d = tab(v)?;
+            let keys = [
+                "folder",
+                "home-env",
+                "homes",
+                "env",
+                "named-env",
+                "named-in",
+                "named-in-env",
+                "named-keys",
+                "version",
+            ];
+            known(&d, &keys, "`disk-store`")?;
+            let env = d.get("env").and_then(Value::as_array).ok_or("`disk-store`: `env` isn't a list")?;
+            let d = DiskStore {
+                folder: need(&d, "folder", "`disk-store`")?,
+                home_env: need(&d, "home-env", "`disk-store`")?,
+                homes: list_in(&d, "homes")?,
+                env: env.iter().map(store_var).collect::<Result<_, _>>()?,
+                named_env: list_in(&d, "named-env")?,
+                named_in: list_in(&d, "named-in")?,
+                named_in_env: list_in(&d, "named-in-env")?,
+                named_keys: list_in(&d, "named-keys")?,
+                version: d.get("version").map(|v| tool_version(v, &homes)).transpose()?,
+            };
+            if !plain_word(d.folder.trim_start_matches('.')) || d.folder.contains('/') {
+                return Err(format!("`disk-store`: `{}` isn't a folder's name", d.folder));
+            }
+            let word = |v: &String| plain_word(v) && !v.contains(['.', '-', '+']);
+            let env = d.env.iter().map(|e| &e.var);
+            for v in std::iter::once(&d.home_env).chain(env).chain(&d.named_env).chain(&d.named_in_env) {
+                if !word(v) || NOT_A_HOME.contains(&v.as_str()) {
+                    return Err(format!("`disk-store`: `{v}` isn't a variable it may name"));
+                }
+            }
+            if d.env.is_empty() || d.env.iter().any(|v| !d.named_env.contains(&v.var)) {
+                return Err(
+                    "`disk-store`: each variable in `env` names a store, so it's in `named-env` too".into()
+                );
+            }
+            for p in &d.homes {
+                check_place(p, Kind::Read, &homes)?;
+            }
+            // (read by tarae alone, for a key's name — never a run's read: `~/.npmrc` holds tokens)
+            for f in &d.named_in {
+                let place = (f.starts_with('{') || f.starts_with("~/")) && leads(f, &homes).is_some();
+                if !(place || plain(f)) || f.split('/').any(|s| s == "..") {
+                    return Err(format!("`disk-store`: `{f}` isn't a place nor a file in the project"));
+                }
+            }
+            out.disk_stores.push(d);
+        }
         ("sandbox", "write-files") => places(&mut out.write_files, v, Kind::WriteFile)?,
         ("sandbox", "ask") => {
             for a in v.as_array().ok_or("`ask` isn't a list")? {
@@ -793,9 +928,27 @@ fn read_key_of(
                 out.settings.push(setting(&tab(s)?, &homes)?);
             }
         }
+        ("sandbox", "any-case") => {
+            for n in list(v)? {
+                match check_var(&n) {
+                    Ok(()) if !out.any_case.iter().any(|a| a.eq_ignore_ascii_case(&n)) => {
+                        out.any_case.push(n)
+                    }
+                    Ok(()) => wrong.push(format!("`{n}` is named twice, in any case")),
+                    Err(e) => wrong.push(e),
+                }
+            }
+        }
         ("sandbox", "proxy") => {
             let p = tab(v)?;
-            known(&p, &["env", "append", "files"], "`proxy`")?;
+            known(&p, &["env", "append", "files", "out"], "`proxy`")?;
+            for n in list_in(&p, "out")? {
+                match crate::sandbox::runenv::entry_ok(&n) && !n.ends_with('*') {
+                    true if !out.proxy.out.contains(&n) => out.proxy.out.push(n),
+                    true => {}
+                    false => wrong.push(format!("`proxy.out`: `{n}` isn't a variable's name")),
+                }
+            }
             for key in ["env", "append"] {
                 for (k, val) in p.get(key).map_or(Ok(Vec::new()), |e| pairs(e, key))? {
                     match check_proxy_var(&k).and_then(|()| check_braces(&val, &[], &format!("`{key}.{k}`")))
@@ -1070,8 +1223,10 @@ fn proxy_file(name: &str, f: &Value) -> Result<ProxyLines, String> {
 }
 
 fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
-    let keys =
-        ["env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "proxy", "files", "said"];
+    let keys = [
+        "env", "keep", "when", "make", "link", "set", "append", "daemon", "fresh", "proxy", "files", "said",
+        "note",
+    ];
     known(h, &keys, &format!("`run-home.{name}`"))?;
     if !plain_word(name) {
         return Err(format!("`run-home.{name}`: a home's name is a folder's"));
@@ -1152,15 +1307,84 @@ fn run_home(name: &str, h: &Table, homes: &[Home]) -> Result<RunHome, String> {
         r.files.push((k.clone(), text.to_string()));
     }
     r.said = string(h, "said")?.unwrap_or_default();
+    if let Some(n) = h.get("note") {
+        let what = format!("`run-home.{name}.note`");
+        let n = n.as_table().ok_or(format!("{what} isn't `{{ when, say }}`"))?;
+        known(n, &["when", "say"], &what)?;
+        let when = list_in(n, "when")?;
+        if when.is_empty() || when.iter().any(|w| !plain(w)) {
+            return Err(format!("{what}: `when` names files in the project"));
+        }
+        r.note = Some((when, need(n, "say", &what)?));
+    }
     let named = r.append.iter().chain(&r.fresh).chain(r.daemon.iter().flat_map(|d| &d.append));
-    if r.env.is_empty() && !named.into_iter().any(|(_, v)| v.contains("{home}")) {
-        return Err(format!("`run-home.{name}`: no `env`, and nothing appended names `{{home}}`"));
+    let set = r.set.iter().map(|(_, v, _)| v);
+    if r.env.is_empty() && !named.into_iter().map(|(_, v)| v).chain(set).any(|v| v.contains("{home}")) {
+        return Err(format!("`run-home.{name}`: no `env`, and nothing set or appended names `{{home}}`"));
     }
     Ok(r)
 }
 
+/// A `disk-store` `env` entry: `{ var, from, below }` — the tool's major versions that read it.
+fn store_var(v: &Value) -> Result<StoreVar, String> {
+    let what = "a `disk-store` `env` entry";
+    let t = v.as_table().ok_or(format!("{what} isn't `{{ var, from, below }}`"))?;
+    known(t, &["var", "from", "below"], what)?;
+    let major = |k: &str| {
+        let n = t.get(k).map(|v| v.as_integer().and_then(|n| u32::try_from(n).ok()));
+        n.map(|n| n.ok_or(format!("{what}: `{k}` isn't a major version"))).transpose()
+    };
+    Ok(StoreVar { var: need(t, "var", what)?, from: major("from")?, below: major("below")? })
+}
+
+/// `disk-store`'s `version`: where the tool's version is found (`ToolVersion`).
+fn tool_version(v: &Value, homes: &[Home]) -> Result<ToolVersion, String> {
+    let what = "`disk-store.version`";
+    let t = v.as_table().ok_or(format!("{what} isn't a table"))?;
+    known(t, &["program", "pinned", "packages", "follows-pin-from", "shims", "known"], what)?;
+    let follows = |s: String| -> Result<(u32, u32), String> {
+        let (a, b) = s.split_once('.').unwrap_or((&s, "0"));
+        a.parse().ok().zip(b.parse().ok()).ok_or(format!("{what}: `follows-pin-from` isn't `major.minor`"))
+    };
+    let file_key = |k: &str| match t.get(k) {
+        None => Ok(None),
+        Some(p) => {
+            let p = p.as_table().ok_or(format!("{what}: `{k}` isn't `{{ file, key }}`"))?;
+            known(p, &["file", "key"], what)?;
+            Ok::<_, String>(Some((need(p, "file", what)?, need(p, "key", what)?)))
+        }
+    };
+    let out = ToolVersion {
+        program: need(t, "program", what)?,
+        pinned: file_key("pinned")?,
+        packages: list_in(t, "packages")?,
+        follows_pin_from: string(t, "follows-pin-from")?.map(follows).transpose()?,
+        shims: list_in(t, "shims")?,
+        known: string(t, "known")?,
+    };
+    if !plain_word(&out.program) || out.pinned.as_ref().is_some_and(|(f, _)| !plain_word(f)) {
+        return Err(format!("{what}: `program` and `pinned.file` are plain names"));
+    }
+    if let Some(k) = &out.known {
+        check_place(k, Kind::Read, homes)?;
+    }
+    Ok(out)
+}
+
 fn setting(s: &Table, homes: &[Home]) -> Result<Setting, String> {
-    let keys = ["tool", "var", "var-also", "off", "var-if-there", "files", "above", "form", "copy", "tell"];
+    let keys = [
+        "tool",
+        "var",
+        "var-also",
+        "off",
+        "var-if-there",
+        "files",
+        "above",
+        "form",
+        "copy",
+        "tell",
+        "out-keys",
+    ];
     known(s, &keys, "a `settings` entry")?;
     let tool = need(s, "tool", "a `settings` entry")?;
     let flag =
@@ -1174,9 +1398,13 @@ fn setting(s: &Table, homes: &[Home]) -> Result<Setting, String> {
         form: string(s, "form")?.unwrap_or_else(|| "lines".into()),
         copy: string(s, "copy")?,
         tell: string(s, "tell")?,
+        out_keys: list_in(s, "out-keys")?,
         tool,
         ..Default::default()
     };
+    if !out.out_keys.is_empty() && out.copy.is_none() {
+        return Err(format!("`{}`: `out-keys` leave a copy, so it has a `copy`", out.tool));
+    }
     for v in out.var.iter().chain(&out.var_also) {
         check_var(v)?;
     }

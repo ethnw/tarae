@@ -108,6 +108,13 @@ pub struct RunEnv {
     pub tokens: Vec<String>,
     /// Left out, the rest — names (but what the shell or tarae sets anyway).
     pub others: Vec<String>,
+    /// Left out for what tarae gives the tool instead — names: another spelling of one it reads in any case
+    /// (the packs' `any-case`: the run gets the packs'), or the user's own variable naming settings a copy of
+    /// tarae's stands in for (`tokens.rs`, a setting's `var`, `var-also`).
+    pub replaced: Vec<String>,
+    /// What the packs' run homes give instead of the user's own, in their words (`RunHome::note`) — said once a
+    /// conversation.
+    pub notes: Vec<String>,
 }
 
 /// Names only: a value never reaches a log through a policy's `Debug`.
@@ -118,6 +125,8 @@ impl std::fmt::Debug for RunEnv {
             .field("vars", &names)
             .field("tokens", &self.tokens)
             .field("others", &self.others)
+            .field("replaced", &self.replaced)
+            .field("notes", &self.notes.len())
             .finish()
     }
 }
@@ -142,13 +151,18 @@ pub(crate) fn entry_ok(entry: &str) -> bool {
 
 /// `NAME=value` looks like a token (`tokens::token_like`).
 fn token_like(name: &str, value: &OsString) -> bool {
-    crate::tokens::token_like(&format!("{name}={}", value.to_string_lossy()))
+    crate::tokens::var_token_like(name, &value.to_string_lossy())
 }
 
 /// What a run gets of `here`'s variables: the floor, what the policy reads (`policy`), the packs' `pass`, the
 /// user's `yours` — no token-like one but a name of `yours` written whole. `set`: what tarae sets on top (not
-/// said as left out).
+/// said as left out). One its tool reads in any case (the packs' `any-case`) goes in the packs' spelling alone, its
+/// value `Here::spelled`'s — the user's other spellings `replaced`; a tool's own proxy setting (the packs'
+/// `proxy.out`, any case) never, as `PROXIES`.
 pub fn of(here: &Here, policy: &[&str], pass: &[String], yours: &[String], set: &[&str]) -> RunEnv {
+    let packs = crate::sandboxpack::get();
+    let folded = |n: &str| n.to_ascii_lowercase().replace('-', "_");
+    let proxies: Vec<String> = packs.proxy.out.iter().map(|n| folded(n)).collect();
     let yours: Vec<&String> = yours.iter().filter(|e| entry_ok(e)).collect();
     let by = |name: &str| -> Option<By> {
         if FLOOR.contains(&name) || FLOOR_FAMILIES.iter().any(|f| name.starts_with(f)) {
@@ -169,6 +183,22 @@ pub fn of(here: &Here, policy: &[&str], pass: &[String], yours: &[String], set: 
     for name in names {
         let value = &here.env[name];
         let named_whole = yours.contains(&name);
+        if proxies.contains(&folded(name)) {
+            continue;
+        }
+        if let Some(own) = packs.any_case.iter().find(|a| a.eq_ignore_ascii_case(name)) {
+            match () {
+                _ if token_like(name, value) && !named_whole => out.tokens.push(name.clone()),
+                _ if here.spelled(own).is_some_and(|(k, _)| k == name) => {
+                    out.vars.push((own.clone(), value.clone(), By::Policy));
+                    if name != own {
+                        out.replaced.push(name.clone());
+                    }
+                }
+                _ => out.replaced.push(name.clone()),
+            }
+            continue;
+        }
         match by(name) {
             _ if token_like(name, value) && !named_whole => out.tokens.push(name.clone()),
             Some(why) => out.vars.push((name.clone(), value.clone(), why)),
@@ -176,6 +206,8 @@ pub fn of(here: &Here, policy: &[&str], pass: &[String], yours: &[String], set: 
             None => out.others.push(name.clone()),
         }
     }
+    // (a spelling of the packs' in its sorted place)
+    crate::sorting::by(&mut out.vars, |(a, ..), (b, ..)| a.cmp(b));
     out
 }
 
@@ -207,9 +239,22 @@ impl RunEnv {
         value.clone().into_string().ok()
     }
 
+    /// A copy of tarae's stands in for the settings `names` name: they leave the run — those the user set (`set`)
+    /// named as left out; the packs' spelling of one set in another (named already) just goes.
+    pub fn stand_in(&mut self, names: &[&String], set: &dyn Fn(&str) -> bool) {
+        let gone: Vec<String> =
+            self.vars.iter().filter(|(k, ..)| names.contains(&k)).map(|(k, ..)| k.clone()).collect();
+        self.vars.retain(|(k, ..)| !gone.contains(k));
+        for k in gone {
+            if set(&k) && !self.replaced.contains(&k) {
+                self.replaced.push(k);
+            }
+        }
+    }
+
     /// Every name left out.
     pub fn left_out(&self) -> impl Iterator<Item = &String> {
-        self.tokens.iter().chain(&self.others)
+        self.tokens.iter().chain(&self.others).chain(&self.replaced)
     }
 
     /// What Claude reads of the names left out that `said` doesn't hold yet — which it then does (once a
@@ -221,19 +266,24 @@ impl RunEnv {
         let new = |names: &[String]| -> Vec<String> {
             names.iter().filter(|n| !said.contains(n)).cloned().collect()
         };
-        let (tokens, others) = (new(&self.tokens), new(&self.others));
-        if tokens.is_empty() && others.is_empty() {
+        let (tokens, others, replaced) = (new(&self.tokens), new(&self.others), new(&self.replaced));
+        if tokens.is_empty() && others.is_empty() && replaced.is_empty() {
             return None;
         }
         let mut parts = Vec::new();
         if !tokens.is_empty() {
             parts.push(format!("token-like: {}", tokens.join(", ")));
         }
+        if !replaced.is_empty() {
+            let instead = "tarae's own stands in (the one spelling a run gets, a token-free copy of the settings, or a file of the \
+                 run's own)";
+            parts.push(format!("{instead}: {}", replaced.join(", ")));
+        }
         if !others.is_empty() {
-            let label = if tokens.is_empty() { "" } else { "the rest: " };
+            let label = if tokens.is_empty() && replaced.is_empty() { "" } else { "the rest: " };
             parts.push(format!("{label}{}", grouped(&others).join(", ")));
         }
-        said.extend(tokens.into_iter().chain(others));
+        said.extend(tokens.into_iter().chain(replaced).chain(others));
         Some(format!(
             "Your commands' environment holds PATH, HOME, the locale and the toolchains' own variables — not the \
              rest of the user's. Left out (names only) — {}. A command that needs one of them fails without it: \
@@ -297,6 +347,12 @@ impl RunEnv {
             "\n## Left out — token-like (a name for a secret, a URL with a password, a token's prefix)\n",
         );
         for k in &self.tokens {
+            s.push_str(&format!("{k}\n"));
+        }
+        s.push_str(
+            "\n## Left out — tarae's own stands in (the one spelling a run gets, a token-free copy)\n",
+        );
+        for k in &self.replaced {
             s.push_str(&format!("{k}\n"));
         }
         s.push_str("\n## Left out — the rest\n");
@@ -400,6 +456,36 @@ mod tests {
         assert!(!format!("{e:?}").contains(FAKE));
     }
 
+    /// compat8 N1: npm's, pnpm's and yarn's own proxy settings (the packs' `proxy.out`) never reach a run, in
+    /// any case — a `pass` family holds them and their names aren't token-like, yet a tool's own proxy wins over
+    /// tarae's and goes direct, which the sandbox refuses; not said either, as the core's proxies. Their
+    /// neighbours still pass.
+    #[test]
+    fn the_tools_own_proxy_settings_never_reach_a_run() {
+        let proxies = [
+            "npm_config_proxy",
+            "npm_config_https_proxy",
+            "NPM_CONFIG_HTTPS_PROXY",
+            "Npm_Config_Https_Proxy",
+            "npm_config_https-proxy",
+            "npm_config_noproxy",
+            "NPM_CONFIG_NOPROXY",
+            "pnpm_config_https_proxy",
+            "YARN_HTTPS_PROXY",
+            "yarn_https_proxy",
+            "YARN_HTTP_PROXY",
+        ];
+        let mut vars: Vec<(&str, &str)> =
+            proxies.iter().map(|p| (*p, "http://corp-proxy.example:3128")).collect();
+        vars.extend([("npm_config_registry", "https://npm.example/"), ("YARN_ENABLE_COLORS", "false")]);
+        let h = here(&vars);
+        let pass =
+            ["npm_config_*", "NPM_CONFIG_*", "YARN_*", "pnpm_config_*", "Npm_Config_*"].map(String::from);
+        let e = of(&h, &[], &pass, &["npm_config_https-proxy".into()], &[]);
+        assert_eq!(names(&e), ["YARN_ENABLE_COLORS", "npm_config_registry"]);
+        assert!(e.left_out().next().is_none(), "{e:?}");
+    }
+
     /// The report: token-like names by name, the rest grouped by their first part; a chat hears each name
     /// once — a new one is said, an old one isn't; never a value.
     #[test]
@@ -418,6 +504,8 @@ mod tests {
             ]
             .map(String::from)
             .into(),
+            replaced: Vec::new(),
+            notes: Vec::new(),
         };
         let mut said = Vec::new();
         let first = e.said(&mut said).unwrap();
@@ -437,6 +525,9 @@ mod tests {
         assert!(next.contains("Left out (names only) — NEW_ONE.") && !next.contains("GITHUB"), "{next}");
         let page = e.page();
         assert!(page.contains("GITHUB_TOKEN\n") && page.contains("CLAUDE_CODE_A\n"), "{page}");
+        // (what the report says tarae's own stands in for is on the page it points to — N11)
+        let spelled = RunEnv { replaced: vec!["npm_config_userconfig".into()], ..e.clone() }.page();
+        assert!(spelled.contains("stands in") && spelled.contains("npm_config_userconfig\n"), "{spelled}");
         // A name the output says, as a word, is said every time — not one inside another word
         let out = |l: &str| vec![(true, l.to_string())];
         let named = more.named_in(&out("error: NEW_ONE not set")).unwrap();

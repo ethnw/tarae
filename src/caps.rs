@@ -453,7 +453,12 @@ impl Basis {
         c.later = home
             .map(|h| {
                 let vars = crate::sandbox::vars_in(h, here);
-                crate::sandbox::RunsLater::new(h, &vars, &crate::sandbox::path_dirs_in(here))
+                // (a tool's store on the project's filesystem — compat B12)
+                let stores = crate::sandbox::disk_stores_in(&self.root, h, &vars, here).told;
+                crate::sandbox::RunsLater {
+                    stores: stores.into_iter().map(|(s, _)| s).collect(),
+                    ..crate::sandbox::RunsLater::new(h, &vars, &crate::sandbox::path_dirs_in(here))
+                }
             })
             .unwrap_or_default();
         c.home = home.map(Path::to_path_buf);

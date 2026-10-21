@@ -584,6 +584,14 @@ impl Store {
         Store { projects: by_path(&json["projects"]), repositories }
     }
 
+    /// Every folder a write is kept for, any project's or repository's (a store's check: `Here.others_write`).
+    pub fn writes(&self) -> Vec<PathBuf> {
+        let repositories =
+            self.repositories.values().flat_map(|r| std::iter::once(&r.shared).chain(r.checkouts.values()));
+        let all = self.projects.values().chain(repositories);
+        all.flat_map(|a| a.write.iter().cloned()).collect()
+    }
+
     /// What applies to `project` (`Where::of` it — a worker's).
     pub fn get(&self, project: &Path) -> Allowed {
         self.kept(&Where::of(project)).all

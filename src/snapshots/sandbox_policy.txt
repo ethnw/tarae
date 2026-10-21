@@ -249,6 +249,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
@@ -506,6 +507,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
@@ -764,6 +766,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
@@ -1027,6 +1030,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
@@ -1276,6 +1280,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
@@ -1526,6 +1531,7 @@ run env:
     MAVEN_ARGS=-s $RUN/maven-settings.xml
     MYPY_CACHE_DIR=$RUN/mypy
     NODE_USE_ENV_PROXY=1
+    NPM_CONFIG_GLOBALCONFIG=$RUN/npm-global/npmrc
     PYTEST_ADDOPTS=-o 'cache_dir=$RUN/pytest'
     PYTHONPYCACHEPREFIX=$RUN/pycache
     RUFF_CACHE_DIR=$RUN/ruff
