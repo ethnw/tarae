@@ -1,14 +1,14 @@
 # soft_wrap · 60x14 · theme meok · cursor 3:4
 ## text
 00  tarae  ›  notes.md
-01   2 # Notes
-02   1
+01   1 # Notes
+02   2
 03   3 Long lines in prose wrap at word boundaries instead of
 04     running off the right edge.
-05   1
-06   2 - A list item long enough to need a second row keeps
+05   4
+06   5 - A list item long enough to need a second row keeps
 07       its text aligned.
-08   3 - Short item
+08   6 - Short item
 09
 10
 11

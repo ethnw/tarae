@@ -4489,8 +4489,8 @@ pub fn rail_focus(ed: &mut Editor) {
 }
 
 /// Keys while the rail has them: `j`/`k` move over the files, Enter (`l`) opens one, `m` marks it viewed
-/// and goes on to the next, Esc (`q`) back to the code; `space` and `:` stay the editor's. False = not the
-/// rail's.
+/// and goes on to the next, `q` ends the review (`space v q`: its card when files are unviewed), Esc back to
+/// the code; `space`, `:` and `C-w` stay the editor's. False = not the rail's.
 pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != crate::editor::Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
         return false;
@@ -4507,12 +4507,14 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
         return true;
     }
     match (key.code, key.ctrl) {
-        (Code::Char(' ') | Code::Char(':'), false) => return false,
+        (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
         (Code::Enter | Code::Char('l') | Code::Right, false) => {
             let i = r.selected;
             r.focus = false;
             show(ed, i, false);
         }
+        // (as every list panel's `q`: it closes — the review ends, asked first when files are unviewed)
+        (Code::Char('q'), false) => close_asked(ed),
         (Code::Char('m'), false) => {
             let i = r.selected;
             show(ed, i, false);
@@ -4521,7 +4523,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
                 r.selected = pick(at + 1).unwrap_or(i);
             }
         }
-        (Code::Esc | Code::Char('q'), false) => r.focus = false,
+        (Code::Esc, false) => r.focus = false,
         // (the next file not viewed, selected — enter opens it; `U` the one before)
         (Code::Char(c @ ('u' | 'U')), false) => {
             let selected = r.selected;
@@ -4536,7 +4538,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
                 None => ed.set_status("every file is viewed"),
             }
         }
-        _ => ed.key_unused(key, "the review's file list", "enter opens a file, esc goes to the code"),
+        _ => ed.key_unused(key, "the review's file list", "enter open, esc code"),
     }
     true
 }

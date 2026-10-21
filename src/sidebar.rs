@@ -1196,7 +1196,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         }
         (Code::Esc, _) => s.focus = false,
         (Code::Char('q'), false) => ed.session.sidebar = None,
-        _ => ed.key_unused(key, "the side panel", "esc gives the keys to the code"),
+        _ => ed.key_unused(key, "the side panel", "esc code"),
     }
     // Moving onto a hunk or conflict shows it in the code
     if let Some(s) =

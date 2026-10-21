@@ -107,8 +107,10 @@ pub enum Keys {
     Picker,
     Chat,
     Side(crate::sidebar::Mode),
-    /// The review's file rail, or an edit's review in the buffer (its `y`/`n`).
+    /// The code review's file rail.
     Review,
+    /// Claude's change in review in the buffer (its `y`/`n`) — a word of its own, so `review` means one thing.
+    Change,
     /// The bottom slot with tarae's keys — on the terminal they scroll it, `i` types in it.
     Slot(Slot),
     /// The terminal's program: every key goes to it.
@@ -135,6 +137,7 @@ impl Keys {
             Keys::Side(S::Git) => "GIT",
             Keys::Side(S::Plugin) => "PANEL",
             Keys::Review => "REVIEW",
+            Keys::Change => "CHANGE",
             Keys::Slot(Slot::Terminal) | Keys::Program => "TERMINAL",
             Keys::Slot(Slot::Test) => "TESTS",
             Keys::Slot(Slot::Task) => "TASK",
@@ -154,7 +157,7 @@ impl Keys {
 
     /// Whether the code panes are what has them (they're drawn at full strength).
     pub fn code(self) -> bool {
-        matches!(self, Keys::Code | Keys::Review)
+        matches!(self, Keys::Code | Keys::Review | Keys::Change)
     }
 
     /// The key hint the status line puts after the label (key, what it does): on the terminal with tarae's
@@ -230,7 +233,8 @@ impl Editor {
             R::Picker => Keys::Picker,
             R::Card(_) => Keys::Card,
             R::Chat | R::Unfold => Keys::Chat,
-            R::Rail | R::EditReview => Keys::Review,
+            R::Rail => Keys::Review,
+            R::EditReview => Keys::Change,
             R::Side(m) => Keys::Side(m),
             R::Slot(s) => Keys::Slot(s),
             R::Program => Keys::Program,
@@ -465,5 +469,6 @@ mod tests {
         assert_eq!(Keys::Slot(Slot::Terminal).label(), Some("TERMINAL"));
         assert_eq!(Keys::Picker.label(), Some("PICKER"));
         assert_eq!(Keys::Review.label(), Some("REVIEW"));
+        assert_eq!(Keys::Change.label(), Some("CHANGE"));
     }
 }

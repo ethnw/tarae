@@ -3,7 +3,7 @@
 //!
 //! - **The panel** takes the keys while it's focused — as a plugin command shows it, or with a click. tarae
 //!   moves through its rows (`j` `k` `g` `G`, `C-d` `C-u`, the arrows and the wheel); `esc` gives the keys
-//!   back to the code; `space` and `:` stay the editor's. Every other key goes to the plugin (`key`), with
+//!   back to the code; `space`, `:` and `C-w` stay the editor's. Every other key goes to the plugin (`key`), with
 //!   the row selected then — the plugin decides what `d` or `enter` does.
 //!   With row ids, the selection stays on its row as rows come, go and move, and a key says which row it
 //!   was on. A panel that's out of sight (a terminal or the debugger in its place) doesn't take keys.
@@ -84,8 +84,8 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         return true;
     }
     match (key.code, key.ctrl, key.alt) {
-        // Still the editor's: the space menu, the command line
-        (Code::Char(' ') | Code::Char(':'), false, false) => return false,
+        // Still the editor's: the space menu, the command line, the windows
+        (Code::Char(' ') | Code::Char(':'), false, false) | (Code::Char('w'), true, false) => return false,
         (Code::Esc, ..) => st.focus = false,
         _ => {
             let (plugin, row) = (st.plugin.clone(), (n > 0).then_some(st.selected as u64));

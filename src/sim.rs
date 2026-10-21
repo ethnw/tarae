@@ -920,16 +920,33 @@ pub mod lint {
     /// How often each of `patterns` appears per file of tarae's code (under `src/`, keyed by the path from
     /// there) — in what a non-test build compiles; `except` left out.
     pub fn counts(patterns: &[&str], except: &[&str]) -> BTreeMap<String, usize> {
+        count_tree(&files(), patterns, except)
+    }
+
+    /// tarae's code as a non-test build compiles it, literals kept (comments and test-only items and files
+    /// out): each file's path from `src/` and its text — for checks of the words it says.
+    pub fn sources() -> Vec<(String, String)> {
+        let files = files();
+        let split: BTreeMap<&str, Split> = files.iter().map(|(p, t)| (p.as_str(), split(t))).collect();
+        let tests = test_only(&split);
+        split
+            .into_iter()
+            .filter(|(p, _)| !tests.contains(*p))
+            .map(|(p, s)| (p.to_string(), s.decls))
+            .collect()
+    }
+
+    /// Every file under `src/`: its path from there, its text.
+    fn files() -> Vec<(String, String)> {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut paths = Vec::new();
         walk(&src, &mut paths);
-        let files: Vec<(String, String)> = paths
+        paths
             .iter()
             .map(|p| {
                 (p.strip_prefix(&src).unwrap().display().to_string(), std::fs::read_to_string(p).unwrap())
             })
-            .collect();
-        count_tree(&files, patterns, except)
+            .collect()
     }
 
     /// `counts` over `files` (each its path from `src/` and its text): not in comments or literals, nor in a

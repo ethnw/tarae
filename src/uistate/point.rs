@@ -140,7 +140,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             },
             None => ed.set_status(format!("no label starts with {c} — type one shown, or esc")),
         },
-        _ => ed.set_status(format!("{key}: pointing takes a label's two letters — esc stops it")),
+        _ => ed.set_status(format!("{key}: pointing takes a label's two letters — esc stop pointing")),
     }
     true
 }

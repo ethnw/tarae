@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::NOTHING;
 use crate::editor::Editor;
 use crate::event::SessionId;
 use crate::key::{Code, Key};
@@ -181,7 +182,7 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     feed(&mut ed, "n");
     assert!(ed.offers.is_empty() && !ed.card_keys);
     // C-q: third's — tarae's own card, its turn over (#94) — before front's newer one
-    assert!(ed.status.as_ref().is_none_or(|s| !s.0.contains("no card waits")));
+    assert!(ed.status.as_ref().is_none_or(|s| s.0 != NOTHING));
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, third, "#94: found");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Trust this project's settings?"));
@@ -193,7 +194,7 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     // Nothing anywhere: said
     ed.offers.clear();
     feed(&mut ed, "<C-q>");
-    assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+    assert!(ed.status.as_ref().is_some_and(|s| s.0 == NOTHING), "{:?}", ed.status);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -407,7 +408,7 @@ fn c_q_goes_to_a_finished_session_when_nothing_waits() {
     // Nothing left
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, third);
-    assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+    assert!(ed.status.as_ref().is_some_and(|s| s.0 == NOTHING), "{:?}", ed.status);
     std::fs::remove_dir_all(&dir).ok();
 }
 

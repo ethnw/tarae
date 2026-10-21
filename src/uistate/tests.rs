@@ -909,7 +909,7 @@ fn an_edit_review_under_a_side_panel_is_where_the_keys_go() {
     ed.sidebar_show(crate::sidebar::Mode::Outline);
     frame(&mut ed);
     assert_eq!(ed.keys_to().region, Region::EditReview);
-    assert_eq!(ed.keys_at(), crate::chrome::Keys::Review);
+    assert_eq!(ed.keys_at(), crate::chrome::Keys::Change);
 }
 
 /// On a screen too narrow for the chat beside the code, the chat takes it all — while it has the keys. Once

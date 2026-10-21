@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespace() {
-10   8     │   *counts.entry(word).or_insert(0) += 1;
-11   9     }
-12  10     counts
-13  11 }                                       ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-14  12                                          ▎ End fix-login?
-15  13 fn main() {                                2 commits not in main:
-16  14     let text = "the quick brown fox jump     a1b2c3d Parse hours too
-17  15     let counts = word_counts(text);          9f8e7d6 Say the hours in the summary
-18  16     println!("{} distinct words", counts   A squash merge on a forge looks unmerged here.
-19  17 }
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   7     let mut counts = HashMap::new();
+09   8     for word in text.split_whitespace() {
+10   9     │   *counts.entry(word).or_insert(0) += 1;
+11  10     }
+12  11     counts
+13  12 }                                       ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+14  13                                          ▎ End fix-login?
+15  14 fn main() {                                2 commits not in main:
+16  15     let text = "the quick brown fox jump     a1b2c3d Parse hours too
+17  16     let counts = word_counts(text);          9f8e7d6 Say the hours in the summary
+18  17     println!("{} distinct words", counts   A squash merge on a forge looks unmerged here.
+19  18 }
 20                                                Kept in main's target/sb/sessions/fix-login/:
 21                                                  target/sb  14 files, 220 KB
 22                                                  CLAUDE.md  differs from main's
@@ -73,7 +73,7 @@
 08   f
 09   f
 10   f
-11   f
+11  ff
 12  ff
 13  ff
 14  ff                                          a BBB BBBBBBBBBB

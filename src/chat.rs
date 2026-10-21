@@ -3007,7 +3007,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
             c.cursor += x.len_utf8();
         }
         // (a `C-`/`A-` key the chat has no use for: said, not dropped — the keys stay the chat's)
-        (Code::Char(_), ..) => ed.key_unused(key, "the chat", "esc gives the keys to the code"),
+        (Code::Char(_), ..) => ed.key_unused(key, "the chat", "esc code"),
         _ => {}
     }
     true

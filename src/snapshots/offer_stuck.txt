@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespace() {
-10   8     │   *counts.entry(word).or_i▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-11   9     }                            ▎ Stuck? Claude's command
-12  10     counts                         No output for 12 min, 0% CPU — Claude's command cargo test
-13  11 }                                  --target aarch64-unknown-linux-gnu in the task panel.
-14  12                                    Claude's turn waits on it, and only you can stop it.
-15  13 fn main() {
-16  14     let text = "the quick brown    What each of its threads waits in is in its output now
-17  15     let counts = word_counts(tex   (w), kept if you stop it:
-18  16     println!("{} distinct words"       pid 4242 · cargo test --target
-19  17 }                                          aarch64-unknown-linux-gnu · 1 thread
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   7     let mut counts = HashMap::new();
+09   8     for word in text.split_whitespace() {
+10   9     │   *counts.entry(word).or_i▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+11  10     }                            ▎ Stuck? Claude's command
+12  11     counts                         No output for 12 min, 0% CPU — Claude's command cargo test
+13  12 }                                  --target aarch64-unknown-linux-gnu in the task panel.
+14  13                                    Claude's turn waits on it, and only you can stop it.
+15  14 fn main() {
+16  15     let text = "the quick brown    What each of its threads waits in is in its output now
+17  16     let counts = word_counts(tex   (w), kept if you stop it:
+18  17     println!("{} distinct words"       pid 4242 · cargo test --target
+19  18 }                                          aarch64-unknown-linux-gnu · 1 thread
 20                                              cargo — sleeping in do_wait · 0.84 s CPU
 21                                            pid 4250 · qemu-aarch64 target/debug/deps/tarae-1f2e ·
 22                                                3 threads
@@ -73,7 +73,7 @@
 08   f
 09   f
 10   f
-11   f                                  a BBBBBB BBBBBBBB BBBBBBB
+11  ff                                  a BBBBBB BBBBBBBB BBBBBBB
 12  ff
 13  ff
 14  ff

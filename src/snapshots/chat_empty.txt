@@ -3,26 +3,26 @@
 00  tarae  ›  src  ›  demo.rs                                     claude › follow                ready
 01  ──────────────────────────────────────────────────────────    ────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize>
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>
 08     {                                                          ▎ Ask Claude
-09   6     let mut counts = HashMap::new();
-10   7     for word in text.split_whitespace() {                  It reads the whole project,
-11   8     │   *counts.entry(word).or_insert(0) += 1;             starting from demo.rs.
-12   9     }
-13  10     counts                                                 tab for a suggestion
-14  11 }                                                          › Explain what this file does
-15  12                                                            › Where is this used across the pro…
-16  13 fn main() {                                                › Why is this diagnostic happening?
-17  14     let text = "the quick brown fox jumps over the lazy
+09   7     let mut counts = HashMap::new();
+10   8     for word in text.split_whitespace() {                  It reads the whole project,
+11   9     │   *counts.entry(word).or_insert(0) += 1;             starting from demo.rs.
+12  10     }
+13  11     counts                                                 tab for a suggestion
+14  12 }                                                          › Explain what this file does
+15  13                                                            › Where is this used across the pro…
+16  14 fn main() {                                                › Why is this diagnostic happening?
+17  15     let text = "the quick brown fox jumps over the lazy
 18         dog";                                                  C-t for another model
-19  15     let counts = word_counts(text);
-20  16     println!("{} distinct words", counts.len()); //
+19  16     let counts = word_counts(text);
+20  17     println!("{} distinct words", counts.len()); //
 21         타래
-22  17 }
+22  18 }
 23
 24
 25
@@ -74,7 +74,7 @@
 09   f
 10   f                                                            dd ddddd ddd ddddd dddddddd
 11   f                                                            dddddddd dddd dddddddd
-12   f
+12  ff
 13  ff                                                            DDD fff f ffffffffff
 14  ff                                                            f ddddddd dddd dddd dddd dddd
 15  ff                                                            f ddddd dd dddd dddd dddddd ddd dddd

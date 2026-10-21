@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespac▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-10   8     │   *counts.entry(word).or_inser ▎ Quiet: Claude's command
-11   9     }                                  No output for 14 min, 0% CPU — Claude's command cargo
-12  10     counts                             xtask linux test in the task panel. Claude's turn
-13  11 }                                      waits on it, and only you can stop it.
-14  12
-15  13 fn main() {                            Its processes are connected to
-16  14     let text = "the quick brown fox    ~/.colima/default/docker.sock — the work may be going
-17  15     let counts = word_counts(text);    on there: next to no CPU here doesn't mean it's stuck.
-18  16     println!("{} distinct words", co
-19  17 }                                      What each of its threads waits in is in its output now
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   7     let mut counts = HashMap::new();
+09   8     for word in text.split_whitespac▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+10   9     │   *counts.entry(word).or_inser ▎ Quiet: Claude's command
+11  10     }                                  No output for 14 min, 0% CPU — Claude's command cargo
+12  11     counts                             xtask linux test in the task panel. Claude's turn
+13  12 }                                      waits on it, and only you can stop it.
+14  13
+15  14 fn main() {                            Its processes are connected to
+16  15     let text = "the quick brown fox    ~/.colima/default/docker.sock — the work may be going
+17  16     let counts = word_counts(text);    on there: next to no CPU here doesn't mean it's stuck.
+18  17     println!("{} distinct words", co
+19  18 }                                      What each of its threads waits in is in its output now
 20                                            (w), kept if you stop it:
 21                                                pid 4242 · cargo xtask linux test · 1 thread
 22                                                  cargo — waiting · 0.31 s CPU
@@ -73,7 +73,7 @@
 08   f
 09   f
 10   f                                      a BBBBBB BBBBBBBB BBBBBBB
-11   f
+11  ff
 12  ff
 13  ff
 14  ff

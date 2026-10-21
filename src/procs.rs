@@ -2423,7 +2423,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('s'), false, false) => ed.procs_stop(),
         (Code::Char('r'), false, false) => ed.procs_restart(),
         (Code::Char('l'), false, false) => ed.procs_log(),
-        _ => ed.key_unused(key, ":procs", "esc gives the keys to the code"),
+        _ => ed.key_unused(key, ":procs", "esc code"),
     }
     true
 }

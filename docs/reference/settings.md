@@ -15,7 +15,7 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `editor.line-numbers` | `"absolute"` · `"relative"` | `"relative"` | Gutter line numbers |
+| `editor.line-numbers` | `"absolute"` · `"relative"` | `"absolute"` | Gutter line numbers |
 | `editor.scrolloff` | integer 0–100 | `5` | Lines kept visible above/below the cursor |
 | `editor.tab-width` | integer 1–16 | `4` | Display width of a tab; the indent step when a file doesn't show its own |
 | `editor.color-modes` | bool | `true` | Color the mode indicator by mode |

@@ -2,33 +2,33 @@
 ## text
 00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs
 01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────────────────
-02   1 file  +30                ▌  3 let line_1 = 1;                                                              ▐
+02   1 file  +30                ▌  1 let line_1 = 1;                                                              ▐
 03   0 of 1 viewed · 1 unviewed ▌  2 let line_2 = 2;                                                              ▐
-04   ▲ 2 high to look at        ▌  1 let line_3 = 3;                                                              ▐
+04   ▲ 2 high to look at        ▌  3 let line_3 = 3;                                                              ▐
 05   space v C  a board         ▌  4 let line_4 = 4;                                                              ▐
-06   reviewer  1 finding ▲1     ▌  1 let line_5 = 5;                                                              ▐
-07   “One risk: the unsafe cal… ▌  2▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▐
-08                              ▌  3▎let added_2 = 2;                                                             ▐
-09     src/                     ▌  4▎let added_3 = 3;                                                             ▐
-10 ▎ │ ◦ demo.rs         ▲2 +30 ▌  5▎let added_4 = 4;                                                             ▐
-11                              ▌  6▎let added_5 = 5;                                                             ▐
-12                              ▌  7▎let added_6 = 6;                                                             ▐
-13                              ▌  8▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comme… ▐
-14                              ▌  9▎let added_8 = 8;                                                             ▐
-15                              ▌ 10▎let added_9 = 9;                                                             ▐
-16                              ▌ 11▎let added_10 = 10;                                                           ▐
-17                              ▌ 12▎let added_11 = 11;                                                           ▐
-18                              ▌ 13▎let added_12 = 12;                                                           ▐
-19                              ▌ 14▎let added_13 = 13;                                                           ▐
-20                              ▌ 15▎let added_14 = 14;                                                           ▐
-21                              ▌ 16▎let added_15 = 15;                                                           ▐
-22                              ▌ 17▎let added_16 = 16;                                                           ▐
-23                              ▌ 18▎let added_17 = 17;                                                           ▐
-24                              ▌ 19▎let added_18 = 18;                                                           ▐
-25   ]g hunk  ]F file           ▌ 20▎let added_19 = 19;                                                           ▐
-26   space e files  ]u unviewed ▌ 21▎let added_20 = 20;                                                           ▐
-27   space n comment            ▌ 22▎let added_21 = 21;                                                           ▐
-28   space v m viewed · q end   ▌ 23▎let added_22 = 22;                                                           ▐
+06   reviewer  1 finding ▲1     ▌  5 let line_5 = 5;                                                              ▐
+07   “One risk: the unsafe cal… ▌  6▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▐
+08                              ▌  7▎let added_2 = 2;                                                             ▐
+09     src/                     ▌  8▎let added_3 = 3;                                                             ▐
+10 ▎ │ ◦ demo.rs         ▲2 +30 ▌  9▎let added_4 = 4;                                                             ▐
+11                              ▌ 10▎let added_5 = 5;                                                             ▐
+12                              ▌ 11▎let added_6 = 6;                                                             ▐
+13                              ▌ 12▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comme… ▐
+14                              ▌ 13▎let added_8 = 8;                                                             ▐
+15                              ▌ 14▎let added_9 = 9;                                                             ▐
+16                              ▌ 15▎let added_10 = 10;                                                           ▐
+17                              ▌ 16▎let added_11 = 11;                                                           ▐
+18                              ▌ 17▎let added_12 = 12;                                                           ▐
+19                              ▌ 18▎let added_13 = 13;                                                           ▐
+20                              ▌ 19▎let added_14 = 14;                                                           ▐
+21                              ▌ 20▎let added_15 = 15;                                                           ▐
+22                              ▌ 21▎let added_16 = 16;                                                           ▐
+23                              ▌ 22▎let added_17 = 17;                                                           ▐
+24                              ▌ 23▎let added_18 = 18;                                                           ▐
+25   ]g hunk  ]F file           ▌ 24▎let added_19 = 19;                                                           ▐
+26   space e files  ]u unviewed ▌ 25▎let added_20 = 20;                                                           ▐
+27   space n comment            ▌ 26▎let added_21 = 21;                                                           ▐
+28   space v m viewed · q end   ▌ 27▎let added_22 = 22;                                                           ▐
 29  ● normal   +30                                                                          rust   utf-8 LF   4:1
 ## bg · surface per cell, blank = ui.background
 00 ppppppppppppppppppppppppppppp
@@ -73,10 +73,10 @@
 08                                 fg                                                                             g
 09     dddf                        fg                                                                             g
 10 a f f ttttttt         ee ggg    fg                                                                             g
-11                                 fg                                                                             g
-12                                 fg                                                                             g
-13                                 fg                                                                             g
-14                                 fg                                                                             g
+11                                ffg                                                                             g
+12                                ffg                                                                             g
+13                                ffg                                                                             g
+14                                ffg                                                                             g
 15                                ffg                                                                             g
 16                                ffg                                                                             g
 17                                ffg                                                                             g

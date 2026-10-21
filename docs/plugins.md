@@ -215,7 +215,7 @@ shows the card again.
 | `append` (id, text) | added to that buffer's end; a cursor at the end follows it (a log). When you close it, the plugin is told (`failed`, with its id: time to stop following), and appending to it fails |
 
 While the panel has the keys, tarae moves through its rows (`j` `k` `g` `G`, `C-d` `C-u`, the arrows, the wheel);
-`esc` gives them back to the code, and `space` and `:` stay the editor's. Every other key comes to the plugin as
+`esc` gives them back to the code, and `space`, `:` and `C-w` stay the editor's. Every other key comes to the plugin as
 `key`, with the row selected and its id — the plugin decides what `d` or `ret` does. A click on the panel gives it
 the keys. While the debugger or the terminal has its place, it's out of sight and takes no keys.
 

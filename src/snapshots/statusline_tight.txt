@@ -3,7 +3,7 @@
 00  tarae  ›  src  ›  demo.rs
 01 ▎ 1 use std::collections::HashMap;   ● unre…  +1 ▐
 02   2
-03   1 ▎ Counts how often each word appears.
+03   3 ▎ Counts how often each word appears.
 04     ▎
 05  ● normal    main       ● 1   ▲ 1   2 sels   2:1
 ## bg · surface per cell, blank = ui.background

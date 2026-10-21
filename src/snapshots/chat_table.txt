@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs                                                                   claude › follow                                    ready
 01  ────────────────────────────────────────────────────────────────────────────────────────    ────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;                                                           ▎ 표는 어떻게 그릴까?
-03   1
-04   2 ▎ Counts how often each word appears.                                                    Two ways to draw a cell that doesn't fit:
+03   2
+04   3 ▎ Counts how often each word appears.                                                    Two ways to draw a cell that doesn't fit:
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.                                           방식              장점                단점
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                 ────────────────  ──────────────────  ──────────────────
-08   6     let mut counts = HashMap::new();                                                     셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가
-09   7     for word in text.split_whitespace() {                                                                  열 정렬이 유지된다  들쭉날쭉해진다
-10   8     │   *counts.entry(word).or_insert(0) += 1;
-11   9     }                                                                                    잘라내기(…)       한 행 = 한 줄,      잘린 내용은 볼
-12  10     counts                                                                                                 훑어보기 좋다       방법이 없다
-13  11 }
-14  12                                                                                          The work, roughly:
-15  13 fn main() {
-16  14     let text = "the quick brown fox jumps over the lazy dog";                            부분                 줄 수    비고
-17  15     let counts = word_counts(text);                                                      ───────────────────  ─────  ────────
-18  16     println!("{} distinct words", counts.len()); // 타래                                 markdown.rs 표 파싱   ~120    핵심
-19  17 }                                                                                        wrap 배치              ~80
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                 ────────────────  ──────────────────  ──────────────────
+08   7     let mut counts = HashMap::new();                                                     셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가
+09   8     for word in text.split_whitespace() {                                                                  열 정렬이 유지된다  들쭉날쭉해진다
+10   9     │   *counts.entry(word).or_insert(0) += 1;
+11  10     }                                                                                    잘라내기(…)       한 행 = 한 줄,      잘린 내용은 볼
+12  11     counts                                                                                                 훑어보기 좋다       방법이 없다
+13  12 }
+14  13                                                                                          The work, roughly:
+15  14 fn main() {
+16  15     let text = "the quick brown fox jumps over the lazy dog";                            부분                 줄 수    비고
+17  16     let counts = word_counts(text);                                                      ───────────────────  ─────  ────────
+18  17     println!("{} distinct words", counts.len()); // 타래                                 markdown.rs 표 파싱   ~120    핵심
+19  18 }                                                                                        wrap 배치              ~80
 20                                                                                              테스트                ~150  스냅샷 1
 21
 22                                                                                              And a wide one, row by row:
@@ -101,7 +101,7 @@
 08   f
 09   f
 10   f
-11   f
+11  ff
 12  ff
 13  ff
 14  ff

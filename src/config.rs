@@ -125,7 +125,7 @@ pub struct EditorConfig {
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
-            line_number: LineNumber::Relative,
+            line_number: LineNumber::Absolute,
             scrolloff: 5,
             tab_width: 4,
             // Modes distinct at a glance: insert = bar · select = underline, color per mode too
@@ -749,6 +749,14 @@ pub(crate) mod tests {
         md.split("```toml\n").skip(1).map(|b| &b[..b.find("```").unwrap()]).collect()
     }
 
+    /// Line numbers are absolute unless you say otherwise — Helix's default (uxaudit H2: relative showed `1`
+    /// twice on a file's first two rows, read as a bug by someone new).
+    #[test]
+    fn line_numbers_are_absolute_by_default() {
+        assert_eq!(parse("").0.editor.line_number, LineNumber::Absolute);
+        assert_eq!(parse("[editor]\nline-numbers = \"relative\"").0.editor.line_number, LineNumber::Relative);
+    }
+
     #[test]
     fn configuration_guide_example_loads_cleanly() {
         // The first ```toml block under docs/configuration.md's "## Full example" — the canonical example.
@@ -757,7 +765,7 @@ pub(crate) mod tests {
         let (c, w) = parse(toml_blocks(section)[0]);
         assert!(w.is_empty(), "{w:?}");
         assert!(c.editor.color_modes);
-        assert_eq!(c.editor.line_number, LineNumber::Relative);
+        assert_eq!(c.editor.line_number, LineNumber::Absolute);
         assert_eq!(c.editor.llm.model.as_deref(), Some("haiku"));
     }
 

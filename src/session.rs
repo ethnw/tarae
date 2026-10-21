@@ -1415,7 +1415,7 @@ mod tests {
         ed.card_keys = false;
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, back_id);
-        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("no card waits")), "{:?}", ed.status);
+        assert!(ed.status.as_ref().is_some_and(|s| s.0 == crate::inbox::NOTHING), "{:?}", ed.status);
     }
 
     /// #90: `C-q` goes to the session whose card has waited longest — not the first in the list — and the

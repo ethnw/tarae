@@ -3,26 +3,26 @@
 00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs
 01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────────────────
 02   3 files  +45 −4            ▌  1 use std::collections::HashMap;
-03   1 of 3 viewed · 2 unviewed ▌  1
-04                              ▌  2 ▎ Counts how often each word appears.
+03   1 of 3 viewed · 2 unviewed ▌  2
+04                              ▌  3 ▎ Counts how often each word appears.
 05     src/                     ▌    ▎
 06 ▎ │ ● demo.rs     • +3 −3 ¶1 ▌    ▎ Words are split on whitespace; case is kept.
-07   │ ◦ lib.rs         +40 new ▌  5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   │ ◦ lib.rs         +40 new ▌  6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 08   ◦ README.md          +2 −1 ▌   −    let mut counts = HashMap::new();
-09                              ▌  6▎    let mut counts: HashMap<&str, usize> = HashMap::new();
-10                              ▌  7     for word in text.split_whitespace() {
+09                              ▌  7▎    let mut counts: HashMap<&str, usize> = HashMap::new();
+10                              ▌  8     for word in text.split_whitespace() {
 11                              ▌   −        *counts.entry(word).or_insert(0) += 1;
-12                              ▌  8▎    │   let n = counts.entry(word).or_insert(0);   ¶ draft · Why split this …
-13                              ▌  9▎    │   *n += 1;
-14                              ▌ 10     }
-15                              ▌ 11     counts
-16                              ▌ 12 }
-17                              ▌ 13
-18                              ▌ 14 fn main() {
-19                              ▌ 15     let text = "the quick brown fox jumps over the lazy dog";
-20                              ▌ 16     let counts = word_counts(text);
+12                              ▌  9▎    │   let n = counts.entry(word).or_insert(0);   ¶ draft · Why split this …
+13                              ▌ 10▎    │   *n += 1;
+14                              ▌ 11     }
+15                              ▌ 12     counts
+16                              ▌ 13 }
+17                              ▌ 14
+18                              ▌ 15 fn main() {
+19                              ▌ 16     let text = "the quick brown fox jumps over the lazy dog";
+20                              ▌ 17     let counts = word_counts(text);
 21                              ▌   −    println!("{} distinct words", counts.len()); // 타래
-22                              ▌ 17 }
+22                              ▌ 18 }
 23                              ▌
 24                              ▌
 25   ]g hunk  ]F file           ▌
@@ -75,7 +75,7 @@
 10                                 f
 11                                  E
 12                                 fw                                                   a
-13                                 fw
+13                                ffw
 14                                ff
 15                                ff
 16                                ff

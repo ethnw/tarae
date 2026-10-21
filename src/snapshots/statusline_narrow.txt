@@ -4,7 +4,7 @@
 01 ▎↑1 std::collections::HashMa ▐
 02     p;   ● unresolved i…  +1
 03   2
-04   1 ▎ Counts how often each
+04   3 ▎ Counts how often each
 05  ● normal    ● 1   ▲ 1   2:1
 ## bg · surface per cell, blank = ui.background
 00

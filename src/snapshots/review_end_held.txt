@@ -3,11 +3,11 @@
 00   review         uncommitted ▌ tarae  ›  src  ›  demo.rs
 01   ────────────────────────── ▌ ────────────────────────────────────────────────────────────────────────────────
 02   1 file  +1                 ▌  1 let line_1 = 1;
-03   0 of 1 viewed · 1 unviewed ▌  1 let line_2 = 2;
-04   ▲ 1 high to look at        ▌  2 let line_3 = 3;
-05   space v C  a board         ▌  3 let line_4 = 4;
-06                              ▌  4 let line_5 = 5;
-07     src/                     ▌  5▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
+03   0 of 1 viewed · 1 unviewed ▌  2 let line_2 = 2;
+04   ▲ 1 high to look at        ▌  3 let line_3 = 3;
+05   space v C  a board         ▌  4 let line_4 = 4;
+06                              ▌  5 let line_5 = 5;
+07     src/                     ▌  6▎let pid = unsafe { getpid() };   ▲ high · unsafe (rust pack) · space v h
 08 ▎ │ ◦ demo.rs          ▲1 +1 ▌
 09                              ▌
 10                              ▌                ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄

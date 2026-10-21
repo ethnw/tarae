@@ -96,7 +96,7 @@ preview and saves your choice.
 theme = "default"            # meok · hanji · meok-transparent · hanji-transparent · default (follows the terminal)
 
 [editor]
-line-numbers = "relative"
+line-numbers = "absolute"     # "absolute" (default) · "relative"
 scrolloff = 5
 tab-width = 4
 color-modes = true           # color the mode's dot, cursor, and line number per mode

@@ -3,8 +3,8 @@
 00  tarae  ›  app.yaml
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 kind: Deployment
-03   1 metadata:
-04   2   name: web
+03   2 metadata:
+04   3   name: web
 05
 06
 07
@@ -20,7 +20,7 @@
 17
 18
 19
-20   demo  │  pods · default                                            d describe  l logs  esc back
+20   demo  │  pods · default                                            d describe  l logs  esc code
 21   ─────────────────────────────────────────────────────────────────────────────────────────────────
 22   NAME    READY  STATUS
 23   web-0   1/1    Running

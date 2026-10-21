@@ -1131,6 +1131,20 @@ mod tests {
         }
         let t = ed.session.terminal.as_ref().unwrap();
         assert!(t.visible && t.focus, "shown with the keys, the same shell");
+        // `q` on its panel with tarae's keys hides it as `space T` does, the shell running on — as every list or
+        // output panel's `q` closes it (uxaudit D2); `C-w q` there too (D3)
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.bottom_take_keys();
+        ed.handle_key(key('q'));
+        let t = ed.session.terminal.as_ref().unwrap();
+        assert!(!t.visible && t.exited.is_none(), "hidden, running");
+        assert!(!ed.bottom_focus);
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false });
+        ed.bottom_take_keys();
+        ed.handle_key(Key { code: Code::Char('w'), ctrl: true, alt: false });
+        ed.handle_key(key('q'));
+        assert!(!ed.session.terminal.as_ref().unwrap().visible, "C-w q: hidden too");
     }
 
     /// #58: a `:preflight` started while the terminal holds the bottom slot shows at once — its tab in the

@@ -2,9 +2,9 @@
 ## text
 00  tarae  ›  src  ›  point.rs  ›  τ Point  ›  ƒ dist2
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02  21 ▎ Tiny geometry helpers.
-03  20
-04  19 ▎ A point on the plane.
+02   1 ▎ Tiny geometry helpers.
+03   2
+04   3 ▎ A point on the plane.
 05     ▎
 06     ▎ • x grows to the right
 07     ▎ • y grows downward
@@ -12,19 +12,19 @@
 09     ▎ Examples
 10     ▎
 11     ▎  let p = Point { x: 1, y: 2 };
-12   9 #[derive(Clone, Copy, Debug)]
-13   8 pub struct Point {
-14   7     pub x: i32,
-15   6     pub y: i32,
-16   5 }
-17   4
-18   3 impl Point {
-19   2     ▎ Distance to other, squared — cheap to compare.
-20   1     pub fn dist2(self, other: Point) -> i32 {
+12  13 #[derive(Clone, Copy, Debug)]
+13  14 pub struct Point {
+14  15     pub x: i32,
+15  16     pub y: i32,
+16  17 }
+17  18
+18  19 impl Point {
+19  20     ▎ Distance to other, squared — cheap to compare.
+20  21     pub fn dist2(self, other: Point) -> i32 {
 21  22     │   let (dx, dy) = (self.x - other.x, self.y - other.y);
-22   1     │   dx * dx + dy * dy
-23   2     }
-24   3 }
+22  23     │   dx * dx + dy * dy
+23  24     }
+24  25 }
 25
 26
 27
@@ -64,9 +64,9 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTTT  f    ddddd  f    ddddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02  ff
-03  ff
-04  ff                  BBBBB
+02   f
+03   f
+04   f                  BBBBB
 05
 06       a
 07       a
@@ -74,19 +74,19 @@
 09       AAAAAAAA
 10
 11
-12   f   aaaaaa
-13   f
-14   f
-15   f
-16   f
-17   f
-18   f
-19   f
-20   f
+12  ff   aaaaaa
+13  ff
+14  ff
+15  ff
+16  ff
+17  ff
+18  ff
+19  ff
+20  ff
 21  AA     d
-22   f     d
-23   f
-24   f
+22  ff     d
+23  ff
+24  ff
 25
 26
 27

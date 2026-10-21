@@ -1,19 +1,19 @@
 # editing_narrow · 50x15 · theme meok · cursor 8:11
 ## text
 00  tarae  ›  src  ›  demo.rs  ›  ƒ word_counts
-01   5 ▎ Counts how often each word appears.
+01   3 ▎ Counts how often each word appears.
 02     ▎                                            ▐
 03     ▎ Words are split on whitespace; case is     ▐
 04     ▎ kept.                                      ▐
-05   2 pub fn word_counts(text: &str) ->            ▐
+05   6 pub fn word_counts(text: &str) ->            ▐
 06     HashMap<&str, usize> {                       ▐
-07   1     let mut counts = HashMap::new();         ▐
+07   7     let mut counts = HashMap::new();         ▐
 08   8     for word in text.split_whitespace() {    ▐
-09   1     │   *counts.entry(word).or_insert(0) +=  ▐
+09   9     │   *counts.entry(word).or_insert(0) +=  ▐
 10         │   1;                                   ▐
-11   2     }                                        ▐
-12   3     counts
-13   4 }
+11  10     }                                        ▐
+12  11     counts
+13  12 }
 14  ● normal                  rust   utf-8 LF   8:8
 ## bg · surface per cell, blank = ui.background
 00
@@ -43,9 +43,9 @@
 08   A                                              f
 09   f     d                                        f
 10         d                                        f
-11   f                                              f
-12   f
-13   f
+11  ff                                              f
+12  ff
+13  ff
 14  a TTTTTT                  dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  V=ui.selection.primary  A=ui.cursor.primary  1=other

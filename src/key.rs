@@ -169,6 +169,19 @@ impl FromStr for Key {
     }
 }
 
+impl Key {
+    /// The key as people type it, for what's shown (which-key, the palette, hints): as `Display` writes it for the
+    /// config, but `-` as itself (`minus` is only the config's name for it, `C-w -` not `C-w minus`).
+    pub fn shown(&self) -> String {
+        match self.code {
+            Code::Char('-') => {
+                format!("{}{}-", if self.ctrl { "C-" } else { "" }, if self.alt { "A-" } else { "" })
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.ctrl {

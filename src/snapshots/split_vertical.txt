@@ -3,16 +3,16 @@
 00  tarae  ›  src  ›  demo.rs  ›  ƒ main
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02  ▎ src/demo.rs                                    │ ▎ src/demo.rs
-03  17 use std::collections::HashMap;               ▐│  4 fn main() {
-04  16                                              ▐│  3     let text = "the quick brown fox jumps
-05  15 ▎ Counts how often each word appears.        ▐│        over the lazy dog";
-06     ▎                                            ▐│  2     let counts = word_counts(text);
-07     ▎ Words are split on whitespace; case is     ▐│  1     println!("{} distinct words",
+03   1 use std::collections::HashMap;               ▐│ 14 fn main() {
+04   2                                              ▐│ 15     let text = "the quick brown fox jumps
+05   3 ▎ Counts how often each word appears.        ▐│        over the lazy dog";
+06     ▎                                            ▐│ 16     let counts = word_counts(text);
+07     ▎ Words are split on whitespace; case is     ▐│ 17     println!("{} distinct words",
 08     ▎ kept.                                      ▐│        counts.len()); // 타래
-09  12 pub fn word_counts(text: &str) ->            ▐│ 18 }
+09   6 pub fn word_counts(text: &str) ->            ▐│ 18 }
 10     HashMap<&str, usize> {                       ▐│
-11  11     let mut counts = HashMap::new();          │                                                ▐
-12  10     for word in text.split_whitespace() {     │                                                ▐
+11   7     let mut counts = HashMap::new();          │                                                ▐
+12   8     for word in text.split_whitespace() {     │                                                ▐
 13   9     │   *counts.entry(word).or_insert(0) +=   │                                                ▐
 14         │   1;                                    │                                                ▐
 15  ● normal                                                                   rust   utf-8 LF   18:1
@@ -37,16 +37,16 @@
 00  ddddd  f  ddd  f  TTTTTTT  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 02  f ddddddddddd                                    f a TTTTTTTTTTT
-03  ff                                              ff  f
-04  ff                                              ff  f                gggg ggggg ggggg ggg ggggg
-05  ff                                              ff        gggg ggg gggg gggg
-06                                                  ff  f
-07                                                  ff  f              ggg gggggggg gggggg
+03   f                                              ff ff
+04   f                                              ff ff                gggg ggggg ggggg ggg ggggg
+05   f                                              ff        gggg ggg gggg gggg
+06                                                  ff ff
+07                                                  ff ff              ggg gggggggg gggggg
 08                                                  ff
-09  ff                                              ff AA
+09   f                                              ff AA
 10                                                  ff
-11  ff                                               f                                                f
-12  ff                                               f                                                f
+11   f                                               f                                                f
+12   f                                               f                                                f
 13   f                                               f                                                f
 14                                                   f                                                f
 15  a TTTTTT                                                                   dddd   ddddd dd   TTTT

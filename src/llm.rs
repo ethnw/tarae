@@ -1909,9 +1909,9 @@ fn review_answer(ed: &mut Editor, key: Key) -> bool {
         }
         _ => {
             let out = match wraps {
-                true => "y takes it, n leaves it, a takes all, q ends — esc goes back unanswered",
+                true => "y takes it, n leaves it, a takes all, q ends — esc goes back, unanswered",
                 false => {
-                    "y takes it, n leaves it, a takes all, q ends, h/l scroll sideways — esc goes back unanswered"
+                    "y takes it, n leaves it, a takes all, q ends, h/l scroll sideways — esc goes back, unanswered"
                 }
             };
             ed.key_unused(key, "the review of this change", out);

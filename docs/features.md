@@ -116,7 +116,7 @@ configs carry over as they are.
   from the tree-sitter tree. With several buffers open, the list shows on the right. Turn it off with
   `editor.header = false`
 - **Status line** — the mode (`● normal`: the dot in the accent, or a color per mode, the word in ink bold) · git branch and `+3 −2` · Claude status (`…` waiting,
-  `● review` ready) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green
+  `● change` a change of Claude's waits for its review) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green
   connected (a "ready" toast says so too), red failed or exited, faintest when none is installed · encoding and line
   endings · selection count · position (keys you've started — a count, `g`, `space w` — show in its place until
   they're done). It's the screen's last row: a `:` command, a `/` search or any other prompt opens as a card
@@ -192,7 +192,9 @@ configs carry over as they are.
   Each one's message sits at its line's end (where no diagnostic speaks already), and they follow your edits —
   add lines while fixing the third and the fourth is still where it was
 - **Build tasks** — `space m m` runs the task again (the first time, `space m p` picks one), `space m c` stops it and
-  closes its panel, `:task <name>` (`:make`) runs one by name. Tasks come from the project — `cargo check`/`clippy`/
+  closes its panel, `:task <name>` (`:make`) runs one by name. With the keys on its panel (`C-w j`, a click), `q`
+  closes it once the run has ended — one under way is left running and says `space m c` stops it (the test panel's
+  `q` the same, with `space x c`); Esc gives the keys to the code (its header says `esc code`). Tasks come from the project — `cargo check`/`clippy`/
   `build`, `go build`/`vet`, `tsc`, every `npm run` script, `ruff`/`mypy`, `make`, as the language packs say — and from `[task.<name>] cmd =
   "…"` (optional `cwd`) in the config. It runs in the background with its output below the code; every
   `file:line:col: message` it prints (rustc, gcc/clang, go, eslint, ruff, mypy — and the forms the packs add with
@@ -202,7 +204,7 @@ configs carry over as they are.
   (colors, full-screen programs, the lot). `C-\` moves the keys between the code and it, both ways (inside it the key
   is `editor.terminal-escape`); `space T` shows it with the keys — from wherever it is, behind another tab or
   shown without them — and hides it (it keeps running) only from inside: tarae's keys on its panel (`C-w j`, a
-  click on its header). The wheel over it scrolls
+  click on its header), where `q` hides it too. The wheel over it scrolls
   back; a click in it gives it the keys, a click outside takes them back; a drag selects text and copies it. A
   program that asks for the mouse (htop, vim, lazygit) gets clicks and the wheel instead (alt+drag still selects —
   the panel's title says so), a full-screen one that
@@ -220,7 +222,9 @@ configs carry over as they are.
 - **Search** `/ ? n N *` — matches highlight as you type, the view follows the first match (`Esc` puts you back), and
   the status line shows `/pattern  8/13`. `Esc` in normal mode clears the highlight
   ([screenshot](screenshots/ux-search.png))
-- **Split windows** — `C-w v` side by side · `C-w s` stacked · `C-w w` / `C-w h j k l` move · `C-w q` close ·
+- **Split windows** — `C-w v` side by side · `C-w s` stacked · `C-w w` / `C-w h j k l` move · `C-w q` close — the
+  window, or the panel that has the keys (side panel, the review's rail, `:procs`, a test, task or terminal panel, as
+  its own `q` does; the chat closes with `space L`, so a slip can't cut Claude's turn off) ·
   `C-w o` only this one (`space w` works too); `:vsplit file`, `:hsplit file`. Each pane has a title line; the focused
   one gets an accent bar and the rest dim. The same document in two panes shares its cursor but scrolls separately
   ([screenshot](screenshots/ux-splits.png))

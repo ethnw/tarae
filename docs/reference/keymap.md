@@ -102,14 +102,14 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-u` | `half_page_up` | Move half page up |
 | `C-w` | … | More keys — see `C-w` below |
 | `down` | `move_visual_line_down` | Move down (visual line) |
-| `end` | `goto_line_end` | Goto line end |
+| `end` | `goto_line_end` | Go to line end |
 | `esc` | `normal_mode` | Enter normal mode |
 | `F10` | `dap_next` | Step over |
 | `F11` | `dap_step_in` | Step into |
 | `F12` | `dap_step_out` | Step out |
 | `F5` | `dap_launch` | Start debugging / continue |
 | `F9` | `toggle_breakpoint` | Toggle breakpoint |
-| `home` | `goto_line_start` | Goto line start |
+| `home` | `goto_line_start` | Go to line start |
 | `left` | `move_char_left` | Move left |
 | `pagedown` | `page_down` | Move page down |
 | `pageup` | `page_up` | Move page up |
@@ -128,13 +128,13 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `[ f` | `goto_prev_function` | Previous function |
 | `[ F` | `goto_prev_review_file` | Previous file of the review |
 | `[ g` | `goto_prev_change` | Previous git hunk |
-| `[ G` | `goto_prev_change_part` | Previous change (each small one) |
+| `[ G` | `goto_prev_change_part` | Previous change, part by part |
 | `[ h` | `goto_prev_high_change` | Previous high-risk change |
 | `[ m` | `goto_prev_conflict` | Previous merge conflict |
 | `[ n` | `goto_prev_note` | Previous note |
 | `[ p` | `goto_prev_paragraph` | Previous paragraph |
 | `[ q` | `goto_prev_quickfix` | Previous place in the list |
-| `[ r` | `replay_prev` | Claude's previous stop (replay) |
+| `[ r` | `replay_prev` | Replay: Claude's previous stop |
 | `[ t` | `goto_prev_class` | Previous type |
 | `[ T` | `goto_prev_test` | Previous test |
 | `[ u` | `goto_prev_unviewed_file` | Previous file not viewed |
@@ -151,13 +151,13 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `] f` | `goto_next_function` | Next function |
 | `] F` | `goto_next_review_file` | Next file of the review |
 | `] g` | `goto_next_change` | Next git hunk |
-| `] G` | `goto_next_change_part` | Next change (each small one) |
+| `] G` | `goto_next_change_part` | Next change, part by part |
 | `] h` | `goto_next_high_change` | Next high-risk change |
 | `] m` | `goto_next_conflict` | Next merge conflict |
 | `] n` | `goto_next_note` | Next note |
 | `] p` | `goto_next_paragraph` | Next paragraph |
 | `] q` | `goto_next_quickfix` | Next place in the list |
-| `] r` | `replay_next` | Claude's next stop (replay) |
+| `] r` | `replay_next` | Replay: Claude's next stop |
 | `] t` | `goto_next_class` | Next type |
 | `] T` | `goto_next_test` | Next test |
 | `] u` | `goto_next_unviewed_file` | Next file not viewed |
@@ -168,23 +168,23 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
-| `g a` | `goto_last_accessed_file` | Goto last accessed file |
+| `g a` | `goto_last_accessed_file` | Go to last accessed file |
 | `g b` | `goto_window_bottom` | Cursor to the screen bottom |
 | `g c` | `goto_window_center` | Cursor to mid-screen |
-| `g d` | `goto_definition` | Goto definition (LSP) |
-| `g D` | `goto_declaration` | Goto declaration (LSP) |
-| `g e` | `goto_last_line` | Goto last line |
+| `g d` | `goto_definition` | Go to definition (LSP) |
+| `g D` | `goto_declaration` | Go to declaration (LSP) |
+| `g e` | `goto_last_line` | Go to last line |
 | `g g` | `goto_file_start` | Go to file start (or line &lt;n>) |
-| `g h` | `goto_line_start` | Goto line start |
-| `g i` | `goto_implementation` | Goto implementation (LSP) |
-| `g l` | `goto_line_end` | Goto line end |
-| `g n` | `goto_next_buffer` | Goto next buffer |
-| `g p` | `goto_previous_buffer` | Goto previous buffer |
-| `g r` | `goto_reference` | Goto references (LSP) |
-| `g s` | `goto_first_nonwhitespace` | Goto first non-blank in line |
+| `g h` | `goto_line_start` | Go to line start |
+| `g i` | `goto_implementation` | Go to implementation (LSP) |
+| `g l` | `goto_line_end` | Go to line end |
+| `g n` | `goto_next_buffer` | Go to next buffer |
+| `g p` | `goto_previous_buffer` | Go to previous buffer |
+| `g r` | `goto_reference` | Go to references (LSP) |
+| `g s` | `goto_first_nonwhitespace` | Go to first non-blank in line |
 | `g t` | `goto_window_top` | Cursor to the screen top |
 | `g w` | `goto_word` | Jump to a word by its label |
-| `g y` | `goto_type_definition` | Goto type definition (LSP) |
+| `g y` | `goto_type_definition` | Go to type definition (LSP) |
 
 ### `m`
 
@@ -193,7 +193,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `m a` | `select_textobject_around` | Select around object |
 | `m d` | `surround_delete` | Surround delete |
 | `m i` | `select_textobject_inner` | Select inside object |
-| `m m` | `match_brackets` | Goto matching bracket |
+| `m m` | `match_brackets` | Go to matching bracket |
 | `m r` | `surround_replace` | Surround replace |
 | `m s` | `surround_add` | Surround add |
 
@@ -233,24 +233,24 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
-| `C-w +` | `bottom_taller` | Taller: the panel at the bottom |
-| `C-w <` | `panel_narrower` | Narrower: the chat, the side panel |
+| `C-w +` | `bottom_taller` | Taller: the bottom panel |
+| `C-w <` | `panel_narrower` | Narrower: chat or side panel |
 | `C-w =` | `sizes_auto` | Sizes back to automatic |
-| `C-w >` | `panel_wider` | Wider: the chat, the side panel |
+| `C-w >` | `panel_wider` | Wider: chat or side panel |
 | `C-w e` | `focus_side_panel` | To the side panel and back |
 | `C-w h` | `jump_view_left` | Window to the left |
 | `C-w j` | `jump_view_down` | Window below |
 | `C-w k` | `jump_view_up` | Window above |
 | `C-w l` | `jump_view_right` | Window to the right |
 | `C-w o` | `wonly` | Close all other windows |
-| `C-w q` | `wclose` | Close this window |
+| `C-w q` | `wclose` | Close this window or panel |
 | `C-w s` | `hsplit` | Split the window top / bottom |
 | `C-w t` | `slot_next` | Next tab of the bottom panel |
 | `C-w v` | `vsplit` | Split the window side by side |
 | `C-w w` | `rotate_view` | Next window |
-| `C-w z` | `zoom_toggle` | Fill the screen with this, or back |
+| `C-w z` | `zoom_toggle` | Full screen: on / off |
 | `C-w C-w` | `rotate_view` | Next window |
-| `C-w minus` | `bottom_shorter` | Shorter: the panel at the bottom |
+| `C-w minus` | `bottom_shorter` | Shorter: the bottom panel |
 
 ### `space`
 
@@ -262,13 +262,13 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space ?` | `command_palette` | Find a command |
 | `space @` | `chat_point` | Point Claude at something |
 | `space a` | `code_action` | Code actions |
-| `space b` | `buffer_picker` | Open buffer picker |
+| `space b` | `buffer_picker` | Switch to an open buffer |
 | `space c` | `toggle_comments` | Comment or uncomment lines |
 | `space C` | `toggle_block_comments` | Block-comment the selections |
 | `space d` | `diagnostics_picker` | Diagnostics |
 | `space D` | `workspace_diagnostics_picker` | Diagnostics in every file |
-| `space e` | `file_explorer` | Files panel (tree) |
-| `space f` | `file_picker` | Open file picker |
+| `space e` | `file_explorer` | Files panel: show / hide |
+| `space f` | `file_picker` | Open a file |
 | `space g` | `git_panel` | Git: stage, commit, push |
 | `space G` | … | More keys — see `space G` below |
 | `space h` | `select_references_to_symbol_under_cursor` | Select this symbol's uses |
@@ -281,10 +281,10 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space m` | … | More keys — see `space m` below |
 | `space n` | `note_here` | Ask Claude here, or reply |
 | `space N` | `note_picker` | Claude's notes |
-| `space o` | `outline` | Outline panel (this file) |
+| `space o` | `outline` | Outline panel: show / hide |
 | `space p` | `paste_clipboard_after` | Paste clipboard after |
 | `space P` | `paste_clipboard_before` | Paste clipboard before |
-| `space q` | `quickfix_panel` | Show the list (quickfix) |
+| `space q` | `quickfix_panel` | List panel: show / hide |
 | `space r` | `rename_symbol` | Rename symbol |
 | `space s` | `symbol_picker` | Symbols in this file |
 | `space S` | `workspace_symbol_picker` | Symbols in the workspace |
@@ -323,7 +323,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space m c` | `task_close` | Stop the task, close its panel |
 | `space m m` | `task_again` | Run the task (again) |
 | `space m p` | `task_picker` | Pick a task to run |
-| `space m s` | `task_sandbox` | What the sandbox blocked: open it |
+| `space m s` | `task_sandbox` | What the sandbox blocked |
 
 ### `space v`
 
@@ -349,24 +349,24 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 
 | Key | Command | Description |
 |---|---|---|
-| `space w +` | `bottom_taller` | Taller: the panel at the bottom |
-| `space w <` | `panel_narrower` | Narrower: the chat, the side panel |
+| `space w +` | `bottom_taller` | Taller: the bottom panel |
+| `space w <` | `panel_narrower` | Narrower: chat or side panel |
 | `space w =` | `sizes_auto` | Sizes back to automatic |
-| `space w >` | `panel_wider` | Wider: the chat, the side panel |
+| `space w >` | `panel_wider` | Wider: chat or side panel |
 | `space w e` | `focus_side_panel` | To the side panel and back |
 | `space w h` | `jump_view_left` | Window to the left |
 | `space w j` | `jump_view_down` | Window below |
 | `space w k` | `jump_view_up` | Window above |
 | `space w l` | `jump_view_right` | Window to the right |
 | `space w o` | `wonly` | Close all other windows |
-| `space w q` | `wclose` | Close this window |
+| `space w q` | `wclose` | Close this window or panel |
 | `space w s` | `hsplit` | Split the window top / bottom |
 | `space w t` | `slot_next` | Next tab of the bottom panel |
 | `space w v` | `vsplit` | Split the window side by side |
 | `space w w` | `rotate_view` | Next window |
-| `space w z` | `zoom_toggle` | Fill the screen with this, or back |
+| `space w z` | `zoom_toggle` | Full screen: on / off |
 | `space w C-w` | `rotate_view` | Next window |
-| `space w minus` | `bottom_shorter` | Shorter: the panel at the bottom |
+| `space w minus` | `bottom_shorter` | Shorter: the bottom panel |
 
 ### `space x`
 
@@ -377,7 +377,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space x f` | `test_file` | Run this file's tests |
 | `space x l` | `test_last` | Run the last test again |
 | `space x o` | `test_output` | Test output in a buffer |
-| `space x s` | `test_sandbox` | What the sandbox blocked: open it |
+| `space x s` | `test_sandbox` | What the sandbox blocked |
 | `space x x` | `test_nearest` | Run the test at the cursor |
 
 ## Select mode
@@ -418,9 +418,9 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-x` | `completion` | Invoke completion popup (LSP) |
 | `del` | `delete_char_forward` | Delete next char |
 | `down` | `move_visual_line_down` | Move down (visual line) |
-| `end` | `goto_line_end_newline` | Goto end of line (after the last char) |
+| `end` | `goto_line_end_newline` | Go to end of line (after the last char) |
 | `esc` | `normal_mode` | Enter normal mode |
-| `home` | `goto_line_start` | Goto line start |
+| `home` | `goto_line_start` | Go to line start |
 | `left` | `move_char_left` | Move left |
 | `pagedown` | `page_down` | Move page down |
 | `pageup` | `page_up` | Move page up |

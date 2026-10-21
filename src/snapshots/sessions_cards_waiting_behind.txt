@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs                                                 claude                                 ready
 01  ──────────────────────────────────────────────────────────────────────    ────────────────────────────────────────────
 02   1 use std::collections::HashMap;                                         main │ fix-login ▲2 waits │ +
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespace() {                              ▎ Ask Claude
-10   8     │   *counts.entry(word).or_insert(0) += 1;
-11   9     }                                                                  It reads the whole project,
-12  10     counts                                                             starting from demo.rs.
-13  11 }
-14  12                                                                        tab for a suggestion
-15  13 fn main() {                                                            › Explain what this file does
-16  14     let text = "the quick brown fox jumps over the lazy dog";          › Where is this used across the project?
-17  15     let counts = word_counts(text);                                    › Why is this diagnostic happening?
-18  16     println!("{} distinct words", counts.len()); // 타래
-19  17 }                                                                      C-t for another model
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   7     let mut counts = HashMap::new();
+09   8     for word in text.split_whitespace() {                              ▎ Ask Claude
+10   9     │   *counts.entry(word).or_insert(0) += 1;
+11  10     }                                                                  It reads the whole project,
+12  11     counts                                                             starting from demo.rs.
+13  12 }
+14  13                                                                        tab for a suggestion
+15  14 fn main() {                                                            › Explain what this file does
+16  15     let text = "the quick brown fox jumps over the lazy dog";          › Where is this used across the project?
+17  16     let counts = word_counts(text);                                    › Why is this diagnostic happening?
+18  17     println!("{} distinct words", counts.len()); // 타래
+19  18 }                                                                      C-t for another model
 20
 21
 22
@@ -73,7 +73,7 @@
 08   f
 09   f                                                                        a TTT TTTTTT
 10   f
-11   f                                                                        dd ddddd ddd ddddd dddddddd
+11  ff                                                                        dd ddddd ddd ddddd dddddddd
 12  ff                                                                        dddddddd dddd dddddddd
 13  ff
 14  ff                                                                        DDD fff f ffffffffff

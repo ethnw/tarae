@@ -382,7 +382,7 @@ impl Keymaps {
     pub fn bindings(&self) -> HashMap<&'static str, String> {
         fn walk(node: &Node, prefix: &str, out: &mut HashMap<&'static str, String>) {
             for (k, t) in &node.map {
-                let seq = if prefix.is_empty() { k.to_string() } else { format!("{prefix} {k}") };
+                let seq = if prefix.is_empty() { k.shown() } else { format!("{prefix} {}", k.shown()) };
                 match t {
                     KeyTrie::Node(n) => walk(n, &seq, out),
                     KeyTrie::Leaf(cmds) => {
@@ -676,5 +676,47 @@ mod tests {
         assert_eq!(name(&km, Mode::Normal, "g g").as_deref(), Some("goto_file_start"));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("no_such_command"));
+    }
+
+    /// Every line which-key shows for the default keys fits its column whole: ≤ 30 characters (CLAUDE.md's
+    /// rule; uxaudit D11 — the `C-w` menu's were cut, "Taller: the panel at the bott…").
+    #[test]
+    fn every_which_key_line_fits_whole() {
+        fn walk(km: &Keymaps, mode: Mode, node: &Node, path: &mut Vec<Key>, long: &mut Vec<String>) {
+            for (k, t) in node.sorted() {
+                if let KeyTrie::Node(n) = t {
+                    path.push(*k);
+                    for (key, desc, _) in km.children(mode, path) {
+                        if desc.chars().count() > 30 {
+                            let at: Vec<String> = path.iter().chain([&key]).map(Key::shown).collect();
+                            long.push(format!("{mode:?} {}: {desc}", at.join(" ")));
+                        }
+                    }
+                    walk(km, mode, n, path, long);
+                    path.pop();
+                }
+            }
+        }
+        let km = Keymaps::default();
+        let mut long = Vec::new();
+        // (every mode's menus: a prefix bound only in select or insert has its card too)
+        for (mode, root) in
+            [(Mode::Normal, &km.normal), (Mode::Select, &km.select), (Mode::Insert, &km.insert)]
+        {
+            walk(&km, mode, root, &mut Vec::new(), &mut long);
+        }
+        assert!(long.is_empty(), "{long:#?}");
+    }
+
+    /// Keys are shown as they're typed: `C-w -`, not the config's `minus` (uxaudit D11).
+    #[test]
+    fn keys_are_shown_as_typed() {
+        let km = Keymaps::default();
+        assert_eq!(km.bindings()["bottom_shorter"], "C-w -");
+        // (the config's name stays the config's: `minus` round-trips, `-` is what's shown — the drawn card is
+        // term's `which_key_draws_keys_as_typed`)
+        let minus = "C-minus".parse::<Key>().unwrap();
+        assert_eq!((minus.to_string(), minus.shown()), ("C-minus".to_string(), "C--".to_string()));
+        assert_eq!("A-minus".parse::<Key>().unwrap().shown(), "A--");
     }
 }

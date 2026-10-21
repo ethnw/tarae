@@ -1035,6 +1035,14 @@ mod tests {
         key(&mut ed, ":");
         assert!(ed.prompt.is_some(), "the command line opened");
         key(&mut ed, "esc");
+        // …and `C-w`, the windows' (uxaudit D8: it went to the plugin)
+        key(&mut ed, "C-w");
+        assert_eq!(ed.pending.len(), 1, "C-w waits for its window key");
+        // …but `C-w q` doesn't close it, as its own `q` doesn't (the plugin's): said, the keys kept
+        key(&mut ed, "q");
+        assert!(panel(&ed).is_some_and(|p| p.focus), "the panel stays, with the keys");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("closes by its own keys"), "{said}");
         // esc: the keys go back to the code, the panel stays
         key(&mut ed, "esc");
         assert!(!panel(&ed).unwrap().focus);

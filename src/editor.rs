@@ -1959,7 +1959,7 @@ impl Editor {
             let cmd = cmd.to_string();
             self.open_prompt(PromptKind::Command, &cmd);
             return self
-                .set_status("a pasted : line — in the command line, not run: enter runs it, esc drops it");
+                .set_status("a pasted : line — in the command line, not run: enter runs it, esc close");
         }
         // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
         // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat.
@@ -3496,7 +3496,7 @@ impl Editor {
             if !self.inbox_next() {
                 // (one about to come — its call held back until the run before it ends: said, #5)
                 match self.cards_coming().as_slice() {
-                    [] => self.set_status("no card waits for you"),
+                    [] => self.set_status(crate::inbox::NOTHING),
                     [one] => self.set_status(format!("no card yet — {one}'s comes once its run ends")),
                     many => self.set_status(format!("no card yet — {}'s come as runs end", many.join(", "))),
                 }
@@ -4091,8 +4091,8 @@ impl Editor {
             // (said, not dropped: a `C-q` here waited for a card the prompt keeps from it)
             (Code::Char(_), true) => {
                 let out = match self.offers.is_empty() {
-                    true => "enter runs the line, esc leaves it",
-                    false => "esc leaves it — then C-q reaches the card",
+                    true => "enter runs the line, esc close",
+                    false => "esc close — then C-q reaches the card",
                 };
                 self.key_unused(key, "the command line", out);
             }
@@ -7540,8 +7540,8 @@ mod tests {
         assert_eq!(ed.doc().text.to_string(), "ONE\nTWO\n");
     }
 
-    /// An edit review in front is said once on the status line — its mode, `● review`; the right-hand
-    /// `claude ● review` only while it waits behind the code's keys.
+    /// An edit review in front is said once on the status line — its mode, `● change` (`review` is the code
+    /// review's rail, uxaudit D5); the right-hand `claude ● change` only while it waits behind the code's keys.
     #[test]
     fn the_review_in_front_is_said_once_on_the_status_line() {
         let mut ed = editor("one\ntwo\n");
@@ -7554,18 +7554,18 @@ mod tests {
             parser.process(&bytes);
             parser.screen().rows(0, 140).nth(29).unwrap_or_default()
         };
-        // In front, with the keys: the mode says it — no `claude ● review` beside
+        // In front, with the keys: the mode says it — no `claude ● change` beside
         let s = status(&mut ed);
-        assert!(s.contains("● review ") && !s.contains("claude ● review"), "{s}");
+        assert!(s.contains("● change ") && !s.contains("claude ● change"), "{s}");
         // Left unanswered: the code's mode, and the chip says Claude still waits on it
         feed(&mut ed, "<esc>");
         assert!(ed.session.review.is_some());
         let s = status(&mut ed);
-        assert!(s.contains("● normal ") && s.contains("claude ● review"), "{s}");
+        assert!(s.contains("● normal ") && s.contains("claude ● change"), "{s}");
         // Back to it: said once again
         feed(&mut ed, "<C-q>");
         let s = status(&mut ed);
-        assert!(s.contains("● review ") && !s.contains("claude ● review"), "{s}");
+        assert!(s.contains("● change ") && !s.contains("claude ● change"), "{s}");
     }
 
     /// #61, #70: while an edit review waits, the editor's keys still work over it — C-d/C-u and the wheel
@@ -11058,7 +11058,7 @@ mod tests {
         );
         assert!(!ed.session.sidebar.as_ref().unwrap().focus);
         let s = screen(&mut ed);
-        assert!(s.contains("m viewed, on to the next") && !s.contains("review behind"), "{s}");
+        assert!(s.contains("m viewed, next  q end") && !s.contains("review behind"), "{s}");
         feed(&mut ed, "d");
         assert_eq!(text(&ed), before, "the change is still there");
         // Esc in the tab: the same
@@ -12912,6 +12912,158 @@ mod tests {
         feed(&mut ed, "<esc>");
         assert!(!ed.session.code_review.as_ref().unwrap().focus);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The rail's `q` ends the review, as `space v q` does — files not viewed: its card asks first (uxaudit D2:
+    /// it only gave the keys back, where every other list panel's `q` closes it). `C-w` goes through the rail to
+    /// the window keys (D8: it said "does nothing in the review's file list"), and `C-w q` there ends it too (D3).
+    #[test]
+    fn the_rails_q_ends_the_review_and_c_w_goes_through_it() {
+        use crate::codereview::{Base, CodeReview, File};
+        let dir = crate::scratch::Scratch::new("rail-q");
+        let files = ["a.rs", "b.rs"]
+            .map(|rel| {
+                std::fs::write(dir.join(rel), "x\n").unwrap();
+                File {
+                    rel: rel.into(),
+                    path: dir.join(rel),
+                    added: 1,
+                    removed: 0,
+                    new: true,
+                    gone: false,
+                    binary: false,
+                }
+            })
+            .to_vec();
+        let mut ed = editor("");
+        ed.open(&dir.join("a.rs")).unwrap();
+        ed.session.code_review = Some(CodeReview::for_test(Base::Head, dir.to_path_buf(), files));
+        let asked =
+            |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::ReviewEnd { .. }));
+        feed(&mut ed, " eq");
+        assert!(asked(&ed), "two files not viewed: the end asks");
+        assert!(ed.session.code_review.is_some(), "not ended unasked");
+        ed.offers.clear();
+        ed.session.code_review.as_mut().unwrap().focus = true;
+        feed(&mut ed, "<C-w>");
+        assert!(!ed.pending.is_empty(), "C-w waits for its window key");
+        assert!(ed.status.as_ref().is_none_or(|s| !s.0.contains("does nothing")), "{:?}", ed.status);
+        feed(&mut ed, "q");
+        assert!(asked(&ed), "C-w q from the rail: its end, asked");
+        // Every file viewed: `q` ends it at once, nothing to ask
+        ed.offers.clear();
+        ed.session.code_review.as_mut().unwrap().focus = true;
+        ed.session.code_review.as_mut().unwrap().selected = 0;
+        let viewed = |ed: &Editor, i: usize| {
+            let r = ed.session.code_review.as_ref().unwrap();
+            r.viewed(ed, &r.files[i])
+        };
+        feed(&mut ed, "m");
+        settle_until(&mut ed, |ed| viewed(ed, 0));
+        ed.session.code_review.as_mut().unwrap().focus = true;
+        feed(&mut ed, "m");
+        settle_until(&mut ed, |ed| viewed(ed, 1));
+        ed.session.code_review.as_mut().unwrap().focus = true;
+        feed(&mut ed, "q");
+        assert!(ed.session.code_review.is_none(), "all viewed: ended");
+        assert!(!asked(&ed), "nothing asked");
+    }
+
+    /// `q` closes the bottom panel with tarae's keys (uxaudit D2) — a task's once its run has ended: one under
+    /// way runs on, said (`space m c` stops it), and its header offers `q` only once it can. `C-w q` closes what
+    /// has the keys — this panel, the side panel — and, from the code, a pane as ever (D3).
+    #[test]
+    fn q_closes_the_panel_that_has_the_keys() {
+        let mut ed = editor("a\n");
+        let head = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 140, 40).unwrap();
+            let (frame, w, h) = ed.last_frame.clone().unwrap();
+            let screen = crate::screen::text(&frame, w, h).unwrap();
+            screen.lines().find(|l| l.contains("j k scroll")).unwrap_or_default().to_string()
+        };
+        task_of_40_lines(&mut ed);
+        ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;
+        head(&mut ed);
+        feed(&mut ed, "<C-w>j");
+        assert!(ed.bottom_focus);
+        let h = head(&mut ed);
+        assert!(h.contains("esc code") && !h.contains("q close"), "{h}");
+        feed(&mut ed, "q");
+        assert!(ed.session.task_run.is_some(), "a run under way isn't stopped by q");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("space m c stops")), "{:?}", ed.status);
+        ed.session.task_run.as_mut().unwrap().state = crate::task::State::Passed;
+        let h = head(&mut ed);
+        assert!(h.contains("q close"), "{h}");
+        feed(&mut ed, "q");
+        assert!(ed.session.task_run.is_none(), "ended: q closes it");
+        assert!(!ed.bottom_focus);
+        // `C-w q` in it: the same
+        task_of_40_lines(&mut ed);
+        head(&mut ed);
+        feed(&mut ed, "<C-w>j<C-w>q");
+        assert!(ed.session.task_run.is_none(), "C-w q closed the panel");
+        // The side panel
+        feed(&mut ed, " e");
+        assert!(ed.session.sidebar.as_ref().is_some_and(|s| s.focus));
+        feed(&mut ed, "<C-w>q");
+        assert!(ed.session.sidebar.is_none(), "C-w q closed the side panel");
+        // The code: its pane, as ever
+        feed(&mut ed, "<C-w>q");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0 == "only one window"), "{:?}", ed.status);
+        // A rebase stopped at its conflicts isn't running, and `space m c` isn't its way out: said so, kept
+        task_of_40_lines(&mut ed);
+        ed.session.task_run.as_mut().unwrap().state = crate::task::State::Stopped("2 conflicts".into());
+        head(&mut ed);
+        feed(&mut ed, "<C-w>jq");
+        assert!(ed.session.task_run.is_some(), "the rebase's panel stays");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(said.contains("waits at 2 conflicts") && said.contains(":rebase-abort"), "{said}");
+        assert!(!said.contains("space m c"), "{said}");
+    }
+
+    /// The test panel's `q` as the task panel's: a run under way is left running (`space x c` stops it), an ended
+    /// one closes — one that ran no test too.
+    #[test]
+    fn q_on_the_test_panel_closes_it_once_its_run_has_ended() {
+        use crate::testing::{RunState, TestRun};
+        let mut ed = editor("a\n");
+        let draw = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 140, 40).unwrap();
+        let mut run = TestRun::finished("t", Vec::new(), vec!["running 1 test".into()]);
+        run.state = RunState::Running;
+        ed.session.test_run = Some(run);
+        draw(&mut ed);
+        feed(&mut ed, "<C-w>j");
+        assert!(ed.bottom_focus);
+        feed(&mut ed, "q");
+        assert!(ed.session.test_run.is_some(), "tests under way aren't stopped by q");
+        assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("space x c stops")), "{:?}", ed.status);
+        ed.session.test_run.as_mut().unwrap().state = RunState::NoTests;
+        feed(&mut ed, "q");
+        assert!(ed.session.test_run.is_none(), "ended (no test ran): q closes it");
+        assert!(!ed.bottom_focus);
+    }
+
+    /// `C-w q` from `:procs` closes it, as its `q` does; from the chat it closes nothing and says `space L` does
+    /// (closing the chat ends its conversation's process — two keys mustn't cut a turn off).
+    #[test]
+    fn c_w_q_closes_procs_and_leaves_the_chat_saying_how() {
+        let mut ed = editor("a\n");
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        ed.procs_toggle();
+        assert!(ed.procs_focused());
+        feed(&mut ed, "<C-w>q");
+        assert!(ed.procs.panel.is_none(), "C-w q closed :procs");
+        feed(&mut ed, " l");
+        assert!(ed.session.chat.as_ref().is_some_and(|c| c.focused));
+        feed(&mut ed, "<C-w>q");
+        assert!(ed.session.chat.is_some(), "the chat stays");
+        assert!(
+            ed.status.as_ref().is_some_and(|s| s.0.contains("space L closes the chat")),
+            "{:?}",
+            ed.status
+        );
     }
 
     /// `space g` is the git panel, lazygit beside the code: from the code it opens on the hunk under the

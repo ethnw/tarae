@@ -26,6 +26,9 @@ use crate::event::SessionId;
 use crate::sizes::Slot;
 use crate::uistate::{CardState, session_id};
 
+/// What `space I` and `C-q` say when nothing waits — one sentence for the one empty state.
+pub const NOTHING: &str = "nothing waits for you — no card, no edit, in any session";
+
 /// One thing waiting for the user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -462,7 +465,7 @@ impl Editor {
     pub fn inbox_open(&mut self) {
         let items = self.inbox_items();
         if items.is_empty() {
-            return self.set_status("nothing waits for you — no card, no edit, in any session");
+            return self.set_status(NOTHING);
         }
         let p = crate::picker::Picker::of("inbox", INBOX, items, false).without_preview();
         self.open_picker(p, None);

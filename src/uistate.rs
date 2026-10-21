@@ -442,7 +442,7 @@ impl Editor {
                 Filter::Except(v)
             };
             if self.review_rail_up() && self.session.code_review.as_ref().is_some_and(|r| r.focus) {
-                v.push(layer(Region::Rail, editors(&[])));
+                v.push(layer(Region::Rail, editors(&[ctrl('w')])));
             }
             if let Some(s) = self.session.sidebar.as_ref().filter(|s| s.focus && !self.side_folded()) {
                 v.push(layer(Region::Side(s.mode), editors(&[ctrl('w')])));
@@ -451,7 +451,7 @@ impl Editor {
                 v.push(layer(Region::Slot(Slot::Procs), editors(&[ctrl('w')])));
             }
             if !self.session.sidebar.as_ref().is_some_and(|s| s.focus) && self.plugin_panel_focused() {
-                v.push(layer(Region::Slot(Slot::Plugin), editors(&[])));
+                v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
             if let Some(s) = self
                 .slot()

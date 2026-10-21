@@ -3,26 +3,26 @@
 00  tarae  ›  src  ›  demo.rs                                     claude › follow                ready
 01  ──────────────────────────────────────────────────────────    ────────────────────────────────────
 02   1 use std::collections::HashMap;                             demo.rs · L5
-03   1                                                            ▎ Who calls word_counts?
-04   2 ▎ Counts how often each word appears.
+03   2                                                            ▎ Who calls word_counts?
+04   3 ▎ Counts how often each word appears.
 05     ▎                                                          ▎ Finding the callers
 06     ▎ Words are split on whitespace; case is kept.             ▎ It's public, so other modules may…
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize>
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>
 08     {                                                          ◦ grep   word_counts\(  in src
-09   6     let mut counts = HashMap::new();                       ◦ glob   src/**/*.rs
-10   7     for word in text.split_whitespace() {                  ◦ read   src/lib.rs  L1–40
-11   8     │   *counts.entry(word).or_insert(0) += 1;
-12   9     }                                                      Only main does, at src/demo.rs:15.
-13  10     counts                                                 src/lib.rs:12 has a copy that splits
-14  11 }                                                          on commas.
-15  12                                                                                            2.4s
-16  13 fn main() {
-17  14     let text = "the quick brown fox jumps over the lazy
+09   7     let mut counts = HashMap::new();                       ◦ glob   src/**/*.rs
+10   8     for word in text.split_whitespace() {                  ◦ read   src/lib.rs  L1–40
+11   9     │   *counts.entry(word).or_insert(0) += 1;
+12  10     }                                                      Only main does, at src/demo.rs:15.
+13  11     counts                                                 src/lib.rs:12 has a copy that splits
+14  12 }                                                          on commas.
+15  13                                                                                            2.4s
+16  14 fn main() {
+17  15     let text = "the quick brown fox jumps over the lazy
 18         dog";
-19  15     let counts = word_counts(text);
-20  16     println!("{} distinct words", counts.len()); //
+19  16     let counts = word_counts(text);
+20  17     println!("{} distinct words", counts.len()); //
 21         타래
-22  17 }
+22  18 }
 23
 24
 25
@@ -74,7 +74,7 @@
 09   f                                                            d ffff   ggggggggggg
 10   f                                                            d ffff   dddddddddd  fffff
 11   f
-12   f
+12  ff
 13  ff
 14  ff
 15  ff                                                                                            ffff

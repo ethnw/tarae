@@ -3,18 +3,18 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;                                                                 ▐
-03   1                                                                                                ▐
-04   2 ▎ Counts how often each word appears.                                                          ▐
+03   2                                                                                                ▐
+04   3 ▎ Counts how often each word appears.                                                          ▐
 05     ▎                                                                                              ▐
 06     ▎ Words are split on whitespace; case is kept.                                                 ▐
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
-08   6     let mut counts = HashMap::new();                                                           ▐
-09   7     for word in text.split_whitespace() {                                                      ▐
-10   8     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
-11   9     }
-12  10     counts
-13  11 }
-14  12
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                                       ▐
+08   7     let mut counts = HashMap::new();                                                           ▐
+09   8     for word in text.split_whitespace() {                                                      ▐
+10   9     │   *counts.entry(word).or_insert(0) += 1;                                                 ▐
+11  10     }
+12  11     counts
+13  12 }
+14  13
 15   tests ▲  │  tests   ● 1   ▲ 2   1.2s         space x l again  space x o output  space x c close
 16   ─────────────────────────────────────────────────────────────────────────────────────────────────
 17   TESTS                           │ FAILURE  src/demo.rs:92                 ]x next  [x prev   1/2
@@ -61,7 +61,7 @@
 08   f                                                                                                f
 09   f                                                                                                f
 10   f                                                                                                f
-11   f
+11  ff
 12  ff
 13  ff
 14  ff

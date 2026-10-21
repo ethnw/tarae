@@ -93,7 +93,7 @@ Select everything with `%`, then type a pattern after `s` — you get a cursor o
 ## 9. With Claude
 
   `space i`  ask Claude to rework the selection — the changes unfold in the buffer in red and
-             green; `y` accept · `n` discard
+             green; `y` accept · `n` reject
   `space l`  chat panel on the right — Claude sees the current file, cursor and selection.
              `C-r` puts code from the answer into the selection
 

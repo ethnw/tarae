@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+03   2
+04   3 ▎ Counts how often each ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 05     ▎                         space
 06     ▎ Words are split on whi
-07   5 pub fn word_counts(text:  '  Reopen the last picker          L  Close chat
-08   6     let mut counts = Has  /  Search in project               m  Tasks …
-09   7     for word in text.spl  >  View the chat                   n  Ask Claude here, or reply
-10   8     │   *counts.entry(wo  ?  Find a command                  N  Claude's notes
-11   9     }                     @  Point Claude at something       o  Outline panel (this file)
-12  10     counts                a  Code actions                    p  Paste clipboard after
-13  11 }                         b  Open buffer picker              P  Paste clipboard before
-14  12                           c  Comment or uncomment lines      q  Show the list (quickfix)
-15  13 fn main() {               C  Block-comment the selections    r  Rename symbol
-16  14     let text = "the quic  d  Diagnostics                     s  Symbols in this file
-17  15     let counts = word_co  D  Diagnostics in every file       S  Symbols in the workspace
-18  16     println!("{} distinc  e  Files panel (tree)              t  Choose a theme (live preview)
-19  17 }                         f  Open file picker                T  Terminal: show / hide
+07   6 pub fn word_counts(text:  '  Reopen the last picker          L  Close chat
+08   7     let mut counts = Has  /  Search in project               m  Tasks …
+09   8     for word in text.spl  >  View the chat                   n  Ask Claude here, or reply
+10   9     │   *counts.entry(wo  ?  Find a command                  N  Claude's notes
+11  10     }                     @  Point Claude at something       o  Outline panel: show / hide
+12  11     counts                a  Code actions                    p  Paste clipboard after
+13  12 }                         b  Switch to an open buffer        P  Paste clipboard before
+14  13                           c  Comment or uncomment lines      q  List panel: show / hide
+15  14 fn main() {               C  Block-comment the selections    r  Rename symbol
+16  15     let text = "the quic  d  Diagnostics                     s  Symbols in this file
+17  16     let counts = word_co  D  Diagnostics in every file       S  Symbols in the workspace
+18  17     println!("{} distinc  e  Files panel: show / hide        t  Choose a theme (live preview)
+19  18 }                         f  Open a file                     T  Terminal: show / hide
 20                               g  Git: stage, commit, push        u  Undo Claude's last turn
 21                               G  Debug …                         U  Bring Claude's turn back
 22                               h  Select this symbol's uses       v  Review …
@@ -73,7 +73,7 @@
 08   f                           A                                  A  ddddd d
 09   f                           A                                  A
 10   f                           A                                  A
-11   f                           A                                  A
+11  ff                           A                                  A
 12  ff                           A                                  A
 13  ff                           A                                  A
 14  ff                           A                                  A

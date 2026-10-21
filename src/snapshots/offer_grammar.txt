@@ -3,10 +3,10 @@
 00  tarae  ›  app.py
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 def greet(name):
-03   1     return f"hello, {name}"
-04   2
-05   3
-06   4 print(greet("tarae"))
+03   2     return f"hello, {name}"
+04   3
+05   4
+06   5 print(greet("tarae"))
 07
 08
 09

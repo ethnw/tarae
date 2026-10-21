@@ -3,23 +3,23 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   1
-04   2 ▎ Counts how often each word appears.
+03   2
+04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.
-07   5 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   6     let mut counts = HashMap::new();
-09   7     for word in text.split_whitespace() {
-10   8     │   *counts.entry(word).or_insert(0) += 1;
-11   9     }
-12  10     counts                  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-13  11 }                            ▎ Open the sandbox a little?
-14  12                                Let Claude's commands write in
-15  13 fn main() {                    /private/tmp/tarae-shot-blocked/npm-cache and everything in it
-16  14     let text = "the quick br
-17  15     let counts = word_counts   npm was writing …/_cacache/index-v5 in it, in `npm test` —
-18  16     println!("{} distinct wo   which runs again now with it open, whichever you choose.
-19  17 }                              Claude hears how it ended with your next message. s lasts
+07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+08   7     let mut counts = HashMap::new();
+09   8     for word in text.split_whitespace() {
+10   9     │   *counts.entry(word).or_insert(0) += 1;
+11  10     }
+12  11     counts                  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+13  12 }                            ▎ Open the sandbox a little?
+14  13                                Let Claude's commands write in
+15  14 fn main() {                    /private/tmp/tarae-shot-blocked/npm-cache and everything in it
+16  15     let text = "the quick br
+17  16     let counts = word_counts   npm was writing …/_cacache/index-v5 in it, in `npm test` —
+18  17     println!("{} distinct wo   which runs again now with it open, whichever you choose.
+19  18 }                              Claude hears how it ended with your next message. s lasts
 20                                    until this session ends, A until :granted takes it back.
 21
 22                                    y Once   a This chat   s This session   A Always here   n No
@@ -73,7 +73,7 @@
 08   f
 09   f
 10   f
-11   f
+11  ff
 12  ff
 13  ff                              a BBBB BBB BBBBBBB B BBBBBBB
 14  ff

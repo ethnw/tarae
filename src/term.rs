@@ -1053,7 +1053,10 @@ fn slot_hints(editor: &Editor) -> Vec<(&'static str, &'static str)> {
         return Vec::new();
     }
     let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
-    vec![("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")]
+    let mut v = vec![("j k", "scroll"), ("C-w z", zoom)];
+    v.extend(editor.slot().is_some_and(|s| editor.q_closes(s)).then_some(("q", "close")));
+    v.push(("esc", "code"));
+    v
 }
 
 /// A tab's badge (`chrome::Badge`): its glyph and colour — the wave in the accent while under way, `●` in
@@ -1373,18 +1376,14 @@ fn draw_terminal_panel(
     let zoomed = editor.zoomed().is_some();
     let zoom = if zoomed { "back" } else { "full screen" };
     let mut hints: Vec<(&str, &str)> = match (t.exited, t.focus, editor.bottom_focus) {
-        (Some(_), _, true) => vec![("j k", "scroll"), ("C-w z", zoom), ("esc", "to the code")],
+        (Some(_), _, true) => vec![("j k", "scroll"), ("C-w z", zoom), ("q", "close"), ("esc", "code")],
         (Some(_), _, false) => vec![("space T", "close")],
         // (filling the screen, its escape leaves the keys on it: `C-w z` from there)
         (None, true, _) if zoomed => vec![(esc, "stop typing")],
-        (None, true, _) => vec![(esc, "back to the code")],
-        (None, false, true) => vec![
-            ("i", "type in it"),
-            ("j k", "scroll"),
-            ("C-w z", zoom),
-            ("space T", "hide"),
-            ("esc", "to the code"),
-        ],
+        (None, true, _) => vec![(esc, "code")],
+        (None, false, true) => {
+            vec![("i", "type in it"), ("j k", "scroll"), ("C-w z", zoom), ("q", "hide"), ("esc", "code")]
+        }
         (None, false, false) => vec![(esc, "type in it")],
     };
     // The program has the mouse: how to select in it anyway
@@ -1783,7 +1782,7 @@ fn draw_queued(
 /// selected row marked while focused — and its status line at the bottom.
 ///
 /// ```text
-///   kubernetes   pods · all namespaces                             d describe  l logs  esc back
+///   kubernetes   pods · all namespaces                             d describe  l logs  esc code
 ///   ─────────────────────────────────────────────────────────────────────────────────────────
 ///   NAMESPACE    NAME                   READY  STATUS   RESTARTS
 /// ▎ default      web-fbc446b7c-8f5mj    1/1    Running  0
@@ -1808,7 +1807,7 @@ fn draw_plugin_panel<W: Write>(
     let title = fit_ellipsis(&clean(&panel.title), (w / 2).max(12));
     let keys: Vec<(String, String)> = panel.keys.iter().map(|(k, d)| (clean(k), clean(d))).collect();
     let mut hints: Vec<(&str, &str)> = keys.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect();
-    hints.push(if st.focus { ("esc", "back") } else { ("click", "keys") });
+    hints.push(if st.focus { ("esc", "code") } else { ("click", "keys") });
     let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints)?;
     // The table, and the status line under it
     let header = !panel.columns.is_empty();
@@ -1890,7 +1889,7 @@ fn procs_panel_h(editor: &Editor, total: usize) -> usize {
 /// how long it's run, its CPU and memory — and tarae's own checks on them, newest first.
 ///
 /// ```text
-///   terminal   procs  │  6 processes · 1.9 GB · 3% CPU           s stop  r restart  l log  q close  esc back
+///   terminal   procs  │  6 processes · 1.9 GB · 3% CPU           s stop  r restart  l log  q close  esc code
 ///   ──────────────────────────────────────────────────────────────────────────────────────────────────
 ///      PID  PROCESS            FOR                        UP     CPU  FOOTPRINT   RESIDENT
 /// ▎  41231  tarae              this editor            2h 03m    1.2%     118 MB     140 MB
@@ -1930,7 +1929,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         if sel.is_some_and(|r| r.kind.restarts()) {
             hints.push(("r", "restart"));
         }
-        hints.extend([("l", if heading { "to front" } else { "log" }), ("q", "close"), ("esc", "back")]);
+        hints.extend([("l", if heading { "to front" } else { "log" }), ("q", "close"), ("esc", "code")]);
     } else {
         hints.push(("click", "keys"));
     }
@@ -6638,11 +6637,11 @@ fn draw_statusline(
         right.push(gap(215));
     }
     match &editor.session.review {
-        // (the review in front: the mode says it — `● review` on the left — once is enough)
-        Some(r) if r.ready && keys == crate::chrome::Keys::Review => {}
+        // (the change in review in front: the mode says it — `● change` on the left — once is enough)
+        Some(r) if r.ready && keys == crate::chrome::Keys::Change => {}
         Some(r) if r.ready => {
             right.push(Seg {
-                text: "claude ● review".into(),
+                text: "claude ● change".into(),
                 style: Style { bold: true, ..accent },
                 keep: 220,
             });
@@ -8321,7 +8320,7 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
         .to_string(),
     };
     let title = title.as_str();
-    let kw = entries.iter().map(|(k, _, _)| k.to_string().width()).max().unwrap_or(1);
+    let kw = entries.iter().map(|(k, _, _)| k.shown().width()).max().unwrap_or(1);
     const DESC: usize = 30;
     let dw = entries.iter().map(|(_, d, _)| d.width()).max().unwrap_or(0).min(DESC);
     let max_rows = lay.text_rows.saturating_sub(2 * pad + 3).max(1);
@@ -8363,7 +8362,7 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
             let i = c * rows + r;
             let used = match entries.get(i) {
                 Some((k, d, group)) => {
-                    let ks = k.to_string();
+                    let ks = k.shown();
                     apply(out, key_style)?;
                     queue!(out, Print(format!("{ks:<kw$}  ")))?;
                     let d = fit_ellipsis(d, dw);
@@ -9342,7 +9341,8 @@ fn review_rail_hints(
     if focus {
         vec![
             hint(&[("j k", "files"), ("enter", "open")]),
-            hint(&[("m", "viewed, on to the next")]),
+            // (`q end` beside `m`: as wide as the rows were — the rail's width is the hints')
+            hint(&[("m", "viewed, next"), ("q", "end")]),
             hint(&[("u", "next unviewed"), ("esc", "code")]),
             walk(),
         ]
@@ -12621,6 +12621,9 @@ fn float_geom_around(
     let h = rows.len().min(max_rows) + 2;
     let y0 = if down { last + 1 } else { first - h };
     let x0 = (cx as usize).saturating_sub(2).min(right.saturating_sub(inner + 4)).max(left);
+    // (an edge inside the gutter would leave the first digits of the numbers it covers beside it — `1▄▄`, read
+    // as a number: from the pane's edge then, over the whole gutter)
+    let x0 = if x0 > left && x0 < left + pane.gutter { left } else { x0 };
     Some(FloatGeom { x0, y0, inner, h, max_rows, rows })
 }
 
@@ -13231,7 +13234,7 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         // (one with unsaved changes asked about: what the next `C-x` does)
         match (p.current().map(|i| &i.action), p.closing) {
             (Some(Action::Buffer(id)), Some(asked)) if *id == asked => {
-                hints(&[("enter", "open"), ("C-x", "close without saving"), ("esc", "close the list")])
+                hints(&[("enter", "open"), ("C-x", "close without saving"), ("esc", "close")])
             }
             _ => {
                 hints(&[("enter", "open"), ("C-x", "close the buffer"), ("type", "narrow"), ("esc", "close")])
@@ -13257,7 +13260,7 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         // (answered there, on its card — never from the list)
         hints(&[("enter", "go to it"), ("type", "narrow"), ("esc", "close")])
     } else if editor.picker.as_ref().is_some_and(replace_list) {
-        hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "cancel")])
+        hints(&[("enter", "replace in every listed file"), ("type", "narrow"), ("esc", "close")])
     } else if editor.popup.is_some() {
         hints(&[("C-d", "scroll down"), ("C-u", "scroll up"), ("esc", "close")])
     } else {
@@ -13488,6 +13491,20 @@ mod tests {
         assert_eq!(which_key_columns(44, 1, 30, 22, 20), None, "cut below the floor: none");
     }
 
+    /// The `C-w` card draws its keys as typed — `-`, never the config's `minus` (uxaudit D11) — and its lines whole.
+    #[test]
+    fn which_key_draws_keys_as_typed() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.handle_key("C-w".parse().unwrap());
+        let mut bytes = Vec::new();
+        render(&mut ed, &mut bytes, 140, 40).unwrap();
+        let mut p = vt100::Parser::new(40, 140, 0);
+        p.process(&bytes);
+        let s = p.screen().contents();
+        assert!(s.lines().any(|l| l.contains("-    Shorter: the bottom panel")), "drawn:\n{s}");
+        assert!(!s.contains("minus") && !s.contains('…'), "drawn:\n{s}");
+    }
+
     /// Which-key on a narrow screen (#201's check at 50 columns): `space`'s keys in as many columns as the rows
     /// need, descriptions cut to share the width — before, one column was too tall and nothing was drawn.
     #[test]
@@ -13499,7 +13516,7 @@ mod tests {
         let mut p = vt100::Parser::new(30, 50, 0);
         p.process(&bytes);
         let s = p.screen().contents();
-        assert!(s.contains("Open file") && s.contains("Search in"), "drawn:\n{s}");
+        assert!(s.contains("Open a fi") && s.contains("Search in"), "drawn:\n{s}");
         for (y, line) in s.lines().enumerate() {
             assert!(line.width() <= 50, "row {y} past the edge:\n{s}");
         }
@@ -14338,10 +14355,10 @@ mod tests {
         let mut buf = Vec::new();
         render(&mut ed, &mut buf, w, h).unwrap();
         let rows = screen(&buf, w as usize, h as usize);
-        // Row 0 is the path bar (a screen this short has no rule under it); line numbers are relative
+        // Row 0 is the path bar (a screen this short has no rule under it); line numbers are absolute
         assert_eq!(rows[1].trim_end(), "  1 - one two three", "{rows:#?}");
         assert_eq!(rows[2].trim_end(), "      four five six", "no number, hangs under the text");
-        assert_eq!(rows[3].trim_end(), "  1 next");
+        assert_eq!(rows[3].trim_end(), "  2 next");
         let head = |ed: &Editor| ed.doc().selection().primary().cursor(&ed.doc().text);
         let key = |ed: &mut Editor, k: &str| {
             ed.handle_key(k.parse().unwrap());
@@ -17223,5 +17240,66 @@ mod tests {
         // (off the main thread — tracked, not budgeted against a frame)
         measured("conflict_scan_200k_lines", scan, Duration::from_secs(1));
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// `esc` says one thing per act in every hint tarae has (uxaudit D1): `code` where the surface stays and the
+    /// keys go back to the code, `close` where it goes — in every file a build compiles, in each form a hint
+    /// takes: a pair (`("esc", "code")`), the terminal's escape key's pair (`(esc, "code")`, `C-\` by default) and
+    /// a line that says what to do instead (`key_unused`'s `"enter open, esc code"`). The few that say something
+    /// else are each counted, with why — a new one fails until it's said here.
+    #[test]
+    fn esc_says_one_word_per_act_in_every_hint() {
+        const KEPT: &[(&str, usize)] = &[
+            // Claude's change in review: esc leaves it waiting — its word must say so (narrow: `back`)
+            ("back, unanswered", 1),
+            ("back", 1),
+            // a card's line, and the change's, for the same act: esc leaves it there, unanswered
+            ("goes back", 4),
+            // a card given the keys (`C-q`): esc gives them back where they came from — the code or the chat
+            ("gives them back", 2),
+            // the stale notes' list goes back to the card it came from, not the code
+            ("back to the card", 1),
+            // Claude's answer streaming: esc stops it
+            ("stop", 1),
+            // pointing: the labels go, nothing opened or closes
+            ("stop pointing", 2),
+            // a note being written: what's typed goes
+            ("cancel", 2),
+        ];
+        // The terminal's escape key: from the program back to the code, or — filling the screen — off the
+        // program with the keys kept on it; and the same key into the program from the code
+        const TERMINAL: &[(&str, usize)] = &[("code", 1), ("stop typing", 1), ("type in it", 1)];
+        type Words = std::collections::BTreeMap<String, usize>;
+        let (mut seen, mut terminal) = (Words::new(), Words::new());
+        let word = |rest: &str, ends: &[char]| rest.split(ends).next().unwrap_or_default().to_string();
+        for (_, src) in crate::sim::lint::sources() {
+            // (a line's hint ends at its dash: `esc close — then C-q reaches the card`)
+            let src = src.replace(" — ", "\"");
+            for part in src.split("(\"esc\", \"").skip(1) {
+                *seen.entry(word(part, &['"'])).or_default() += 1;
+            }
+            for part in src.split("(esc, \"").skip(1) {
+                *terminal.entry(word(part, &['"'])).or_default() += 1;
+            }
+            for pat in ["\"esc ", ", esc "] {
+                for part in src.split(pat).skip(1) {
+                    *seen.entry(word(part, &['"', ','])).or_default() += 1;
+                }
+            }
+        }
+        let other: Vec<(&str, usize)> = seen
+            .iter()
+            .filter(|(w, _)| !matches!(w.as_str(), "code" | "close"))
+            .map(|(w, n)| (w.as_str(), *n))
+            .collect();
+        let mut kept = KEPT.to_vec();
+        kept.sort();
+        assert_eq!(other, kept, "an esc hint's word: `code` (it stays) or `close` (it goes)");
+        let terminal: Vec<(&str, usize)> = terminal.iter().map(|(w, n)| (w.as_str(), *n)).collect();
+        assert_eq!(terminal, TERMINAL, "the terminal's escape key's words");
+        assert!(
+            seen.get("code").is_some_and(|&n| n >= 10) && seen.get("close").is_some_and(|&n| n >= 10),
+            "{seen:?}"
+        );
     }
 }

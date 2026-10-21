@@ -1649,7 +1649,8 @@ back in one go. It works on the real buffers, so every motion, go-to-definition,
   in red where they were (a click on one goes to the start of the line it went above); added and changed lines sit on
   a green wash. `]g`/`[g` walk the changes and go on into the
   next or previous file. `space e` gives the rail the keys: `j`/`k` over the files, Enter opens one, `m` marks it
-  viewed and goes on to the next, Esc back to the code. A click on a file opens it, a click on its `◦` marks it
+  viewed and goes on to the next, `q` ends the review (as `space v q`, asking first while files are unviewed), Esc
+  back to the code. A click on a file opens it, a click on its `◦` marks it
   viewed too (a second click leaves it marked), and a click on `↑ N more` / `↓ N more` or the wheel scrolls the list
 - `space n` on a line writes a **draft** comment (the same key as everywhere else; during a review it drafts instead of
   sending). Drafts show as `¶ draft · …` and in the rail (a file's row ends with how many: `¶2` yours, in the
@@ -1955,7 +1956,7 @@ of repeating itself, and the log says where.
 | `space n` | Draft a comment (or a reply) on this line |
 | `space v m` | Mark this file viewed |
 | `space v M` | Unmark it |
-| `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, `u` the next not viewed, Esc back |
+| `space e` | The rail: `j`/`k` files, Enter open, `m` viewed and next, `u` the next not viewed, `q` end the review, Esc back |
 | click on a file's `◦` | Open it and mark it viewed |
 | `space v u` | Take the change at the cursor back |
 | `space v z` | Read wide: the rail and the chat give the code their columns (again: back) |

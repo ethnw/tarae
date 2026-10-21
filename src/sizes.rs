@@ -15,7 +15,7 @@
 //!
 //! `C-w z` fills the screen with what has the keys — the code (its pane alone), the bottom slot, the chat, the
 //! side panel — and back (`Zoom`); it ends when the keys go elsewhere. The bottom slot takes the keys with
-//! `C-w j` or a click (`bottom_key`: they scroll it; Esc or `C-w k` back to the code).
+//! `C-w j` or a click (`bottom_key`: they scroll it; `q` closes it; Esc or `C-w k` back to the code).
 
 use crate::key::{Code, Key};
 
@@ -198,12 +198,92 @@ pub enum Slot {
     Task,
 }
 
+impl crate::editor::Editor {
+    /// Whether `q` closes the test or task panel now: only once its run has ended — one under way (or a rebase
+    /// stopped at its conflicts) is stopped by its own `space x c` / `space m c`, never by a `q` meant for a pager.
+    pub fn q_closes(&self, slot: Slot) -> bool {
+        use crate::task::State;
+        match slot {
+            Slot::Test => {
+                self.session.test_run.as_ref().is_some_and(|r| r.state != crate::testing::RunState::Running)
+            }
+            Slot::Task => self
+                .session
+                .task_run
+                .as_ref()
+                .is_some_and(|r| matches!(r.state, State::Passed | State::Failed(_))),
+            _ => false,
+        }
+    }
+
+    /// `q` in a list or output panel with tarae's keys, and `C-w q` there: it closes — the terminal's hides as
+    /// `space T` hides it (the shell runs on), a test's or task's once its run has ended (else said, the run
+    /// untouched), `:procs`.
+    pub fn slot_close(&mut self, slot: Slot) {
+        match slot {
+            Slot::Terminal => {
+                if let Some(t) = self.session.terminal.as_mut() {
+                    (t.visible, t.focus) = (false, false);
+                }
+                self.bottom_focus = false;
+            }
+            // A rebase stopped at its conflicts isn't running: it waits on them, and its panel with it — `space m c`
+            // isn't the way out there (it drops the run the rebase is), `:rebase-abort` is
+            Slot::Task
+                if let Some(crate::task::State::Stopped(why)) =
+                    self.session.task_run.as_ref().map(|r| &r.state) =>
+            {
+                let why = why.clone();
+                self.set_status(format!(
+                    "the rebase waits at {why} — its panel stays until it ends (:rebase-abort ends it)"
+                ));
+            }
+            Slot::Test | Slot::Task if !self.q_closes(slot) => {
+                let (what, stop) = match slot {
+                    Slot::Test => ("the tests are", "space x c"),
+                    _ => ("the task is", "space m c"),
+                };
+                self.set_status(format!("{what} still running — {stop} stops and closes"));
+            }
+            Slot::Test => {
+                self.test_close();
+                self.bottom_focus = false;
+            }
+            Slot::Task => {
+                self.task_close();
+                self.bottom_focus = false;
+            }
+            Slot::Procs => self.procs_close(),
+            Slot::Debug | Slot::Plugin => {}
+        }
+    }
+
+    /// `C-w q`: what has the keys closes, as its own `q` closes it — the side panel (a plugin's tab in it too:
+    /// its `q` is tarae's, the side panel goes and the tab stays the plugin's), the review's rail (the review
+    /// ends, asked first), `:procs`, the test, task and terminal panels. False: the code has them (its pane
+    /// closes). Not the chat (closing it ends its conversation's process: a slip of two keys mustn't cut a turn
+    /// off — `space L` does it) nor a plugin's bottom panel (its `q` is the plugin's, and only the plugin closes
+    /// it — tarae has no event to tell it so): said.
+    pub fn close_focused(&mut self) -> bool {
+        use crate::uistate::Region;
+        match self.keys_to().region {
+            Region::Side(_) => self.session.sidebar = None,
+            Region::Rail => crate::codereview::close_asked(self),
+            Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
+            Region::Slot(s) => self.slot_close(s),
+            Region::Chat | Region::Unfold => self.set_status("C-w q closes panels — space L closes the chat"),
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Keys while the bottom slot has them (test and task output, the terminal's scrollback): `j`/`k` a line,
-/// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs; on the terminal `i`
-/// (Enter) types in it, on a task or test panel Enter runs the user's run waiting there now, on the task panel
-/// `o` a preflight step's output and `K` where Claude's command ran; Esc back to
-/// the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the code
-/// may not be in sight). False = not the slot's.
+/// `C-d`/`C-u` half the panel, `g`/`G` the start/end, `tab`/`S-tab` its other tabs, `q` closes it
+/// (`slot_close`); on the terminal `i` (Enter) types in it, on a task or test panel Enter runs the user's run
+/// waiting there now, on the task panel `o` a preflight step's output and `K` where Claude's command ran; Esc
+/// back to the code. The space menu, `:`, `[`/`]` and `C-w` stay the editor's; other keys do nothing here (the
+/// code may not be in sight). False = not the slot's.
 pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
     if !ed.bottom_focus
         || ed.mode != crate::editor::Mode::Normal
@@ -231,6 +311,10 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         }
         (Code::Esc, _) => {
             ed.bottom_focus = false;
+            return true;
+        }
+        (Code::Char('q'), false) => {
+            ed.slot_close(slot);
             return true;
         }
         (Code::Char('i' | 'a') | Code::Enter, false) if slot == Slot::Terminal => {
@@ -275,9 +359,9 @@ pub fn bottom_key(ed: &mut crate::editor::Editor, key: Key) -> bool {
         (Code::Char('G') | Code::End, false) => isize::MAX / 2,
         _ => {
             let (place, out) = match slot {
-                Slot::Terminal => ("the terminal's panel", "i types in it, esc goes to the code"),
-                Slot::Test => ("the test panel", "esc gives the keys to the code"),
-                _ => ("the task panel", "esc gives the keys to the code"),
+                Slot::Terminal => ("the terminal's panel", "i type in it, esc code"),
+                Slot::Test => ("the test panel", "esc code"),
+                _ => ("the task panel", "esc code"),
             };
             ed.key_unused(key, place, out);
             return true;
