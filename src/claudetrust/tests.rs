@@ -502,6 +502,75 @@ fn the_card_stays_with_its_session() {
     std::fs::remove_dir_all(&other).ok();
 }
 
+/// A yes another tarae's take-back came before, unseen: not written — claude starts again held back, the card asks,
+/// and the warning says so (`claude_settings_skipped`).
+#[test]
+fn a_yes_after_another_taraes_take_back_holds_back_again() {
+    let (mut ed, root) = asked("skipped", r#"{"env": {"SKIP_ZQ7": "1"}}"#, true);
+    let store = root.join("trust.json");
+    until(&mut ed, "the held-back start", |ed| running(ed) && arg_after(&root, "--settings").is_some());
+    crate::storewrite::hold(&store, Some(0));
+    ed.offer_accept();
+    let place = crate::trust::place_of(&root.join(PROJECT));
+    let kind = crate::trust::Kind::Claude;
+    crate::trust::write_as_other(&store, &crate::trust::Write::Forget { kind, place, given: 0 }).unwrap();
+    until(&mut ed, "the trusted start", |ed| running(ed) && arg_after(&root, "--settings").is_some());
+    std::fs::remove_file(root.join("argv")).ok();
+    crate::storewrite::hold(&store, None);
+    until(&mut ed, "asked again", |ed| card(ed).is_some());
+    until(&mut ed, "held back again", |_| {
+        arg_after(&root, "--settings").is_some_and(|s| s.contains("SKIP_ZQ7"))
+    });
+    let settings: Json = serde_json::from_str(&arg_after(&root, "--settings").unwrap()).unwrap();
+    assert_eq!(settings["env"]["SKIP_ZQ7"], "", "held back: {settings}");
+    assert!(ed.toasts.iter().any(|t| t.text.contains("Changed in another tarae")), "{}", state(&ed));
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// verify3 F11: a look at the settings read before a take-back given since (its write not landed) isn't trusted,
+/// whatever the store said as it was read.
+#[test]
+fn a_look_read_before_a_take_back_isnt_trusted() {
+    let root = temp("look-before");
+    let store = root.join("trust.json");
+    let (v1, v2) = (r#"{"env": {"LOOK_ZQ7": "1"}}"#, r#"{"env": {"LOOK_ZQ7": "2"}}"#);
+    let kind = crate::trust::Kind::Claude;
+    for v in [v1, v2] {
+        let hash = scan(&[file(PROJECT, v)]).unwrap().hash;
+        crate::trust::record(store.clone(), kind, root.join(PROJECT), hash, true).unwrap();
+    }
+    std::fs::write(root.join(PROJECT), v1).unwrap();
+    let mut ed = Editor::with_root(crate::config::Config::default(), root.clone());
+    ed.claude_settings_gate = true;
+    ed.trust_path = Some(store.clone());
+    stand_in(&mut ed);
+    crate::chat::open(&mut ed);
+    until(&mut ed, "trusted", |ed| {
+        ed.session
+            .chat
+            .as_ref()
+            .and_then(|c| c.settings.seen.as_ref())
+            .is_some_and(|s| s.state == State::Trusted)
+    });
+    // Read (another version, trusted in the store), then the take-back given, then the read applied
+    std::fs::write(root.join(PROJECT), v2).unwrap();
+    let (seen, since) = Places::of(&ed).look_since();
+    let read = seen.state;
+    crate::storewrite::hold(&store, Some(0));
+    let place = crate::trust::place_of(&root.join(PROJECT));
+    ed.trust_take(kind, place.clone());
+    let id = ed.session.chat.as_ref().unwrap().settings.id;
+    seen_now(&mut ed, id, seen, since);
+    let now = ed.session.chat.as_ref().and_then(|c| c.settings.seen.as_ref()).map(|s| s.state);
+    crate::storewrite::hold(&store, None);
+    crate::trust::untake_all(&place);
+    assert_eq!(read, State::Trusted, "read before the take-back");
+    assert_eq!(now, Some(State::Ask), "trusted as it was read");
+    drop(ed);
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// Until `done`, handling events as they come (5 s at most).
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
     let end = Instant::now() + Duration::from_secs(5);

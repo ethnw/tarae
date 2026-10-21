@@ -1115,12 +1115,14 @@ fn frames_of_the_repository_card() {
         let both = Box::new((s.ed.config.clone(), s.ed.keymaps.clone()));
         let items = vec![("task.release".to_string(), "./scripts/release.sh".to_string())];
         let project = crate::trust::Project {
+            place: crate::trust::place_of(&root.join(".tarae.toml")),
             file: root.join(".tarae.toml"),
             hash: [1; 32],
             items,
             state: crate::trust::State::Ask,
             with: both.clone(),
             without: both,
+            read_at: 0,
         };
         s.ed.project_trust_set(Some(project));
         s.frames_both(&format!("i_1_tarae{wide}"));

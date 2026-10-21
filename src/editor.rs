@@ -609,9 +609,22 @@ pub struct Editor {
     pub trust_path: Option<std::path::PathBuf>,
     /// Where what's always allowed is kept (`allow.rs`) — None in tests (they set a temp file).
     pub allow_path: Option<std::path::PathBuf>,
-    /// Kept answers taken back whose write to `allow_path` hasn't landed yet (as `:sandbox-disallow` takes them)
-    /// — a `Caps` made meanwhile leaves them out (`caps::Basis.taking`): the next run never has one.
-    pub allow_taking: Vec<String>,
+    /// Kept answers taken back whose write to `allow_path` hasn't landed yet — or failed: then until you quit, or
+    /// an `A` for that checkout writes it (`allow::add_for`) — each with the checkout it was taken back in, as
+    /// `:sandbox-disallow` names it, and an id: a write ends the ones it carried (`taking_end`). A `Caps` made
+    /// meanwhile leaves out its own checkout's (`caps::Basis.taking`).
+    pub allow_taking: Vec<(u64, PathBuf, String)>,
+    /// Writes to `allow_path` asked whose result hasn't come back (`allow::keep_queued`) — what's kept may be
+    /// on disk before its result is applied (tests wait for none).
+    pub allow_writing: usize,
+    /// Writes to `trust_path` queued whose result hasn't come back (`trust::queue`).
+    pub trust_writing: usize,
+    /// The take-backs a write that landed ended, its result not applied yet — recorded by the write itself, so
+    /// `:restart`'s state (made after the loop has ended) doesn't carry them (`restart::snapshot`).
+    pub allow_landed: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// The take-backs of trust this tarae gave, each its place and given (`trust::taking` is the process's) — what
+    /// `:restart` carries of it, those still marked (`trust::taking_now`).
+    pub trust_taking: Vec<(crate::trust::Place, u64)>,
     /// Where cargo's configs told about for their tokens are kept (`tokens::tell_cargo`) — None in tests.
     pub tokens_said: Option<std::path::PathBuf>,
     /// Those told about since tarae started (`~` paths).
@@ -736,8 +749,6 @@ pub struct Editor {
     pub restart: Option<crate::restart::Restart>,
     /// Projects whose pack-default preflight was shown on its card and run since tarae started (no card again).
     pub preflight_told: std::collections::HashSet<PathBuf>,
-    /// Undo history files being written (`undofile.rs`) — the process ending waits for them.
-    pub undo_writes: crate::undofile::Writes,
     /// Copies of the buffers with unsaved edits, and the ones a gone tarae left (`recovery.rs`). None in
     /// tests (a test gives one its own folder).
     pub recovery: Option<crate::recovery::Recovery>,
@@ -870,6 +881,10 @@ impl Editor {
             trust_path: if cfg!(test) { None } else { crate::trust::Store::path() },
             allow_path: if cfg!(test) { None } else { crate::allow::Store::path() },
             allow_taking: Vec::new(),
+            allow_writing: 0,
+            allow_landed: Default::default(),
+            trust_writing: 0,
+            trust_taking: Vec::new(),
             tokens_said: if cfg!(test) { None } else { crate::tokens::said_path() },
             tokens_told: Vec::new(),
             read_temp: !cfg!(test),
@@ -960,7 +975,6 @@ impl Editor {
             sandbox: if cfg!(test) { crate::sandbox::Availability::Bypass } else { Default::default() },
             restart: None,
             preflight_told: Default::default(),
-            undo_writes: Default::default(),
             recovery,
             idle_save_gen: 0,
             recent: Vec::new(),
@@ -3220,7 +3234,26 @@ impl Editor {
     }
 
     /// Replaces the config (already read and parsed by the watcher thread — no disk wait on the main thread).
-    pub fn reload_config(&mut self, config: Config, warnings: Vec<String>) {
+    pub fn reload_config(&mut self, mut config: Config, warnings: Vec<String>) {
+        // (read before a trust answer at its place given since, or while its write waits, about the same version:
+        // that answer holds — N13; before a take-back there, any version: not trusted — F11)
+        if let (Some(new), Some(t)) = (config.project.as_mut(), self.trust_path.as_deref()) {
+            let (answered, taken) = crate::storewrite::since(t, &crate::trust::key(&new.place), new.read_at);
+            let now = self.project_trust.as_ref();
+            let same =
+                now.filter(|now| new.file == now.file && new.hash == now.hash && new.state != now.state);
+            let state = match same {
+                Some(now) if answered => Some(now.state),
+                _ if taken && new.state == crate::trust::State::Trusted => Some(crate::trust::State::Ask),
+                _ => None,
+            };
+            if let Some(state) = state {
+                new.state = state;
+                let (editor, keymaps) =
+                    if new.state == crate::trust::State::Trusted { &*new.with } else { &*new.without };
+                (config.editor, config.keymaps) = (editor.clone(), keymaps.clone());
+            }
+        }
         self.keymaps = config.keymaps;
         self.config = config.editor;
         self.theme = config.theme;
@@ -3228,6 +3261,8 @@ impl Editor {
             let _ = crate::settings::apply(&mut self.config, path, v);
         }
         self.project_trust_set(config.project);
+        // (review at the end a chat had from what's no longer set goes with it)
+        crate::edits::at_end_follow_config(self);
         self.ensure_theme();
         self.pending.clear();
         self.count = None;
@@ -8392,6 +8427,67 @@ mod tests {
             Some(crate::sandbox::Guard::Outside)
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `A` on what the sandbox blocked, with no chat open and a take-back of it whose write failed: the run again
+    /// has the answer just given — not only once it's written.
+    #[test]
+    fn the_run_again_after_an_always_has_the_answer() {
+        let scratch = crate::scratch::Scratch::new("blocked-always");
+        let dir = scratch.to_path_buf();
+        std::fs::create_dir_all(dir.join("cache")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        let (cache, store) = (dir.join("cache"), dir.join("sandbox.json"));
+        let mut ed = editor("");
+        ed.session.root = this_repo();
+        ed.allow_path = Some(store.clone());
+        // Kept for the project, then taken back with the write failing: until you quit
+        let project = crate::sandbox::profile_path(&ed.session.root);
+        crate::allow::keep(&store, &project, |a| a.add_write(cache.clone())).unwrap();
+        ed.allow_path = Some(dir.join("file/sandbox.json"));
+        ed.sandbox_disallow(&cache.display().to_string()).unwrap();
+        settle_until(&mut ed, |ed| ed.messages.iter().any(|m| m.2.contains("taken back until you quit")));
+        ed.allow_path = Some(store.clone());
+        // A run of Claude's the sandbox refused a write in it
+        let watch = crate::sandbox::Watch::quiet("t.");
+        watch.record(crate::sandbox::Denial {
+            process: "echo".into(),
+            op: "file-write-create".into(),
+            target: cache.join("x.bin").display().to_string(),
+        });
+        let policy = crate::sandbox::Policy {
+            watch: Some(watch),
+            ..crate::sandbox::Policy::for_project(&crate::sandbox::Env::default())
+        };
+        let cmd = "echo tarae-always-marker";
+        let mut run = crate::task::Run::for_test(crate::task::Task {
+            name: cmd.into(),
+            cmd: cmd.into(),
+            cwd: dir.clone(),
+        });
+        run.guard = Some(crate::sandbox::Guard::In(Box::new(policy)));
+        run.by_claude = true;
+        ed.session.task_run = Some(run);
+        feed(&mut ed, " ms");
+        settle_for(&mut ed, |ed| ed.picker.is_some());
+        feed(&mut ed, "<ret>");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some(crate::blocked::GRANT_TITLE));
+        // (drawn, and in sight long enough for an answer)
+        crate::term::render(&mut ed, &mut Vec::new(), 160, 40).unwrap();
+        let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
+        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        let before = crate::tools::USER_ADMITTED.with(|a| a.borrow().len());
+        feed(&mut ed, "A");
+        let ride = crate::tools::USER_ADMITTED.with(|a| a.borrow().get(before).cloned());
+        let (ran, extra) = ride.expect("run again");
+        assert_eq!(ran, cmd);
+        // (the run's policy as `tools::guard_then_go` makes it, the store's write not landed)
+        let w = crate::tools::with_allowed(&ed.config.llm, &ed.caps_basis().granted(), extra.grant.as_ref());
+        assert!(
+            w.llm.sandbox_write.iter().any(|p| Path::new(p).ends_with("cache")),
+            "{:?}",
+            w.llm.sandbox_write
+        );
     }
 
     /// Asking about a line starts a note with you; Claude's plain answer (no tool) lands in the thread.

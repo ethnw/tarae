@@ -123,6 +123,13 @@ impl Allowed {
         }
     }
 
+    /// Whether `g` is in it already (a place in one there, too).
+    pub fn covers(&self, g: &Grant) -> bool {
+        let mut with = self.clone();
+        with.add(g);
+        with.grants() == self.grants()
+    }
+
     /// `g` answered now — unless a time is there already (read from where it was kept).
     fn stamp(&mut self, g: Grant) {
         self.granted.entry(g).or_insert_with(now_s);
@@ -435,13 +442,27 @@ const STORE_VERSION: u64 = 3;
 /// The "always" answers — `$state/sandbox.json`. A repository's (piece J) are kept for every checkout of it when
 /// they name no place in one (`Where::shared`: a place outside them, a port, a host, a variable, the terminals),
 /// else for the checkout they were answered in (a key file there, a place in or holding a checkout) — a place in
-/// another checkout never reaches this one's runs.
+/// another checkout never reaches this one's runs. And each name's counter, as `:granted` lists it
+/// (`storewrite::Rev`, bumped by every write of it, with when — seconds): an answer after a change another tarae
+/// made unseen at a name that takes it back isn't kept (`keep_ordered`); kept `TAKEN_KEPT`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Store {
     /// Projects outside a repository, by real path.
     projects: BTreeMap<PathBuf, Allowed>,
     /// Repositories, by their git common folder (real path).
     repositories: BTreeMap<PathBuf, Repository>,
+    /// Each name's counter and when it last changed, by where it's kept (`Where::revs`: a repository's git common
+    /// folder — every checkout's changes there, shared or its own, bump the same names — else the project).
+    revs: BTreeMap<PathBuf, BTreeMap<String, (crate::storewrite::Rev, u64)>>,
+}
+
+/// How long a name's counter is kept after its last change: an answer that had seen it may land that late at most
+/// (pruned, it asks again — `storewrite::holds`).
+const TAKEN_KEPT: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
+/// A name kept at `at` (`Where::revs`) in `storewrite`'s memory.
+fn rev_key(at: &Path, name: &str) -> String {
+    format!("{}\0{name}", at.display())
 }
 
 /// A repository's kept answers.
@@ -545,6 +566,11 @@ impl Where {
             _ => None,
         })
     }
+
+    /// Where its names' counters are kept (`Store.revs`): the repository's, else the project's.
+    fn revs(&self) -> &Path {
+        self.repository.as_deref().unwrap_or(&self.checkout)
+    }
 }
 
 /// What's kept for a project: all of it, and which of it every checkout of its repository uses.
@@ -559,15 +585,41 @@ impl Store {
         crate::config::state_dir().map(|d| d.join("sandbox.json"))
     }
 
-    /// Read from `path` (missing, unreadable or of another version = nothing allowed).
+    /// Read from `path` (missing, unreadable or of another version = nothing allowed) — what it took back is what
+    /// this tarae has seen (`storewrite::saw`).
     pub fn read(path: Option<&Path>) -> Store {
-        let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Store::default() };
-        let Ok(json) = serde_json::from_str::<Json>(&text) else { return Store::default() };
-        if json["version"].as_u64() != Some(STORE_VERSION) {
-            return Store::default();
+        let Some(path) = path else { return Store::default() };
+        let store = Store::read_strict(path).unwrap_or_default();
+        store.seen(path);
+        store
+    }
+
+    /// Each name's counter, told to `storewrite` as seen at `path`.
+    fn seen(&self, path: &Path) {
+        let revs = self.revs.iter().flat_map(|(p, t)| t.iter().map(move |(w, (r, _))| (rev_key(p, w), *r)));
+        crate::storewrite::saw(path, revs);
+    }
+
+    /// `read`, but a file that's there and can't be read or parsed is an error — a write never takes it for
+    /// nothing allowed and writes that over it. One of an older version reads as nothing (written in this form at
+    /// the next answer); a newer build's is an error too — never written over by this one.
+    fn read_strict(path: &Path) -> Result<Store, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let json = serde_json::from_str::<Json>(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        match json["version"].as_u64() {
+            Some(v) if v > STORE_VERSION => {
+                return Err(format!("{}: written by a newer tarae (version {v})", path.display()));
+            }
+            Some(STORE_VERSION) => {}
+            _ => return Ok(Store::default()),
         }
-        let at = path
-            .and_then(|p| std::fs::metadata(p).ok()?.modified().ok())
+        let at = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
         let by_path = |v: &Json| -> BTreeMap<PathBuf, Allowed> {
@@ -581,7 +633,24 @@ impl Store {
                 (PathBuf::from(r), Repository { shared, checkouts: by_path(&v["checkouts"]) })
             })
             .collect();
-        Store { projects: by_path(&json["projects"]), repositories }
+        let revs = json["revs"].as_object().into_iter().flatten();
+        let revs = revs
+            .map(|(p, t)| {
+                let t = t.as_object().into_iter().flatten();
+                let rev = |v: &Json| Some((crate::storewrite::Rev::of(v)?, v[2].as_u64()?));
+                (PathBuf::from(p), t.filter_map(|(w, v)| Some((w.clone(), rev(v)?))).collect())
+            })
+            .collect();
+        Ok(Store { projects: by_path(&json["projects"]), repositories, revs })
+    }
+
+    /// Names' counters last changed longer than `TAKEN_KEPT` ago dropped.
+    fn prune(&mut self) {
+        let floor = now_s().saturating_sub(TAKEN_KEPT.as_secs());
+        for t in self.revs.values_mut() {
+            t.retain(|_, (_, at)| *at >= floor);
+        }
+        self.revs.retain(|_, t| !t.is_empty());
     }
 
     /// Every folder a write is kept for, any project's or repository's (a store's check: `Here.others_write`).
@@ -708,30 +777,40 @@ impl Store {
             let v = json!({ "shared": r.shared.entries("always"), "checkouts": checkouts });
             repositories.insert(c.to_string_lossy().into_owned(), v);
         }
-        let v = json!({ "version": STORE_VERSION, "projects": by_path(&self.projects), "repositories": repositories });
+        let mut revs = serde_json::Map::new();
+        for (p, t) in &self.revs {
+            let t: serde_json::Map<String, Json> =
+                t.iter().map(|(w, (r, at))| (w.clone(), json!([r.n, r.tag, at]))).collect();
+            revs.insert(p.to_string_lossy().into_owned(), Json::Object(t));
+        }
+        let projects = by_path(&self.projects);
+        let v = json!({ "version": STORE_VERSION, "projects": projects, "repositories": repositories, "revs": revs });
         serde_json::to_string_pretty(&v).unwrap_or_default()
     }
 }
 
-/// Changes what `project` always allows (on a worker — read, change, write; one at a time): what it adds kept for
-/// the checkout or every checkout of the repository (`Where::shared`).
+/// Changes what `project` always allows as it is (on a worker) — what it adds kept for the checkout or every
+/// checkout of the repository (`Where::shared`); a store set up as an earlier answer left it, what a default covers
+/// dropped. Answers and take-backs go through `keep_ordered`.
 pub fn keep(path: &Path, project: &Path, change: impl FnOnce(&mut Allowed)) -> Result<(), String> {
-    keep_where(path, &Where::of(project), |s, here| s.change(here, change))
+    let here = Where::of(project);
+    change_store(path, true, |s| s.change(&here, change))
 }
 
 /// A removed checkout's own answers forgotten (on a worker).
 pub fn forget_checkout(path: &Path, here: &Where) -> Result<(), String> {
-    keep_where(path, here, Store::forget_checkout)
+    change_store(path, true, |s| s.forget_checkout(here))
 }
 
-/// Read, change, write — one at a time, under the lock beside the file (this tarae's workers and another
-/// tarae's alike: two answered at once each read what the other hadn't written yet, and the later write lost the
-/// other's; a test holds it to see what goes on before a write lands). Keeps of other files don't wait.
-fn keep_where(path: &Path, here: &Where, change: impl FnOnce(&mut Store, &Where)) -> Result<(), String> {
+/// The store changed by `f` (on a worker — read, change, write) under the lock beside it: this tarae's workers
+/// and another tarae's alike each read what the other wrote (two answered at once each read what the other hadn't
+/// written yet, and the later write lost the other's). One it can't read isn't written over
+/// (`Store::read_strict`). `ours`: this tarae's — what it reads there is seen (a test's other tarae's isn't).
+fn change_store(path: &Path, ours: bool, f: impl FnOnce(&mut Store)) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    // (beside it, as `trust::change`'s: the file itself is replaced by each write, a new inode)
+    // (beside it, as `trust::change`'s: the file itself is replaced by each write, a new inode, so it can't hold one)
     let lock = {
         use std::os::unix::fs::OpenOptionsExt as _;
         let mut o = std::fs::OpenOptions::new();
@@ -739,11 +818,130 @@ fn keep_where(path: &Path, here: &Where, change: impl FnOnce(&mut Store, &Where)
         o.open(path.with_extension("lock")).map_err(|e| e.to_string())?
     };
     lock.lock().map_err(|e| e.to_string())?;
-    let mut store = Store::read(Some(path));
-    change(&mut store, here);
+    let mut store = Store::read_strict(path)?;
+    if ours {
+        store.seen(path);
+    }
+    f(&mut store);
+    store.prune();
     let body = store.to_json();
     crate::disk::write_atomic(path, |w| std::io::Write::write_all(w, body.as_bytes()))
         .map_err(|e| e.to_string())
+}
+
+/// Tests: another tarae's write for `project` at `path` — a change of its own at each name (nothing of it this
+/// tarae's), an answer that has seen what's there.
+#[cfg(test)]
+pub fn write_as_other(path: &Path, project: &Path, remove: &[String], add: &[Grant]) -> Result<(), String> {
+    let here = Where::of(project);
+    change_store(path, false, |s| {
+        let revs = s.revs.entry(here.revs().to_path_buf()).or_default();
+        let names = remove.iter().cloned().chain(add.iter().map(crate::granted::taken_as));
+        for w in names {
+            let e = revs.entry(w).or_default();
+            *e = (crate::storewrite::Rev { n: e.0.n + 1, tag: crate::storewrite::tag() }, now_s());
+        }
+        s.change(&here, |a| {
+            remove.iter().for_each(|w| a.remove(w));
+            add.iter().for_each(|g| a.add(g));
+        });
+    })
+}
+
+/// An answer or take-back for a project's kept answers, as the store's writer takes it (`keep_queued`): `remove`
+/// taken back (as `:granted` lists them), then `add` — given at `given`, knowing the take-backs it had seen then
+/// (`seen`).
+#[derive(Clone, Debug, Default)]
+pub struct Change {
+    pub remove: Vec<String>,
+    pub add: Vec<Grant>,
+    pub given: u64,
+    pub seen: BTreeMap<String, crate::storewrite::Rev>,
+}
+
+/// `c` written for `project` (on a worker, its turn taken — `fails`: a test's failing write), each name it
+/// changes bumped where its counters are (`Where::revs`): a take-back is always written; an answer is a
+/// compare-and-set — one after a change another tarae made unseen at a name that takes it back isn't kept
+/// (returned — its card asks again), and one that a take-back of this tarae's given after it names (`later`) isn't
+/// added at all: that take-back follows. What's kept goes where it belongs (`Store::change`, piece J).
+pub fn keep_ordered(
+    path: &Path,
+    project: &Path,
+    c: &Change,
+    later: &[String],
+    fails: bool,
+) -> Result<Vec<Grant>, String> {
+    if fails {
+        return Err("the store's write failed (a test's)".into());
+    }
+    type Revs = BTreeMap<String, (crate::storewrite::Rev, u64)>;
+    let here = Where::of(project);
+    let scope = here.revs().to_path_buf();
+    let at = now_s();
+    let (mut made, mut skipped) = (Vec::<(String, crate::storewrite::Rev)>::new(), Vec::new());
+    let bump = |revs: &mut Revs, made: &mut Vec<(String, crate::storewrite::Rev)>, w: &str| {
+        let (k, e) = (rev_key(&scope, w), revs.entry(w.to_string()).or_default());
+        *e = (crate::storewrite::next(path, &k, e.0), at);
+        made.push((k, e.0));
+    };
+    change_store(path, true, |s| {
+        let mut revs = s.revs.remove(&scope).unwrap_or_default();
+        // (what applies here as each part is decided: an answer another tarae kept the same holds)
+        let mut now = s.kept(&here).all;
+        let mut added = Vec::new();
+        for w in &c.remove {
+            now.remove(w);
+            bump(&mut revs, &mut made, w);
+        }
+        for g in &c.add {
+            if later.iter().any(|w| takes_back(w, g)) {
+                continue;
+            }
+            let holds = revs.iter().filter(|(w, _)| takes_back(w, g)).all(|(w, (rev, _))| {
+                let k = rev_key(&scope, w);
+                let ours: Vec<_> = made.iter().filter(|(m, _)| *m == k).map(|(_, r)| *r).collect();
+                crate::storewrite::holds(path, &k, c.seen.get(&k).copied().unwrap_or_default(), *rev, &ours)
+            });
+            // (another tarae's change since: not kept — unless what's there covers it already, the same answer)
+            if !holds {
+                if !now.covers(g) {
+                    skipped.push(g.clone());
+                }
+                continue;
+            }
+            now.add(g);
+            added.push(g.clone());
+            bump(&mut revs, &mut made, &crate::granted::taken_as(g));
+        }
+        s.revs.insert(scope.clone(), revs);
+        s.change(&here, |a| {
+            c.remove.iter().for_each(|w| a.remove(w));
+            added.iter().for_each(|g| a.add(g));
+        });
+    })?;
+    for (k, r) in made {
+        crate::storewrite::wrote(path, &k, r);
+    }
+    Ok(skipped)
+}
+
+/// The take-backs of kept answers under way, (checkout, what, its given) — every editor's: an answer given before
+/// one isn't added (`keep_ordered`'s `later`).
+static TAKING: std::sync::Mutex<Vec<(PathBuf, String, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// `what` taken back in checkout `root`, given at `id`, until `taking_over`.
+pub(crate) fn taking_started(root: &Path, what: &str, id: u64) {
+    TAKING.lock().unwrap_or_else(|e| e.into_inner()).push((root.to_path_buf(), what.to_string(), id));
+}
+
+pub(crate) fn taking_over(ids: &[u64]) {
+    TAKING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, _, n)| !ids.contains(n));
+}
+
+/// What's being taken back in checkout `root` by take-backs given after `given`.
+fn taking_after(root: &Path, given: u64) -> Vec<String> {
+    let t = TAKING.lock().unwrap_or_else(|e| e.into_inner());
+    t.iter().filter(|(r, _, n)| r == root && *n > given).map(|(_, w, _)| w.clone()).collect()
 }
 
 /// Places under home that hold keys and tokens — allowed once at a time, never kept; Claude's commands never
@@ -1121,37 +1319,90 @@ pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute())
 }
 
-/// Keeps `change` for the project (the session's root, resolved on the worker as a run's policy resolves it —
-/// the real path the next runs read the kept answers by: `tools::guard_then_go`), on a worker (an error says so).
-pub fn keep_later(ed: &mut crate::editor::Editor, change: impl FnOnce(&mut Allowed) + Send + 'static) {
-    keep_later_then(ed, change, |_| {});
-}
-
-/// `keep_later`, and `then` once it's written or failed — at once when nothing is kept (tests).
-fn keep_later_then(
+/// Keeps `c` for checkout `root`'s project (resolved on the worker as a run's policy resolves it — the real path
+/// the next runs read the kept answers by: `tools::guard_then_go`), queued at the store's writer in the order
+/// given (`storewrite`), and `then` with how the write went (the answers not kept) once it's written or failed —
+/// at once when nothing is kept (tests). `ends`: the take-backs it carries, recorded as over once it's written
+/// (`Editor.allow_landed`) before `then` ends them. A take-back not written by `:restart`'s exec is given again.
+fn keep_queued(
     ed: &mut crate::editor::Editor,
-    change: impl FnOnce(&mut Allowed) + Send + 'static,
-    then: impl FnOnce(&mut crate::editor::Editor) + Send + 'static,
+    root: PathBuf,
+    ends: Vec<u64>,
+    c: Change,
+    then: impl FnOnce(&mut crate::editor::Editor, Result<Vec<Grant>, String>) + Send + 'static,
 ) {
-    let Some(path) = ed.allow_path.clone() else { return then(ed) };
-    let project = ed.session.root.clone();
-    ed.events.jobs().spawn(move || {
-        let r = keep(&path, &project, change);
+    let Some(path) = ed.allow_path.clone() else { return then(ed, Ok(Vec::new())) };
+    let landed = ed.allow_landed.clone();
+    ed.allow_writing += 1;
+    let said = match c.add.is_empty() {
+        true => format!("taken back from what {} keeps: {}", root.display(), c.remove.join(", ")),
+        false => format!(
+            "kept for {}: {}",
+            root.display(),
+            c.add.iter().map(Grant::shown).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let added: Vec<String> = c.add.iter().map(Grant::shown).collect();
+    let carry = json!({ "root": root, "remove": c.remove, "add": added, "given": c.given, "ends": ends });
+    // (its names: a failed take-back is moot once a later write of them lands — each written, kept or taken back,
+    // from any checkout: named where their counters are, a repository's for all its checkouts (`Where::revs`) —
+    // worked out on the worker, before its turn)
+    let names: Vec<String> =
+        c.remove.iter().cloned().chain(c.add.iter().map(crate::granted::taken_as)).collect();
+    let again = c.add.is_empty();
+    let ticket = crate::storewrite::ticket(&path, said, carry.clone(), again, Vec::new());
+    // (a quit or `:restart`'s exec waits for it: an answer given just before isn't lost)
+    ed.events.jobs().spawn_kept(move || {
+        let scope = Where::of(&root).revs().to_path_buf();
+        let keys: Vec<String> = names.iter().map(|w| rev_key(&scope, w)).collect();
+        crate::storewrite::placed(&ticket, carry, keys.clone());
+        let r = crate::storewrite::turn(ticket).map(|turn| {
+            let later = taking_after(&root, c.given);
+            let r = keep_ordered(&path, &root, &c, &later, turn.fails);
+            if r.is_ok() {
+                landed.lock().unwrap_or_else(|e| e.into_inner()).extend(ends);
+            }
+            turn.done(r.is_ok(), keys);
+            r
+        });
         move |ed: &mut crate::editor::Editor| {
-            then(ed);
-            match r {
-                Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
-                // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
-                Ok(_) => {
-                    crate::reads::kept_keys_load(ed);
-                    // (every session's: one on another checkout of the repository may use what changed — piece J)
-                    let ids: Vec<_> =
-                        std::iter::once(&ed.session).chain(&ed.sessions).map(|s| s.id).collect();
-                    ids.into_iter().for_each(|id| ed.caps_sync_of(id));
-                }
+            // (none: cut off — a test's process that ended)
+            let Some(r) = r else { return };
+            ed.allow_writing -= 1;
+            let kept = r.is_ok();
+            then(ed, r);
+            // (the chat's copy of the keys kept open — the message's context reads it, `reads::key_shut`)
+            if kept {
+                crate::reads::kept_keys_load(ed);
+                // (every session's: one on another checkout of the repository may use what changed — piece J)
+                let ids: Vec<_> = std::iter::once(&ed.session).chain(&ed.sessions).map(|s| s.id).collect();
+                ids.into_iter().for_each(|id| ed.caps_sync_of(id));
             }
         }
     });
+}
+
+/// `:restart`'s take-backs not written queued again (their marks back already: `restore`'s `taking`).
+pub fn keep_again(ed: &mut crate::editor::Editor, carried: &[Json]) {
+    for v in carried {
+        let (Some(root), Some(given)) = (v["root"].as_str(), v["given"].as_u64()) else { continue };
+        let remove: Vec<String> = v["remove"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+            .map(str::to_string)
+            .collect();
+        let ends: Vec<u64> = v["ends"].as_array().into_iter().flatten().filter_map(Json::as_u64).collect();
+        let c = Change { remove, given, ..Change::default() };
+        let ended = ends.clone();
+        keep_queued(ed, PathBuf::from(root), ends, c, move |ed, r| match r {
+            Ok(_) => ed.taking_end(&ended),
+            Err(e) => ed.set_error(format!(
+                "couldn't take it out of what the project keeps: {e} — taken back until you quit"
+            )),
+        });
+    }
 }
 
 /// `grants` for `scope` past once: this conversation's (`Chat.allowed`), this session's (`Session.allowed`,
@@ -1171,10 +1422,42 @@ fn add_for(ed: &mut crate::editor::Editor, grants: &[Grant], scope: Scope) {
         }
     }
     if scope == Scope::Always {
-        let grants = grants.to_vec();
-        keep_later(ed, move |a| grants.iter().for_each(|g| a.add(g)));
+        keep_answer(ed, grants.to_vec());
     }
     ed.caps_sync();
+}
+
+/// An `A`: `grants` kept for the project on a worker — this checkout's take-backs not written yet go in first, the
+/// answer after them; once on disk they're over (a failed one no longer hides what's answered again), but a
+/// take-back of the same name made while this write is under way is its own.
+pub(crate) fn keep_answer(ed: &mut crate::editor::Editor, grants: Vec<Grant>) {
+    let root = ed.session.root.clone();
+    let (ids, remove): (Vec<u64>, Vec<String>) = ed.taking_ids(&root).into_iter().unzip();
+    let seen = ed.allow_path.as_deref().map(crate::storewrite::seen_now).unwrap_or_default();
+    let c = Change { remove, add: grants, given: crate::storewrite::given(), seen };
+    let ended = ids.clone();
+    keep_queued(ed, root, ids, c, move |ed, r| match r {
+        Ok(skipped) => {
+            ed.taking_end(&ended);
+            if !skipped.is_empty() {
+                let shown: Vec<String> = skipped.iter().map(Grant::shown).collect();
+                ed.set_warning(format!(
+                    "Not kept for the project: {} — changed in another tarae before your answer; it lasts this \
+                     conversation, and its card asks again after",
+                    shown.join(", ")
+                ));
+            }
+        }
+        Err(e) => ed.set_error(format!("couldn't keep it: {e}")),
+    });
+}
+
+/// Whether taking back `what` (as `:sandbox-disallow` takes it) takes `g` back.
+pub(crate) fn takes_back(what: &str, g: &Grant) -> bool {
+    let mut one = Allowed::default();
+    one.add(g);
+    one.remove(what);
+    one.is_empty()
 }
 
 /// How long `scope` lasts for `grants`, as Claude hears it and as the toast ends — always in a repository's
@@ -1273,12 +1556,7 @@ impl crate::editor::Editor {
         }
         // (what goes, as Claude was told it: every answer `what` names, whichever scope — the session's `Caps` has
         // the kept ones too)
-        let named = |g: &Grant| {
-            let mut one = Allowed::default();
-            one.add(g);
-            one.remove(&what);
-            one.is_empty()
-        };
+        let named = |g: &Grant| takes_back(&what, g);
         let gone_in = |s: &crate::session::Session| -> Vec<String> {
             let mut gone: Vec<String> = s.caps().map_or_else(Vec::new, |c| {
                 c.grants().iter().filter(|g| named(g)).map(Grant::shown).collect()
@@ -1289,16 +1567,31 @@ impl crate::editor::Editor {
         let (gone, self_id) = (gone_in(&self.session), self.session.id);
         // Every session's: a kept answer may be every checkout's (piece J), and the conversation that answered it
         // in another session holds a copy meanwhile (review J 8) — each taken out, each Claude told
-        let mut changed = false;
+        let mut takes = Vec::new();
         let sessions = std::iter::once(&mut self.session).chain(self.sessions.iter_mut());
         for s in sessions {
             let theirs = gone_in(s);
             let had = (s.allowed.clone(), s.chat.as_ref().map(|c| c.allowed.clone()));
             if let Some(c) = s.chat.as_mut() {
                 c.allowed.remove(&what);
+                // (the chat's copy of the keys kept open, at once — the message's context reads it: `reads::key_shut`)
+                if let Some(k) = c.kept_keys.as_mut() {
+                    k.retain(|p| !takes_back(&what, &Grant::Key(p.clone())));
+                }
             }
             s.allowed.remove(&what);
-            changed |= s.allowed != had.0;
+            if s.allowed != had.0 {
+                takes.push((s.root.clone(), what.clone()));
+            }
+            // (a grant riding with a run that waits its turn goes too: the run starts with what's allowed then —
+            // F15; every session's, as the take-back is)
+            for n in s.runs_next.iter_mut() {
+                if let crate::queued::What::Guarded { ride, .. } = &mut n.what
+                    && ride.extra.grant.as_ref().is_some_and(|g| takes_back(&what, g))
+                {
+                    ride.extra.grant = None;
+                }
+            }
             let chat_had = had.1 != s.chat.as_ref().map(|c| c.allowed.clone());
             if s.id != self_id && (!theirs.is_empty() || chat_had || s.allowed != had.0) {
                 let said = if theirs.is_empty() { what.clone() } else { theirs.join("; ") };
@@ -1308,17 +1601,38 @@ impl crate::editor::Editor {
                 ));
             }
         }
-        if changed {
-            self.sessions_keep();
+        if !takes.is_empty() {
+            self.sessions_taken_back(takes);
         }
         if let Some((h, p)) = host {
             self.session.hosts.retain(|(sh, sp)| (sh, *sp) != (&h, p));
             crate::hosts::taken(&self.session, &h, p);
         }
-        // (a run's `Caps` made before the write lands leaves it out too: `caps::Basis.taking`)
-        self.allow_taking.push(what.clone());
-        let (taken, landed) = (what.clone(), what.clone());
-        keep_later_then(self, move |a| a.remove(&taken), move |ed| ed.allow_taking.retain(|w| *w != landed));
+        // (what comes back with the kept sessions stays taken back — `worktree::SessionStore.taken`)
+        if !self.session_store.restored {
+            self.session_store.taken.push((self.session.id, what.clone()));
+        }
+        // (a run's `Caps` made before the write lands leaves it out too: `caps::Basis.taking` — and after it
+        // failed, until you quit: the store still keeps it, and the next `Caps` would have it again)
+        let root = self.session.root.clone();
+        // (its id is its given: what's taken back orders by it, and its own write ends it)
+        let id = crate::storewrite::given();
+        self.taking(root.clone(), what.clone(), id);
+        let named = what.clone();
+        let c = Change { remove: vec![what.clone()], given: id, ..Change::default() };
+        keep_queued(self, root.clone(), vec![id], c, move |ed, r| match r {
+            // (this one, and one of the name before it that failed: written now — never one made since)
+            Ok(_) => {
+                let over: Vec<u64> = (ed.allow_taking.iter())
+                    .filter(|(n, r, w)| *n <= id && *r == root && *w == named)
+                    .map(|(n, _, _)| *n)
+                    .collect();
+                ed.taking_end(&over);
+            }
+            Err(e) => ed.set_error(format!(
+                "couldn't take {named} out of what the project keeps: {e} — taken back until you quit"
+            )),
+        });
         self.caps_sync();
         let said = if gone.is_empty() { what.clone() } else { gone.join("; ") };
         self.session.checkpoints.tell.push(format!(
@@ -1419,6 +1733,25 @@ pub(crate) mod tests {
         assert_eq!(refused, Some(true), "another open of sandbox.lock got it while keeping");
         assert!(other().try_lock().is_ok(), "the lock is let go after");
         assert_eq!(Store::read(Some(&path)).get(Path::new("/p/one")).read, [PathBuf::from("/t/a")]);
+    }
+
+    /// Two taraes writing `sandbox.json` at once each keep the other's answers: every write reads, changes and
+    /// writes under the lock beside it.
+    #[test]
+    fn writers_at_once_keep_each_others_answers() {
+        let dir = crate::scratch::Scratch::new("allow-at-once");
+        let path = dir.join("state/sandbox.json");
+        let writers: Vec<_> = (0..16u16)
+            .map(|i| {
+                let path = path.clone();
+                crate::event::thread("tarae-keeptest", move || {
+                    keep(&path, Path::new("/p"), |a| a.add(&Grant::Port(1000 + i))).unwrap()
+                })
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        let ports = Store::read(Some(&path)).get(Path::new("/p")).ports;
+        assert_eq!(ports.len(), 16, "lost one another's: {ports:?}");
     }
 
     /// A project's hosts (the card's `A`) are kept in `sandbox.json` as `host:port`, read back into the next run's
@@ -1580,6 +1913,54 @@ pub(crate) mod tests {
         for said in ["", "nope-z", "..", "../../cargo", "/tmp/tc (path)", "stable-x/../bare-y"] {
             assert_eq!(named_in(said, &tcs), None, "{said}");
         }
+    }
+
+    /// A take-back of an answer every checkout uses whose write failed in one checkout is written over by the same
+    /// take-back landing from another: one entry in `sandbox.json`, so it's no longer among the writes a quit names
+    /// or `:restart` carries.
+    #[test]
+    fn a_shared_take_back_failed_in_one_checkout_is_written_over_from_another() {
+        let dir = crate::scratch::Scratch::new("allow-take-across");
+        let (main, wt) = repo_with_worktree(&dir);
+        let store = dir.join("state/sandbox.json");
+        keep(&store, &main, |a| a.add_port(8080)).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
+        let settle = |ed: &mut crate::editor::Editor| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while ed.allow_writing > 0 {
+                assert!(std::time::Instant::now() < end, "the write never came back");
+                if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+                    ed.handle_event(ev);
+                }
+            }
+        };
+        crate::storewrite::fail_next(&store);
+        ed.sandbox_disallow("port 8080").unwrap();
+        settle(&mut ed);
+        let failed = crate::storewrite::pending(&store).len();
+        let id = ed.session_add(wt.clone());
+        assert!(ed.session_switch(id));
+        ed.sandbox_disallow("port 8080").unwrap();
+        settle(&mut ed);
+        let left = crate::storewrite::pending(&store).len();
+        assert!(Store::read(Some(&store)).get(&main).ports.is_empty(), "not taken back");
+        assert_eq!((failed, left), (1, 0), "the failed one kept past the same take-back landing");
+    }
+
+    /// A `sandbox.json` a newer tarae wrote (a later version) is never written over by this one: a keep fails and
+    /// says so, the file as it was.
+    #[test]
+    fn a_newer_builds_sandbox_json_is_never_written_over() {
+        let dir = crate::scratch::Scratch::new("allow-newer");
+        let path = dir.join("sandbox.json");
+        let newer =
+            json!({ "version": STORE_VERSION + 1, "projects": { "/p": [] }, "more": true }).to_string();
+        std::fs::write(&path, &newer).unwrap();
+        let r = keep(&path, Path::new("/p"), |a| a.add_port(8080));
+        assert!(r.as_ref().is_err_and(|e| e.contains("newer tarae")), "{r:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer, "written over");
+        assert!(Store::read(Some(&path)).get(Path::new("/p")).is_empty());
     }
 
     /// A real repository in `base`: `main` with a commit, and `wt` added as a linked checkout of it (git's

@@ -113,7 +113,7 @@ fn label(g: &Grant) -> String {
 }
 
 /// What `:sandbox-disallow` takes to take `g` back.
-fn taken_as(g: &Grant) -> String {
+pub(crate) fn taken_as(g: &Grant) -> String {
     match g {
         Grant::Read(p) | Grant::Write(p) | Grant::Key(p) => p.display().to_string(),
         Grant::Port(n) => format!("port {n}"),
@@ -397,21 +397,42 @@ impl Editor {
         Ok(())
     }
 
-    /// A trust answer taken back: forgotten in the store (on a worker), then what it let run follows — tarae's
-    /// project settings held back, each chat whose claude runs with Claude's settings started again without them,
-    /// tarae's git with the repository's own commands held (its store's answers and kept resolves dropped there,
-    /// after the write: a resolve between reads the store as it is then); a hook's next action asks (it reads the
-    /// store each time). Each card asks again at the next look — `:project-trust`, `:claude-settings`,
-    /// `:git-trust` ask now.
-    fn trust_take(&mut self, kind: Kind, place: Place) {
+    /// A trust answer taken back: held back first, then forgotten in the store. From the `d` on the store reads as
+    /// not trusting it (`trust::taking` — a reload, a resolve, a hook's next action), and what it let run follows
+    /// before the write (on a worker: which places are it) — tarae's project settings held back, each chat whose
+    /// claude runs with Claude's settings started again without them, tarae's git with the repository's own
+    /// commands held (its answers and kept resolves dropped). A write that fails leaves it held back until you
+    /// quit. Each card asks again at the next look — `:project-trust`, `:claude-settings`, `:git-trust` ask now.
+    pub(crate) fn trust_take(&mut self, kind: Kind, place: Place) {
+        let given = self.trust_taking_given(place.clone());
+        // (a git resolve from now on reads it held, and one kept or under way isn't used: N8)
+        if kind == Kind::Git {
+            crate::gitrepo::trust_changed();
+        }
         let store = self.trust_path.clone();
         let project = self.project_trust.as_ref().map(|p| p.file.clone());
         let chats: Vec<(crate::event::SessionId, PathBuf)> = std::iter::once(&self.session)
             .chain(&self.sessions)
             .filter_map(|s| Some((s.id, s.chat.as_ref()?.settings.seen.as_ref()?.file.clone())))
             .collect();
+        // The store's write queued now, not from the result below: a quit right after the `d` waits for it (the
+        // loop that would apply a result has ended), `:restart` gives it again. The mark holds the store's answer
+        // back until its own write lands.
+        match store {
+            Some(s) => {
+                let w = crate::trust::Write::Forget { kind, place: place.clone(), given };
+                crate::trust::queue(self, s, vec![w], |ed, r| {
+                    if let Err(e) = r {
+                        ed.set_error(format!(
+                            "couldn't take it out of the trust answers kept: {e} — held back until you quit"
+                        ));
+                    }
+                });
+            }
+            None => crate::trust::taken(&place, given),
+        }
+        // What it let run held back, without waiting for the store (which places are it: on a worker)
         self.events.jobs().spawn(move || {
-            let r = store.as_deref().map_or(Ok(()), |s| crate::trust::forget(s, &place));
             if kind == Kind::Git {
                 crate::gitrepo::forget_trust(&place);
             }
@@ -419,9 +440,6 @@ impl Editor {
             let project = kind == Kind::Tarae && project.is_some_and(|f| here(&f));
             let chats: Vec<_> = chats.into_iter().filter(|(_, f)| kind == Kind::Claude && here(f)).collect();
             move |ed: &mut Editor| {
-                if let Err(e) = r {
-                    return ed.set_error(format!("couldn't take it back: {e}"));
-                }
                 ed.trust_taken(kind, project, chats.into_iter().map(|(id, _)| id).collect());
                 ed.granted_list(true);
             }
@@ -530,17 +548,14 @@ mod tests {
         };
         pick(&mut ed, shown(&kept));
         {
-            // (the lock beside the store: the keep waits on it)
-            let mut held = std::fs::OpenOptions::new();
-            let held =
-                held.create(true).truncate(false).write(true).open(store.with_extension("lock")).unwrap();
-            held.lock().unwrap();
+            // (the store's writes held a moment)
+            crate::storewrite::hold(&store, Some(0));
             key(&mut ed, 'd');
-            assert!(
-                crate::allow::Store::read(Some(&store)).get(&project).write.contains(&kept),
-                "not written yet"
-            );
-            assert_eq!(next_run(&ed).llm.sandbox_write, [shown(&chat)], "taken back before the write lands");
+            let written = !crate::allow::Store::read(Some(&store)).get(&project).write.contains(&kept);
+            let next = next_run(&ed).llm.sandbox_write;
+            crate::storewrite::hold(&store, None);
+            assert!(!written, "not written yet");
+            assert_eq!(next, [shown(&chat)], "taken back before the write lands");
         }
         until(&mut ed, "the write", |ed| ed.allow_taking.is_empty());
         assert!(crate::allow::Store::read(Some(&store)).get(&project).is_empty(), "and kept so");
@@ -611,10 +626,11 @@ mod tests {
         ed.picker = None;
         ed.sandbox_disallow("env DATABASE_URL").unwrap();
         ed.sandbox_disallow("localhost").unwrap();
+        let project = crate::sandbox::profile_path(&ed.session.root);
         until(&mut ed, "taken back", |ed| {
-            let kept = std::fs::read_to_string(&store).unwrap_or_default();
-            !kept.contains("DATABASE_URL")
-                && !kept.contains("localhost")
+            let kept = crate::allow::Store::read(Some(&store)).get(&project);
+            !kept.env.iter().any(|e| e == "DATABASE_URL")
+                && !kept.localhost
                 && ed.session.caps().is_some_and(|c| c.localhost.is_empty())
         });
         let w = next_run(&ed);
@@ -716,8 +732,10 @@ mod tests {
         assert_eq!(ed.session.no_sandbox, None, "the card asks before the next run");
         until(&mut ed, "the list again", |ed| !rows(ed).iter().any(|r| r.0 == no_sandbox));
         take(&mut ed, &|t| matches!(t, Taken::Trust(Kind::Hook, _)));
+        // (the store written, not only the mark `Store::state` reads meanwhile)
         until(&mut ed, "the hook taken back", |_| {
-            crate::trust::Store::read(Some(&trust)).state(&hook, [7; 32]) == crate::trust::State::Ask
+            !crate::trust::is_taking(&crate::trust::place_of(&hook))
+                && crate::trust::Store::read(Some(&trust)).state(&hook, [7; 32]) == crate::trust::State::Ask
         });
         take(&mut ed, &|t| matches!(t, Taken::Preflight(_)));
         until(&mut ed, "the told line gone", |_| std::fs::read_to_string(&told).unwrap() == "other\n");

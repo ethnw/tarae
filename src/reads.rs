@@ -667,18 +667,29 @@ fn previewed(ed: &Editor, action: &crate::picker::Action) -> Vec<PathBuf> {
 }
 
 /// Reads the files named like keys the project keeps open (`A`) into the chat's copy, on a worker — when the
-/// chat opens and after every change to what's kept (`allow::keep_later`), so `key_shut` never waits on disk.
+/// chat opens and after every change to what's kept (`allow::keep_queued`), so `key_shut` never waits on disk.
 pub fn kept_keys_load(ed: &mut Editor) {
-    if ed.session.chat.is_none() {
-        return;
-    }
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    c.kept_keys_asked += 1;
+    let asked = c.kept_keys_asked;
     let (store, root) = (ed.allow_path.clone(), ed.session.root.clone());
+    // (but those taken back, their write not landed or failed — as the `Caps` leaves them out)
+    let taking = ed.taking_for(&root);
     // (the project's, whatever claude process runs by then)
     ed.events.jobs().spawn(move || {
-        let keys = crate::allow::Store::read(store.as_deref()).get(&root).keys;
+        let mut kept = crate::allow::Store::read(store.as_deref()).get(&root);
+        taking.iter().for_each(|w| kept.remove(w));
         move |ed: &mut Editor| {
+            let taking = ed.taking_for(&root);
             let Some(c) = ed.session.chat.as_mut() else { return };
-            c.kept_keys = Some(keys);
+            // (one asked since read what's kept after this — a take-back's write landed)
+            if c.kept_keys_asked != asked {
+                return;
+            }
+            let shut = |k: &PathBuf| {
+                taking.iter().any(|w| crate::allow::takes_back(w, &crate::allow::Grant::Key(k.clone())))
+            };
+            c.kept_keys = Some(kept.keys.into_iter().filter(|k| !shut(k)).collect());
             // What waited for them goes now, decided on them (`wait_for_kept`)
             for own in std::mem::take(&mut c.after_kept) {
                 match own {

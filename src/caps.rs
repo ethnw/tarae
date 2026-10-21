@@ -477,11 +477,35 @@ impl crate::editor::Editor {
             chat: self.session.chat.as_ref().map(|c| c.allowed.clone()).unwrap_or_default(),
             temp: self.read_temp,
             outside: self.read_outside,
-            taking: self.allow_taking.clone(),
+            taking: self.taking_for(&self.session.root),
             hosts: self.session.granted_hosts(),
             #[cfg(test)]
             home: self.caps_home.clone(),
         }
+    }
+
+    /// The kept answers taken back in checkout `root` whose store write hasn't landed — or failed: then until you
+    /// quit (`:restart` carries them).
+    pub fn taking_for(&self, root: &Path) -> Vec<String> {
+        self.taking_ids(root).into_iter().map(|(_, w)| w).collect()
+    }
+
+    /// `taking_for`, each with its id — what a write that carries them ends (`taking_end`), and only those.
+    pub fn taking_ids(&self, root: &Path) -> Vec<(u64, String)> {
+        self.allow_taking.iter().filter(|(_, r, _)| r == root).map(|(n, _, w)| (*n, w.clone())).collect()
+    }
+
+    /// `what` taken back in checkout `root`, its write under way — `id` its given (`storewrite::given`).
+    pub fn taking(&mut self, root: PathBuf, what: String, id: u64) {
+        crate::allow::taking_started(&root, &what, id);
+        self.allow_taking.push((id, root, what));
+    }
+
+    /// The take-backs `ids` written: over (one made since, of the same name, isn't).
+    pub fn taking_end(&mut self, ids: &[u64]) {
+        crate::allow::taking_over(ids);
+        self.allow_taking.retain(|(n, _, _)| !ids.contains(n));
+        self.allow_landed.lock().unwrap_or_else(|e| e.into_inner()).retain(|n| !ids.contains(n));
     }
 
     /// The session in front's `Caps` made again — a chat opened, an answer given or taken back.
@@ -493,7 +517,8 @@ impl crate::editor::Editor {
     /// is then (in front or behind; gone: dropped), and only over an older one — two out of order keep the newer.
     pub fn caps_sync_of(&mut self, id: crate::event::SessionId) {
         let (store, temp, outside) = (self.allow_path.clone(), self.read_temp, self.read_outside);
-        let taking = self.allow_taking.clone();
+        let Some(root) = self.session_by_id(id).map(|s| s.root.clone()) else { return };
+        let taking = self.taking_for(&root);
         #[cfg(test)]
         let home = self.caps_home.clone();
         let Some(s) = self.session_by_id(id) else { return };
@@ -555,6 +580,9 @@ impl crate::session::Session {
         self.caps.as_ref().map(|(_, c)| c.as_ref())
     }
 }
+
+#[cfg(test)]
+mod props;
 
 #[cfg(test)]
 mod tests {

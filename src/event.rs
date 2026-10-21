@@ -60,6 +60,9 @@ pub struct Queue {
     /// The user's input (its `input_seq`) whose handling is under way — or a job's result it started, through
     /// jobs it started in turn (`Jobs` carries it): what a card it makes was asked by (#205).
     asked: std::cell::Cell<Option<u64>>,
+    /// Writes under way the process's end waits for (`Editor::writes_flush`): every `background` job, and what a
+    /// spawned job writes that an answer is kept in (`Writes::start`).
+    writes: Writes,
     /// The simulation it was made in (`sim.rs`): what its senders send goes there.
     #[cfg(test)]
     sim: Option<crate::sim::Handle>,
@@ -73,6 +76,7 @@ impl Default for Queue {
             rx,
             session: Default::default(),
             asked: Default::default(),
+            writes: Writes::default(),
             #[cfg(test)]
             sim: crate::sim::current(),
         }
@@ -101,13 +105,18 @@ impl Queue {
     }
 
     pub fn jobs(&self) -> Jobs {
-        Jobs { tx: self.sender(), asked: self.asked.get() }
+        Jobs { tx: self.sender(), asked: self.asked.get(), writes: self.writes.clone() }
+    }
+
+    /// The writes under way the process's end waits for.
+    pub fn writes(&self) -> &Writes {
+        &self.writes
     }
 
     /// Jobs whose results are applied in whatever session is in front when they land — work about sessions
     /// themselves (making, ending one: `worktree.rs`), never swapped into the session it's about.
     pub fn shared_jobs(&self) -> Jobs {
-        Jobs { tx: self.shared_sender(), asked: self.asked.get() }
+        Jobs { tx: self.shared_sender(), asked: self.asked.get(), writes: self.writes.clone() }
     }
 
     /// Results made from now on are for `session`.
@@ -185,6 +194,7 @@ pub struct Jobs {
     /// The input it was started under (`Queue.asked`): its result is applied as asked by it too — one-shot
     /// work only; a long-lived sender (a task's output, a server's) carries none.
     asked: Option<u64>,
+    writes: Writes,
 }
 
 impl Jobs {
@@ -213,10 +223,41 @@ impl Jobs {
         );
     }
 
+    /// `spawn` for work that writes what's kept (an answer, a store): the process's end waits for the work, as for a
+    /// `background` job's — its result isn't waited for (the loop has ended).
+    #[track_caller]
+    pub fn spawn_kept<W, A>(&self, work: W)
+    where
+        W: FnOnce() -> A + Send + 'static,
+        A: FnOnce(&mut Editor) + Send + 'static,
+    {
+        let writing = self.writes.start();
+        self.spawn(move || {
+            let apply = work();
+            drop(writing);
+            apply
+        });
+    }
+
     /// Runs `work` on a thread with nothing to bring back (a state file saved, history written): no result, so
-    /// the main loop isn't woken for it — a result, even one that does nothing, is an event and a frame.
+    /// the main loop isn't woken for it — a result, even one that does nothing, is an event and a frame. The
+    /// process's end waits for it (`Writes`, `EXIT_WAIT` at most): what it writes isn't cut off by a quit.
     #[track_caller]
     pub fn background(&self, work: impl FnOnce() + Send + 'static) {
+        let writing = self.writes.start();
+        run(
+            Location::caller(),
+            Box::new(move || {
+                let _writing = writing;
+                work()
+            }),
+        );
+    }
+
+    /// `background` the process's end doesn't wait for: a timer, a clean-up a quit may cut short (the start's
+    /// prunes, a commit's tree removed) — nothing kept is lost with it.
+    #[track_caller]
+    pub fn detached(&self, work: impl FnOnce() + Send + 'static) {
         run(Location::caller(), Box::new(work));
     }
 }
@@ -229,6 +270,68 @@ pub fn sleep(d: Duration) {
         return;
     }
     thread::sleep(d);
+}
+
+/// How long the process's end waits for the writes under way (a hung disk isn't waited for forever — what it
+/// was writing is lost).
+pub const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Writes under way on workers, counted.
+#[derive(Clone, Default)]
+pub struct Writes(std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>);
+
+/// One write under way — counted until dropped (a worker that panics, too).
+pub struct Writing(Writes);
+
+impl Writes {
+    /// One more under way, until the returned `Writing` goes.
+    pub fn start(&self) -> Writing {
+        *self.0.0.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        Writing(self.clone())
+    }
+
+    /// Until none is under way, or `within` passes — whether they all finished.
+    pub fn wait(&self, within: std::time::Duration) -> bool {
+        let (lock, cv) = &*self.0;
+        let n = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let (n, _) = cv.wait_timeout_while(n, within, |n| *n > 0).unwrap_or_else(|p| p.into_inner());
+        *n == 0
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.0.0;
+        *lock.lock().unwrap_or_else(|p| p.into_inner()) -= 1;
+        cv.notify_all();
+    }
+}
+
+impl Editor {
+    /// Before the process ends (quitting, `:restart`'s exec): the writes still under way land (`Writes`) —
+    /// false: some didn't within `EXIT_WAIT`.
+    pub fn writes_flush(&self) -> bool {
+        self.events.writes().wait(EXIT_WAIT)
+    }
+
+    /// What a quit says it didn't write (`flushed`: `writes_flush`'s answer) — every store's writes not landed,
+    /// cut off past the wait or failed (trust's, what projects keep, the sessions'), and a take-back of a session's
+    /// given before the kept sessions were back.
+    pub fn unwritten(&self, flushed: bool) -> Vec<String> {
+        let stores: Vec<std::path::PathBuf> = [self.trust_path.clone(), self.allow_path.clone()]
+            .into_iter()
+            .flatten()
+            .chain(self.sessions_path())
+            .collect();
+        let stores: Vec<&std::path::Path> = stores.iter().map(std::path::PathBuf::as_path).collect();
+        let before = self.session_store.taken.iter().map(|(_, w)| format!("the sessions kept without {w}"));
+        let said = crate::storewrite::pending_said(&stores).into_iter().chain(before);
+        said.map(|said| match flushed {
+            true => format!("tarae: not written: {said}"),
+            false => format!("tarae: not written before quitting ({}s waited): {said}", EXIT_WAIT.as_secs()),
+        })
+        .collect()
+    }
 }
 
 /// Lets `x` go on a worker — a big file's parse trees take milliseconds to free (`editor.rs`'s, perf
@@ -327,6 +430,43 @@ mod tests {
         assert!(q.recv_timeout(Duration::from_millis(100)).is_none(), "nothing came back");
         q.jobs().spawn(|| |_: &mut Editor| {});
         assert!(q.recv_timeout(Duration::from_secs(5)).is_some(), "a spawned job's result does");
+    }
+
+    /// Waiting ends when the last write under way does — on another thread, or panicking.
+    #[test]
+    fn waits_for_the_writes_under_way() {
+        let writes = Writes::default();
+        assert!(writes.wait(Duration::ZERO), "nothing under way");
+        let (a, b) = (writes.start(), writes.start());
+        assert!(!writes.wait(Duration::from_millis(10)));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(a);
+        });
+        let _ = std::thread::spawn(move || {
+            let _b = b;
+            panic!("a worker that panics still counts down");
+        })
+        .join();
+        assert!(writes.wait(Duration::from_secs(5)));
+    }
+
+    /// A `background` job holds the process's end until it's done; a `detached` one doesn't.
+    #[test]
+    fn the_end_waits_for_background_work_not_detached() {
+        let q = Queue::default();
+        let (go, wait) = mpsc::channel::<()>();
+        q.jobs().detached(move || {
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        assert!(q.writes().wait(Duration::ZERO), "a detached job held it");
+        let (go2, wait2) = mpsc::channel::<()>();
+        q.jobs().background(move || {
+            let _ = wait2.recv_timeout(Duration::from_secs(5));
+        });
+        assert!(!q.writes().wait(Duration::from_millis(20)), "a background job didn't hold it");
+        let _ = (go.send(()), go2.send(()));
+        assert!(q.writes().wait(Duration::from_secs(5)));
     }
 
     /// Every thread tarae starts has a name: `thread(…)`, or a `Builder` given one — the e2e test

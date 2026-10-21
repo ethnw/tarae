@@ -199,14 +199,19 @@ fn an_api_sessions_key_goes_through_its_helper_and_never_through_tarae() {
     assert!(!notes(&ed).iter().any(|n| n.starts_with("Stopped:")), "{:?}", notes(&ed));
     let state = ed.ui_state();
     assert_eq!(state.json()["sessions"][0]["billing"], "api");
-    // (what's kept is written on workers: the chat and the session list there before looking)
-    until(&mut ed, "the chat and the sessions kept", |_| {
+    // (what's kept is written on workers: the chat and the session list there before looking — the sessions' own
+    // file, not its lock beside it nor a write's temp file, holding the write that kept the session as an API one)
+    until(&mut ed, "the chat kept, and the session kept as an API session", |_| {
         let files = files_in(&place.state);
         let has = |part: &str| files.iter().any(|(p, _)| p.to_string_lossy().contains(part));
-        has("/chats/") && has("/sessions/") && has("billing.json")
+        let kept = files_in(&place.state.join("sessions")).into_iter().any(|(p, b)| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.ends_with(".json")
+                && !name.starts_with('.')
+                && String::from_utf8_lossy(&b).contains(r#""billing":"api""#)
+        });
+        has("/chats/") && has("billing.json") && kept
     });
-    let sessions = files_in(&place.state.join("sessions"));
-    assert!(String::from_utf8_lossy(&sessions[0].1).contains(r#""billing":"api""#), "kept as an API session");
     // The key, nowhere of tarae's
     let nonce = place.key.trim_start_matches("tarae-fake-key-");
     for (path, bytes) in files_in(&place.state) {

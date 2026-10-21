@@ -180,6 +180,10 @@ pub fn set_trust_store(path: Option<PathBuf>) {
 
 /// The answer for what a repository (its `config` file) runs now (`digest`).
 fn trust_state(config: &Path, digest: Digest) -> State {
+    // (being taken back: held from the `d` on — an answer since tarae started too)
+    if crate::trust::is_taking(&crate::trust::place_of(config)) {
+        return State::Ask;
+    }
     let answers = ANSWERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, _, t)) = answers.iter().rev().find(|(c, d, _)| c == config && *d == digest) {
         return if *t { State::Trusted } else { State::Ignored };
@@ -192,21 +196,28 @@ fn trust_state(config: &Path, digest: Digest) -> State {
     }
 }
 
+/// Tests: `trust_state`.
+#[cfg(test)]
+pub fn trust_state_of(config: &Path, digest: Digest) -> State {
+    trust_state(config, digest)
+}
+
 /// The card answered for a repository (its `config` file): kept for this run of tarae (the editor writes the
 /// store), and its kept entries resolved again — trusted, nothing held.
 pub fn answered(config: &Path, digest: Digest, trusted: bool) {
     ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).push((config.to_path_buf(), digest, trusted));
-    repos().entries.retain(|(_, r)| !r.about(config));
-    submodules().entries.retain(|(_, r)| !r.about(config));
+    repos().entries.retain(|(_, r, _)| !r.about(config));
+    submodules().entries.retain(|(_, r, _)| !r.about(config));
 }
 
 /// What a repository's config file at `place` runs taken back (`:granted`'s `d`, on a worker — after the store's
 /// write): its answers since tarae started forgotten and its kept entries resolved again — held, the card asks.
 pub fn forget_trust(place: &crate::trust::Place) {
+    trust_changed();
     let of = |c: &Path| crate::trust::place_of(c) == *place;
     ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(c, ..)| !of(c));
-    repos().entries.retain(|(_, r)| !r.about_place(place));
-    submodules().entries.retain(|(_, r)| !r.about_place(place));
+    repos().entries.retain(|(_, r, _)| !r.about_place(place));
+    submodules().entries.retain(|(_, r, _)| !r.about_place(place));
 }
 
 /// Whether what a repository (its `config` file) runs (`digest`) was answered since tarae started — a resolve
@@ -278,17 +289,32 @@ const KEPT_MAX: usize = 64;
 /// kept: a `git init` there later is seen.
 struct Kept {
     cap: usize,
-    entries: Vec<(PathBuf, Arc<Repo>)>,
+    entries: Vec<(PathBuf, Arc<Repo>, u64)>,
+    /// What a resolve's trust answers are as of (`trust_gen`; a test's own).
+    epoch_now: fn() -> u64,
+}
+
+/// Bumped as a repository's trust is taken back (`:granted`'s `d` — on the main thread, before the worker that
+/// forgets its answers): a resolve under way across it isn't kept, and one kept from before isn't used.
+static TRUST_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn trust_gen() -> u64 {
+    TRUST_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A repository's trust taken back: what's kept resolved is resolved again, and a resolve under way isn't kept.
+pub fn trust_changed() {
+    TRUST_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 impl Kept {
     /// `root`'s repository while it still holds: its git folder there, and no `.git` of the root's own that
     /// isn't it (a folder first resolved inside an outer repository, `git init`ed since) — else dropped.
     fn get(&mut self, root: &Path) -> Option<Arc<Repo>> {
-        let i = self.entries.iter().position(|(k, _)| k == root)?;
-        let r = &self.entries[i].1;
+        let i = self.entries.iter().position(|(k, ..)| k == root)?;
+        let (r, epoch) = (&self.entries[i].1, self.entries[i].2);
         let own = std::fs::symlink_metadata(root.join(".git")).is_ok();
-        let changed = r.racy || r.stamps.iter().any(|(p, t)| stamp(p) != *t);
+        let changed = r.racy || r.stamps.iter().any(|(p, t)| stamp(p) != *t) || epoch != (self.epoch_now)();
         if !r.git_dir.is_dir() || (own && r.work_tree.as_deref() != Some(root)) || changed {
             self.entries.remove(i);
             return None;
@@ -299,15 +325,21 @@ impl Kept {
         Some(r)
     }
 
-    fn put(&mut self, root: PathBuf, r: Arc<Repo>) {
-        self.entries.retain(|(k, _)| *k != root);
-        self.entries.push((root, r));
+    /// `r`, resolved from `epoch` on, kept for `root` — unless a trust was taken back meanwhile (false: resolve it
+    /// again, it may have read an answer forgotten since).
+    fn put(&mut self, root: PathBuf, r: Arc<Repo>, epoch: u64) -> bool {
+        if epoch != (self.epoch_now)() {
+            return false;
+        }
+        self.entries.retain(|(k, ..)| *k != root);
+        self.entries.push((root, r, epoch));
         let over = self.entries.len().saturating_sub(self.cap);
         self.entries.drain(..over);
+        true
     }
 }
 
-static REPOS: Mutex<Kept> = Mutex::new(Kept { cap: KEPT_MAX, entries: Vec::new() });
+static REPOS: Mutex<Kept> = Mutex::new(Kept { cap: KEPT_MAX, entries: Vec::new(), epoch_now: trust_gen });
 
 fn repos() -> std::sync::MutexGuard<'static, Kept> {
     REPOS.lock().unwrap_or_else(|e| e.into_inner())
@@ -315,7 +347,8 @@ fn repos() -> std::sync::MutexGuard<'static, Kept> {
 
 /// Submodules once resolved (`submodule`), by their top's real path — apart from the roots: one is taken
 /// only as the repository around it records it.
-static SUBMODULES: Mutex<Kept> = Mutex::new(Kept { cap: KEPT_MAX, entries: Vec::new() });
+static SUBMODULES: Mutex<Kept> =
+    Mutex::new(Kept { cap: KEPT_MAX, entries: Vec::new(), epoch_now: trust_gen });
 
 fn submodules() -> std::sync::MutexGuard<'static, Kept> {
     SUBMODULES.lock().unwrap_or_else(|e| e.into_inner())
@@ -328,10 +361,14 @@ pub fn repo(root: &Path) -> Result<Arc<Repo>, String> {
     if let Some(r) = repos().get(&real) {
         return Ok(r);
     }
-    let r = Arc::new(resolve_with(&real, None)?);
-    repos().put(real, r.clone());
-    tell(&r);
-    Ok(r)
+    loop {
+        let epoch = trust_gen();
+        let r = Arc::new(resolve_with(&real, None)?);
+        if repos().put(real.clone(), r.clone(), epoch) {
+            tell(&r);
+            return Ok(r);
+        }
+    }
 }
 
 /// `repo` when it was resolved already — for the main loop, which doesn't run git: `root` as given (a
@@ -344,7 +381,7 @@ pub fn cached(root: &Path) -> Option<Arc<Repo>> {
 #[cfg(test)]
 pub fn forget(root: &Path) {
     let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    repos().entries.retain(|(k, _)| *k != real);
+    repos().entries.retain(|(k, ..)| *k != real);
 }
 
 /// The one discovery: from `root`, bare-looking folders refused — and with `ceilings`, never climbing into
@@ -991,10 +1028,14 @@ fn outside(folder: &Path, writes: &[PathBuf]) -> Option<Arc<Repo>> {
         return Some(r);
     }
     let ceilings = std::env::join_paths(writes.iter().filter(|w| w.is_absolute())).ok()?;
-    let r = Arc::new(resolve_with(folder, (!writes.is_empty()).then_some(ceilings.as_os_str())).ok()?);
-    repos().put(folder.to_path_buf(), r.clone());
-    tell(&r);
-    Some(r)
+    loop {
+        let epoch = trust_gen();
+        let r = Arc::new(resolve_with(folder, (!writes.is_empty()).then_some(ceilings.as_os_str())).ok()?);
+        if repos().put(folder.to_path_buf(), r.clone(), epoch) {
+            tell(&r);
+            return Some(r);
+        }
+    }
 }
 
 /// Whether something from `folder` up to `top` passes for a git repository: a `.git`, or a git folder's own
@@ -1060,10 +1101,15 @@ fn submodule(repo: &Repo, at: &Path, rel: &str) -> Option<Arc<Repo>> {
         return None;
     }
     // (its own config, held by its own answer)
-    let mut sub = Repo::read_local(git_dir.clone(), git_dir, Some(top.clone()), top.clone(), 1);
+    let epoch = trust_gen();
+    let mut sub = Repo::read_local(git_dir.clone(), git_dir.clone(), Some(top.clone()), top.clone(), 1);
+    // (a trust taken back while it read: read again — it may have read an answer forgotten since)
+    if epoch != trust_gen() {
+        sub = Repo::read_local(git_dir.clone(), git_dir, Some(top.clone()), top.clone(), 1);
+    }
     sub.stamps.extend(made);
     let sub = Arc::new(sub);
-    submodules().put(top, sub.clone());
+    submodules().put(top, sub.clone(), epoch);
     tell(&sub);
     Some(sub)
 }

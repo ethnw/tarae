@@ -233,7 +233,11 @@ fn granted_takes_each_part_back_and_what_it_let_run_follows() {
         );
         ed.handle_event(crate::event::Event::Key(crate::key::Key::plain(crate::key::Code::Char('d'))));
         let (file, hash) = &kept_at[kind as usize];
-        until(&mut ed, "taken back", |ed| kept(ed, file, *hash) == State::Ask);
+        // (the store written, not only the mark `Store::state` reads meanwhile)
+        let place = crate::trust::place_of(file);
+        until(&mut ed, "taken back", |ed| {
+            !crate::trust::is_taking(&place) && kept(ed, file, *hash) == State::Ask
+        });
     }
     until(&mut ed, "the list again", |ed| {
         ed.picker.as_ref().is_some_and(|p| !p.items().iter().any(|i| i.label == ".git/config"))

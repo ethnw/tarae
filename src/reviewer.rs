@@ -1180,14 +1180,19 @@ fn refused(tool: &str, role: Option<Role>) -> String {
     }
 }
 
+/// What the reviewer's reads go by: the checkout's defaults and what the project keeps — no conversation's
+/// answers, nor outside home — less what's being taken back there (a failed take-back: until you quit).
+pub(crate) fn basis(ed: &Editor, root: &std::path::Path) -> crate::caps::Basis {
+    let (store, temp, taking) = (ed.allow_path.clone(), ed.read_temp, ed.taking_for(root));
+    crate::caps::Basis { root: root.to_path_buf(), store, temp, taking, ..Default::default() }
+}
+
 /// A read: allowed where the chat's reads go unasked (`reads::decide` — inside the checkout, the places the
 /// user allowed for always, the repository's other checkouts…), else refused — the reviewer never asks.
 fn read(ed: &mut Editor, generation: u64, request_id: &str, tool: &str, input: &Value) {
     let Some(r) = ed.session.reviewer.as_ref() else { return };
-    // (no conversation's answers, nor outside home: only what's covered)
-    let (store, temp) = (ed.allow_path.clone(), ed.read_temp);
-    let basis = crate::caps::Basis { root: r.root.clone(), store, temp, ..Default::default() };
     let root = r.root.clone();
+    let basis = basis(ed, &root);
     let (tool, input, request_id) = (tool.to_string(), input.clone(), request_id.to_string());
     let (llm, here) = (ed.config.llm.clone(), ed.sandbox_here.clone());
     ed.events.jobs().spawn(move || {

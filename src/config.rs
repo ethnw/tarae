@@ -350,12 +350,14 @@ pub(crate) fn load_layers(
             config = if trusted { with.clone() } else { without.clone() };
             warnings.extend(if trusted { w_with } else { w_without });
             config.project = Some(crate::trust::Project {
+                place: crate::trust::place_of(&real),
                 file: real,
                 hash,
                 items: gate.held,
                 state,
                 with: Box::new((with.editor, with.keymaps)),
                 without: Box::new((without.editor, without.keymaps)),
+                read_at: store.read_at,
             });
         }
     }

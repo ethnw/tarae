@@ -43,6 +43,9 @@ pub struct Edits {
     /// Review at the end (`space v a`, agreed on its card): edits under this folder go in as Claude makes
     /// them, and the turn is reviewed when it ends.
     pub at_end: Option<PathBuf>,
+    /// `at_end` is your `y` on its card's, not the config's: a config without it leaves it on
+    /// (`at_end_follow_config`).
+    pub at_end_yours: bool,
     /// Claude's renames, replaces and edits landing (`refactor.rs`): the front one's files reviewed one at a
     /// time.
     pub sets: VecDeque<crate::refactor::Landing>,
@@ -98,10 +101,47 @@ pub fn at_end_new_chat(ed: &mut Editor) {
     let root = ed.session.root.clone();
     let Some(c) = &mut ed.session.chat else { return };
     c.edits.at_end = on.then_some(root);
+    c.edits.at_end_yours = false;
     let tell = &mut ed.session.checkpoints.tell;
     tell.retain(|t| t != TELL_ON && t != TELL_OFF);
     if on {
         tell.push(TELL_ON.to_string());
+    }
+}
+
+/// Claude hears the change with its next message — unless it never heard of the other.
+fn at_end_told(ed: &mut Editor, on: bool) {
+    let (say, unsay) = if on { (TELL_ON, TELL_OFF) } else { (TELL_OFF, TELL_ON) };
+    let tell = &mut ed.session.checkpoints.tell;
+    match tell.iter().position(|t| t == unsay) {
+        Some(i) => {
+            tell.remove(i);
+        }
+        None => tell.push(say.to_string()),
+    }
+}
+
+/// The config's `llm.review-at-end` off now (a project's trust taken back, a reload): every chat the config turned
+/// review at the end on for — each session's — has its edits come one at a time again, said in it. One your `y`
+/// turned on stays (a project's layer, a write that failed, a reload read before it can't take it back). Never
+/// turned on this way; the config file isn't written.
+pub fn at_end_follow_config(ed: &mut Editor) {
+    if ed.config.llm.review_at_end {
+        return;
+    }
+    let on = |s: &crate::session::Session| {
+        s.chat.as_ref().is_some_and(|c| c.edits.at_end.is_some() && !c.edits.at_end_yours)
+    };
+    let ids: Vec<_> =
+        std::iter::once(&ed.session).chain(&ed.sessions).filter(|s| on(s)).map(|s| s.id).collect();
+    for id in ids {
+        ed.with_session(id, |ed| {
+            let Some(c) = &mut ed.session.chat else { return };
+            c.edits.at_end = None;
+            let row = "Claude's edits come one at a time again — the settings that turned review at the end on went";
+            c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
+            at_end_told(ed, false);
+        });
     }
 }
 
@@ -127,20 +167,13 @@ pub fn at_end_set(ed: &mut Editor, on: bool) {
     let root = ed.session.root.clone();
     let Some(c) = &mut ed.session.chat else { return };
     c.edits.at_end = on.then_some(root);
+    c.edits.at_end_yours = on;
     let row = match on {
         true => "review at the end · space v a turns it off",
         false => "Claude's edits come one at a time again",
     };
     c.msgs.push(crate::chat::Msg::new(crate::chat::Role::Note, row, ""));
-    // Claude hears the change with its next message — unless it never heard of the other
-    let (say, unsay) = if on { (TELL_ON, TELL_OFF) } else { (TELL_OFF, TELL_ON) };
-    let tell = &mut ed.session.checkpoints.tell;
-    match tell.iter().position(|t| t == unsay) {
-        Some(i) => {
-            tell.remove(i);
-        }
-        None => tell.push(say.to_string()),
-    }
+    at_end_told(ed, on);
     match on {
         true => ed.set_success(
             "Claude's edits go in as it works — you review the turn when it ends (new chats too)",

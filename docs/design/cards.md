@@ -334,8 +334,10 @@ README, "Configuration").
 **Revoked:** `d` or Enter on a row (a default row says it can't be taken back here). A revoke
 applies to the next run, because policies are built per run (`with_allowed`, `tools.rs:1574`), and
 to the next Read at once. Claude hears it with the next message (`checkpoints.tell`: *"The user took
-back: read ~/src/other-lib"*). Revoking a project grant writes `sandbox.json` on a worker (as
-`keep_later`).
+back: read ~/src/other-lib"*). Revoking a project grant queues a write of `sandbox.json` at the store's
+writer (`allow::keep_queued`, `storewrite.rs`): this tarae's writes land one at a time in the order given, a
+take-back always written; an `A` is a compare-and-set on its names' change counters (`storewrite::holds`) — one
+after another tarae's unseen change there isn't kept, and its card asks again.
 
 ### 3.7 What the parser keeps
 
@@ -411,7 +413,8 @@ Net: about −1,000 product lines and −1,200 test lines; +600 product and +300
   first write, and the toast says which — never one every checkout of the repository uses (a default
   here may be none in another checkout). As built (piece J, 2026-10-17, version 3): versions 1–2 are no
   longer read (no compatibility before the first release) — an old file reads as nothing, each answer
-  is asked once, and the next answer writes the new form.
+  is asked once, and the next answer writes the new form. A newer build's file is never written over by an older
+  tarae running beside it: its keeps fail, said.
 - **`Chat.allowed`** becomes chat-scope grants (it's the same type). `Chat.read_once`: gone.
 - **`Chat.run_allow`** patterns and `Chat.run_scripts` pins: dropped. They allowed *commands*, and
   every such command now runs without asking. If a chat had any, the first run after the update

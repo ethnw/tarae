@@ -562,8 +562,8 @@ fn read(ed: &mut Editor) {
     let id = c.settings.id;
     let places = Places::of(ed);
     ed.events.jobs().spawn(move || {
-        let seen = places.look();
-        move |ed: &mut Editor| seen_now(ed, id, seen)
+        let (seen, since) = places.look_since();
+        move |ed: &mut Editor| seen_now(ed, id, seen, since)
     });
 }
 
@@ -597,6 +597,14 @@ impl Places {
         };
         look(&self.root, self.store.as_deref(), self.user.as_deref(), yours, env)
     }
+
+    /// `look`, with its place's key and `storewrite::last()` before the read — what a take-back since is told by.
+    fn look_since(&self) -> (Seen, (String, u64)) {
+        let at = crate::storewrite::last();
+        let seen = self.look();
+        let key = crate::trust::key(&crate::trust::place_of(&seen.file));
+        (seen, (key, at))
+    }
 }
 
 /// Your own Claude settings file — `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json` (Claude
@@ -612,7 +620,13 @@ pub fn user_settings() -> Option<PathBuf> {
 /// The settings as just read (the first time, or after a change): the card when they need one; claude started —
 /// held back while it's up — or, running, started again at once when what it runs with no longer holds or the
 /// card asks again.
-fn seen_now(ed: &mut Editor, id: u64, seen: Seen) {
+fn seen_now(ed: &mut Editor, id: u64, mut seen: Seen, (key, at): (String, u64)) {
+    // (read before a take-back at its place given since: not trusted, whatever the store said then — F11)
+    if seen.state == State::Trusted
+        && ed.trust_path.as_deref().is_some_and(|t| crate::storewrite::since(t, &key, at).1)
+    {
+        seen.state = State::Ask;
+    }
     let gate_on = ed.claude_settings_gate;
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.settings.id == id) else { return };
     c.settings.reading = false;
@@ -680,8 +694,8 @@ fn watch(ed: &mut Editor, id: u64) {
             let now = stamps();
             if now != last {
                 last = now;
-                let seen = places.look();
-                let apply = move |ed: &mut Editor| seen_now(ed, id, seen);
+                let (seen, since) = places.look_since();
+                let apply = move |ed: &mut Editor| seen_now(ed, id, seen, since);
                 if tx.send(crate::event::Event::Job(Box::new(apply))).is_err() {
                     break;
                 }
@@ -811,18 +825,36 @@ impl Editor {
             }
         }
         if let Some(path) = self.trust_path.clone() {
-            let file = seen.file.clone();
-            self.events.jobs().spawn(move || {
-                let r = crate::trust::record(path, crate::trust::Kind::Claude, file, hash, trusted);
-                move |ed: &mut Editor| {
-                    if let Err(e) = r {
-                        ed.set_error(format!("couldn't keep the answer: {e}"));
-                    }
-                }
+            let (file, given, seen) =
+                (seen.file.clone(), crate::trust::given(), crate::storewrite::seen_now(&path));
+            let kind = crate::trust::Kind::Claude;
+            let w = crate::trust::Write::Answer { kind, place: None, file, hash, trusted, given, seen };
+            crate::trust::queue(self, path, vec![w], move |ed, r| match r {
+                Err(e) => ed.set_error(format!("couldn't keep the answer: {e}")),
+                Ok(w) if w.contains(&crate::trust::Wrote::Skipped) => ed.claude_settings_skipped(hash),
+                Ok(_) => {}
             });
         }
         crate::chat::gate_opened(self);
         Some(n)
+    }
+
+    /// A yes on the project's Claude settings not written: changed in another tarae before it, unseen — held
+    /// back again (Claude started again without them), the card asking.
+    fn claude_settings_skipped(&mut self, hash: Digest) {
+        let Some(c) = self.session.chat.as_mut() else { return };
+        let Some(seen) =
+            c.settings.seen.as_mut().filter(|s| s.digest() == Some(hash) && s.state == State::Trusted)
+        else {
+            return;
+        };
+        seen.state = State::Ask;
+        let now = settings(crate::chat::CHAT_SETTINGS, seen);
+        if c.running() && Some(&now) != c.settings.started.as_ref() {
+            crate::chat::settings_restart(self, "Held back — Claude started again without them", true);
+        }
+        self.set_warning("Changed in another tarae before your yes was kept — held back, asked again");
+        let _ = self.claude_settings_ask();
     }
 
     /// `v` on the card: its text and `detail` in its buffer — for what the card shows (`hash`), else (read again

@@ -1723,6 +1723,9 @@ fn outside_socket(s: &Path) -> bool {
 #[cfg(test)]
 thread_local! {
     pub static ADMITTED: std::cell::RefCell<Vec<(String, Extra)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The user's runs admitted (a card's run again), with what rode along.
+    pub static USER_ADMITTED: std::cell::RefCell<Vec<(String, Extra)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Runs `command` now (allowed), or once the user says yes on its card — answered when it ends.
@@ -3349,8 +3352,14 @@ pub fn guard_and_go(ed: &mut Editor, who: For, job: Job, asked: bool, extra: Ext
 /// `guard_and_go` with what rides along from the start (`ride`: a card's answer — `run_now`).
 fn guard_and_go_riding(ed: &mut Editor, who: For, job: Job, ride: Ride) {
     #[cfg(test)]
-    if let (For::Claude(_), Job::Command(c, _)) = (&who, &job) {
-        ADMITTED.with(|a| a.borrow_mut().push((c.clone(), ride.extra.clone())));
+    match (&who, &job) {
+        (For::Claude(_), Job::Command(c, _)) => {
+            ADMITTED.with(|a| a.borrow_mut().push((c.clone(), ride.extra.clone())))
+        }
+        (For::User(_), Job::Command(c, _)) => {
+            USER_ADMITTED.with(|a| a.borrow_mut().push((c.clone(), ride.extra.clone())))
+        }
+        _ => {}
     }
     crate::queued::admit(ed, who, job, ride);
 }
@@ -4099,7 +4108,7 @@ pub fn run_done(ed: &mut Editor) {
     if let Some(b) = &base {
         let tree = b.tree.clone();
         // (the claim let go only once it's gone: a run asked meanwhile waits for it — review of #212)
-        ed.events.jobs().background(move || {
+        ed.events.jobs().detached(move || {
             if let Err(e) = crate::basetree::remove(&tree) {
                 crate::log::line("basetree", "warning", &format!("{}: {e}", tree.display()));
             }
@@ -6750,6 +6759,32 @@ mod tests {
         let c = ed.session.chat.as_ref().unwrap();
         assert!(!c.allowed.ports.contains(&47012) && c.also_refused.is_empty(), "nothing kept");
         assert_eq!(super::ADMITTED.with(|a| a.borrow().len()), before, "nothing ran");
+    }
+
+    /// An `A` on Claude's `also` card: its run again has the answer whatever its scope — a failed take-back of it
+    /// hides it from the store's answers until the `A`'s write lands.
+    #[test]
+    fn claudes_run_again_after_an_always_has_the_answer() {
+        use serde_json::json;
+        let scratch = crate::scratch::Scratch::new("also-always");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.config.llm.command = "sh".into();
+        ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+        crate::chat::open(&mut ed);
+        let c = ed.session.chat.as_mut().unwrap();
+        c.state = crate::chat::State::Thinking;
+        let generation = c.generation();
+        let run = crate::blocked::BlockedRun {
+            claude: Some(super::Call::of(generation, "t1", json!(1))),
+            ..crate::blocked::BlockedRun::of(super::Job::Command("true".into(), dir.clone()))
+        };
+        let port = crate::allow::Grant::Port(47013);
+        let before = super::ADMITTED.with(|a| a.borrow().len());
+        crate::blocked::grant_answer(&mut ed, 0, port.clone(), run, Some(crate::allow::Scope::Always));
+        let ran = super::ADMITTED.with(|a| a.borrow().get(before).cloned());
+        assert_eq!(ran.map(|(_, e)| e.grant), Some(Some(port)), "the run again without the answer");
     }
 
     /// cardlost: an `also` card parks with its session when another comes to the front — it was left up there,

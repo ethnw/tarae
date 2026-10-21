@@ -311,17 +311,28 @@ impl Editor {
             ed.with_session(w.session, |ed| (w.go)(ed, pre));
         };
         let Some(path) = self.trust_path.clone().filter(|_| run) else { return go(self) };
-        self.events.jobs().spawn(move || {
-            let r: Result<(), String> = ask.hooks.iter().try_for_each(|h| {
-                let file = ask.top.join(&h.rel);
-                crate::trust::record(path.clone(), crate::trust::Kind::Hook, file, h.hash, true)
-            });
-            move |ed: &mut Editor| {
-                if let Err(e) = r {
-                    ed.set_error(format!("couldn't keep the answer: {e}"));
-                }
-                go(ed)
+        let (given, seen) = (crate::trust::given(), crate::storewrite::seen_now(&path));
+        let writes = (ask.hooks.iter())
+            .map(|h| crate::trust::Write::Answer {
+                kind: crate::trust::Kind::Hook,
+                place: None,
+                file: ask.top.join(&h.rel),
+                hash: h.hash,
+                trusted: true,
+                given,
+                seen: seen.clone(),
+            })
+            .collect();
+        crate::trust::queue(self, path, writes, move |ed, r| {
+            match r {
+                Err(e) => ed.set_error(format!("couldn't keep the answer: {e}")),
+                // (they run this time, as answered; the next action asks again)
+                Ok(w) if w.contains(&crate::trust::Wrote::Skipped) => ed.set_warning(
+                    "Changed in another tarae before your yes was kept — the hooks are asked about again next time",
+                ),
+                Ok(_) => {}
             }
+            go(ed)
         });
     }
 }

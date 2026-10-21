@@ -180,14 +180,27 @@ impl Editor {
     pub(crate) fn git_trust_answered(&mut self, ask: Ask, trusted: bool) {
         crate::gitrepo::answered(&ask.config, ask.digest, trusted);
         if let Some(path) = self.trust_path.clone() {
-            let (config, digest) = (ask.config.clone(), ask.digest);
-            self.events.jobs().spawn(move || {
-                let r = crate::trust::record(path, crate::trust::Kind::Git, config, digest, trusted);
-                move |ed: &mut Editor| {
-                    if let Err(e) = r {
-                        ed.set_error(format!("couldn't keep the answer: {e}"));
-                    }
+            let (file, hash) = (ask.config.clone(), ask.digest);
+            let (given, seen) = (crate::trust::given(), crate::storewrite::seen_now(&path));
+            let kind = crate::trust::Kind::Git;
+            let w = crate::trust::Write::Answer { kind, place: None, file, hash, trusted, given, seen };
+            let config = ask.config.clone();
+            crate::trust::queue(self, path, vec![w], move |ed, r| match r {
+                Err(e) => ed.set_error(format!("couldn't keep the answer: {e}")),
+                // (changed in another tarae before it, unseen: held, the card asking — on a worker: the place
+                // reads the disk)
+                Ok(w) if w.contains(&crate::trust::Wrote::Skipped) => {
+                    ed.events.jobs().spawn(move || {
+                        crate::gitrepo::forget_trust(&crate::trust::place_of(&config));
+                        |ed: &mut Editor| {
+                            ed.set_warning(
+                                "Changed in another tarae before your yes was kept — held, asked again",
+                            );
+                            let _ = ed.git_trust_ask();
+                        }
+                    });
                 }
+                Ok(_) => {}
             });
         }
         self.git_reload_bases();

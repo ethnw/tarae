@@ -437,10 +437,8 @@ fn keep_one(ed: &mut Editor, session: u64, host: &str, port: u16, scope: Scope) 
         Scope::Session if ours && !ed.session.hosts.iter().any(this) => {
             ed.session.hosts.push((host.into(), port));
         }
-        Scope::Project => {
-            let kept = host.to_string();
-            crate::allow::keep_later(ed, move |k| k.add_host(&kept, port));
-        }
+        // (as a card's other `A`s: a failed take-back of it ends once this is written — `allow::keep_answer`)
+        Scope::Project => crate::allow::keep_answer(ed, vec![crate::allow::Grant::Host(host.into(), port)]),
         Scope::Refused if ours => ed.session.hosts.retain(|e| !this(e)),
         _ => {}
     }

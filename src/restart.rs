@@ -973,6 +973,22 @@ pub fn snapshot(ed: &mut Editor) -> Value {
         top.extend([
             ("light".to_string(), json!(crate::theme::is_light())),
             ("overrides".into(), json!(overrides)),
+            // (taken back until you quit, their store's write failed: `restore_quietly` takes them back again)
+            // (not those a write that landed ended: its result wasn't applied — the loop had ended)
+            ("taking".into(), {
+                let landed = ed.allow_landed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let taking = ed.allow_taking.iter().filter(|(n, _, _)| !landed.contains(n));
+                json!(taking.map(|(n, r, w)| (r, w, n)).collect::<Vec<_>>())
+            }),
+            ("trust_taking".into(), crate::trust::taking_now(ed)),
+            // (the stores' writes not landed when the exec came — its take-backs and no's, given again — and the
+            // sequence they were given in, so what's given after the exec is later)
+            ("store_writes".into(), json!({
+                "trust": ed.trust_path.as_deref().map(crate::storewrite::pending_carried).unwrap_or_default(),
+                "allow": ed.allow_path.as_deref().map(crate::storewrite::pending_carried).unwrap_or_default(),
+                "sessions": ed.sessions_path().as_deref().map(crate::storewrite::pending_carried).unwrap_or_default(),
+            })),
+            ("given_last".into(), json!(crate::storewrite::last())),
             ("sessions".into(), sessions),
             // (the review's viewed marks, each session's)
             ("viewed".into(), crate::codereview::viewed_snapshot(ed)),
@@ -1051,7 +1067,8 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         l.sidebar.as_ref().and_then(|s| Some(json!({ "mode": mode_name(s.mode)?, "focus": s.focus })));
     let chat = l.chat.as_ref().map(|c| {
         json!({ "conversation": c.conversation, "input": c.input, "cursor": c.cursor, "focused": c.focused,
-                "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end })
+                "scroll": c.scroll, "follow": c.follow.on, "at_end": c.edits.at_end,
+                "at_end_yours": c.edits.at_end_yours })
     });
     let on = docs.iter().find(|d| d.id == current).and_then(|d| d.path.as_deref());
     let turns = l.checkpoints.list.len();
@@ -1137,6 +1154,13 @@ pub fn restore(ed: &mut Editor, v: &Value) -> usize {
 /// Files gone since named on the restart's toast (the rest counted; checkouts are all named).
 const GONE_SHOWN: usize = 4;
 
+/// `:restart`'s state `v`, before the config reads the trust store (the editor isn't made yet): the sequence goes
+/// on past what was given, and what it carries that narrows is marked (`trust::mark_carried` — N10).
+pub fn before_config(v: &Value) {
+    crate::storewrite::last_again(v["given_last"].as_u64().unwrap_or(0));
+    crate::trust::mark_carried(v);
+}
+
 fn restore_quietly(ed: &mut Editor, v: &Value) -> Back {
     // `:set`s first — some decide how files open (soft wrap, language servers)
     let mut set = false;
@@ -1151,8 +1175,24 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> Back {
     if set {
         ed.ensure_theme();
     }
-    // The sessions, the one in front in front
+    // What was taken back "until you quit" whose store write failed: still so (the store keeps it) — before any
+    // `Caps` is made or a trust read (the sequence went on in `before_config`)
+    for t in v["taking"].as_array().into_iter().flatten() {
+        if let (Some(root), Some(what), Some(id)) = (t[0].as_str(), t[1].as_str(), t[2].as_u64()) {
+            ed.taking(PathBuf::from(root), what.to_string(), id);
+        }
+    }
+    crate::trust::taking_again(ed, &v["trust_taking"]);
+    // (each written again, in the order given: their marks above hold them back until then)
+    crate::trust::queue_again(ed, &v["store_writes"]["trust"]);
+    let allow = v["store_writes"]["allow"].as_array().cloned().unwrap_or_default();
+    crate::allow::keep_again(ed, &allow);
+    if ed.project_trust.as_ref().is_some_and(|p| crate::trust::is_taking(&p.place)) {
+        ed.project_trust_forgotten();
+    }
+    // The sessions, the one in front in front — and their take-backs not written, written again (F2, F5)
     let gone = crate::worktree::restore(ed, &v["sessions"]);
+    crate::worktree::taken_again(ed, &v["store_writes"]["sessions"]);
     crate::codereview::viewed_restore(ed, &v["viewed"]);
     let mut back = Back::default();
     let blocks: Vec<&Value> =
@@ -1279,6 +1319,7 @@ fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
                 scroll: num(&chat["scroll"]),
                 follow: chat["follow"].as_bool().unwrap_or(ed.config.llm.follow),
                 at_end: chat["at_end"].as_str().map(PathBuf::from),
+                at_end_yours: chat["at_end_yours"].as_bool().unwrap_or(false),
                 lazy: behind,
             },
         );

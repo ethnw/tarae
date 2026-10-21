@@ -382,6 +382,8 @@ pub struct Chat {
     /// `reads::point`; gone with the chip, `reads::input_pass`) · those the chat said weren't sent, once each
     /// a conversation (`reads::not_sent`).
     pub kept_keys: Option<Vec<PathBuf>>,
+    /// How many times `kept_keys` was asked for — only the latest read lands.
+    pub kept_keys_asked: u64,
     /// What the user sent that waits for `kept_keys` to be read before it's decided (`reads::wait_for_kept`).
     pub after_kept: Vec<crate::reads::Own>,
     pub key_pass: Vec<(String, PathBuf)>,
@@ -591,6 +593,16 @@ impl Chat {
 }
 
 impl Chat {
+    /// Its conversation ends (a new one, another one continued): what its answers let through goes with it —
+    /// `a` on a card (`allowed`), on a run's card (`run_again`, a socket's too, and the scripts they run), on the
+    /// screen card (`sees`). The caller tells the proxy (`hosts::chat_ended`, first) and makes the `Caps` again.
+    pub(crate) fn conversation_left(&mut self) {
+        self.allowed = Default::default();
+        self.run_again.clear();
+        self.run_scripts.clear();
+        self.sees = false;
+    }
+
     pub(crate) fn new() -> Self {
         Chat {
             msgs: Vec::new(),
@@ -615,6 +627,7 @@ impl Chat {
             read_once: Vec::new(),
             scanned: Default::default(),
             kept_keys: None,
+            kept_keys_asked: 0,
             after_kept: Vec::new(),
             key_pass: Vec::new(),
             keys_said: Vec::new(),
@@ -851,9 +864,22 @@ pub fn continue_with(ed: &mut Editor, saved: crate::chats::Saved) {
 
 /// `continue_with` — the process only when `spawn` (else the first message starts it, resuming).
 fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
-    let Some(c) = &mut ed.session.chat else { return };
+    let Some(c) = &ed.session.chat else { return };
     if c.busy() {
         return ed.set_status("Claude is still answering — stop it (C-c) first");
+    }
+    // (another conversation: the last one's answers go with it, as a new one's do — `reset`; a chat with none yet
+    // — `:restart`'s, one just opened — leaves only answers it holds)
+    let other = match c.conversation.as_deref() {
+        Some(id) => id != saved.id,
+        None => !c.allowed.is_empty() || !c.run_again.is_empty() || !c.run_scripts.is_empty() || c.sees,
+    };
+    if other {
+        crate::hosts::chat_ended(ed);
+    }
+    let Some(c) = &mut ed.session.chat else { return };
+    if other {
+        c.conversation_left();
     }
     c.kill();
     c.msgs = crate::chats::msgs_of(&saved.rows);
@@ -872,6 +898,10 @@ fn continue_from(ed: &mut Editor, saved: crate::chats::Saved, spawn: bool) {
         None => ed.session.usage.resumed(&saved.id),
     }
     crate::usage::watch(ed);
+    if other {
+        crate::reads::conversation_new(ed);
+        ed.caps_sync();
+    }
     if spawn {
         ensure_proc(ed);
     }
@@ -938,6 +968,8 @@ pub struct Restored {
     pub follow: bool,
     /// Review at the end, on for this folder (`edits.rs`).
     pub at_end: Option<PathBuf>,
+    /// … by your `y` (`Edits.at_end_yours`).
+    pub at_end_yours: bool,
     /// A session behind's: no claude until its first message (which resumes the conversation).
     pub lazy: bool,
 }
@@ -954,6 +986,7 @@ pub fn restore(ed: &mut Editor, r: Restored) {
     c.input = r.input;
     c.focused = r.focused;
     c.edits.at_end = r.at_end;
+    c.edits.at_end_yours = r.at_end_yours;
     ed.session.chat = Some(c);
     let spawn = !r.lazy;
     let (Some(id), Some(dir)) = (r.conversation, ed.chats_dir.clone()) else {
@@ -1036,6 +1069,8 @@ pub fn close(ed: &mut Editor) {
     ed.session.usage.cut_off(crate::usage::now_ms());
     ed.calls_record();
     ed.session.chat = None;
+    // (what its answers let through goes with it at once — `:granted` and the chat's count too)
+    ed.caps_sync();
     crate::restart::turn_over(ed);
 }
 
@@ -1064,7 +1099,7 @@ pub fn reset(ed: &mut Editor) {
     }
     c.msgs.clear();
     c.plan = None;
-    c.allowed = Default::default();
+    c.conversation_left();
     c.state = State::Idle;
     c.scroll = 0;
     c.follow.new_turn();
@@ -1079,6 +1114,8 @@ pub fn reset(ed: &mut Editor) {
     ed.session.usage.cut_off(crate::usage::now_ms());
     ed.calls_record();
     ed.session.usage.new_conversation();
+    // (what the last one's answers let through goes with it at once — `:granted` and the chat's count too)
+    ed.caps_sync();
     // (review at the end stays as it's set — `llm.review-at-end`)
     crate::edits::at_end_new_chat(ed);
     // (a `y` for the last one's message, and a card pointing raised, go with it)

@@ -156,6 +156,7 @@ mod snapshot;
 mod sorting;
 mod spawn;
 mod split;
+mod storewrite;
 mod structure;
 mod stuck;
 mod switchcost;
@@ -314,6 +315,10 @@ fn main() -> Result<()> {
     // The language table — the packs, a runtime folder's read from disk here, once: files opened, fences drawn
     // and servers started from now on read memory (the config checks its servers against it)
     let packs = languages::get();
+    // (what `:restart` carries that narrows trust holds it back before the config reads the store — N10)
+    if let Some(state) = &restarted {
+        restart::before_config(state);
+    }
     let (config, warnings) = config::load(&root, &config::Sources::own());
     let mut editor = editor::Editor::with_root(config, root);
     // (where answers about repositories' own git commands are kept — `gitrepo` reads them as it resolves)
@@ -352,14 +357,15 @@ fn main() -> Result<()> {
     editor.recovery_scan();
     // Kept run homes no run needs any more — unused, replaced, their project gone (`runhomes.rs`; a worker's)
     let days = editor.config.llm.sandbox_kept_days;
-    editor.events.jobs().background(move || runhomes::prune_now(days));
+    // (these clean-ups are `detached`: a quit right after the start doesn't wait for them — the next start goes on)
+    editor.events.jobs().detached(move || runhomes::prune_now(days));
     // Run folders a tarae that's gone left in tarae's cache (`sandbox::prune_runs`; a worker's)
-    editor.events.jobs().background(sandbox::prune_runs);
+    editor.events.jobs().detached(sandbox::prune_runs);
     // (and the pins of tarae's binary such a tarae left — macOS's shim, `nofile::pin`)
-    editor.events.jobs().background(nofile::prune_pins);
+    editor.events.jobs().detached(nofile::prune_pins);
     // The card record's months past `cards::KEEP_MONTHS` (a worker's)
     if let Some(dir) = editor.cards_dir.clone() {
-        editor.events.jobs().background(move || match cards::prune(&dir, std::time::SystemTime::now()) {
+        editor.events.jobs().detached(move || match cards::prune(&dir, std::time::SystemTime::now()) {
             Ok(gone) if !gone.is_empty() => {
                 log::line("cards", "info", &format!("record pruned: {}", gone.join(", ")))
             }
@@ -404,22 +410,28 @@ fn main() -> Result<()> {
     // (`:restart`'s new binary binds its own at the same path; a failed one ends here too)
     uisocket::remove();
     editor.save_restore();
-    // The last saves' undo history is still being written on workers — exiting or exec'ing cuts it off
-    editor.undo_flush();
+    // The last saves' undo history, an answer just kept (`sandbox.json`, the sessions' store) may still be being
+    // written on workers — exiting or exec'ing cuts them off
+    let flushed = editor.writes_flush();
     // Copies of unsaved buffers: removed by a quit; kept, written to the last key, for `:restart`'s exec (and
     // its failure), an error, or a signal (`Recovery.keep`)
     let restarting = editor.restart.as_ref().is_some_and(|r| r.ready().is_some());
+    // (a quit says what it didn't write — cut off past the wait, or failed — the screen left by now; `:restart`
+    // carries its take-backs and gives them again, and says them only when its exec fails)
+    let unwritten = editor.unwritten(flushed);
+    if !restarting {
+        unwritten.iter().for_each(|said| eprintln!("{said}"));
+    }
     editor.recovery_end(result.is_err() || restarting);
     // (a `:restart`'s new tarae pins its own binary)
     nofile::unpin();
     if result.is_ok()
         && let Some(bin) = editor.restart.as_ref().and_then(|r| r.ready()).map(PathBuf::from)
     {
-        // Returns only if the new tarae couldn't take over
-        eprintln!(
-            "tarae: {} — run tarae again; r on its start screen reopens your files",
-            restart::exec(editor, &bin)
-        );
+        // Returns only if the new tarae couldn't take over — what it would have written again is said (N7)
+        let failed = restart::exec(editor, &bin);
+        unwritten.iter().for_each(|said| eprintln!("{said}"));
+        eprintln!("tarae: {failed} — run tarae again; r on its start screen reopens your files");
         std::process::exit(1);
     }
     result

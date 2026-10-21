@@ -1215,7 +1215,7 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "in fn answer: ANSWERED.with(|a| a.borrow_mut().push((call.id.clo",
         "the answer kept: compat reads it there",
     ),
-    ("src/tools.rs", "in fn guard_and_go_riding: if let (For::Claude(_), Job::Command(c, _)) = (&wh", RECORD),
+    ("src/tools.rs", "in fn guard_and_go_riding: match (&who, &job) {", RECORD),
 ];
 
 /// What `BRANCHES` says most often.

@@ -36,8 +36,19 @@ pub struct SessionStore {
     pub dir: Option<PathBuf>,
     /// The kept sessions are back (or there were none): from then on a change is written.
     pub restored: bool,
+    /// The repository they came back from (its git folder) — None: tarae started outside one, nothing kept.
+    pub repo: Option<PathBuf>,
+    /// Answers taken back before the kept sessions were back (`:sandbox-disallow`, as it names them) — each
+    /// session's taken from what comes back for it too, or they'd be back with it, no card asked.
+    pub taken: Vec<(SessionId, String)>,
     /// A key was pressed since startup — sessions coming back then stay behind (the front is where you are).
     pub keyed: bool,
+    /// The file's counter as this tarae last read or wrote it: the take-backs kept there above it it hadn't seen
+    /// (`save`) — set on the worker as a write lands.
+    pub seen: std::sync::Arc<std::sync::Mutex<crate::storewrite::Rev>>,
+    /// The repository the last write that landed was for — set on the worker, so `:restart`'s state has it even
+    /// when the write's result was never applied (the loop had ended — F6).
+    pub landed: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// What git last said of each session for the list (read when it opens — shown meanwhile).
     pub facts: std::collections::HashMap<SessionId, Facts>,
     /// Where a checkout's tool builds (the built-in packs' `[builds]`): said on the create card, asked at a
@@ -1225,13 +1236,20 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
 
 static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The sessions kept for a repository: theirs, which was in front, the save's number.
+/// The sessions kept for a repository: theirs, which was in front — and the file's counter as read.
 #[derive(Default)]
 pub struct Stored {
     pub sessions: Vec<Kept>,
     pub front: Option<PathBuf>,
-    pub seq: u64,
+    pub rev: crate::storewrite::Rev,
 }
+
+/// How long a take-back stays in the sessions' file (seconds): a tarae that hadn't seen it may write its list that
+/// late at most.
+const TAKEN_KEPT_S: u64 = 30 * 24 * 3600;
+
+/// What a save narrows, as `storewrite::Pending.over` has it: every save writes the whole list.
+const SAVED: &str = "sessions";
 
 /// The folder they're kept in (in the state folder) · what earlier builds called it, and the list in a file
 /// and in `:restart`'s state — still read, so nothing kept is lost on upgrade.
@@ -1249,11 +1267,8 @@ pub fn load(dir: &Path, common: &Path) -> Stored {
     let Some(v) = read(dir).or_else(old).and_then(|b| serde_json::from_str::<Value>(&b).ok()) else {
         return Stored::default();
     };
-    Stored {
-        sessions: kept_list(&v),
-        front: v["front"].as_str().map(PathBuf::from),
-        seq: v["seq"].as_u64().unwrap_or(0),
-    }
+    let rev = crate::storewrite::Rev::of(&v["rev"]).unwrap_or_default();
+    Stored { sessions: kept_list(&v), front: v["front"].as_str().map(PathBuf::from), rev }
 }
 
 /// The kept sessions in `v` (a file's, `:restart`'s state) — under their old name if an earlier build wrote it.
@@ -1262,18 +1277,69 @@ fn kept_list(v: &Value) -> Vec<Kept> {
     list.and_then(Value::as_array).into_iter().flatten().filter_map(Kept::from_json).collect()
 }
 
-/// Written — unless what's there was taken later (on a worker).
-fn save(dir: &Path, common: &Path, s: Stored) {
+/// Written (on a worker, its turn taken: this tarae's saves land in the order made — `Editor::sessions_write`).
+/// Between taraes no clock orders them: under a lock beside the file its counter goes up with each write, and the
+/// take-backs kept there (`takes`, this write's; `TAKEN_KEPT_S`) carry the counter they were written at — a list
+/// from a tarae that had seen an earlier one (`seen`) is written without them (F7). The counter written, and what
+/// of this list another tarae's take-backs left out (each session's checkout, what).
+pub(crate) fn save(
+    dir: &Path,
+    common: &Path,
+    mut s: Stored,
+    takes: &[(PathBuf, String)],
+    seen: crate::storewrite::Rev,
+) -> std::io::Result<(crate::storewrite::Rev, Vec<(PathBuf, String)>)> {
     let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
-    if load(dir, common).seq > s.seq {
-        return;
+    std::fs::create_dir_all(dir)?;
+    let file = crate::chats::file(dir, common);
+    // (beside it: the file itself is replaced by each write)
+    let lock = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).truncate(false).write(true).mode(0o600);
+        o.open(file.with_extension("lock"))?
+    };
+    lock.lock()?;
+    let old = std::fs::read_to_string(&file).ok().and_then(|b| serde_json::from_str::<Value>(&b).ok());
+    let old = old.unwrap_or_default();
+    let now = crate::storewrite::Rev::of(&old["rev"]).unwrap_or_default();
+    // (a counter gone back, or made again: what was seen is another file's — every take-back kept there counts)
+    let seen = if seen.n > now.n || (seen.n == now.n && seen.tag != now.tag) { 0 } else { seen.n };
+    let at = crate::allow::now_s();
+    let floor = at.saturating_sub(TAKEN_KEPT_S);
+    let mut taken: Vec<Value> = (old["taken"].as_array().into_iter().flatten())
+        .filter(|t| t["at"].as_u64().is_some_and(|a| a >= floor))
+        .cloned()
+        .collect();
+    let mut left = Vec::new();
+    for t in &taken {
+        let (Some(root), Some(what), Some(n)) = (t["root"].as_str(), t["what"].as_str(), t["n"].as_u64())
+        else {
+            continue;
+        };
+        for k in s.sessions.iter_mut().filter(|k| n > seen && k.root == Path::new(root)) {
+            let had = k.allowed.clone();
+            k.allowed.remove(what);
+            if k.allowed != had {
+                left.push((k.root.clone(), what.to_string()));
+            }
+        }
     }
+    let rev = crate::storewrite::Rev { n: now.n + 1, tag: crate::storewrite::tag() };
+    taken
+        .extend(takes.iter().map(|(root, what)| json!({ "root": root, "what": what, "n": rev.n, "at": at })));
     let sessions: Vec<Value> = s.sessions.iter().map(Kept::json).collect();
-    let body = json!({ "repo": common, "seq": s.seq, "front": s.front, "sessions": sessions }).to_string();
-    let _ = std::fs::create_dir_all(dir);
-    let _ = crate::disk::write_atomic(&crate::chats::file(dir, common), |w| {
-        std::io::Write::write_all(w, body.as_bytes())
-    });
+    let body =
+        json!({ "repo": common, "front": s.front, "sessions": sessions, "rev": rev.json(), "taken": taken });
+    let body = body.to_string();
+    crate::disk::write_atomic(&file, |w| std::io::Write::write_all(w, body.as_bytes()))?;
+    Ok((rev, left))
+}
+
+/// A sessions' write's take-backs, as its ticket carries them.
+fn takes_of(v: &Value) -> Vec<(PathBuf, String)> {
+    let takes = v["takes"].as_array().into_iter().flatten();
+    takes.filter_map(|t| Some((PathBuf::from(t[0].as_str()?), t[1].as_str()?.to_string()))).collect()
 }
 
 /// The kept sessions still there (their checkout's top where it was) · the ones gone.
@@ -1284,18 +1350,35 @@ fn still_there(sessions: Vec<Kept>) -> (Vec<Kept>, Vec<Kept>) {
 /// The sessions for `:restart`'s state (`restart.rs`): theirs and which is in front.
 pub fn snapshot(ed: &Editor) -> Value {
     let sessions: Vec<Value> = ed.sessions_in_order().iter().map(|l| Kept::of(l).json()).collect();
-    json!({ "sessions": sessions, "front": ed.session.root })
+    // (and the repository they're kept for — the last write's that landed, its result applied or not: a take-back
+    // after the restart says a write it can't make — and the file's counter as seen)
+    let landed = ed.session_store.landed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let seen = *ed.session_store.seen.lock().unwrap_or_else(|e| e.into_inner());
+    let repo = landed.or_else(|| ed.session_store.repo.clone());
+    json!({ "sessions": sessions, "front": ed.session.root, "repo": repo, "seen": seen.json() })
 }
 
 /// Back from `:restart`'s state, the front one in front — before its files open. The names of those whose
 /// checkout is gone (the restart's toast says them).
 pub fn restore(ed: &mut Editor, v: &Value) -> Vec<String> {
+    ed.session_store.repo = v["repo"].as_str().map(PathBuf::from).or(ed.session_store.repo.take());
+    if let Some(seen) = crate::storewrite::Rev::of(&v["seen"]) {
+        *ed.session_store.seen.lock().unwrap_or_else(|e| e.into_inner()) = seen;
+    }
     let sessions = kept_list(v);
     if sessions.is_empty() {
         return Vec::new();
     }
     let (here, gone): (Vec<Kept>, Vec<Kept>) = sessions.into_iter().partition(|k| k.root.is_dir());
     ed.sessions_back(here, gone, v["front"].as_str().map(PathBuf::from), true)
+}
+
+/// `:restart`'s sessions' writes not landed: their take-backs written again (the sessions back by then).
+pub fn taken_again(ed: &mut Editor, carried: &Value) {
+    let takes: Vec<_> = carried.as_array().into_iter().flatten().flat_map(takes_of).collect();
+    if !takes.is_empty() {
+        ed.sessions_taken_back(takes);
+    }
 }
 
 impl Editor {
@@ -1335,22 +1418,151 @@ impl Editor {
         })
     }
 
-    /// The sessions as they are now, kept for this repository (written on a worker).
+    /// The sessions as they are now, kept for this repository (written on a worker) — the repository recorded
+    /// once a write lands there, so a later take-back that can't find it says so (`sessions_keep_then`).
     pub fn sessions_keep(&self) {
-        let Some(dir) = self.session_store.dir.clone().filter(|_| self.session_store.restored) else {
-            return;
+        self.sessions_keep_then(|ed, _| ed.unchanged = true);
+    }
+
+    /// `sessions_keep`, and `then` with how the write went — for what must be said when it fails (an answer
+    /// taken back). Before the kept sessions are back nothing is written (`SessionStore.taken` holds a take-back).
+    pub fn sessions_keep_then(&self, then: impl FnOnce(&mut Editor, Result<(), String>) + Send + 'static) {
+        self.sessions_write(Vec::new(), then);
+    }
+
+    /// The sessions written without what `takes` took back (each session's checkout, what) — kept in the file as
+    /// taken back, so another tarae's list written later leaves them out; until written a quit names them and
+    /// `:restart` gives them again (`store_writes`), and a write that fails says so.
+    pub fn sessions_taken_back(&self, takes: Vec<(PathBuf, String)>) {
+        let named = takes.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", ");
+        self.sessions_write(takes, move |ed, r| {
+            if let Err(e) = r {
+                ed.set_error(format!(
+                    "couldn't write the sessions without {named}: {e} — taken back until you quit; at the next start \
+                     it's back unless the sessions are written again before then"
+                ));
+            }
+        });
+    }
+
+    /// `sessions_keep_then`, with `takes` (`sessions_taken_back`).
+    fn sessions_write(
+        &self,
+        takes: Vec<(PathBuf, String)>,
+        then: impl FnOnce(&mut Editor, Result<(), String>) + Send + 'static,
+    ) {
+        let Some((dir, start, s)) = self.sessions_stored() else { return };
+        let kept_in = self.session_store.repo.clone();
+        let (seen, landed) = (self.session_store.seen.clone(), self.session_store.landed.clone());
+        // (in this tarae's order — and named by a quit that cuts it off; one with take-backs kept, failed, until a
+        // later write lands — which writes them too)
+        let said = match takes.is_empty() {
+            true => format!("the sessions kept for {}", start.display()),
+            false => format!(
+                "the sessions kept for {} without {}",
+                start.display(),
+                takes.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", ")
+            ),
         };
-        let start = self.start_root();
+        let again = !takes.is_empty();
+        let ticket =
+            crate::storewrite::ticket(&dir, said, json!({ "takes": takes }), again, vec![SAVED.into()]);
+        self.events.shared_jobs().spawn_kept(move || {
+            // (none: cut off — a test's process that ended: nothing written, nothing back)
+            let went = crate::storewrite::turn(ticket).map(|turn| {
+                // (with this tarae's take-backs whose writes failed: this one writes over them)
+                let mut takes = takes;
+                let failed = crate::storewrite::pending(&dir).into_iter().filter(|p| p.failed && p.again);
+                takes.extend(failed.flat_map(|p| takes_of(&p.carry)));
+                let (r, kept) =
+                    write_sessions(&dir, &start, s, &takes, (&seen, &landed), kept_in.as_ref(), turn.fails);
+                turn.done(r.is_ok(), vec![SAVED.into()]);
+                (r, kept)
+            });
+            move |ed: &mut Editor| {
+                let Some((r, kept)) = went else { return };
+                // (kept there now: a later take-back that can't find it says so)
+                let left = match (&r, kept) {
+                    (Ok((_, left)), Some(common)) => {
+                        ed.session_store.repo = Some(common);
+                        left.clone()
+                    }
+                    _ => Vec::new(),
+                };
+                // (taken back in another tarae, unseen: gone here too)
+                for (root, what) in &left {
+                    let id = (ed.sessions_in_order().into_iter().find(|l| l.root == *root)).map(|l| l.id);
+                    if let Some(l) = id.and_then(|id| ed.session_by_id(id)) {
+                        l.allowed.remove(what);
+                    }
+                    if let Some(id) = id {
+                        ed.caps_sync_of(id);
+                    }
+                    ed.set_status(format!("Taken back in another tarae: {what} for the session"));
+                }
+                then(ed, r.map(|_| ()))
+            }
+        });
+    }
+}
+
+/// What the sessions' file's write left out of this tarae's list: each session's checkout and what.
+type Left = Vec<(PathBuf, String)>;
+
+/// `Editor::sessions_write`'s write, its turn taken (`fails`: a test's failing write) — where they're kept for
+/// `kept_in`, the counter seen and the repository it lands for set here (`seen`, `landed`: on the worker, so
+/// `:restart`'s state has them though the result never reaches the loop — F6). How it went, and the repository it
+/// was written for.
+fn write_sessions(
+    dir: &Path,
+    start: &Path,
+    s: Stored,
+    takes: &[(PathBuf, String)],
+    (seen, landed): (&std::sync::Mutex<crate::storewrite::Rev>, &std::sync::Mutex<Option<PathBuf>>),
+    kept_in: Option<&PathBuf>,
+    fails: bool,
+) -> (Result<(crate::storewrite::Rev, Left), String>, Option<PathBuf>) {
+    let (r, kept) = match common_dir(start) {
+        _ if fails => (Err("the store's write failed (a test's)".to_string()), None),
+        // (another repository found where they're kept for one — its `.git` gone, an outer one around it:
+        // not written there, said — F13)
+        Ok(common) if kept_in.is_some_and(|k| *k != common) => (
+            Err(format!("the repository they're kept for is gone ({} found instead)", common.display())),
+            None,
+        ),
+        Ok(common) => {
+            let seen_then = *seen.lock().unwrap_or_else(|e| e.into_inner());
+            let r = save(dir, &common, s, takes, seen_then).map_err(|e| e.to_string());
+            (r, Some(common))
+        }
+        // (outside a repository nothing was kept: nothing to write — but one they're kept for, gone)
+        Err(e) if kept_in.is_some() => {
+            (Err(format!("the repository they're kept for isn't found: {e}")), None)
+        }
+        Err(_) => (Ok(Default::default()), None),
+    };
+    if let (Ok((rev, _)), Some(common)) = (&r, &kept) {
+        *seen.lock().unwrap_or_else(|e| e.into_inner()) = *rev;
+        *landed.lock().unwrap_or_else(|e| e.into_inner()) = Some(common.clone());
+    }
+    (r, kept)
+}
+
+impl Editor {
+    /// Where the sessions' store is (its writes' line in `storewrite`).
+    pub fn sessions_path(&self) -> Option<PathBuf> {
+        self.session_store.dir.clone()
+    }
+
+    /// What `sessions_keep` writes, and where — None before the kept sessions are back, or with no store.
+    fn sessions_stored(&self) -> Option<(PathBuf, PathBuf, Stored)> {
+        let dir = self.session_store.dir.clone().filter(|_| self.session_store.restored)?;
         let s = Stored {
             sessions: self.sessions_in_order().into_iter().map(Kept::of).collect(),
             front: Some(self.session.root.clone()),
-            seq: crate::chats::seq(),
+            rev: Default::default(),
         };
-        self.events.shared_jobs().background(move || {
-            if let Ok(common) = common_dir(&start) {
-                save(&dir, &common, s);
-            }
-        });
+        Some((dir, self.start_root(), s))
     }
 
     /// At startup: this repository's kept sessions come back behind (read on a worker); the one that was in
@@ -1366,10 +1578,13 @@ impl Editor {
             let found = common_dir(&start).ok().map(|common| {
                 let s = load(&dir, &common);
                 let (here, gone) = still_there(s.sessions);
-                (here, gone, s.front)
+                (here, gone, s.front, common, s.rev)
             });
             move |ed: &mut Editor| match found {
-                Some((here, gone, front)) => {
+                Some((here, gone, front, common, rev)) => {
+                    ed.session_store.repo = Some(common);
+                    // (the take-backs kept there up to it are in what came back: seen)
+                    *ed.session_store.seen.lock().unwrap_or_else(|e| e.into_inner()) = rev;
                     let take = !ed.session_store.keyed;
                     let gone = ed.sessions_back(here, gone, front, take);
                     if !gone.is_empty() {
@@ -1396,7 +1611,8 @@ impl Editor {
     ) -> Vec<String> {
         let start = self.start_root();
         let mut changed = !gone.is_empty();
-        for k in here {
+        let mut took = false;
+        for mut k in here {
             let id = match std::iter::once(&self.session).chain(&self.sessions).find(|l| l.root == k.root) {
                 Some(l) => l.id,
                 None => {
@@ -1404,6 +1620,10 @@ impl Editor {
                     self.session_add(k.root.clone())
                 }
             };
+            let came = k.allowed.clone();
+            self.session_store.taken.iter().filter(|(s, _)| *s == id).for_each(|(_, w)| k.allowed.remove(w));
+            // (written again without it, or it's back at the next start)
+            took |= k.allowed != came;
             let granted = !k.allowed.is_empty();
             if let Some(l) = self.session_by_id(id) {
                 (l.name, l.branch, l.base) = (k.name, k.branch, k.base);
@@ -1420,13 +1640,21 @@ impl Editor {
             }
         }
         self.session_store.restored = true;
+        let taken: Vec<(SessionId, String)> = std::mem::take(&mut self.session_store.taken);
         if take_front
             && let Some(f) = front.filter(|f| *f != self.session.root && *f != start)
             && let Some(id) = self.sessions.iter().find(|l| l.root == f).map(|l| l.id)
         {
             self.session_switch(id);
         }
-        if changed {
+        // (a take-back before they came back: its write said when it fails, as `:sandbox-disallow` says its own)
+        if took {
+            let roots =
+                self.sessions_in_order().into_iter().map(|l| (l.id, l.root.clone())).collect::<Vec<_>>();
+            let root = |id: SessionId| roots.iter().find(|(i, _)| *i == id).map(|(_, r)| r.clone());
+            let takes = taken.into_iter().filter_map(|(id, w)| Some((root(id)?, w))).collect();
+            self.sessions_taken_back(takes);
+        } else if changed {
             self.sessions_keep();
         }
         gone.into_iter().map(|k| k.name).collect()
@@ -2767,7 +2995,9 @@ mod tests {
         let ended = |ed: &mut Editor, name: &str| {
             feed(ed, ":session-end<ret>");
             settle_until(ed, |ed| says(ed, &format!("Ended {name}")) || says(ed, &format!("end {name}:")));
-            ed.messages.iter().map(|m| m.2.clone()).find(|m| m.contains(&format!("Ended {name}"))).unwrap()
+            let said: Vec<String> = ed.messages.iter().map(|m| m.2.clone()).collect();
+            let ended = said.iter().find(|m| m.contains(&format!("Ended {name}"))).cloned();
+            ended.unwrap_or_else(|| panic!("{name} didn't end: {said:?}"))
         };
         // Its own: removed, counted
         let wt = new_session(&mut ed, "own");
@@ -4655,17 +4885,14 @@ mod tests {
         let state = scratch.to_path_buf();
         let (dir, common) = (state.join(DIR), Path::new("/repo/.git"));
         let kept = |name: &str| json!({ "root": format!("/wt/{name}"), "name": name, "branch": name });
-        let old = json!({ "repo": common, "seq": 3, "front": "/wt/a", OLD_NAME: [kept("a")] });
+        let old = json!({ "repo": common, "front": "/wt/a", OLD_NAME: [kept("a")] });
         std::fs::create_dir_all(state.join(OLD_NAME)).unwrap();
         std::fs::write(crate::chats::file(&state.join(OLD_NAME), common), old.to_string()).unwrap();
         let s = load(&dir, common);
         assert_eq!(s.sessions.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["a"]);
-        assert_eq!((s.front.as_deref(), s.seq), (Some(Path::new("/wt/a")), 3));
-        save(
-            &dir,
-            common,
-            Stored { sessions: vec![Kept::from_json(&kept("b")).unwrap()], front: None, seq: 4 },
-        );
+        assert_eq!(s.front.as_deref(), Some(Path::new("/wt/a")));
+        let s = Stored { sessions: vec![Kept::from_json(&kept("b")).unwrap()], ..Default::default() };
+        save(&dir, common, s, &[], Default::default()).unwrap();
         assert_eq!(load(&dir, common).sessions[0].name, "b", "its own file wins");
         // (a folder not named as the state's isn't paired with an old one)
         assert!(load(&state.join("elsewhere"), common).sessions.is_empty());
@@ -4690,7 +4917,14 @@ mod tests {
         assert!(
             v["allowed"].as_array().unwrap().iter().all(|e| e["scope"] == "session" && e["granted"].is_u64())
         );
-        save(&dir, common, Stored { sessions: vec![k.clone()], front: None, seq: 1 });
+        save(
+            &dir,
+            common,
+            Stored { sessions: vec![k.clone()], ..Default::default() },
+            &[],
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(load(&dir, common).sessions, std::slice::from_ref(&k), "read back, times and all");
         assert_eq!(kept_list(&snapshot(&ed))[0].allowed, k.allowed, ":restart's state");
         // Back onto the session, beside an answer given meanwhile

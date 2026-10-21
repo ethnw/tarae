@@ -471,7 +471,8 @@ pub fn stop(ed: &mut Editor, s: &Stuck) {
         c.stopped();
     }
     // (the same process still — a pid isn't given out again that soon, and its start says it's the one)
-    ed.events.jobs().background(move || {
+    // (a timer, nothing written: a quit doesn't wait for it)
+    ed.events.jobs().detached(move || {
         std::thread::sleep(KILL_AFTER);
         if crate::procs::read(pid).is_some_and(|o| !o.zombie && Some(o.started) == started) {
             // SAFETY: a KILL to the process group of Claude's run, started with setsid, still the same.

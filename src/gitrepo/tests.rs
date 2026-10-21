@@ -131,16 +131,16 @@ fn a_root_with_a_git_of_its_own_since_is_resolved_again() {
 fn the_kept_roots_are_capped_least_lately_used_first() {
     let dir = temp("cap");
     let root = |i: usize| dir.join(format!("d{i}"));
-    let mut kept = Kept { cap: 3, entries: Vec::new() };
+    let mut kept = Kept { cap: 3, entries: Vec::new(), epoch_now: || 0 };
     for i in 0..5 {
         std::fs::create_dir_all(root(i).join(".git")).unwrap();
         let r = plain(root(i).join(".git"), Some(root(i)), root(i));
-        kept.put(root(i), Arc::new(r));
+        kept.put(root(i), Arc::new(r), 0);
         if i == 2 {
             assert!(kept.get(&root(0)).is_some(), "0 used again: the newest");
         }
     }
-    let left: Vec<PathBuf> = kept.entries.iter().map(|(k, _)| k.clone()).collect();
+    let left: Vec<PathBuf> = kept.entries.iter().map(|(k, ..)| k.clone()).collect();
     assert_eq!(left, [root(0), root(3), root(4)]);
     assert_eq!(KEPT_MAX, 64);
     std::fs::remove_dir_all(&dir).ok();

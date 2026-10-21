@@ -664,6 +664,59 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A grant riding with a run that waits its turn goes with a take-back of it made meanwhile (verify3 F15): the
+    /// run starts with what's allowed then.
+    #[test]
+    fn a_take_back_strips_the_grant_riding_with_a_run_in_line() {
+        let (mut ed, dir, generation) = at_work("riding");
+        script(&dir, "slow", 0.8);
+        script(&dir, "fast", 0.0);
+        run(&mut ed, generation, 1, "sh slow.sh");
+        pump(&mut ed, "the first started", running);
+        run(&mut ed, generation, 2, "sh fast.sh");
+        fn riding(ed: &mut Editor) -> Option<&mut Option<crate::allow::Grant>> {
+            match ed.session.runs_next.front_mut().map(|n| &mut n.what) {
+                Some(super::What::Guarded { ride, .. }) => Some(&mut ride.extra.grant),
+                _ => None,
+            }
+        }
+        *riding(&mut ed).expect("in line") = Some(crate::allow::Grant::Port(8080));
+        ed.sandbox_disallow("port 8080").unwrap();
+        assert_eq!(riding(&mut ed).cloned(), Some(None), "the grant rides on past its take-back");
+        pump(&mut ed, "the second ran", |_| answered(2).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A take-back in one session strips the grant riding with another checkout's run in line too: the take-back
+    /// reaches every session (piece J — a kept answer may be every checkout's, each conversation's copy goes).
+    #[test]
+    fn a_take_back_strips_another_sessions_riding_grant() {
+        let (mut ed, dir, generation) = at_work("riding-other");
+        script(&dir, "slow", 0.8);
+        script(&dir, "fast", 0.0);
+        run(&mut ed, generation, 1, "sh slow.sh");
+        pump(&mut ed, "the first started", running);
+        run(&mut ed, generation, 2, "sh fast.sh");
+        let mut next = ed.session.runs_next.pop_front().expect("in line");
+        if let super::What::Guarded { ride, .. } = &mut next.what {
+            ride.extra.grant = Some(crate::allow::Grant::Port(8080));
+        }
+        // (in line in another checkout's session)
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let id = ed.session_add(other);
+        let s = ed.sessions.iter_mut().find(|s| s.id == id).unwrap();
+        s.runs_next.push_back(next);
+        ed.sandbox_disallow("port 8080").unwrap();
+        let s = ed.sessions.iter().find(|s| s.id == id).unwrap();
+        let kept = s.runs_next.front().map(|n| match &n.what {
+            super::What::Guarded { ride, .. } => ride.extra.grant.clone(),
+            _ => None,
+        });
+        assert_eq!(kept, Some(None), "rides on in another session past its take-back");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Its turn came, and while it got ready (its sandbox, the saves) the panel was taken — it's back at the
     /// front of the line, not refused, and runs when the panel frees.
     #[test]

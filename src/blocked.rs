@@ -600,7 +600,9 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
             Grant::Host(h, p) => crate::hosts::granted(ed, h, *p, scope),
             _ => crate::allow::grant(ed, &grant, scope),
         }
-        let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
+        // (the answer rides along whatever its scope, as the user's own run below: a failed take-back of it hides it
+        // from the store's answers until the `A`'s write lands)
+        let extra = Extra { grant: Some(grant), outside: false, base: None };
         return crate::tools::guard_and_go(ed, For::Claude(call), run.job, false, extra);
     }
     let Some(scope) = scope else {
@@ -618,7 +620,9 @@ pub fn grant_answer(ed: &mut Editor, id: u64, grant: Grant, mut run: BlockedRun,
         if scope == Scope::Once { " this once" } else { "" }
     );
     rerun_of(ed, &run, &head);
-    let extra = Extra { grant: (scope == Scope::Once).then_some(grant), outside: false, base: None };
+    // (the answer rides along whatever its scope: an `A` with no chat open is the store's only once written, and
+    // a failed take-back of it hides it until then — the run again is of the answer just given)
+    let extra = Extra { grant: Some(grant), outside: false, base: None };
     crate::tools::guard_and_go(ed, For::User(head), run.job, true, extra);
 }
 
