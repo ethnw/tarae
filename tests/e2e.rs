@@ -476,7 +476,9 @@ fn survives_resizing_to_a_tiny_terminal_and_back() {
     t.wait_for("cursor on line 2", |s| s.status().contains("2:1"));
 
     t.resize(20, 5);
-    t.wait_for("a redraw at 20x5 with the status line", |s| s.rows.len() == 5 && s.status().contains("NOR"));
+    t.wait_for("a redraw at 20x5 with the status line", |s| {
+        s.rows.len() == 5 && s.status().contains("● normal")
+    });
     // Still responsive at that size
     t.send("j");
     t.wait_for("cursor on line 3 at 20x5", |s| s.status().contains("3:1"));
