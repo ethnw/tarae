@@ -644,7 +644,7 @@ impl Editor {
             && !(on && r.behind)
         {
             r.behind = true;
-            if matches!(self.session.at, At::Rail | At::Side) {
+            if matches!(self.session.docked(), At::Rail | At::Side) {
                 self.session.at = At::Code;
             }
         }
@@ -866,7 +866,7 @@ impl Editor {
             }
         }
         let Some(s) = self.session.sidebar.as_ref() else { return };
-        if self.session.at != At::Side
+        if !self.session.is_at(At::Side)
             && let Some(h) = s.here(self)
         {
             self.session.sidebar.as_mut().unwrap().selected = h;
@@ -876,6 +876,7 @@ impl Editor {
     /// Enter / a click: a folder folds or unfolds, a file opens, a definition is jumped to — the code gets
     /// the keys back.
     pub fn sidebar_activate(&mut self, row: usize) {
+        let side_keys = self.session.is_at(At::Side);
         let Some(s) = self.session.sidebar.as_mut() else { return };
         let Some(line) = s.lines().get(row).cloned() else { return };
         s.selected = row;
@@ -896,9 +897,7 @@ impl Editor {
             }
             // A changed file (not new): open to its hunks and conflicts — it shows in the editor, the
             // panel keeps the keys; closed again the same way
-            Target::Change { rel, file: true, staged: false, untracked: false }
-                if self.session.at == At::Side =>
-            {
+            Target::Change { rel, file: true, staged: false, untracked: false } if side_keys => {
                 if s.expanded.remove(&rel) {
                     return;
                 }
@@ -947,7 +946,7 @@ impl Editor {
             }
             Target::None | Target::Change { .. } => {}
             Target::At(at) => {
-                if self.session.at == At::Side {
+                if side_keys {
                     self.session.at = At::Code;
                 }
                 let fresh = s.outline_of.is_some_and(|o| o == (self.doc().id, self.doc().version()));
@@ -1144,7 +1143,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     // Folded away (the terminal is too narrow for it and the code): the keys are the code's
     let folded = ed.side_folded();
-    if ed.session.at != At::Side {
+    if !ed.session.is_at(At::Side) {
         return false;
     }
     let Some(s) = ed.session.sidebar.as_mut() else { return false };
@@ -1259,7 +1258,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     // Moving onto a hunk or conflict shows it in the code
     if let Some(s) = ed.session.sidebar.as_ref().filter(|s| s.mode == Mode::Git && Some(s.selected) != before)
-        && ed.session.at == At::Side
+        && ed.session.is_at(At::Side)
         && let Some(t) = s.lines().get(s.selected).map(|l| l.target.clone())
         && matches!(t, Target::Hunk { .. } | Target::Conflict { .. })
     {

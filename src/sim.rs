@@ -33,6 +33,7 @@ mod commit;
 mod diskwatch;
 mod hosts;
 mod instructions;
+mod panes;
 #[cfg(not(target_os = "linux"))]
 mod ptybroker;
 mod quota;

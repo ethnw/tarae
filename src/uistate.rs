@@ -56,6 +56,8 @@ pub enum Region {
     EditReview,
     /// The bottom slot with tarae's keys: its panel's own (the terminal's are its view mode's).
     Slot(Slot),
+    /// A linked group's list with the keys (§2.1b — the tests' results, `testing::list_key`).
+    List(Slot),
     /// The terminal's program: every key goes to it.
     Program,
     /// Card `id`: its answers (`offer_key`), or every key once `C-q` gave it them (`card_key`).
@@ -83,6 +85,7 @@ impl Region {
             Region::Rail => "review".into(),
             Region::EditReview => "edit-review".into(),
             Region::Slot(s) => format!("slot:{}", slot_name(s)),
+            Region::List(s) => format!("list:{}", slot_name(s)),
             Region::Program => "terminal-program".into(),
             Region::Card(_) => "card".into(),
             Region::NextCard => "next-card".into(),
@@ -108,6 +111,7 @@ impl Region {
             Region::Slot(Slot::Plugin) => Handler::PluginPanel,
             // (the test, task and terminal panels' keys are their view modes')
             Region::Slot(_) => Handler::Code,
+            Region::List(_) => Handler::List,
             Region::Program => Handler::Program,
             Region::Card(_) => Handler::Card,
             Region::NextCard => Handler::NextCard,
@@ -163,6 +167,7 @@ pub enum Handler {
     Side,
     Procs,
     PluginPanel,
+    List,
     Prompt,
     Code,
 }
@@ -187,6 +192,7 @@ impl Handler {
             Handler::Side => "side",
             Handler::Procs => "procs",
             Handler::PluginPanel => "plugin",
+            Handler::List => "list",
             Handler::Prompt => "prompt",
             Handler::Code => "code",
         }
@@ -478,6 +484,9 @@ impl Editor {
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
+            if self.tests_list_focused() {
+                v.push(layer(Region::List(Slot::Test), editors(&[ctrl('w')])));
+            }
             // (the terminal's, the test and task panels' are their view modes', above)
         }
         if self.prompt.is_some() {
@@ -541,6 +550,12 @@ impl Editor {
         crate::sorting::sort(&mut t);
         t.dedup();
         t
+    }
+
+    /// The region the keys go to now — `keys_to().region`, nothing else built.
+    pub(crate) fn keys_region(&self) -> Region {
+        let chain = self.keys_chain();
+        chain.iter().find(|l| !l.shortcut).unwrap_or(&chain[chain.len() - 1]).region
     }
 
     /// Where the keys go now — what drivers check before sending a key, and what the status line names.
@@ -623,6 +638,7 @@ impl Editor {
             Region::EditReview => s.review_change.get().is_some(),
             Region::Slot(Slot::Terminal) | Region::Program => s.terminal_rows.is_some(),
             Region::Slot(Slot::Test) => s.test_panel.get().is_some(),
+            Region::List(_) => s.tests_list.get().is_some(),
             Region::Slot(Slot::Task) => s.task_panel.get().is_some(),
             Region::Slot(Slot::Procs) => s.procs_panel.get().is_some(),
             Region::Slot(Slot::Plugin) => s.plugin_panel.get().is_some(),
@@ -649,6 +665,7 @@ impl Editor {
                 "terminal".into()
             }
             Region::Slot(s) => slot_name(s).into(),
+            Region::List(_) => format!("pane#{}", self.session.tests.list),
             Region::Rail => "review".into(),
             Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),
             Region::View(s) if let Some(slot) = s.slot() => slot_name(slot).into(),
@@ -975,13 +992,23 @@ impl Editor {
     /// Session `l`'s panes as the state lists them, the tree's order — the front's with their rects and the
     /// floating ones over them.
     fn panes_state(&self, l: &crate::session::Session, is_front: bool) -> Vec<PaneState> {
-        use crate::pane::{Floating, Shows};
-        let keys = is_front.then(|| self.keys_to().region);
-        let floats_keys = matches!(keys, Some(Region::Card(_) | Region::Picker | Region::Prompt));
-        let at = l.at_pane().filter(|_| !floats_keys);
-        let mut out: Vec<PaneState> = l
-            .split
-            .leaves()
+        use crate::pane::Shows;
+        let floats_keys = matches!(l.at, At::Float(_));
+        let mut at = l.at_pane().filter(|_| !floats_keys);
+        // (the tests' group on screen: its two members after the slot, the slot's keys its detail's)
+        let mut ids = l.split.leaves();
+        let g = l.tests;
+        let slot = l.leaf(Shows::Slot);
+        if is_front
+            && self.screen.leaves.iter().any(|r| r.0 == g.list)
+            && let Some(i) = ids.iter().position(|&id| Some(id) == slot)
+        {
+            ids.splice(i + 1..i + 1, [g.list, g.detail]);
+            if at == slot {
+                at = Some(g.detail);
+            }
+        }
+        let mut out: Vec<PaneState> = ids
             .into_iter()
             .filter_map(|id| {
                 let shows = match l.shows(id)? {
@@ -1005,17 +1032,13 @@ impl Editor {
             .collect();
         if is_front {
             for f in self.floating() {
-                let (shows, has) = match f {
-                    Floating::Card(n) => ("card", keys == Some(Region::Card(n))),
-                    Floating::Picker => ("picker", keys == Some(Region::Picker)),
-                    Floating::Prompt => ("prompt", keys == Some(Region::Prompt)),
-                    Floating::WhichKey => ("which-key", false),
-                };
+                let pane = l.floats.iter().find(|x| x.0 == f).map(|x| x.1);
+                let has = pane.is_some_and(|p| l.at == At::Float(p));
                 let rect = match f {
-                    Floating::Card(_) => self.screen.offer_card,
+                    crate::pane::Floating::Card(_) => self.screen.offer_card,
                     _ => None,
                 };
-                out.push(PaneState { id: f.id(), shows: shows.into(), rect, at: has, float: true });
+                out.push(PaneState { id: f.id(), shows: f.kind().into(), rect, at: has, float: true });
             }
         }
         out

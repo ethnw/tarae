@@ -349,27 +349,27 @@
       "panes": [
         {
           "at": false,
-          "id": "pane#7",
+          "id": "pane#9",
           "shows": "side"
         },
         {
           "at": false,
-          "id": "pane#8",
+          "id": "pane#10",
           "shows": "rail"
         },
         {
           "at": true,
-          "id": "pane#6",
+          "id": "pane#8",
           "shows": "code"
         },
         {
           "at": false,
-          "id": "pane#9",
+          "id": "pane#11",
           "shows": "slot"
         },
         {
           "at": false,
-          "id": "pane#10",
+          "id": "pane#12",
           "shows": "chat"
         }
       ],

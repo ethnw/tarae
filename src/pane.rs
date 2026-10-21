@@ -2,8 +2,9 @@
 //! are the leaves of their session's split tree (`Session.split`, `split.rs`: ids and shares only) — the code's
 //! panes, the side panel, the review's rail, the bottom slot, the chat — and each shows one surface (`Shows`);
 //! term.rs lays the tree out every frame and draws each surface in its leaf's rect. The floating ones — a card,
-//! a picker, which-key, a prompt — come and go by their keys over the docked ones (`floating`); while one is up
-//! it has the keys, as `Editor::keys_to()` says, and `Session.at` names the docked pane they go back to.
+//! a picker, which-key, a prompt — come and go by their keys over the docked ones (`floating`); while one has the
+//! keys, as `Editor::keys_to()` says, `Session.at` is `At::Float` with its pane id and `Session.under` the docked
+//! pane they go back to (`float_sync`).
 //!
 //! The default tree is today's screen, cell for cell (§2.5): the side panel or the rail on the left, the code over
 //! the slot in the middle, the chat on the right — each surface's own size (`Share::Auto`, `sizes.rs`'s rules),
@@ -24,6 +25,10 @@ pub enum Shows {
     Slot,
     /// The session's chat.
     Chat,
+    /// The tests' linked group (§2.1b, `Group`): the list of results — its selection drives the detail.
+    TestList,
+    /// …and the detail: the failure picked, else the run's output (its view mode, `view.rs`).
+    TestDetail,
 }
 
 impl Shows {
@@ -35,11 +40,37 @@ impl Shows {
             Shows::Rail => "rail",
             Shows::Slot => "slot",
             Shows::Chat => "chat",
+            Shows::TestList => "tests:list",
+            Shows::TestDetail => "tests:detail",
         }
     }
 
+    /// A surface of the tree's (`SURFACES`, the code) by its name — a group's members aren't kept by name: the
+    /// group comes with its host.
     pub fn of_name(s: &str) -> Option<Self> {
         [Shows::Code, Shows::Side, Shows::Rail, Shows::Slot, Shows::Chat].into_iter().find(|k| k.name() == s)
+    }
+}
+
+/// A linked group (§2.1b): a list and its detail, two panes laid out side by side in their host's rect — the slot's,
+/// for the tests — under one header and one `q`, a line between them; the list's selection drives the detail. Each
+/// is a pane of its own: hopped to (`C-w h/l`, `tab`), its own keys and selection. They aren't the tree's leaves
+/// (the slot shows one panel at a time); term.rs lays them out in the slot's leaf while it shows the tests with
+/// results to list (`Screen.leaves` has them there, the slot's leaf not).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub list: PaneId,
+    pub detail: PaneId,
+}
+
+impl Group {
+    /// The member pane `id` is, if it's one.
+    pub fn member(&self, id: PaneId) -> Option<Shows> {
+        match id {
+            _ if id == self.list => Some(Shows::TestList),
+            _ if id == self.detail => Some(Shows::TestDetail),
+            _ => None,
+        }
     }
 }
 
@@ -53,8 +84,14 @@ pub struct Pane {
 /// The surfaces a session has a pane for from its start, in the ids they're given after its first code pane's.
 pub const SURFACES: [Shows; 4] = [Shows::Side, Shows::Rail, Shows::Slot, Shows::Chat];
 
-/// The ids a new session takes: its first code pane's and one for each of `SURFACES`.
-pub const IDS: u64 = 1 + SURFACES.len() as u64;
+/// The ids a new session takes: its first code pane's, one for each of `SURFACES`, then its tests group's two.
+pub const IDS: u64 = 1 + SURFACES.len() as u64 + 2;
+
+/// The tests group of a session whose first code pane is `code` — the two ids after its surfaces'.
+pub fn tests_group(code: PaneId) -> Group {
+    let list = code + 1 + SURFACES.len() as u64;
+    Group { list, detail: list + 1 }
+}
 
 /// A new session's panes and tree, its first code pane `code`, the surfaces' the ids after it: today's screen.
 ///
@@ -95,6 +132,16 @@ pub enum Floating {
 
 impl Floating {
     /// Its id in the state, as the element ids are (`card#12`, `picker`, `prompt`, `which-key`).
+    /// What it shows, in the state (`card`, `picker`, `prompt`, `which-key`).
+    pub fn kind(self) -> &'static str {
+        match self {
+            Floating::Card(_) => "card",
+            Floating::Picker => "picker",
+            Floating::Prompt => "prompt",
+            Floating::WhichKey => "which-key",
+        }
+    }
+
     pub fn id(self) -> String {
         match self {
             Floating::Card(n) => format!("card#{n}"),
@@ -125,6 +172,59 @@ impl crate::editor::Editor {
             out.push(Floating::Prompt);
         }
         out
+    }
+
+    /// The floating pane the keys go to now, as `keys_to()` routes them: a card's (held, or taking its answers),
+    /// the picker, a prompt — else which-key while a key sequence is under way.
+    pub fn float_front(&self) -> Option<Floating> {
+        use crate::uistate::Region;
+        match self.keys_region() {
+            Region::Card(n) => Some(Floating::Card(n)),
+            Region::Picker => Some(Floating::Picker),
+            Region::Prompt => Some(Floating::Prompt),
+            _ => self.floating().into_iter().find(|f| *f == Floating::WhichKey),
+        }
+    }
+
+    /// Every key and event (`focus_sync`): `Session.at` is the floating pane with the keys while one has them —
+    /// risen over the docked pane (`Session.under`), its id the one it rose with — and the docked pane's again once
+    /// it goes (answered, closed, `esc`). A docked pane given the keys while a floating one is up goes under it.
+    pub fn float_sync(&mut self) {
+        use crate::session::At;
+        let front = self.float_front();
+        let mut up = self.floating();
+        up.extend(front);
+        // (a card keeps its pane while it's asked, drawn or not — a bar, stepped aside, behind another)
+        let asked = |f: &Floating| matches!(f, Floating::Card(n) if self.offers.iter().any(|o| o.id == *n));
+        let kept: Vec<_> =
+            self.session.floats.iter().filter(|(f, _)| up.contains(f) || asked(f)).copied().collect();
+        self.session.floats = kept;
+        let Some(f) = front else {
+            if let At::Float(_) = self.session.at {
+                self.session.at = self.session.under;
+            }
+            return;
+        };
+        let id = match self.session.floats.iter().find(|x| x.0 == f) {
+            Some(x) => x.1,
+            None => {
+                let id = self.next_pane;
+                self.next_pane += 1;
+                self.session.floats.push((f, id));
+                id
+            }
+        };
+        let s = &mut self.session;
+        if !matches!(s.at, At::Float(_)) {
+            s.under = s.at;
+        }
+        s.at = At::Float(id);
+    }
+
+    /// The floating pane `id` (`At::Float`'s), while it's up.
+    #[cfg(test)]
+    pub fn float_of(&self, id: crate::split::PaneId) -> Option<Floating> {
+        self.session.floats.iter().find(|x| x.1 == id).map(|x| x.0)
     }
 }
 

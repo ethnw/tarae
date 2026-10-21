@@ -36,19 +36,19 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  ddd  f  TTTTTTT  f    dddd
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02  f ddddddddddd                                    f a TTTTTTTTTTT
-03   f                                              ff ff
-04   f                                              ff ff                gggg ggggg ggggg ggg ggggg
-05   f f                                            ff        gggg ggg gggg gggg
-06     f                                            ff ff
-07     f                                            ff ff              ggg gggggggg gggggg
-08     f                                            ff
-09   f                                              ff AA
-10                                                  ff
-11   f                                               f                                                f
-12   f                                               f                                                f
-13   f                                               f                                                f
-14                                                   f                                                f
+02  f ddddddddddd                                    a a TTTTTTTTTTT
+03   f                                              fa ff
+04   f                                              fa ff                gggg ggggg ggggg ggg ggggg
+05   f f                                            fa        gggg ggg gggg gggg
+06     f                                            fa ff
+07     f                                            fa ff              ggg gggggggg gggggg
+08     f                                            fa
+09   f                                              fa AA
+10                                                  fa
+11   f                                               a                                                f
+12   f                                               a                                                f
+13   f                                               a                                                f
+14                                                   a                                                f
 15  a TTTTTT                                                                   dddd   ddddd dd   TTTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other

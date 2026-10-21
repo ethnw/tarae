@@ -258,6 +258,15 @@ side git · 4 rows · in hand git:src/term.rs
     terminal's program, the slot, `:procs`, a plugin's panel, the side panel, the review's rail): `side`'s,
     `review`'s and `chat`'s `focused` and `slot`'s has-the-keys read it, so at most one is true — the one `keys`
     names. A code pane's `focused` is the pane the code means (`Session.focus`), wherever the keys are.
+    Panes P2b: a floating pane with the keys — a card (held, or taking its answers), the picker, a prompt,
+    which-key — is `at` itself (`At::Float(pane id)`), the docked pane it rose over `Session.under`, the keys' again
+    once it goes (`Editor::float_sync`, every key and event); the tests' list is `At::List(pane id)`, its detail the
+    slot's view mode.
+  - `panes` (per session, panes P2b): every leaf of its tree in the tree's order — `{id: pane#N, shows:
+    code:src/a.rs | side | rail | slot | chat, rect, at}` (rects the front's, as the last frame laid them out), the
+    tests' two members after the slot while it shows them (`tests:list`, `tests:detail` — the slot's keys the
+    detail's), then the floating ones up (`card#N`, `picker`, `prompt`, `which-key`, `float: true`); `at` is true on
+    exactly the one with the keys.
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).
   - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `quiet` (cardburden 5: a run of
     Claude's printing nothing, held from the stuck card — under its own time limit still to come, or its work
@@ -280,7 +289,7 @@ Short, so they can be read in prose and typed. Unique within one tarae process.
 | card | `card#12` | `Offer.id` (`offer_seq`) |
 | toast | `toast#311` | its index in `Editor.messages` (`:messages`) |
 | session | `s1` | `SessionId` |
-| pane | `pane#3` | `ViewId` |
+| pane | `pane#3` | `PaneId` — one counter for every pane: the code's, the surfaces', the tests' two, a floating one's |
 | run | `run#7` | new sequence, given with the `RunTrace` |
 | Claude's tool call | `call#5` | new per-turn index (claude's `toolu_…` ids are too long to read) |
 | note | `note#4` | `notes` ids |

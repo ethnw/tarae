@@ -2,15 +2,15 @@
 ## text
 00
 01  ╭─ commands ─────────────────────────────────────────────────────────────────────────────────────╮
-02  │ › split                                                                                  6/304 │
+02  │ › split                                                                                  7/309 │
 03  │ ────────────────────────────────────────────────────────────────────────────────────────────── │
 04  │▎ Split selection on newlines                                                               A-s │
 05  │  Split selections on regex matches                                                           S │
 06  │  Split the window side by side                                                           C-w v │
 07  │  Split the window top / bottom                                                           C-w s │
-08  │  Previous place in the list                                                                [ q │
-09  │  Stop the task, close its panel                                                      space m c │
-10  │                                                                                                │
+08  │  Turn the split around                                                                   C-w t │
+09  │  Previous place in the list                                                                [ q │
+10  │  Stop the task, close its panel                                                      space m c │
 11  │                                                                                                │
 12  │                                                                                                │
 13  │                                                                                                │
@@ -70,9 +70,9 @@
 05  f  AAAAA                                                                                       d f
 06  f  AAAAA                                                                                   ddd d f
 07  f  AAAAA                                                                                   ddd d f
-08  f         A AA    A  A                                                                       d d f
-09  f  A  A            A    AA                                                             ddddd d d f
-10  f                                                                                                f
+08  f           AAAAA                                                                          ddd d f
+09  f         A AA    A  A                                                                       d d f
+10  f  A  A            A    AA                                                             ddddd d d f
 11  f                                                                                                f
 12  f                                                                                                f
 13  f                                                                                                f

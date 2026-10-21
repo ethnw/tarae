@@ -276,7 +276,7 @@ impl crate::editor::Editor {
             Region::Side(_) => self.session.sidebar = None,
             Region::Rail => crate::codereview::close_asked(self),
             Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
-            Region::Slot(s) => self.slot_close(s),
+            Region::Slot(s) | Region::List(s) => self.slot_close(s),
             Region::View(s) if let Some(slot) = s.slot() => self.slot_close(slot),
             Region::Chat | Region::Unfold | Region::View(crate::view::Surface::Chat) => {
                 self.set_status("C-w q closes panels — space L closes the chat")
@@ -603,7 +603,8 @@ impl crate::editor::Editor {
             Some(Slot::Terminal) => self.session.is_at(At::Slot) || self.session.is_at(At::Program),
             Some(Slot::Plugin) => self.plugin_panel_focused(),
             Some(Slot::Procs) => self.procs_focused(),
-            Some(Slot::Test | Slot::Task) => self.session.is_at(At::Slot),
+            Some(Slot::Test) => self.session.is_at(At::Slot) || self.tests_list_focused(),
+            Some(Slot::Task) => self.session.is_at(At::Slot),
             Some(Slot::Debug) | None => false,
         }
     }
@@ -682,18 +683,19 @@ impl crate::editor::Editor {
     pub fn focus_sync(&mut self) {
         self.slot_sync();
         let s = &self.session;
-        let there = match s.at {
-            At::Code => true,
+        let there = match s.docked() {
+            At::Code | At::Float(_) => true,
             At::Chat => s.chat.is_some(),
             At::Program => s.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()),
             At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task)),
             At::Procs => self.procs.panel.is_some(),
+            At::List(id) => id == s.tests.list && self.tests_grouped(),
             At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
             At::Side => s.sidebar.is_some(),
             At::Rail => s.code_review.is_some(),
         };
         if !there {
-            self.session.at = At::Code;
+            self.session.leave(self.session.docked());
         }
         // `:procs`' panel gives the slot to the terminal given the keys (`C-\`), which it covered
         if self.procs_up() && self.session.program_has_keys() {
@@ -704,6 +706,8 @@ impl crate::editor::Editor {
         if self.session.zoom.is_some() && self.zoomed().is_none() {
             self.session.zoom = None;
         }
+        // (a card, the picker, a prompt, which-key: the keys' while up, the docked pane's again once gone)
+        self.float_sync();
     }
 
     /// Writes the sizes (worker — the newest write wins).

@@ -239,7 +239,7 @@ impl Editor {
             R::Rail => Keys::Review,
             R::EditReview => Keys::Change,
             R::Side(m) => Keys::Side(m),
-            R::Slot(s) => Keys::Slot(s),
+            R::Slot(s) | R::List(s) => Keys::Slot(s),
             R::Program => Keys::Program,
             R::Point => Keys::Point,
             R::View(s) => Keys::View(s),
@@ -285,7 +285,7 @@ impl Editor {
         }
     }
 
-    /// The panel you put in front (a tab clicked, `C-w t`, one just opened), while it's there.
+    /// The panel you put in front (a tab clicked, `tab` in its view mode, one just opened), while it's there.
     pub(crate) fn slot_front(&self) -> Option<Slot> {
         self.session.slot_front.filter(|&s| self.slot_there(s, true))
     }
@@ -378,11 +378,27 @@ impl Editor {
         }
     }
 
-    /// `C-w t` (and `tab` / `S-tab` while the slot has the keys): the next tab in front, or the one before.
+    /// `tab` / `S-tab` while the slot has the keys: the next tab in front, or the one before. On the tests' group
+    /// (§2.1c) its members come first, in order — `tab` from the list to its detail, from the detail on to the next
+    /// tab, which starts at its first member; `S-tab` the other way.
     pub fn slot_step(&mut self, by: isize) {
         let tabs = self.slot_tabs();
         if tabs.is_empty() {
             return self.set_status("nothing at the bottom — tests, tasks and the terminal show there");
+        }
+        let g = self.session.tests;
+        if self.tests_grouped() {
+            let on_list = self.tests_list_focused();
+            let on_detail = !on_list && self.session.is_at(crate::session::At::Slot);
+            match (on_list, on_detail, by > 0) {
+                (true, _, true) => return self.focus_pane(g.detail),
+                (_, true, false) => return self.focus_pane(g.list),
+                // (the one tab there is: round its two members)
+                (true, _, false) | (_, true, true) if tabs.len() == 1 => {
+                    return self.focus_pane(if on_list { g.detail } else { g.list });
+                }
+                _ => {}
+            }
         }
         let at = self.slot().and_then(|s| tabs.iter().position(|t| t.slot == s));
         let n = tabs.len() as isize;
@@ -391,6 +407,10 @@ impl Editor {
             None => 0,
         };
         self.slot_show(tabs[next].slot);
+        // (onto the tests' group going forward: its first member, the list)
+        if by > 0 && tabs[next].slot == Slot::Test && self.tests_grouped() && self.bottom_has_keys() {
+            self.focus_pane(g.list);
+        }
     }
 
     /// Every event: a panel that's new in the slot comes to the front — a test or a task only while the slot

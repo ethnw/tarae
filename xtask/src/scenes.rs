@@ -715,6 +715,53 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "run the tests", "\r", "@?Its reason", "@1"],
     },
+    // (panes P2b: the default layout — the side panel, the code, the chat — the keys back on the code by `C-w h`)
+    Scene {
+        name: "panes-default",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "e", "@1", " ", "l", "@1", "\x17", "h", "@1"],
+    },
+    // (two code panes side by side: the divider lit beside the one with the keys)
+    Scene {
+        name: "panes-split",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", "\x17", "v", "@1", "8", "j", "@1"],
+    },
+    // (the tests group: a failing test written and run, `C-w j` to the group, `C-w h` to its list — its title lit)
+    Scene {
+        name: "panes-tests",
+        claude: "idle",
+        files: &["src/thread.rs"],
+        keys: &[
+            "@1",
+            "G",
+            "o",
+            "\r#[test]\rfn ties() {\rassert!(false, \"a knot slipped\");",
+            "\x1b",
+            ":w\r",
+            "@1",
+            " ",
+            "x",
+            "f",
+            "@60?FAILURE",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x17",
+            "h",
+            "@1",
+        ],
+    },
+    // (a card is a pane that asks: `C-q` from the chat gives it the keys — it floats with them, the chat's again after)
+    Scene {
+        name: "panes-card",
+        claude: "card",
+        files: MAIN,
+        keys: &["@1", " ", "l", "@1", "run the tests", "\r", "@?Its reason", "@1", "\x11", "@1"],
+    },
     // (the same run asked again after a yes, the program it runs rebuilt since — git ignores it: the card's "Same as")
     Scene {
         name: "samebinary",

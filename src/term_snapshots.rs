@@ -6888,8 +6888,8 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
         (s.ed.slot(), s.ed.session.is_at(crate::session::At::Slot), typing(&s.ed)),
         (Some(Slot::Task), true, false)
     );
-    // `C-w t`: the next tab, round to the first; `tab` while the slot has the keys too
-    s.keys("<C-w>t");
+    // `tab` while the slot has the keys: the next tab, round to the first (`C-w t` is Helix's transpose again)
+    s.keys("<tab>");
     assert_eq!(s.ed.slot(), Some(Slot::Terminal));
     s.keys("<tab>");
     assert_eq!(s.ed.slot(), Some(Slot::Task));

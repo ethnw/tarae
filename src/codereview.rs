@@ -4699,13 +4699,13 @@ const CLOSE_FILES: usize = 6;
 pub fn rail_focus(ed: &mut Editor) {
     let current = ed.session.code_review.as_ref().and_then(|r| r.in_hand(ed));
     let up = ed.review_rail_up();
+    let to_rail = !up || !ed.session.is_at(At::Rail);
     let Some(r) = ed.session.code_review.as_mut() else { return };
     if !up {
         r.behind = false;
-        ed.session.at = At::Code;
     }
-    ed.session.at = if ed.session.at == At::Rail { At::Code } else { At::Rail };
-    if ed.session.at == At::Rail {
+    ed.session.at = if to_rail { At::Rail } else { At::Code };
+    if to_rail {
         r.selected = current.or_else(|| r.rail_order().first().copied()).unwrap_or(0);
     }
 }
@@ -4723,7 +4723,7 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     // (the files drawn: the hand moves a file at a time, so `C-d` is half the files in sight and `C-f` all of them —
     // counting the folders' rows too would carry it past the screen; `C-e`/`C-y` scroll rows, `room` below)
     let rows = ed.screen.review_rail.borrow().len();
-    if ed.session.at != At::Rail {
+    if !ed.session.is_at(At::Rail) {
         return false;
     }
     let Some(r) = ed.session.code_review.as_mut() else { return false };
@@ -4788,7 +4788,7 @@ impl Editor {
     /// has the keys — going to one brings it back while it has them.
     pub fn review_wide(&self) -> bool {
         self.session.code_review.as_ref().is_some_and(|r| r.wide)
-            && !matches!(self.session.at, At::Rail | At::Chat)
+            && !matches!(self.session.docked(), At::Rail | At::Chat)
     }
 }
 

@@ -534,6 +534,20 @@ const SCENES: &[Scene] = &[
         ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
         ed.bottom_take_keys();
     }),
+    // (panes P2b: the tests' group — its list a pane of its own, beside the detail)
+    ("the tests' list", |ed| {
+        let case = crate::test_results::Case {
+            name: "adds".into(),
+            status: crate::test_results::Status::Passed,
+            secs: None,
+            message: Vec::new(),
+            at: None,
+        };
+        let run = crate::testing::TestRun::finished("t", vec![case.clone(), case], vec!["ok".into()]);
+        ed.session.test_run = Some(run);
+        frame(ed);
+        ed.tests_list_focus();
+    }),
     ("a card over the task panel's view mode", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();

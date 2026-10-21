@@ -72,7 +72,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     if ed.mode != Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
         return false;
     }
-    if ed.session.at != At::Plugin || !ed.plugin_panel_in_sight() {
+    if !ed.session.is_at(At::Plugin) || !ed.plugin_panel_in_sight() {
         return false;
     }
     let Some(st) = ed.plugins.as_mut().and_then(|p| p.panel.as_mut()) else {
@@ -181,7 +181,7 @@ impl Editor {
 
     /// Whether the panel has the keys.
     pub fn plugin_panel_focused(&self) -> bool {
-        self.session.at == At::Plugin
+        self.session.is_at(At::Plugin)
             && self.plugins.as_ref().is_some_and(|p| p.panel.is_some())
             && self.plugin_panel_in_sight()
     }

@@ -239,13 +239,17 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w >` | `panel_wider` | Wider: chat or side panel |
 | `C-w e` | `focus_side_panel` | To the side panel and back |
 | `C-w h` | `jump_view_left` | Window to the left |
+| `C-w H` | `swap_view_left` | Swap with the window left |
 | `C-w j` | `jump_view_down` | Window below |
+| `C-w J` | `swap_view_down` | Swap with the window below |
 | `C-w k` | `jump_view_up` | Window above |
+| `C-w K` | `swap_view_up` | Swap with the window above |
 | `C-w l` | `jump_view_right` | Window to the right |
+| `C-w L` | `swap_view_right` | Swap with the window right |
 | `C-w o` | `wonly` | Close all other windows |
 | `C-w q` | `wclose` | Close this window or panel |
 | `C-w s` | `hsplit` | Split the window top / bottom |
-| `C-w t` | `slot_next` | Next tab of the bottom panel |
+| `C-w t` | `transpose_view` | Turn the split around |
 | `C-w v` | `vsplit` | Split the window side by side |
 | `C-w w` | `rotate_view` | Next window |
 | `C-w z` | `zoom_toggle` | Full screen: on / off |
@@ -355,13 +359,17 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w >` | `panel_wider` | Wider: chat or side panel |
 | `space w e` | `focus_side_panel` | To the side panel and back |
 | `space w h` | `jump_view_left` | Window to the left |
+| `space w H` | `swap_view_left` | Swap with the window left |
 | `space w j` | `jump_view_down` | Window below |
+| `space w J` | `swap_view_down` | Swap with the window below |
 | `space w k` | `jump_view_up` | Window above |
+| `space w K` | `swap_view_up` | Swap with the window above |
 | `space w l` | `jump_view_right` | Window to the right |
+| `space w L` | `swap_view_right` | Swap with the window right |
 | `space w o` | `wonly` | Close all other windows |
 | `space w q` | `wclose` | Close this window or panel |
 | `space w s` | `hsplit` | Split the window top / bottom |
-| `space w t` | `slot_next` | Next tab of the bottom panel |
+| `space w t` | `transpose_view` | Turn the split around |
 | `space w v` | `vsplit` | Split the window side by side |
 | `space w w` | `rotate_view` | Next window |
 | `space w z` | `zoom_toggle` | Full screen: on / off |

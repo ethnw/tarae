@@ -216,7 +216,7 @@ configs carry over as they are.
   plugin's), `h`/`l` fold and unfold, Enter
   opens (the code gets the keys back), Tab steps files → outline → list → git, Esc leaves it showing, `q` or the same key again closes it; `space` and `:` still
   work. `C-w e` goes to it from whichever window you're in, whatever tab it shows (closed, it opens at the tab it
-  last showed), and back again; `C-w h`/`j`/`k`/`l` stay between the code's windows. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
+  last showed), and back again; `C-w h`/`j`/`k`/`l` go to the pane that way, the side panel among them. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
   (`user_prof…model.ts`), and the selected one shows whole, over the code. A wide terminal makes it wider (up to
   12 columns, the code keeping 100). A click opens a row, the wheel scrolls. It folds away
   when the terminal leaves the code fewer than 80 columns ([files](screenshots/ux-side-panel.png) ·
@@ -230,6 +230,10 @@ configs carry over as they are.
   closes its panel, `:task <name>` (`:make`) runs one by name. With the keys on its panel (`C-w j`, a click), `q`
   closes it once the run has ended — one under way is left running and says `space m c` stops it (the test panel's
   `q` the same, with `space x c`); Esc gives the keys to the code (its header says `esc code`).
+  - **The tests panel is two panes** — the list of results and, beside it, the failure picked (else the output),
+    under one header, one `q` closing both. `C-w h`/`l` or `tab`/`S-tab` go between them; on the list `j`/`k` (and
+    every list's moves) pick a test — the failure beside it follows — and `enter` goes to its place in the code; its
+    title is lit while it has the keys.
   - **View mode** — the keys on a run panel (the task's, a preflight's, the tests') are its view mode, as the
     terminal's are: `C-w j`, a click (its cursor on that row) or the wheel up over it. A cursor on its output as
     text — the tests' panel: the failure picked, its message, else the output — the code's normal mode on it: `j`
@@ -287,12 +291,18 @@ configs carry over as they are.
 - **Search** `/ ? n N *` — matches highlight as you type, the view follows the first match (`Esc` puts you back), and
   the status line shows `/pattern  8/13`. `Esc` in normal mode clears the highlight
   ([screenshot](screenshots/ux-search.png))
-- **Split windows** — `C-w v` side by side · `C-w s` stacked · `C-w w` / `C-w h j k l` move · `C-w q` close — the
-  window, or the panel that has the keys (side panel, the review's rail, `:procs`, a test, task or terminal panel, as
-  its own `q` does; the chat closes with `space L`, so a slip can't cut Claude's turn off) ·
-  `C-w o` only this one (`space w` works too); `:vsplit file`, `:hsplit file`. Each pane has a title line; the focused
-  one gets an accent bar and the rest dim. The same document in two panes shares its cursor but scrolls separately
-  ([screenshot](screenshots/ux-splits.png))
+- **Split windows** — every surface is a pane (the code's, the side panel, the review's rail, the bottom slot, the
+  chat): `C-w v` side by side · `C-w s` stacked (from the chat or a panel it's the code pane last focused that splits;
+  the terminal says a second one comes with the terminal work) · `C-w h j k l` to the pane that way, any kind · `C-w
+  w` the next pane, every kind · `C-w H J K L` swap this code pane with the one that way · `C-w t` turn the code's
+  split (side by side ↔ stacked) · `C-w q` close — the window, or the panel that has the keys (side panel, the
+  review's rail, `:procs`, a test, task or terminal panel, as its own `q` does; the chat closes with `space L`, so a
+  slip can't cut Claude's turn off) · `C-w o` only this one (`space w` works too); `:vsplit file`, `:hsplit file`.
+  Each pane has a title line; the focused one gets an accent bar and the rest dim, the line beside it lit. The same
+  document in two panes shares its cursor but scrolls separately ([screenshot](screenshots/ux-splits.png)). A card,
+  the picker, a prompt and which-key float over the panes: while one has the keys it's where they are, and they go
+  back to the pane under it once it goes. Your panes are kept per folder (`$state/layouts.json`, written as they
+  change) and come back with the files on the start screen's `r`
 - **`:` completion** — command names (fuzzy, with aliases and descriptions), then arguments: file paths, themes,
   setting paths and their values, languages. `Tab`/`Shift-Tab` cycle; `→` takes the dimmed suggestion
   ([screenshot](screenshots/ux-cmdline-complete.png))

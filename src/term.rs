@@ -428,7 +428,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     let terminal_shown = editor.slot() == Some(crate::sizes::Slot::Terminal);
     editor.screen = crate::editor::Screen {
         panes: Vec::new(),
-        leaves: lay.leaves.iter().filter(|l| l.1.w > 0 && l.1.h > 0).copied().collect(),
+        leaves: screen_leaves(editor, &lay),
         pane_docs: Vec::new(),
         writing_rows: Vec::new(),
         writing_head: None,
@@ -488,6 +488,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             terminal_cols(&lay) as u16,
         ))),
         test_panel: Default::default(),
+        tests_list: Default::default(),
         run_rows: Default::default(),
         review_change: Default::default(),
         review_rows: Default::default(),
@@ -528,12 +529,13 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         // (its view mode read again at the new size)
         crate::view::terminal_resized(editor);
     }
+    let (side_keys, rail_keys) = (editor.session.is_at(At::Side), editor.session.is_at(At::Rail));
     if lay.rail_w > 0
         && !editor.review_rail_up()
         && let Some(sb) = editor.session.sidebar.as_mut()
     {
         let depths: Vec<usize> = sb.lines().iter().map(|l| l.depth).collect();
-        let keys = editor.session.at == At::Side;
+        let keys = side_keys;
         sb.fit(sidebar_list_rows(&lay, editor.session.code_review.is_some()), &depths, keys);
     }
     if lay.rail_w > 0
@@ -542,7 +544,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             editor.session.code_review.as_ref().map(|r| (r.marked(editor), review_rail_list(&lay, editor, r)))
         && let Some(r) = editor.session.code_review.as_mut()
     {
-        r.fit(marked, room.1, room.0, editor.session.at == At::Rail);
+        r.fit(marked, room.1, room.0, rail_keys);
     }
     if let Some(p) = editor.picker.as_mut() {
         let pb = PickerBox::new(&lay, p);
@@ -703,6 +705,46 @@ impl Layout {
     fn slot_y(&self) -> usize {
         self.text_top as usize + self.text_rows
     }
+}
+
+/// Every pane laid out with room this frame, as `C-w h/j/k/l` hop between them: the tree's leaves — the slot's
+/// replaced by the tests group's two members while it shows them (`tests_members`).
+fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, crate::split::Rect)> {
+    let mut leaves: Vec<_> = lay.leaves.iter().filter(|l| l.1.w > 0 && l.1.h > 0).copied().collect();
+    if let Some((list, detail)) = tests_members(editor, lay)
+        && let Some(slot) = editor.session.leaf(crate::pane::Shows::Slot)
+        && let Some(i) = leaves.iter().position(|l| l.0 == slot)
+    {
+        let g = editor.session.tests;
+        leaves.splice(i..=i, [(g.list, list), (g.detail, detail)]);
+    }
+    leaves
+}
+
+/// The tests group's two members in the slot, under its header — the list, a line, the detail — while the slot
+/// shows a run with results to list (with none it's the output alone: one pane).
+fn tests_members(editor: &Editor, lay: &Layout) -> Option<(crate::split::Rect, crate::split::Rect)> {
+    let r = editor.session.test_run.as_ref().filter(|r| !r.cases.is_empty())?;
+    if editor.slot() != Some(crate::sizes::Slot::Test)
+        || lay.debug_h <= crate::chrome::HEAD
+        || lay.slot_w == 0
+    {
+        return None;
+    }
+    let left_w = tests_list_w(r, lay.slot_w);
+    let (y, h) = (lay.slot_y() + crate::chrome::HEAD, lay.debug_h - crate::chrome::HEAD);
+    let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
+    let detail =
+        crate::split::Rect { x: lay.slot_x + left_w + 1, y, w: lay.slot_w.saturating_sub(left_w + 1), h };
+    Some((list, detail))
+}
+
+/// The tests' list's width in a slot `w` wide: its names (the shared prefix dropped) and their marks, within
+/// 45 % of it — the detail keeps 20.
+fn tests_list_w(r: &crate::testing::TestRun, w: usize) -> usize {
+    let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
+    let name_w = short.iter().map(|n| n.width()).max().unwrap_or(10);
+    (name_w + 14).clamp(26, (w * 45 / 100).max(26)).min(w.saturating_sub(20))
 }
 
 /// The columns a terminal in the slot gets: its width inside the padding.
@@ -1184,6 +1226,23 @@ fn draw_debug_panel(
 /// A test's or task's panel: what its keys do there when it has them, else how they come (`C-w j` — how you get
 /// in, uxaudit D6) — first in its header's hints, before the commands that work from anywhere.
 fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
+    let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
+    // (the tests' list, a pane of its group: its own keys — `tab` to the detail beside it)
+    if editor.tests_list_focused() {
+        let picked = editor.session.test_run.as_ref().is_some_and(|r| r.picked().is_some());
+        let closes = editor.q_closes(crate::sizes::Slot::Test);
+        return [
+            Some(("enter", "go to it")),
+            Some(("tab", if picked { "failure" } else { "output" })),
+            Some(("esc", "code")),
+            closes.then_some(("q", "close")),
+            Some(("C-w z", zoom)),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(k, d)| (k.to_string(), d))
+        .collect();
+    }
     if !editor.session.is_at(At::Slot) {
         // (only where `C-w` is the window prefix — the code in normal mode, nothing under way: in insert mode or a
         // draft it deletes a word, in the terminal it's the program's — and from a pane with none below it: from
@@ -1194,7 +1253,6 @@ fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
         let way_in = prefix && editor.pane_toward(0, 1).is_none();
         return way_in.then(|| ("C-w j".to_string(), "scroll")).into_iter().collect();
     }
-    let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
     // Its view mode's — the same pairs as the terminal's head, each key as bound (a remap moves the hint)
     let Some(s) = crate::view::has_keys(editor).filter(|s| s.run()) else {
         return vec![("esc".into(), "code"), ("C-w z".into(), zoom)];
@@ -1289,7 +1347,7 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
 /// The bottom slot's header (`chrome.rs`): its tabs — every panel it has (`Editor::slot_tabs`), the one in
 /// front strong, each with its badge — then, after a faint `│`, what the one in front says (`details`) and
 /// its keys at the right; the rule under them, the accent while the slot has the keys. Tabs are clicked
-/// (`Screen.slot_tabs`) or stepped with `C-w t`. Returns the first row of the panel's body.
+/// (`Screen.slot_tabs`) or `tab` in its view mode. Returns the first row of the panel's body.
 ///
 /// ```text
 ///   terminal   check ▲   tests ●  │  sh                                                C-\ type  space T hide
@@ -2656,19 +2714,26 @@ fn draw_test_panel(
     // ── Two columns: result list · selected failure (or output if none)
     // List names drop the shared prefix (`math::tests::adds` → `adds` — the full name is in the header)
     let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
-    let name_w = short.iter().map(|n| n.width()).max().unwrap_or(10);
-    let left_w = (name_w + 14).clamp(26, (w * 45 / 100).max(26)).min(w.saturating_sub(20));
+    let left_w = tests_list_w(r, w);
     let right_x = left_w + 1;
     let right_w = w.saturating_sub(right_x + 1);
     let selected = r.picked();
     let list_rows = rows.saturating_sub(1);
     editor.screen.test_panel.set(Some((y0, last, list_rows)));
-    // Keep the selection visible; while running, keep the latest visible
+    // Keep the selection visible from where the list is (`C-e`/`C-y` move it); while running, the latest visible
     let first = if r.state == RunState::Running {
         r.cases.len().saturating_sub(list_rows)
     } else {
-        r.selected.saturating_sub(list_rows.saturating_sub(1))
+        r.list_top.get().min(r.selected).max((r.selected + 1).saturating_sub(list_rows))
     };
+    r.list_top.set(first);
+    editor.screen.tests_list.set(Some((body + 1, list_rows, first)));
+    // (the member with the keys says so in its title — one header over both, the names lit as the frame's are)
+    let g = editor.session.tests;
+    let list_keys = editor.session.is_at(At::List(g.list));
+    let detail_keys = view.is_some() && editor.session.is_at(At::Slot);
+    let title =
+        |keys: bool| if keys { Style { bold: true, ..strong } } else { Style { bold: true, ..faint } };
     let cwd = &r.target.cwd;
     let rel = |p: &std::path::Path| p.strip_prefix(cwd).unwrap_or(p).display().to_string();
     let fails = r.failures();
@@ -2716,9 +2781,10 @@ fn draw_test_panel(
         leaf_line(out, ui, card, faint)?;
         if i == 0 {
             // Column title
-            apply(out, Style { bold: true, ..faint })?;
+            apply(out, title(list_keys))?;
             queue!(out, MoveTo((x0 + PAD) as u16, y), Print("TESTS"))?;
             queue!(out, MoveTo((x0 + right_x + 1) as u16, y))?;
+            apply(out, title(detail_keys))?;
             match selected {
                 Some(c) => {
                     queue!(out, Print("FAILURE"))?;
@@ -2749,7 +2815,8 @@ fn draw_test_panel(
         // List
         if let Some(c) = r.cases.get(first + i - 1) {
             let idx = first + i - 1;
-            let is_sel = selected.is_some() && idx == r.selected;
+            // (a failure picked; with the list's keys whatever row it's on)
+            let is_sel = (selected.is_some() || list_keys) && idx == r.selected;
             let row_bg = if is_sel { selected_row(ui, editor, card) } else { card };
             queue!(out, MoveTo(x0 as u16, y))?;
             apply(out, if is_sel { Style { fg: ui.accent.fg, ..row_bg } } else { row_bg })?;
@@ -2871,11 +2938,22 @@ fn draw_panes(
         Some(crate::sizes::Border::Divider(id)) => ps.iter().find(|p| p.0 == id).map(|p| p.1.x + p.1.w),
         _ => None,
     };
+    // (D2, under `ui.edge = "lines"`: the rows of a divider that edge the pane with the keys lit, as every surface's
+    // lines are — the others the faint wash)
+    let keys_here = ui.edge == crate::theme::Edge::Lines && ui.lit == Some(Region::Code);
+    let focused = ps.iter().find(|p| p.6).map(|p| p.1).filter(|_| keys_here);
+    let edges = |x: usize, y: usize| {
+        focused.is_some_and(|f| (f.x == x + 1 || f.x + f.w == x) && (f.y..f.y + f.h).contains(&y))
+    };
     for (_, r, ..) in ps.iter().filter(|p| p.1.x > 0) {
-        let lit = dragged == Some(r.x - 1);
-        apply(out, if lit { Style { fg: ui.accent.fg, ..ui.base } } else { faint })?;
+        let x = r.x - 1;
         for y in r.y..r.y + r.h {
-            queue!(out, MoveTo((r.x - 1) as u16, y as u16), Print("│"))?;
+            let style = match dragged == Some(x) || edges(x, y) {
+                true => Style { fg: ui.accent.fg, ..ui.base },
+                false => faint,
+            };
+            queue!(out, MoveTo(x as u16, y as u16))?;
+            put_line(out, style, "│")?;
         }
     }
     Ok(cursor)
@@ -16402,6 +16480,46 @@ mod tests {
             keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect()
         });
         measured("key_to_frame_under_a_long_header", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
+    /// Panes P2b: four code panes on a 20k-line file, each at its own spot, the side panel and the chat beside them
+    /// (the tree laid out every frame, the dividers lit for the one with the keys) — moves, edits and the window
+    /// keys between them (each hop a layout kept: no write here, `layouts_path` is None in tests) within a frame.
+    #[test]
+    fn perf_budget_key_to_frame_with_four_panes() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_with_four_panes") {
+            return;
+        }
+        let budget = frame_budget();
+        let text: String = (0..20_000).map(|i| format!("fn f{i}(x: u32) -> u32 {{ x + {i} }}\n")).collect();
+        let rope = Rope::from_str(&text);
+        let keys =
+            ["j", "C-d", "w", "C-w", "l", "k", "C-u", "C-w", "j", "i", "a", "esc", "C-w", "w", "G", "g", "g"];
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = rope.clone();
+            ed.docs[0].path = Some(std::path::PathBuf::from("/nonexistent/four.rs"));
+            let root = ed.session.root.clone();
+            ed.session.sidebar = Some(crate::sidebar::Sidebar::new(crate::sidebar::Mode::Outline, root));
+            ed.session.chat = Some(crate::chat::Chat::new());
+            let mut buf = Vec::with_capacity(1 << 16);
+            for (i, split) in
+                [crate::split::Dir::Vertical, crate::split::Dir::Horizontal, crate::split::Dir::Horizontal]
+                    .into_iter()
+                    .enumerate()
+            {
+                ed.split_view(split);
+                for digit in ((i + 1) * 4000).to_string().chars() {
+                    key_to_frame(&mut ed, &mut buf, &digit.to_string(), 160, 48);
+                }
+                key_to_frame(&mut ed, &mut buf, "G", 160, 48);
+            }
+            assert_eq!(ed.session.views.len(), 4);
+            render(&mut ed, &mut buf, 160, 48).unwrap();
+            keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 160, 48)).collect()
+        });
+        measured("key_to_frame_with_four_panes", worst, budget);
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
     }
 

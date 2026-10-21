@@ -89,6 +89,32 @@ impl Split {
         }
     }
 
+    /// `split`, but `new` joins a node going `dir` only where every leaf in it is `mine` (the code's panes) — else
+    /// `target` is wrapped in a node of its own: `C-w s` in the code's column beside the slot makes the two code panes
+    /// their own split (one `C-w t` turns), never siblings of the slot.
+    pub fn split_among(
+        &mut self,
+        target: PaneId,
+        new: PaneId,
+        dir: Dir,
+        mine: &impl Fn(PaneId) -> bool,
+    ) -> bool {
+        match self {
+            Split::Leaf(_) => self.split(target, new, dir),
+            Split::Node(d, kids) => {
+                let ours = kids.iter().all(|k| k.1.leaves().into_iter().all(mine));
+                if *d == dir
+                    && ours
+                    && let Some(i) = kids.iter().position(|k| k.1 == Split::Leaf(target))
+                {
+                    kids.insert(i + 1, (Share::Even, Split::Leaf(new)));
+                    return true;
+                }
+                kids.iter_mut().any(|k| k.1.split_among(target, new, dir, mine))
+            }
+        }
+    }
+
     /// Remove a leaf. A node left with one child collapses into it (the child taking the node's share). true if
     /// removed (the last leaf can't be).
     pub fn remove(&mut self, target: PaneId) -> bool {
@@ -101,6 +127,34 @@ impl Split {
         if kids.len() == 1 {
             *self = kids.pop().expect("one child").1;
         }
+        true
+    }
+
+    /// Leaves `a` and `b` trade places (`C-w H J K L`) — the shares stay with the places.
+    pub fn swap(&mut self, a: PaneId, b: PaneId) {
+        self.renumber(&|id| match id {
+            _ if id == a => b,
+            _ if id == b => a,
+            _ => id,
+        });
+    }
+
+    /// `C-w t`: the innermost split around leaf `id` whose leaves are all `mine` (the code's panes) turned — side
+    /// by side ↔ stacked; false when there's none (one pane alone).
+    pub fn transpose(&mut self, id: PaneId, mine: &impl Fn(PaneId) -> bool) -> bool {
+        let Split::Node(_, kids) = self else { return false };
+        let Some(i) = kids.iter().position(|k| k.1.holds(id)) else { return false };
+        if kids[i].1.transpose(id, mine) {
+            return true;
+        }
+        if !self.leaves().into_iter().all(mine) {
+            return false;
+        }
+        let Split::Node(dir, _) = self else { return false };
+        *dir = match dir {
+            Dir::Vertical => Dir::Horizontal,
+            Dir::Horizontal => Dir::Vertical,
+        };
         true
     }
 

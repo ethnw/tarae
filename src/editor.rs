@@ -368,6 +368,9 @@ pub struct Screen {
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
+    /// The tests' list, as drawn beside its detail: its first row's screen row, the rows it has, the first result
+    /// in sight — a click picks a row, its keys move by its rows.
+    pub tests_list: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// The in-buffer review's change in hand: its first and last screen rows.
     pub review_change: std::cell::Cell<Option<(usize, usize)>>,
     /// The in-buffer review's changes: every screen row of one (its header, its lines) and which change — cards
@@ -738,6 +741,11 @@ pub struct Editor {
     pub sizes: crate::sizes::Sizes,
     pub sizes_path: Option<PathBuf>,
     pub sizes_seq: u64,
+    /// Each checkout's layout as kept (`layouts.rs`) in `layouts_path` (None in tests) · how many it has asked to
+    /// write (the writes' own numbers are the process's, `layouts::WRITES`).
+    pub layouts: serde_json::Map<String, serde_json::Value>,
+    pub layouts_path: Option<PathBuf>,
+    pub layouts_seq: u64,
     /// What's counted of the features used and not saved yet (`features.rs`; its path None in tests).
     pub features: crate::features::Counts,
     /// The card record's folder (`cards.rs`, `$state/cards`) — None in tests: nothing written.
@@ -991,6 +999,14 @@ impl Editor {
             },
             sizes_path: if cfg!(test) { None } else { crate::sizes::Sizes::path() },
             sizes_seq: 0,
+            // (each checkout's panes as you left them — a small file, read before the first frame)
+            layouts: if cfg!(test) {
+                Default::default()
+            } else {
+                crate::layouts::read(crate::layouts::path().as_deref())
+            },
+            layouts_path: if cfg!(test) { None } else { crate::layouts::path() },
+            layouts_seq: 0,
             cards_dir: if cfg!(test) {
                 None
             } else {
@@ -1444,17 +1460,28 @@ impl Editor {
         self.popup = None;
     }
 
-    /// Splits the current pane — the new pane shows the same document at the same spot; focus moves to it.
+    /// Splits the current pane — the new pane shows the same document at the same spot; focus moves to it. From
+    /// another surface (§2.6: the chat, a run, the side panel) it's the code pane last focused that splits, the keys
+    /// to the new one; from the terminal it's said — a second terminal comes with the terminal work (P1).
     pub fn split_view(&mut self, dir: crate::split::Dir) {
+        let terminal = self.session.is_at(At::Program)
+            || (self.session.is_at(At::Slot) && self.slot() == Some(crate::sizes::Slot::Terminal));
+        if terminal {
+            return self.set_status("one terminal for now — a second comes with the terminal work");
+        }
         self.sync_focus_view();
         let id = self.next_pane;
         self.next_pane += 1;
         let Some(cur) = self.session.views.iter().find(|v| v.id == self.session.focus).cloned() else {
             return;
         };
+        let views: Vec<_> = self.session.views.iter().map(|v| v.id).collect();
+        self.session.split.split_among(self.session.focus, id, dir, &|p| views.contains(&p));
         self.session.views.push(View { id, ..cur });
-        self.session.split.split(self.session.focus, id, dir);
         self.session.focus = id;
+        if !self.session.is_at(At::Code) {
+            self.focus_pane(id);
+        }
     }
 
     /// Closes the current pane — false if it's the last one (then `:q` quits the editor).
@@ -1488,12 +1515,50 @@ impl Editor {
         self.session.views.retain(|v| v.id == focus);
     }
 
-    /// Next pane (`C-w w`) / by direction (`C-w h j k l` — using the last frame's pane layout).
+    /// `C-w w`: the next pane, every kind (§2.6) — in the tree's order as the last frame laid them out with room
+    /// (`Screen.leaves`: the side panel, the code's panes, the slot or the tests' two, the chat), landing where each
+    /// takes the keys. Before a frame, the code's panes.
     pub fn cycle_view(&mut self, delta: isize) {
-        let order = self.code_leaves();
-        let i = order.iter().position(|v| *v == self.session.focus).unwrap_or(0) as isize;
+        let mut order: Vec<_> = self.screen.leaves.iter().map(|l| l.0).collect();
+        if order.is_empty() {
+            order = self.code_leaves();
+        }
+        let mut here = self.session.at_pane().unwrap_or(self.session.focus);
+        // (the slot's keys on the tests' group: its detail's)
+        if !order.contains(&here) && order.contains(&self.session.tests.detail) {
+            here = self.session.tests.detail;
+        }
+        let i = order.iter().position(|v| *v == here).unwrap_or(0) as isize;
         let next = order[(i + delta).rem_euclid(order.len() as isize) as usize];
-        self.focus_view(next);
+        if next == here {
+            return self.set_status("one pane on screen — C-w v splits this one");
+        }
+        self.focus_pane(next);
+    }
+
+    /// `C-w H J K L` (Helix's `swap_view_*`): this code pane and the code pane that way trade places, the keys
+    /// staying with this one. The panels keep their places (moving one out of the slot comes with P3) — said.
+    pub fn swap_view(&mut self, dx: i32, dy: i32) {
+        if !self.session.is_at(At::Code) {
+            return self.set_status("the panels keep their places — C-w H J K L moves the code's panes");
+        }
+        // (the last frame's panes: one closed since — `C-w o`, no frame between — is no pane to trade with)
+        let live = |to: &crate::split::PaneId| {
+            self.session.views.iter().any(|v| v.id == *to) && self.session.split.holds(*to)
+        };
+        match self.pane_toward(dx, dy).filter(live) {
+            Some(to) => self.session.split.swap(self.session.focus, to),
+            None => self.nothing_toward(dx, dy),
+        }
+    }
+
+    /// `C-w t` (Helix's `transpose_view`): the split of the code's panes around the one last focused turned — side by
+    /// side ↔ stacked; the panels around it stay.
+    pub fn transpose_view(&mut self) {
+        let views: Vec<_> = self.session.views.iter().map(|v| v.id).collect();
+        if !self.session.split.transpose(self.session.focus, &|id| views.contains(&id)) {
+            self.set_status("one code pane — nothing to turn (C-w v splits it)");
+        }
     }
 
     /// `C-w h/j/k/l`: to the pane that way, any kind (panes P2b, §2.6) — the nearest the tree laid out there in the
@@ -1502,8 +1567,13 @@ impl Editor {
     /// the terminal's view mode, the chat's input, the side panel on the row for where the code is. Nothing that way
     /// is said.
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        let Some(from) = self.session.at_pane() else { return self.nothing_toward(dx, dy) };
+        let Some(mut from) = self.session.at_pane() else { return self.nothing_toward(dx, dy) };
         let leaves = &self.screen.leaves;
+        // (the slot's keys on the tests' group: its detail's — the slot's leaf is its two members on screen)
+        let detail = self.session.tests.detail;
+        if self.session.leaf(crate::pane::Shows::Slot) == Some(from) && leaves.iter().any(|l| l.0 == detail) {
+            from = detail;
+        }
         // (from what has no room on screen — the minimized chat's input — a hop goes back to the code)
         if self.screen.width.is_some() && from != self.session.focus && !leaves.iter().any(|l| l.0 == from) {
             return self.focus_pane(self.session.focus);
@@ -1516,11 +1586,18 @@ impl Editor {
         }
     }
 
+    /// The tests' result at screen cell (x, y), as the list was last drawn (its pane in `Screen.leaves`).
+    fn tests_list_row(&self, x: usize, y: usize) -> Option<usize> {
+        let (y0, rows, first) = self.screen.tests_list.get()?;
+        let list = self.screen.leaves.iter().find(|l| l.0 == self.session.tests.list)?.1;
+        ((list.x..list.x + list.w).contains(&x) && (y0..y0 + rows).contains(&y)).then(|| first + y - y0)
+    }
+
     /// The keys to pane `id`, landing where its surface takes them.
     pub fn focus_pane(&mut self, id: crate::split::PaneId) {
         use crate::pane::Shows;
         let Some(shows) = self.session.shows(id) else { return };
-        if shows != Shows::Slot {
+        if !matches!(shows, Shows::Slot | Shows::TestList | Shows::TestDetail) {
             self.plugin_panel_unfocus();
             self.procs_unfocus();
         }
@@ -1534,6 +1611,12 @@ impl Editor {
             // (the rail as `space e` gives it the keys: on the file in hand)
             Shows::Rail => crate::codereview::rail_focus(self),
             Shows::Slot => self.bottom_take_keys(),
+            Shows::TestList => self.tests_list_focus(),
+            // (the detail is the slot's view mode on the tests)
+            Shows::TestDetail => {
+                self.session.slot_front = Some(crate::sizes::Slot::Test);
+                self.bottom_take_keys();
+            }
         }
     }
 
@@ -1559,7 +1642,7 @@ impl Editor {
     /// opens at the tab it last showed.
     pub fn side_toggle_focus(&mut self) {
         match self.session.sidebar.as_ref() {
-            Some(_) if self.session.at == At::Side => self.session.at = At::Code,
+            Some(_) if self.session.is_at(At::Side) => self.session.at = At::Code,
             Some(_) => self.side_focus(),
             None => self.sidebar_show(self.session.side_last),
         }
@@ -1948,6 +2031,7 @@ impl Editor {
         }
         self.sync_focus_view();
         self.focus_sync();
+        self.layout_keep();
         self.schedule_parses();
         self.lsp_flush();
         self.inlay_schedule();
@@ -2025,7 +2109,7 @@ impl Editor {
             return;
         }
         // Straight into the chat's input — as keys, its letters could answer a review or an offer first
-        if self.session.at == At::Chat
+        if self.session.is_at(At::Chat)
             && let Some(c) = self.session.chat.as_mut()
         {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
@@ -2233,6 +2317,7 @@ impl Editor {
         // on `↑/↓ N more` or the wheel scrolls it (`CodeReview::fit` clamps; #73: the rail is its columns, left
         // of where the code and the slot under it start — not "left of the first pane")
         let on_rail = self.review_rail_up() && x < s.slot_x && !s.review_rail.borrow().is_empty();
+        let rail_keys = self.session.is_at(At::Rail);
         if on_rail && let Some(r) = self.session.code_review.as_mut() {
             let by = match m.kind {
                 K::ScrollDown => 3,
@@ -2243,7 +2328,7 @@ impl Editor {
             // (with the keys, the file in hand follows into sight — as `C-e`/`C-y`; without them it's the code's
             // file and the wheel only looks)
             if by != 0 {
-                return if self.session.at == At::Rail { r.scroll_keeping(by) } else { r.scroll_by(by) };
+                return if rail_keys { r.scroll_keeping(by) } else { r.scroll_by(by) };
             }
         }
         if m.kind == K::Down && on_rail {
@@ -2272,7 +2357,7 @@ impl Editor {
             t.selecting = false;
             if !in_terminal {
                 t.selection = None;
-                if self.session.at == At::Program {
+                if self.session.is_at(At::Program) {
                     self.session.at = At::Code;
                 }
             }
@@ -2364,6 +2449,15 @@ impl Editor {
                 ),
                 K::Down => match at {
                     Some((r, c)) => crate::view::run_click(self, crate::sizes::Slot::Test, r, c),
+                    None if let Some(i) = self.tests_list_row(x, y) => {
+                        self.tests_list_focus();
+                        if let Some(r) = self.session.test_run.as_mut().filter(|r| i < r.cases.len()) {
+                            if r.selected != i {
+                                r.scroll = None;
+                            }
+                            r.selected = i;
+                        }
+                    }
                     None => self.bottom_take_keys(),
                 },
                 _ => {}
@@ -2415,6 +2509,7 @@ impl Editor {
         {
             let row = s.sidebar.borrow().iter().find(|l| l.0 == y).map(|l| l.1);
             let rows = s.sidebar.borrow().len();
+            let side_keys = self.session.is_at(At::Side);
             let sb = self.session.sidebar.as_mut().unwrap();
             // (with the keys, as `C-e`/`C-y`: the selection, what they act on, follows into sight; without them it
             // marks where the code is and comes back there by itself — the wheel only looks)
@@ -2424,7 +2519,7 @@ impl Editor {
                         self.sidebar_activate(r);
                     }
                 }
-                K::ScrollDown | K::ScrollUp if self.session.at == At::Side => {
+                K::ScrollDown | K::ScrollUp if side_keys => {
                     sb.scroll_keeping(if m.kind == K::ScrollDown { 3 } else { -3 }, rows)
                 }
                 K::ScrollDown => sb.scroll += 3,
@@ -3813,7 +3908,7 @@ impl Editor {
         } else if key.code == Code::Esc
             && self.mode == Mode::Normal
             && self.prompt.is_none()
-            && self.session.at == At::Code
+            && self.session.is_at(At::Code)
         {
             self.search_hl = false;
             if self.popup.is_none() {
@@ -3879,6 +3974,9 @@ impl Editor {
         }
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);
+        }
+        if crate::testing::list_key(self, key) {
+            return took(Handler::List);
         }
         // Start screen: `r` = the files last open here
         if self.welcome()

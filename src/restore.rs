@@ -273,6 +273,8 @@ impl Editor {
         self.lsp.unseen_later = false;
         if let Some(pick) = pick {
             self.current = pick;
+            // (and the panes they were in — `layouts.rs`)
+            self.layout_restore();
             let name = if opened == 1 { "1 file".to_string() } else { format!("{opened} files") };
             self.set_status(format!("Reopened {name} from last time"));
         }

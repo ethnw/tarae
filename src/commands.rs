@@ -262,6 +262,11 @@ commands! {
         dap_unwatch => "Remove a watch",
         hsplit => "Split the window top / bottom",
         rotate_view => "Next window",
+        swap_view_left => "Swap with the window left",
+        swap_view_right => "Swap with the window right",
+        swap_view_up => "Swap with the window above",
+        swap_view_down => "Swap with the window below",
+        transpose_view => "Turn the split around",
         jump_view_left => "Window to the left",
         focus_side_panel => "To the side panel and back",
         jump_view_right => "Window to the right",
@@ -2206,6 +2211,26 @@ fn hsplit(cx: &mut Context) {
 
 fn rotate_view(cx: &mut Context) {
     cx.editor.cycle_view(1);
+}
+
+fn swap_view_left(cx: &mut Context) {
+    cx.editor.swap_view(-1, 0);
+}
+
+fn swap_view_right(cx: &mut Context) {
+    cx.editor.swap_view(1, 0);
+}
+
+fn swap_view_up(cx: &mut Context) {
+    cx.editor.swap_view(0, -1);
+}
+
+fn swap_view_down(cx: &mut Context) {
+    cx.editor.swap_view(0, 1);
+}
+
+fn transpose_view(cx: &mut Context) {
+    cx.editor.transpose_view();
 }
 
 fn focus_side_panel(cx: &mut Context) {

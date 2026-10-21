@@ -3280,7 +3280,7 @@ pub fn unfold_key(ed: &mut Editor, key: Key) -> bool {
     if !ed.pending.is_empty() {
         return false;
     }
-    if ed.session.at != At::Chat {
+    if !ed.session.is_at(At::Chat) {
         return false;
     }
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.compact()) else { return false };
@@ -3318,7 +3318,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     }
     let page = page(ed);
     let half = crate::key::half(page) as usize;
-    if ed.session.at != At::Chat {
+    if !ed.session.is_at(At::Chat) {
         return false;
     }
     let Some(c) = ed.session.chat.as_mut() else { return false };

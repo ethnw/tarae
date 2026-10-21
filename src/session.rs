@@ -18,10 +18,14 @@ use crate::event::SessionId;
 use crate::key::{Code, Key};
 
 /// Where a session's keys are — one value (panes P2a, `target/sb/panes-plan.md` §2.3): the code, a surface
-/// beside it, or the left rail's two. Inside a surface its own sub-state says the rest (the chat's input or its
-/// view mode, `Session.view`). P2b makes every surface a pane and this its id.
+/// beside it, the left rail's two, or a floating pane over them (P2b, §2.1c). Inside a surface its own sub-state
+/// says the rest (the chat's input or its view mode, `Session.view`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum At {
+    /// A floating pane — a card with the keys, the picker, a prompt, which-key (`pane::Floating`), by its pane id
+    /// (`Session.floats`); the docked pane it rose over is `Session.under`, the keys' again when it goes
+    /// (`Editor::float_sync`).
+    Float(crate::split::PaneId),
     /// The code pane `Session.focus`.
     #[default]
     Code,
@@ -29,6 +33,9 @@ pub enum At {
     Chat,
     /// The terminal's program.
     Program,
+    /// A linked group's list (§2.1b: the tests' results, `Session.tests`), by its pane id — its detail is the slot's
+    /// view mode (`Slot`).
+    List(crate::split::PaneId),
     /// The slot's panel with tarae's keys: the test run's, the task's, the terminal's view mode.
     Slot,
     /// `:procs`' panel.
@@ -63,10 +70,16 @@ pub struct Session {
     pub views: Vec<View>,
     pub panes: Vec<crate::pane::Pane>,
     pub split: crate::split::Split,
+    /// The tests' linked group — the list and the detail, laid out in the slot while it shows results (`pane.rs`).
+    pub tests: crate::pane::Group,
     /// The code pane last focused — what `doc()` means, wherever the keys are (`at`).
     pub focus: crate::split::PaneId,
     /// Where the keys are: one value (`At`) — never a flag on each surface.
     pub at: At,
+    /// While a floating pane has the keys (`At::Float`): the docked pane it rose over — never a `Float`.
+    pub under: At,
+    /// The floating panes up with the ids they were given as they rose (`Editor::float_sync`).
+    pub floats: Vec<(crate::pane::Floating, crate::split::PaneId)>,
     /// `C-w z`: what fills the screen, while it keeps the keys (`Editor::zoomed`).
     pub zoom: Option<crate::sizes::Zoom>,
     /// While it's behind: the document its focused pane shows (in front, that's `Editor.current`).
@@ -125,7 +138,7 @@ pub struct Session {
     /// The build task running or last run (task.rs) · the last one started (`space m m`).
     pub task_run: Option<crate::task::Run>,
     pub task_last: Option<crate::task::Task>,
-    /// The bottom slot's panel put in front (a tab, `C-w t`, one just opened) · what was there last event,
+    /// The bottom slot's panel put in front (a tab, `tab` in its view mode, one just opened) · what was there last event,
     /// so a new one is told from one already seen (`chrome::slot_sync`).
     pub slot_front: Option<crate::sizes::Slot>,
     pub slot_seen: Vec<(crate::sizes::Slot, Option<std::time::Instant>)>,
@@ -333,7 +346,10 @@ impl Session {
             panes,
             split,
             focus: view,
+            tests: crate::pane::tests_group(view),
             at: At::Code,
+            under: At::Code,
+            floats: Vec::new(),
             zoom: None,
             current_doc: 0,
             scratch: None,
@@ -422,15 +438,26 @@ impl Session {
         }
     }
 
-    /// The keys are `at`'s.
+    /// The docked pane the keys are in, or go back to once the floating one with them goes (`under`).
+    pub fn docked(&self) -> At {
+        match self.at {
+            At::Float(_) => self.under,
+            at => at,
+        }
+    }
+
+    /// The keys are `at`'s — a docked pane's: under a floating one too (the surface a picker's or a prompt's
+    /// answer acts on). `at` itself says whether a floating pane has them.
     pub fn is_at(&self, at: At) -> bool {
-        self.at == at
+        self.docked() == at
     }
 
     /// The pane showing surface `shows` (a code pane: the one last focused).
     pub fn leaf(&self, shows: crate::pane::Shows) -> Option<crate::split::PaneId> {
         match shows {
             crate::pane::Shows::Code => Some(self.focus),
+            crate::pane::Shows::TestList => Some(self.tests.list),
+            crate::pane::Shows::TestDetail => Some(self.tests.detail),
             _ => self.panes.iter().find(|p| p.shows == shows).map(|p| p.id),
         }
     }
@@ -439,7 +466,7 @@ impl Session {
     pub fn shows(&self, id: crate::split::PaneId) -> Option<crate::pane::Shows> {
         match self.views.iter().any(|v| v.id == id) {
             true => Some(crate::pane::Shows::Code),
-            false => self.panes.iter().find(|p| p.id == id).map(|p| p.shows),
+            false => self.panes.iter().find(|p| p.id == id).map(|p| p.shows).or(self.tests.member(id)),
         }
     }
 
@@ -447,8 +474,9 @@ impl Session {
     /// program, `:procs`, a plugin's panel are the slot's panels), the side panel's, the rail's.
     pub fn at_pane(&self) -> Option<crate::split::PaneId> {
         use crate::pane::Shows;
-        self.leaf(match self.at {
-            At::Code => Shows::Code,
+        self.leaf(match self.docked() {
+            At::List(id) => return Some(id),
+            At::Float(_) | At::Code => Shows::Code,
             At::Chat => Shows::Chat,
             At::Program | At::Slot | At::Procs | At::Plugin => Shows::Slot,
             At::Side => Shows::Side,
@@ -458,19 +486,21 @@ impl Session {
 
     /// The keys leave `at` for the code — nothing when they were elsewhere.
     pub fn leave(&mut self, at: At) {
-        if self.at == at {
-            self.at = At::Code;
+        match self.at {
+            At::Float(_) if self.under == at => self.under = At::Code,
+            a if a == at => self.at = At::Code,
+            _ => {}
         }
     }
 
-    /// The chat has the keys (its input, minimized or not, or its view mode).
+    /// The chat has the keys (its input, minimized or not, or its view mode) — under a floating pane too.
     pub fn chat_has_keys(&self) -> bool {
-        self.at == At::Chat && self.chat.is_some()
+        self.is_at(At::Chat) && self.chat.is_some()
     }
 
-    /// The terminal's program has the keys: it's shown and runs.
+    /// The terminal's program has the keys: it's shown and runs (under a floating pane too).
     pub fn program_has_keys(&self) -> bool {
-        self.at == At::Program && self.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none())
+        self.is_at(At::Program) && self.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none())
     }
 
     /// The hosts its `s` let through, at their ports — what its runs' rules carry (`caps::Basis`).

@@ -1382,7 +1382,7 @@ fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
 }
 
 /// The current file and the panes — `ids` = the document each saved one is now.
-fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
+pub(crate) fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::DocId>]) {
     let doc_at = |i: &Value| i.as_u64().and_then(|i| *ids.get(i as usize)?);
     if let Some(id) = doc_at(&v["current"]).or_else(|| ids.iter().flatten().next().copied())
         && let Some(i) = ed.docs.iter().position(|d| d.id == id)
@@ -1477,7 +1477,7 @@ fn mode_of(s: &str) -> Option<Mode> {
 /// A leaf is its pane's id; a node is `{"v": [...]}` (side by side) or `{"h": [...]}` (stacked); a child with an
 /// even share is itself, the others `{"auto": child}` (the surface's own size) and `{"cells": n, "of": child}`.
 /// Ids and shares, no cells: the frame lays it out at its own size.
-fn split_json(s: &Split) -> Value {
+pub(crate) fn split_json(s: &Split) -> Value {
     use crate::split::Share;
     match s {
         Split::Leaf(id) => json!(id),
@@ -1493,7 +1493,7 @@ fn split_json(s: &Split) -> Value {
     }
 }
 
-fn split_of(v: &Value) -> Option<Split> {
+pub(crate) fn split_of(v: &Value) -> Option<Split> {
     use crate::split::Share;
     if let Some(id) = v.as_u64() {
         return Some(Split::Leaf(id));

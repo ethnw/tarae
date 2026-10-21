@@ -2355,7 +2355,7 @@ impl crate::editor::Editor {
         self.offer_views.push((doc, id));
         // The code has the keys, to read it (#55: the review's rail kept them, and keys did nothing)
         // (a panel in the slot `:procs`, a plugin's, keeps them as it did)
-        if !matches!(self.session.at, crate::session::At::Procs | crate::session::At::Plugin) {
+        if !matches!(self.session.docked(), crate::session::At::Procs | crate::session::At::Plugin) {
             self.session.at = crate::session::At::Code;
         }
         // The card keeps the keys while it's read: the keys that read reach the buffer through it (`card_reads`),

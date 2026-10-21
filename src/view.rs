@@ -609,11 +609,11 @@ pub fn chat_view_of(ed: &Editor) -> Option<&View> {
 /// chat keeps its `esc` (to the code); `space >` brings it back. A chat not drawn yet (closed, minimized) is
 /// viewed once the frame lays its rows out (`wanted`).
 pub fn chat_view(ed: &mut Editor) {
+    let from_input = ed.session.is_at(At::Chat);
     let Some(c) = ed.session.chat.as_mut() else {
         crate::chat::open(ed);
         return want(ed);
     };
-    let from_input = ed.session.at == At::Chat;
     if c.compact() {
         match from_input {
             true => ed.session.at = At::Code,
@@ -660,9 +660,10 @@ fn want(ed: &mut Editor) {
 /// After a frame (`term::render`): the view asked for before the chat was drawn, made now — true when it was
 /// (the frame is drawn again with it).
 pub fn wanted(ed: &mut Editor) -> bool {
+    let chat_keys = ed.session.is_at(At::Chat);
     let Some(c) = ed.session.chat.as_mut().filter(|c| c.view_wanted) else { return false };
     c.view_wanted = false;
-    if ed.session.at != At::Chat || ed.screen.chat_view.get().is_none() {
+    if !chat_keys || ed.screen.chat_view.get().is_none() {
         return false;
     }
     // (opened on an empty conversation: the input keeps the keys, said)
