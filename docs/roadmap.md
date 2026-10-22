@@ -434,7 +434,11 @@ main that has what it waits for, and the user says go:
   paragraph, its view mode normal mode on it (`● normal · chat`), its input a small document in insert mode, a
   run's output kept once (footprint −60 % on 20,000 lines); the document pane one module (`docpane.rs`); the
   terminal's waits for the engine → **P3** panes of their own (the tests panel
-  the first linked group) → **P3b** tabs and the task list → the terminal line: several terminals → the engine →
+  the first linked group), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  a session = one participant, a workspace = a checkout with its layout; C1 where
+  every session reads and writes, shown wherever that file is; C2 an overlap between workspaces said the moment it
+  would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C3 workspaces kept close to
+  main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
