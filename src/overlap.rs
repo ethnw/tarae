@@ -1080,6 +1080,72 @@ fn apart(x: &Option<Range<usize>>, y: &Option<Range<usize>>) -> bool {
     }
 }
 
+/// The base's branch as said: the session whose checkout has it (its name, its colour), else the branch, plain.
+pub fn named_branch(ed: &Editor, branch: &str) -> (String, Option<u8>) {
+    name(ed, &as_session(ed, ed.session.id, Other::Branch(branch.to_string())))
+}
+
+/// A file of session `id`'s to show merged (the session list's `v`): one where it would conflict — with the front
+/// session first — and the other side there; else the first it changed (no side).
+pub fn file_of(ed: &Editor, id: SessionId) -> Option<(String, Option<Other>)> {
+    let me = ed.session.id;
+    let with = |o: &&Overlap| o.a == id || o.b == Other::Session(id);
+    let theirs = |o: &Overlap| match o.a == id {
+        true => as_session(ed, id, o.b.clone()),
+        false => Other::Session(o.a),
+    };
+    let first = ed.overlap.now.iter().filter(with).find(|o| o.a == me || o.b == Other::Session(me));
+    if let Some(o) = first.or_else(|| ed.overlap.now.iter().find(with)) {
+        let side = match id == me {
+            true => theirs(o),
+            false => Other::Session(id),
+        };
+        return Some((o.path.clone(), Some(side)));
+    }
+    let snap = ed.overlap.places.get(&id)?.snap.as_ref()?;
+    snap.changed.iter().find(|p| !key_named(&snap.top, p)).map(|p| (p.clone(), None))
+}
+
+/// Session `id`'s working tree as last taken (its commit) — the merged view asks again when it moves.
+pub fn snapshot_commit(ed: &Editor, id: SessionId) -> Option<String> {
+    ed.overlap.places.get(&id)?.snap.as_ref().map(|s| s.commit.clone())
+}
+
+/// Session `id`'s working tree as last taken, to read a file of (`merged.rs`, when its disk text can't be read).
+pub fn snapshot_reader(ed: &Editor, id: SessionId) -> Option<SnapRead> {
+    let p = ed.overlap.places.get(&id)?;
+    let s = p.snap.as_ref()?;
+    Some(SnapRead {
+        commit: s.commit.clone(),
+        top: s.top.clone(),
+        common: s.common.clone(),
+        folder: p.folder.clone(),
+    })
+}
+
+/// A snapshot to read a file of: its commit's objects in its folder, the repository's read too — never a fetch.
+pub struct SnapRead {
+    commit: String,
+    top: PathBuf,
+    common: PathBuf,
+    folder: Arc<Folder>,
+}
+
+impl SnapRead {
+    /// `rel`'s text in it (None: not there, unreadable, past `TEXT_MAX`, binary, or its workspace gone).
+    pub fn read(&self, rel: &str) -> Option<String> {
+        let _one = self.folder.one.lock().unwrap_or_else(|e| e.into_inner());
+        if self.folder.ended.load(Ordering::SeqCst) || rel.contains('\n') {
+            return None;
+        }
+        let env = env(&self.folder, &self.common, None);
+        let spec = format!("{}:{rel}", self.commit);
+        let cmd = crate::snapshot::command_env(&self.top, &["cat-file", "blob", &spec], None, &env).ok()?;
+        let b = crate::gitrepo::finish(&cmd, None).ok()?;
+        (b.len() <= TEXT_MAX && !b.contains(&0)).then(|| String::from_utf8_lossy(&b).into_owned())
+    }
+}
+
 /// A side by its name and its colour (a branch no session has: its name, no colour).
 pub fn name(ed: &Editor, side: &Other) -> (String, Option<u8>) {
     match side {
@@ -1192,10 +1258,14 @@ pub fn in_file(ed: &Editor, rel: &Path) -> Vec<(String, Option<u8>, Option<Range
     out
 }
 
-/// What Claude's `edit` or `read` answer says of `path` (in its session's checkout): a line per other side its file
-/// would conflict with — `src/a.rs: fix's change would conflict here: L30–34` — its own lines, the other's name,
+/// What Claude's `edit` or `read` answer says of `path` (in its session's checkout) — the merged view's words where
+/// one of the file was worked out (`merged::told`), else a line per other side its file would conflict with — `src/a.rs: fix's change would conflict here: L30–34` — its own lines, the other's name,
 /// nothing else. None: no overlap there.
 pub fn told(ed: &Editor, path: &Path) -> Vec<String> {
+    // (where the file was merged in memory — the buffers, unsaved too — that merge says it: `merged::told`)
+    if let Some(lines) = crate::merged::told(ed, path) {
+        return lines;
+    }
     if ed.overlap.now.is_empty() {
         return Vec::new();
     }

@@ -139,6 +139,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "sh" | "run-shell-command" => shell(editor, rest),
         "diff" => editor.diff_against(rest.trim()),
         "diff-off" => editor.diff_off(),
+        "merged" => {
+            let path = Some(rest.trim()).filter(|p| !p.is_empty()).map(|p| editor.session.root.join(p));
+            crate::merged::open(editor, path, None)
+        }
         "session-open" if !rest.trim().is_empty() => {
             let id = editor.session_open(Path::new(rest.trim()))?;
             let all = editor.sessions_in_order();

@@ -100,6 +100,33 @@ impl Dir {
         Ok(dir)
     }
 
+    /// `read`, but no more than `max` bytes: one larger is `FileTooLarge`, its size taken from the open descriptor
+    /// before any byte is read (and the read itself stops past `max` — a file growing meanwhile too). Opened
+    /// non-blocking, so a FIFO planted there is refused as what isn't a plain file, never waited on.
+    pub fn read_at_most(&self, name: &OsStr, max: usize) -> io::Result<Option<Vec<u8>>> {
+        let (cn, at, fd) = (c(name)?, self.at.join(name), self.fd.as_raw_fd());
+        let file = match open_at(fd, &cn, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK) {
+            Ok(f) => std::fs::File::from(f),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(said(e, fd, &cn, &at)),
+        };
+        let m = file.metadata()?;
+        if !m.is_file() {
+            return Err(io::Error::other(format!("{} isn't a plain file", at.display())));
+        }
+        let too_large =
+            || io::Error::new(io::ErrorKind::FileTooLarge, format!("{} is too large", at.display()));
+        if m.len() > max as u64 {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        (&file).take(max as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > max {
+            return Err(too_large());
+        }
+        Ok(Some(bytes))
+    }
+
     /// File `name`'s bytes — None: nothing there; Err for a link (never followed) or what isn't a plain file.
     pub fn read(&self, name: &OsStr) -> io::Result<Option<Vec<u8>>> {
         let (cn, at, fd) = (c(name)?, self.at.join(name), self.fd.as_raw_fd());

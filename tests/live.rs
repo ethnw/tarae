@@ -1078,6 +1078,60 @@ fn chat_overlap_line_tokens() {
     assert!(with.len() >= 2 && without.len() >= 2, "a request after the read in each");
 }
 
+/// What the merged view's line costs in a tool's answer (collab C2b): as `chat_overlap_line_tokens`, with `:merged` of
+/// `a.rs` open in the main checkout — its answer then ending `a.rs: merged with fix's change: conflict at L3` (in
+/// place of C2's line), and once with fix's file as the base has it: merged clean, no line.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_merged_line_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let after_read = |conflict: bool| {
+        let (sb, out) = teed_chat(if conflict { "merged-line" } else { "merged-none" });
+        std::fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n")
+            .unwrap();
+        let text: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        sb.write("a.rs", &text);
+        sb.git(&["init", "-q", "-b", "main"]);
+        sb.git(&["add", "-A"]);
+        sb.git(&["commit", "-q", "-m", "base"]);
+        let wt = sb.work().with_file_name("fix");
+        sb.git(&["worktree", "add", "-q", "-b", "fix", wt.to_str().unwrap()]);
+        sb.write("a.rs", &text.replace("line 3\n", "line 3, main\n"));
+        if conflict {
+            std::fs::write(wt.join("a.rs"), text.replace("line 3\n", "line 3, fix\n")).unwrap();
+        }
+        let mut t = sb.spawn(&["a.rs"]);
+        t.send(&format!(":session-open {}\r", wt.display()));
+        let two = |s: &serde_json::Value| s["sessions"].as_array().is_some_and(|a| a.len() == 2);
+        t.wait_state("two sessions", two);
+        t.send(":session-switch 0\r");
+        t.command("merged");
+        // (one of `:merged`'s refusals is said in a toast: seen, not waited past)
+        let refused =
+            |s: &Screen| ["workspace", "branch", "named like", "no file"].iter().any(|w| s.contains(w));
+        let s = match conflict {
+            true => t.wait_for("the merge, a conflict", |s| s.contains("1 conflict") || refused(s)),
+            false => t.wait_for("the merge, clean", |s| {
+                (s.contains("merged · a.rs") && !s.contains("merging")) || refused(s)
+            }),
+        };
+        assert!(!refused(&s), "`:merged` refused:\n{s}");
+        chat_turn(&mut t, "Read a.rs with the read tool, then reply with the single word ok.");
+        let stream = std::fs::read_to_string(&out).unwrap_or_default();
+        assert_eq!(
+            stream.contains("merged with fix's change: conflict at L3"),
+            conflict,
+            "the line in the answer"
+        );
+        prompts(&stream)
+    };
+    let (with, without) = (after_read(true), after_read(false));
+    eprintln!("TOKENS requests' prompts — with the merged view's line: {with:?} · without: {without:?}");
+    assert!(with.len() >= 2 && without.len() >= 2, "a request after the read in each");
+}
+
 /// Keep-warm (`keepwarm.rs`): a ping of a fork of the conversation reads the cache the chat's turn wrote — its
 /// request's cache read is at least 95 % of the chat's last prompt, so the fork's prefix (tools, system prompt,
 /// history) is the chat's to the byte. Asked for now (`:keep-warm now`) rather than waited for 55 minutes; the

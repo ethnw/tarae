@@ -932,7 +932,8 @@ impl Layout {
         let total = all - bar;
         // The sign column (breakpoints, diagnostics) right after the gutter, the numbers after it
         let doc = editor.doc();
-        let gutter = crate::chrome::SIGNS + num_w(doc);
+        // (a merged view's sign column holds its sides' prefixes — `merged::signs`)
+        let gutter = crate::merged::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > total;
         // The review's file rail when there's room for it and the code (else the header says where you are)
         // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
@@ -1130,7 +1131,7 @@ impl Layout {
         editor: &Editor,
     ) -> Layout {
         let rows = r.h.saturating_sub(title as usize).max(1);
-        let gutter = crate::chrome::SIGNS + num_w(doc);
+        let gutter = crate::merged::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > rows;
         Layout {
             x0: r.x,
@@ -4593,10 +4594,31 @@ fn draw_text(
         };
         Some(Style { bg: blend(color, ui.tint, k).or(ui.base.bg), ..ui.base })
     };
+    // A merged view (`merged.rs`): each change's lines on its participant's wash (a step stronger on the cursor
+    // line), a conflict's base part on a faint one; in the sign column a change's first line says whose by its
+    // prefix, bold in its colour (never the colour alone), its other lines and a conflict part's a `▎` in it
+    let merged = crate::merged::of(doc);
+    let merged_bg = |line: usize, here: bool| -> Option<Style> {
+        let (colour, _) = crate::merged::mark(merged?, line)?;
+        let (fg, k) = match colour {
+            Some(c) => (ui.participant(c, true), if here { 0.20 } else { 0.11 }),
+            None => (ui.linenr.fg, if here { 0.14 } else { 0.07 }),
+        };
+        Some(Style { bg: blend(fg, ui.tint, k).or(ui.base.bg), ..ui.base })
+    };
+    let merged_sign = |line: usize| -> Option<(&str, Style)> {
+        let (colour, prefix) = crate::merged::mark(merged?, line)?;
+        let fg = ui.participant(colour?, true);
+        Some(match prefix {
+            Some(p) => (p, Style { fg, bold: true, ..ui.base }),
+            None => ("▎", Style { fg, ..ui.base }),
+        })
+    };
     // git: sign per visible line (glyph, color)
     let git_color = |k: &str| Style { fg: editor.theme.try_get(k).and_then(|s| s.fg), ..ui.base };
     let mut git_marks: Vec<Option<(&str, Style)>> = vec![None; span];
-    for h in hunks.iter() {
+    // (a merged view's changes are marked in their participants' colours instead — `merged_bg`, `merged_sign`)
+    for h in hunks.iter().filter(|_| shows.changes != crate::codeview::Changes::Merged) {
         let (glyph, st, lines) = match h.kind {
             crate::git::HunkKind::Added => ("▎", git_color("diff.plus"), h.lines.clone()),
             crate::git::HunkKind::Modified => ("▎", git_color("diff.delta"), h.lines.clone()),
@@ -4794,6 +4816,14 @@ fn draw_text(
             }
             // The edit review's change head: the review draws it over this row (`draw_review`)
             Some(crate::codeview::Row::Header { .. }) => continue,
+            // A merged view's conflict: a part's head, or a side by side one's head and rows of columns
+            Some(crate::codeview::Row::Other { kind: crate::codeview::OtherKind::Merged(r), .. }) => {
+                if let Some(m) = merged {
+                    let cursor = cur_shown.then_some(cur_line);
+                    draw_merged_row(out, editor, (doc, m), *r, (ui, lay, y, signs), cursor, &mut qcursor)?;
+                }
+                continue;
+            }
             // A line that isn't the document's — one the review's base had here or a shown edit replaced, or one
             // the edit under review proposes (or takes out or keeps, from the text it was asked on): its mark
             // where the git bar goes, no number (the old numbers would read as the new ones — or clash with
@@ -4805,6 +4835,8 @@ fn draw_text(
                     OtherKind::Edit(e) => (e.mark, None),
                     // (an edit being written: on the wash its review will have, nothing decided)
                     OtherKind::Writing { .. } => (Mark::Added { washed: true }, None),
+                    // (drawn by their own arm above)
+                    OtherKind::Merged(_) => (Mark::Kept, None),
                 };
                 let bg = match mark {
                     Mark::Taken => removed_bg,
@@ -4908,6 +4940,8 @@ fn draw_text(
             Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
         } else if let Some(st) = conflict_bg(line) {
             st
+        } else if let Some(st) = merged_bg(line, here) {
+            st
         } else if taken {
             // A line the edit under review takes out
             Style { bg: removed_bg, ..ui.base }
@@ -4946,11 +4980,10 @@ fn draw_text(
             queue!(out, Spaces(lay.gutter - 1))?;
         } else if signs > 0 {
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
-            apply(out, gut(ui.base))?;
-            queue!(out, Spaces(signs - 1))?;
-            // (under them all: a session's place — `presence.rs`, the one you follow in the accent; its cell kept,
-            // a click follows it, the mouse over it shows its tag)
+            // (under them all: a merged view's whose — then a session's place, `presence.rs`, the one you follow in
+            // the accent; its cell kept, a click follows it, the mouse over it shows its tag)
             let (glyph, st) = match sign_of(line, line) {
+                (" ", _) if merged.is_some() => merged_sign(line).unwrap_or((" ", ui.base)),
                 (" ", _) => match presence_sign(line) {
                     Some(s) => {
                         if let Some(m) = shows.presence.iter().find(|m| m.lines.contains(&line)) {
@@ -4964,6 +4997,10 @@ fn draw_text(
                 },
                 s => s,
             };
+            // (right-aligned against the numbers: a prefix of two can take the column's two cells)
+            let glyph = fit(glyph, signs);
+            apply(out, gut(ui.base))?;
+            queue!(out, Spaces(signs - glyph.width()))?;
             apply(out, gut(st))?;
             queue!(out, Print(glyph))?;
         }
@@ -5491,6 +5528,30 @@ fn draw_text(
                 gap = " ";
             }
         }
+        // A merged view: whose change the cursor is on, at its first line's end (`‹fix›` — C1's tag rule: only while it
+        // says something new), in its colour; only where the line end is free
+        if let Some(m) = merged
+            && cur_shown
+            && last
+            && !clipped
+            && tag_here.is_none()
+            && line_message_here.is_none()
+            && note_here.is_none()
+            && hint_here.is_none()
+            && risk_here.is_none()
+            && let Some((at, name, colour)) = crate::merged::tag_at(m, cur_line)
+            && at == line
+        {
+            let used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
+            let tag = format!("‹{}›", fit_ellipsis(&name, 32));
+            if used + 3 + tag.width() <= lay.text_cols {
+                let fg = colour.and_then(|c| ui.participant(c, true)).or(ui.linenr.fg);
+                apply(out, line_base)?;
+                queue!(out, Print("   "))?;
+                apply(out, Style { fg, ..line_base })?;
+                queue!(out, Print(&tag))?;
+            }
+        }
         // Blame (`b` in the git tab): who changed the cursor line, when, and why — faint, only where the line end is
         // free (a diagnostic or debugger values take it first), and not while typing
         if shows.blame
@@ -5517,6 +5578,179 @@ fn draw_text(
         draw_scrollbar(doc, top, ui, lay, out)?;
     }
     Ok(cursor)
+}
+
+/// A merged view's conflict row (`merged.rs`) that isn't a line: a stacked part's head (`─ conflict 1 of 2 · base ──`,
+/// `─ fix ──` — its prefix in the sign column), or one side by side — its head (`─ conflict 1 of 2 ── base ──┬─
+/// main ──┬─ fix ──`, its first line's number) and its rows of columns, each part's lines cut to its column on its
+/// participant's wash, a `│` between. `≈` in warning where a conflict starts; names bold in their colours, the rules
+/// faint.
+fn draw_merged_row(
+    out: &mut impl Write,
+    editor: &Editor,
+    (doc, m): (&crate::document::Document, &crate::merged::Shown),
+    row: crate::codeview::MergedRow,
+    (ui, lay, y, signs): (&Ui, &Layout, u16, usize),
+    cursor: Option<usize>,
+    qcursor: &mut QueryCursor,
+) -> io::Result<()> {
+    use crate::codeview::MergedRow;
+    let (i, part) = match row {
+        MergedRow::Head { conflict, part } => (conflict, part),
+        MergedRow::Columns { conflict, .. } => (conflict, None),
+    };
+    let Some(c) = m.merge.conflicts.get(i) else { return ground(out, lay, y, ui.base) };
+    let spans: Vec<(std::ops::Range<usize>, Option<usize>)> = c.spans().collect();
+    let warn = ui.base.patch(ui.sign[2]);
+    let faint = Style { fg: ui.linenr.fg, ..ui.base };
+    let wash = |side: Option<usize>| -> Style {
+        let (fg, k) = match m.part_name(c, side).1 {
+            Some(col) => (ui.participant(col, true), 0.11),
+            None => (ui.linenr.fg, 0.07),
+        };
+        Style { bg: blend(fg, ui.tint, k).or(ui.base.bg), ..ui.base }
+    };
+    let named = |side: Option<usize>| -> (String, Style) {
+        let (name, col) = m.part_name(c, side);
+        let fg = col.and_then(|col| ui.participant(col, true)).or(ui.base.fg);
+        (name, Style { fg, bold: true, ..ui.base })
+    };
+    let of = format!("conflict {} of {}", i + 1, m.merge.conflicts.len());
+    ground(out, lay, y, ui.base)?;
+    // The sign column and the numbers: `≈` and the conflict's first line where it starts, a part's prefix on its head
+    let sign = match (row, part) {
+        (MergedRow::Head { .. }, None | Some(0)) => Some(("≈".to_string(), warn)),
+        (MergedRow::Head { .. }, Some(k)) => spans.get(k).and_then(|(_, s)| *s).map(|s| {
+            let p = m.prefixes.get(s).cloned().unwrap_or_default();
+            (p, named(Some(s)).1)
+        }),
+        _ => None,
+    };
+    apply(out, ui.base)?;
+    match sign {
+        Some((g, st)) if signs > 0 => {
+            let g = fit(&g, signs);
+            queue!(out, Spaces(signs - g.width()))?;
+            apply(out, st)?;
+            queue!(out, Print(g))?;
+        }
+        _ => queue!(out, Spaces(signs))?,
+    }
+    let w = lay.gutter.saturating_sub(signs + 1);
+    let here = cursor.is_some_and(|l| c.lines().contains(&l));
+    match row {
+        MergedRow::Head { part: None, .. } => {
+            apply(out, if here { ui.linenr_selected } else { ui.linenr })?;
+            queue!(out, Print(format!("{:>w$}", c.base.start + 1)), Print(" "))?;
+        }
+        _ => queue!(out, Spaces(w + 1))?,
+    }
+    let cols = lay.text_cols;
+    match row {
+        // Stacked: this part's head across the code
+        MergedRow::Head { part: Some(k), .. } => {
+            let side = spans.get(k).and_then(|(_, s)| *s);
+            let mut words = Vec::new();
+            if k == 0 {
+                words.push((of, warn));
+                words.push(("·".into(), faint));
+            }
+            words.push(named(side));
+            merged_rule(out, faint, &words, cols)
+        }
+        // Side by side: a column's head each, `┬` between
+        MergedRow::Head { part: None, .. } => {
+            let cw = crate::merged::column_w(cols, spans.len());
+            for (k, (_, side)) in spans.iter().enumerate() {
+                if k > 0 {
+                    apply(out, faint)?;
+                    queue!(out, Print("┬"))?;
+                }
+                let mut words = Vec::new();
+                if k == 0 {
+                    words.push((of.clone(), warn));
+                    words.push(("──".into(), faint));
+                }
+                words.push(named(*side));
+                let last = k + 1 == spans.len();
+                merged_rule(out, faint, &words, if last { cols - k * (cw + 1) } else { cw })?;
+            }
+            Ok(())
+        }
+        MergedRow::Columns { index, .. } => {
+            let tab = editor.config.tab_width;
+            let capture_styles = editor.theme.capture_styles();
+            let cw = crate::merged::column_w(cols, spans.len());
+            for (k, (r, side)) in spans.iter().enumerate() {
+                if k > 0 {
+                    apply(out, faint)?;
+                    queue!(out, Print("│"))?;
+                }
+                let width = if k + 1 == spans.len() { cols - k * (cw + 1) } else { cw };
+                let line = r.start + index;
+                let st = match line < r.end {
+                    true => wash(*side),
+                    false => ui.base,
+                };
+                apply(out, st)?;
+                if line >= r.end {
+                    queue!(out, Spaces(width))?;
+                    continue;
+                }
+                let text = doc.text.line(line).to_string();
+                let text = text.trim_end_matches(['\n', '\r']);
+                let paint = other_paint(doc, text, None, qcursor);
+                let mut room = width;
+                for g in graphemes::cells(text, 0, tab) {
+                    if g.width > room {
+                        break;
+                    }
+                    room -= g.width;
+                    let cap = paint.get(g.bytes.start).copied().unwrap_or(u32::MAX);
+                    let syn = capture_styles.get(cap as usize).copied().flatten().unwrap_or_default();
+                    apply(out, st.patch(Style { bg: None, ..syn }))?;
+                    match &text[g.bytes.clone()] {
+                        "\t" => queue!(out, Spaces(g.width))?,
+                        s if s.chars().next().is_some_and(char::is_control) => {
+                            queue!(out, Print('\u{fffd}'))?
+                        }
+                        s => queue!(out, Print(s))?,
+                    }
+                }
+                apply(out, st)?;
+                queue!(out, Spaces(room))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A rule with words on it: `─ words ───…` to `width` cells — the words that fit, cut, the rule faint.
+fn merged_rule(
+    out: &mut impl Write,
+    faint: Style,
+    words: &[(String, Style)],
+    width: usize,
+) -> io::Result<()> {
+    let mut used = 0;
+    for (k, (t, st)) in words.iter().enumerate() {
+        let lead = if k == 0 { "─ " } else { " " };
+        let t = fit_ellipsis(t, width.saturating_sub(used + lead.width() + 1));
+        if t.is_empty() || used + lead.width() + t.width() + 1 > width {
+            break;
+        }
+        apply(out, faint)?;
+        queue!(out, Print(lead))?;
+        apply(out, *st)?;
+        queue!(out, Print(&t))?;
+        used += lead.width() + t.width();
+    }
+    apply(out, faint)?;
+    if used > 0 && used < width {
+        queue!(out, Print(" "))?;
+        used += 1;
+    }
+    queue!(out, Print("─".repeat(width.saturating_sub(used))))
 }
 
 /// Per byte of a line that isn't the document's (`Row::Other`): the capture that paints it — from the review
@@ -5556,7 +5790,7 @@ fn rows_pane(
     shows: &Shows,
     lay: &Layout,
 ) -> Vec<crate::codeview::Row> {
-    use crate::codeview::{Part, Row};
+    use crate::codeview::{MergedRow, OtherKind, Part, Row};
     use crate::doccomment::parts;
     let text = &doc.text;
     let rows = lay.text_rows;
@@ -5620,11 +5854,61 @@ fn rows_pane(
         let room = rows.saturating_sub(view.len());
         view.extend(b.screen_rows(text, (wrap_w, tab), skip, room));
     };
+    // A merged view (`merged.rs`): a stacked conflict's head above each part; one side by side its head and rows of
+    // columns in place of its lines — from the top's skipped rows when the screen starts inside it, as a folded block's
+    let merged = crate::merged::of(doc);
+    if let Some(m) = merged {
+        m.cols.set(lay.text_cols);
+    }
+    let end = end + usize::from(merged.is_some());
+    let side_by_side =
+        |c: &crate::merged::Conflict| crate::merged::columns(editor, doc, c, lay.text_cols, shows.editing);
+    let merged_heads = |view: &mut Vec<Row>, line: usize| {
+        let Some(m) = merged else { return };
+        for (conflict, part) in crate::merged::heads_at(&m.merge, line) {
+            if view.len() < rows && !side_by_side(&m.merge.conflicts[conflict]) {
+                let kind = OtherKind::Merged(MergedRow::Head { conflict, part: Some(part) });
+                view.push(Row::Other { at: line, text: String::new(), kind, part: None });
+            }
+        }
+    };
+    let push_columns = |view: &mut Vec<Row>, line: usize| -> Option<usize> {
+        let m = merged?;
+        let conflict = m.merge.conflict_at(line)?;
+        let c = &m.merge.conflicts[conflict];
+        if !side_by_side(c) {
+            return None;
+        }
+        let r = c.lines();
+        let n = crate::merged::column_rows(c);
+        let skip = if line == r.start && line == top { top_skip } else { line - r.start };
+        for k in skip.min(n - 1)..n {
+            if view.len() == rows {
+                break;
+            }
+            let kind = match k {
+                0 => MergedRow::Head { conflict, part: None },
+                _ => MergedRow::Columns { conflict, index: k - 1 },
+            };
+            view.push(Row::Other {
+                at: r.start,
+                text: String::new(),
+                kind: OtherKind::Merged(kind),
+                part: None,
+            });
+        }
+        Some(r.end)
+    };
     if !folding {
         let mut view = Vec::with_capacity(rows);
         let mut line = top;
         while view.len() < rows && line <= end {
             removed_before(&mut view, line, &mut next);
+            if let Some(next) = push_columns(&mut view, line) {
+                line = next;
+                continue;
+            }
+            merged_heads(&mut view, line);
             if let Some(b) = writing.and_then(|w| w.at(line)) {
                 push_writing(&mut view, b, line);
                 line = b.last + 1;
@@ -5649,6 +5933,11 @@ fn rows_pane(
     let mut line = top;
     while view.len() < rows && line <= end {
         removed_before(&mut view, line, &mut next);
+        if let Some(next) = push_columns(&mut view, line) {
+            line = next;
+            continue;
+        }
+        merged_heads(&mut view, line);
         if line > max_line {
             break;
         }
@@ -7537,6 +7826,51 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     if doc.disk_conflict {
         let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
         left.push(Seg { text: "  ▲ changed on disk".into(), style: ui.base.patch(warn), keep: 246 });
+    }
+    // A merged view (`merged.rs`): whose changes it merges — each name in its colour, how far behind the base's tip,
+    // unsaved — and its conflicts in warning; what it couldn't merge, said
+    if let Some(m) = crate::merged::of(doc) {
+        let warn = ui.base.patch(ui.sign[2]);
+        match (&m.said, m.sides.is_empty()) {
+            (Some(why), _) => left.push(Seg { text: format!("  {why}"), style: warn, keep: 244 }),
+            (None, true) if m.asking || m.merges == 0 => {
+                left.push(Seg { text: "  merging…".into(), style: faint, keep: 244 })
+            }
+            (None, true) if m.left.is_empty() => {
+                left.push(Seg { text: "  no session changed it".into(), style: faint, keep: 244 })
+            }
+            (None, true) => {}
+            (None, false) => {
+                for (k, s) in m.sides.iter().enumerate() {
+                    let keep = 243u8.saturating_sub(k as u8);
+                    let fg = ui.participant(s.colour, true);
+                    let lead = if k == 0 { "  " } else { " · " };
+                    left.push(Seg { text: lead.into(), style: faint, keep });
+                    left.push(Seg { text: s.name.clone(), style: Style { fg, bold: true, ..ui.base }, keep });
+                    let mut more = String::new();
+                    if let Some(n) = s.behind.filter(|&n| n > 0) {
+                        more += &format!(" {n} behind");
+                    }
+                    if s.unsaved {
+                        more += " unsaved";
+                    }
+                    if !more.is_empty() {
+                        left.push(Seg { text: more, style: faint, keep: keep.saturating_sub(20) });
+                    }
+                }
+                if let n @ 1.. = m.merge.conflicts.len() {
+                    let text = format!("  ≈ {}", crate::nav::count(n, "conflict"));
+                    left.push(Seg { text, style: warn, keep: 244 });
+                }
+            }
+        }
+        // (a session whose file couldn't be merged — a link, a FIFO, too large, binary: said, each with why)
+        if m.said.is_none() {
+            for (name, why) in &m.left {
+                let text = format!("  {name} left out: {why}");
+                left.push(Seg { text, style: warn, keep: 241 });
+            }
+        }
     }
     // (each definition's segments — separator, glyph, name — by their `keep`: they go together)
     let mut scope: Vec<(u8, usize)> = Vec::new();
@@ -15200,9 +15534,18 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             _ => false,
         };
         let follow: &[(&'static str, &str)] = if working { &[("f", "follow")] } else { &[] };
+        // (`v`: its changes merged with the rest — where it would conflict first, `merged.rs`)
+        let merged: &[(&'static str, &str)] = match p.current().map(|i| &i.action) {
+            Some(Action::Session(id))
+                if !editor.sessions.is_empty() && crate::overlap::file_of(editor, *id).is_some() =>
+            {
+                &[("v", "merged")]
+            }
+            _ => &[],
+        };
         let with = |rest: &[(&'static str, &str)]| {
             let (enter, rest) = rest.split_at(1);
-            hints(&[enter, follow, marks, rest].concat())
+            hints(&[enter, merged, follow, marks, rest].concat())
         };
         match p.current().map(|i| &i.action) {
             None => with(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),

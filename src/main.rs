@@ -99,6 +99,7 @@ mod lsp_editor;
 mod markdown;
 mod mcp;
 mod media;
+mod merged;
 mod models;
 mod motion;
 mod movement;

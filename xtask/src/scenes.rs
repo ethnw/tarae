@@ -229,6 +229,82 @@ const OVERLAP_STRIP: &[&str] = overlap_keys!(" ", "l", "@2");
 const OVERLAP_LIST: &[&str] = overlap_keys!(" ", "W", "@2");
 // (…the file tree: `≈m` on src/main.rs — main's initial in its colour — and the row in hand's words at its foot)
 const OVERLAP_FILES: &[&str] = overlap_keys!(" ", "e", "@?main.rs", "@1");
+// (collab C2b: …and fix's `println!` line changed too, unsaved, then `:merged` — the conflict side by side where it's
+// wide, stacked at 80; fix's change in its colour, `fix unsaved` in the path bar)
+const MERGED: &[&str] = overlap_keys!(
+    "/",
+    "println",
+    "\r",
+    "A",
+    " // and fix's",
+    "\x1b",
+    ":",
+    "merged",
+    "\r",
+    "@10?conflict 1 of 1",
+    "@1"
+);
+/// Three checkouts changing `src/main.rs` far apart — main's `threads.insert` line saved, docs's `println!` saved, fix's
+/// `mod thread` unsaved — then `:merged` in fix: a clean merge, each change in its session's colour, its prefix in the
+/// sign column (`mergedclean`, collab C2b); the cursor on fix's change, `‹fix›` at its end.
+const MERGED_CLEAN: &[&str] = &[
+    "@1",
+    "/",
+    "threads.insert",
+    "\r",
+    "A",
+    " // main's way",
+    "\x1b",
+    ":",
+    "w",
+    "\r",
+    "@1",
+    ":",
+    "sh git worktree add -q ../fix && git worktree add -q ../docs",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../docs",
+    "\r",
+    "@3",
+    ":",
+    "e src/main.rs",
+    "\r",
+    "@1",
+    "/",
+    "println",
+    "\r",
+    "A",
+    " // docs' way",
+    "\x1b",
+    ":",
+    "w",
+    "\r",
+    "@1",
+    ":",
+    "session-open ../fix",
+    "\r",
+    "@3",
+    ":",
+    "e src/main.rs",
+    "\r",
+    "@1",
+    "/",
+    "mod thread",
+    "\r",
+    "A",
+    " // fix's way",
+    "\x1b",
+    ":",
+    "merged",
+    "\r",
+    "@10?docs' way",
+    "/",
+    "fix's way",
+    "\r",
+    ";",
+    "@1",
+];
 
 const QUOTE_CHIP: &[&str] = &[
     "@1",
@@ -1574,6 +1650,9 @@ const SCENES: &[Scene] = &[
     Scene { name: "overlapstrip", claude: "writemid", files: MAIN, keys: OVERLAP_STRIP },
     Scene { name: "overlaplist", claude: "writemid", files: MAIN, keys: OVERLAP_LIST },
     Scene { name: "overlapfiles", claude: "writemid", files: MAIN, keys: OVERLAP_FILES },
+    // (collab C2b: the merged view — a conflict side by side and stacked, and a clean merge of three in their colours)
+    Scene { name: "merged", claude: "writemid", files: MAIN, keys: MERGED },
+    Scene { name: "mergedclean", claude: "writemid", files: MAIN, keys: MERGED_CLEAN },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))

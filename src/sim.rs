@@ -34,6 +34,7 @@ mod commit;
 mod diskwatch;
 mod hosts;
 mod instructions;
+mod merged;
 mod overlap;
 mod panes;
 mod presence;

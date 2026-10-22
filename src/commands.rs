@@ -237,6 +237,7 @@ commands! {
         review_turn => "Review Claude's last turn",
         review_undo_change => "Take this change back",
         review_wide => "Read wide: hide rail and chat",
+        merged_view => "File as all sessions merge",
         session_new => "New session (its own branch)",
         session_list => "Sessions: switch, end, new",
         follow_next => "Follow next session at work",
@@ -1782,8 +1783,11 @@ fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
     let r = doc.selection().primary();
     let line = crate::movement::line_of(text, if forward { r.cursor(text) } else { r.from() });
     // (the view's one diff: a shown edit's over the index's — `codeview::Changes`)
-    let shown = crate::codeview::Changes::of(doc).hunks(doc);
-    let mut hunks = if parts { shown.into_owned() } else { crate::git::regions(&shown) };
+    let changes = crate::codeview::Changes::of(doc);
+    let shown = changes.hunks(doc);
+    // (a merged view's changes are each someone's: never one region — `merged.rs`)
+    let whole = parts || changes == crate::codeview::Changes::Merged;
+    let mut hunks = if whole { shown.into_owned() } else { crate::git::regions(&shown) };
     if let Some(new) = &new {
         let has = |h: &crate::git::Hunk| {
             new.iter().any(|&l| h.lines.start <= l && l < h.lines.end.max(h.lines.start + 1))
@@ -2038,6 +2042,12 @@ fn review_send(cx: &mut Context) {
 
 fn review_close(cx: &mut Context) {
     crate::codereview::close_asked(cx.editor);
+}
+
+fn merged_view(cx: &mut Context) {
+    if let Err(e) = crate::merged::open(cx.editor, None, None) {
+        cx.editor.set_status(e);
+    }
 }
 
 fn review_at_end(cx: &mut Context) {

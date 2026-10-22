@@ -2339,6 +2339,27 @@ impl Editor {
                 let Some(id) = here else { return };
                 crate::keepwarm::mark_in(self, id);
             }
+            // Its changes merged with the rest (`merged.rs`): a file where it would conflict, at the conflict — else
+            // the one it's in, the first it changed; your own row: the file in front
+            'v' => {
+                let Some(id) = here else { return };
+                let me = id == self.session.id;
+                let at = crate::presence::path_of(self, id).filter(|_| !me);
+                let file = match crate::overlap::file_of(self, id) {
+                    Some((rel, side)) => {
+                        Some((self.session.root.join(rel), Some(crate::merged::Land::Conflict(side))))
+                    }
+                    None => at.map(|rel| (self.session.root.join(rel), None)),
+                };
+                let file = file.or_else(|| me.then(|| self.doc().path.clone()).flatten().map(|p| (p, None)));
+                let Some((path, land)) = file else {
+                    return self.set_status("nothing of it to merge yet — it changed no file");
+                };
+                self.picker = None;
+                if let Err(e) = crate::merged::open(self, Some(path), land) {
+                    self.set_status(e);
+                }
+            }
             // Followed: into its checkout, the editor where its Claude is (`follow::follow_session`)
             'f' => {
                 let Some(id) = here else { return };

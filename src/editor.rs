@@ -2202,6 +2202,7 @@ impl Editor {
         crate::follow::watch(self);
         crate::presence::sync(self);
         crate::overlap::sync(self);
+        crate::merged::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);
@@ -4393,6 +4394,14 @@ impl Editor {
     /// step over it as one line.
     pub fn folded_doc_block_at(&self, line: usize) -> Option<(usize, usize)> {
         let doc = self.doc();
+        // (a merged view's conflict side by side, at the width it was last drawn — `merged.rs`)
+        if let Some(m) = crate::merged::of(doc)
+            && let Some(c) = m.merge.conflict_at(line).map(|i| &m.merge.conflicts[i])
+        {
+            let r = c.lines();
+            return crate::merged::columns(self, doc, c, m.cols.get(), self.editing_in(true))
+                .then(|| (r.start, r.end - 1));
+        }
         if !self.doc_comments_render(doc.lang_name()) {
             return None;
         }

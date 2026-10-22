@@ -518,6 +518,18 @@ only in the answer of the tool that touches that file — its `edit` or `read` o
 `src/term.rs: fix's change would conflict here: L30–34` (its own lines, the other's name, never the other's lines
 or text) — never as a note of its own, never a feed of what the others do.
 
+**The merged view.** `:merged` (or `space v j`, or `v` on a session in the list — at its conflict) shows the file in
+front as every session's changes merge onto the base's tip: the open buffers, unsaved changes too, else what's on
+disk, merged in memory on a worker and merged again as any of them moves. It's a read-only document (an edit is put
+back and said): each change on its session's colour, its first line's sign column saying whose (`f`, `m` — the
+side panel's prefixes), the cursor's change named at its end (`‹fix›`); a conflict is the base's lines then each
+session's version, side by side where the pane is wide and stacked under a head each where it isn't (a selection
+over it opens it stacked, as a folded block); `]m`/`[m` go to the conflicts, `]g`/`[g` to each change. A session
+behind the base's tip has its change laid on the tip first; where it meets the tip's own change, the conflict's
+first part is the tip's, named by its branch. The path bar names whose changes it merges, how far behind each is,
+which are unsaved. Where a merge of the file was worked out, Claude's `edit` or `read` of it says that merge's word
+instead of the overlap's — `src/a.rs: merged with fix's change: conflict at L30–34`, nothing when it merges clean.
+
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,
 each note. `[r` and `]r` step back and forward through them at any time, during the turn or after it. The editor

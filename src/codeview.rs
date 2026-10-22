@@ -53,6 +53,16 @@ pub enum OtherKind {
     /// A line of an edit Claude is still writing (`writing.rs`) — drawn as the review will draw it, nothing
     /// applied; `head`: the line it's writing now, its last words wet.
     Writing { head: bool },
+    /// A merged view's row that isn't a line (`merged.rs`).
+    Merged(MergedRow),
+}
+
+/// A merged view's conflict row: a head — a stacked part's (`part`: 0 the tip's), or the side by side one's (None)
+/// — or row `index` of a side by side conflict's columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergedRow {
+    Head { conflict: usize, part: Option<usize> },
+    Columns { conflict: usize, index: usize },
 }
 
 /// A row of change `hunk` of the edit review, and what the change does to it.
@@ -153,12 +163,18 @@ pub enum Changes {
     Shown,
     /// The edit review's: its rows carry their own marks (`Edit`) — nothing from the document's diffs.
     Edit,
+    /// A merged view's (`merged.rs`): its changes and conflicts, each in its participant's colour — the conflicts'
+    /// heads rows of their own.
+    Merged,
 }
 
 impl Changes {
     /// Where `doc`'s marks come from: a review's or `:diff`'s base over a shown edit over the git tab's inline
     /// diff (its base the index's) over the index.
     pub fn of(doc: &Document) -> Changes {
+        if doc.merged.is_some() {
+            return Changes::Merged;
+        }
         match (&doc.review_base, &doc.shown) {
             (Some(_), _) if doc.own_base() => Changes::Base,
             (_, Some(_)) => Changes::Shown,
@@ -169,7 +185,7 @@ impl Changes {
 
     /// Removed lines are rows of their own (not the index's `▁` under the line before), changed lines washed.
     pub fn rows(self) -> bool {
-        self != Changes::Index
+        !matches!(self, Changes::Index | Changes::Merged)
     }
 
     /// The changes, in order: the index's or the base's (`git_hunks` — the document's git base is the review's),
@@ -192,6 +208,9 @@ impl Changes {
                     .collect(),
             ),
             (Changes::Shown, None) | (Changes::Edit, _) => Cow::Borrowed(&[]),
+            (Changes::Merged, _) => {
+                Cow::Owned(doc.merged.as_deref().map(crate::merged::hunks).unwrap_or_default())
+            }
             _ => Cow::Borrowed(&doc.git_hunks),
         }
     }
@@ -361,6 +380,7 @@ impl<'a> Measure<'a> {
         self.wrap.is_none()
             && self.writing.is_none()
             && !self.changes.rows()
+            && crate::merged::of(self.doc).is_none_or(|m| m.merge.conflicts.is_empty())
             && self
                 .blocks
                 .iter()
@@ -391,6 +411,14 @@ impl<'a> Measure<'a> {
         // (lines an edit being written replaces show as its rows, folded doc comment or not)
         if let Some(w) = self.writing(l) {
             return Some(w);
+        }
+        // (a merged view's conflict side by side: its head and its longest part's rows, on its first line)
+        if let Some(m) = crate::merged::of(self.doc)
+            && let Some(c) = m.merge.conflict_at(l).map(|i| &m.merge.conflicts[i])
+            && crate::merged::columns(self.editor, self.doc, c, self.cols, self.editing)
+        {
+            let r = c.lines();
+            return Some((r.start, r.end - 1, crate::merged::column_rows(c)));
         }
         if !self.folding {
             return None;
@@ -428,6 +456,13 @@ impl<'a> Measure<'a> {
 
     /// The removed rows above `l`.
     pub fn removed(&self, l: usize) -> usize {
+        // (a merged view's stacked conflicts: a head above each part)
+        if let Some(m) = crate::merged::of(self.doc) {
+            let stacked = |c: usize| {
+                !crate::merged::columns(self.editor, self.doc, &m.merge.conflicts[c], self.cols, self.editing)
+            };
+            return crate::merged::heads_at(&m.merge, l).into_iter().filter(|&(c, _)| stacked(c)).count();
+        }
         self.changes.rows_above(self.doc, l, self.wrap, self.tab)
     }
 
