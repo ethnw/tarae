@@ -342,10 +342,14 @@ impl<'a> Measure<'a> {
     }
 
     /// The rows above a block's head (the line being written) inside it — where the row kept in sight is counted for a
-    /// place on the block (`term::scroll_to`: follow keeps it in sight); 0 elsewhere.
+    /// place on the block (`term::scroll_to`: follow keeps it in sight); once its text is whole, above the last row it
+    /// wrote while follow leads the view there (it stays where the writing ended — never back up to its first row;
+    /// your cursor's view is yours: its first row); 0 elsewhere.
     pub fn head(&self, l: usize) -> usize {
         let Some(b) = self.writing.and_then(|w| w.at(l)).filter(|b| b.first == l) else { return 0 };
-        b.head.map_or(0, |head| b.counts(&self.doc.text, self.wrap, self.tab)[head])
+        let leads = || self.doc.id == self.editor.doc().id && crate::follow::view_line(self.editor).is_some();
+        let last = || b.rows.iter().rposition(|r| matches!(r, Row::Other { .. })).filter(|_| leads());
+        b.head.or_else(last).map_or(0, |row| b.counts(&self.doc.text, self.wrap, self.tab)[row])
     }
 
     /// Every line near is one row: nothing wraps, no removed rows, no block shows folded (asked of the fold rule

@@ -135,6 +135,11 @@ pub struct Item {
     /// `move_to` or `delete`: not a change of text — nothing to draw.
     pub other: bool,
     pub place: Place,
+    /// Follow led the view on it at its last piece (`sync`): watched as it was written to where it ends
+    /// (`written_end`).
+    pub followed: bool,
+    /// Its text whole and drawn: `followed` stays as it was then (a `C-f` after, another call's piece, change nothing).
+    ended: bool,
     /// Its block as last laid out, and what for: the buffer's version, the new text's length, whether whole —
     /// laid out again only when one of them moved (a finished item costs a batch nothing).
     drawn: Option<((u64, usize, bool), Arc<Block>)>,
@@ -579,6 +584,19 @@ pub fn sync(ed: &mut Editor) {
         let past = past_sight(ed).is_some();
         crate::follow::writing_at(ed, &path, lines, line, past);
     }
+    // Whether follow leads the view on what's drawn in front now — kept from the first time an item is drawn whole:
+    // whether it was watched to its end (`written_end`)
+    let (front, leads) = (ed.doc().id, crate::follow::view_line(ed).is_some());
+    if let Some(c) = ed.session.chat.as_mut() {
+        for it in c.writing.calls.iter_mut().flat_map(|c| &mut c.items).filter(|it| !it.ended) {
+            let bound = match &it.place {
+                Place::Found(f) => f.bound.map(|b| b.0),
+                _ => None,
+            };
+            it.followed = leads && bound == Some(front);
+            it.ended = it.new.closed && bound.is_some();
+        }
+    }
 }
 
 /// How far from where it was the text an item replaces is looked for once its buffer changed (`relocate`).
@@ -630,6 +648,56 @@ pub fn being_written(ed: &Editor, path: &std::path::Path, lines: &std::ops::Rang
         Place::Found(f) => f.path == path && f.lines.0 < lines.end && lines.start <= f.lines.1,
         _ => false,
     })
+}
+
+/// Where call `call`'s writing ended in `after` — `path`'s text once it landed, `before` the text it landed on — when
+/// it was drawn in the document in front and follow led the view on its last item to its last piece
+/// (`Item.followed`): the last line that item wrote, its place in `before` moved by the items above it; one that
+/// doesn't read there (matched loosely, the buffer changed since) the edit's last changed line. None: nobody watched it
+/// written there (`follow::wrote` takes the view to its first line). A review's rows aren't the writing's
+/// (`reviewed`).
+pub fn written_end(
+    ed: &Editor,
+    call: &str,
+    path: &std::path::Path,
+    before: &Rope,
+    after: &Rope,
+) -> Option<usize> {
+    let c = ed.session.chat.as_ref()?;
+    let doc = ed.doc();
+    let call = c.writing.calls.iter().find(|k| k.id == call).filter(|_| doc.path.as_deref() == Some(path))?;
+    // (its items drawn there, in the order they were written)
+    let drawn: Vec<(&Found, &str, bool)> = call
+        .items
+        .iter()
+        .filter_map(|it| match &it.place {
+            Place::Found(f) if f.bound.is_some_and(|b| b.0 == doc.id) => {
+                Some((f, it.new.s.as_str(), it.followed))
+            }
+            _ => None,
+        })
+        .collect();
+    let &(last, new, followed) = drawn.last()?;
+    if !followed {
+        return None;
+    }
+    let at = || {
+        let read = |f: &Found| before.get_byte_slice(f.from..f.to).is_some_and(|s| s == f.held.as_str());
+        if !drawn.iter().all(|(f, ..)| read(f)) {
+            return None;
+        }
+        let shift: isize = drawn
+            .iter()
+            .filter(|(f, ..)| f.from < last.from)
+            .map(|(f, new, _)| new.len() as isize - (f.to - f.from) as isize)
+            .sum();
+        let start = last.from.checked_add_signed(shift)?;
+        let end = start + new.len();
+        // (its last byte's line: the line it ends on, not the one after its newline)
+        (after.get_byte_slice(start..end)? == new)
+            .then(|| after.byte_to_line(end.saturating_sub(1).max(start)))
+    };
+    Some(at().unwrap_or_else(|| crate::follow::last_difference(before, after)))
 }
 
 /// The line of `doc` whose end Claude's caret is at when the row it's writing is one it keeps (a piece ended right

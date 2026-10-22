@@ -914,7 +914,7 @@ fn a_landed_edit_follow_wont_follow_leaves_your_selection() {
     ed.doc_mut().set_selection(crate::selection::Selection::single(wide));
     let before = ropey::Rope::from_str(TEXT);
     let after = ropey::Rope::from_str(&TEXT.replace("let b = 2", "let b = 3"));
-    crate::follow::wrote(&mut ed, &path, &before, &after);
+    crate::follow::wrote(&mut ed, None, &path, &before, &after);
     let r = ed.doc().selection().primary();
     assert_eq!((r.from(), r.to()), (0, 8), "your selection stays");
 }
@@ -1009,6 +1009,254 @@ fn an_edit_accepted_in_its_review_leads_the_cursor_there() {
     assert_eq!(led(&ed), Some(changed), "the view on its first changed line");
     assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "your `y` answered the review: still led");
     assert!(status(&frame(&mut ed, 100, 30)).contains("● follow"));
+}
+
+/// tarae's edit made as claude makes it, its input whole: the call, then tarae's tool call (`rpc` its id).
+fn call_edit(ed: &mut Editor, g: u64, id: &str, rpc: u64, input: &str) {
+    let input: Value = serde_json::from_str(input).unwrap();
+    let tool = StreamEv::Tool { id: id.into(), name: "mcp__tarae__edit".into(), input: input.clone() };
+    crate::chat::stream_event(ed, g, tool);
+    let request = json!({"subtype": "mcp_message", "server_name": "tarae", "message": {"jsonrpc": "2.0",
+        "id": rpc, "method": "tools/call", "params": {"name": "edit", "arguments": input}}});
+    crate::chat::stream_event(ed, g, StreamEv::Control { request_id: format!("c{rpc}"), request });
+}
+
+/// tarae's edit of `file` replacing `old` with `new`.
+fn edit_of(file: &str, old: &str, new: &str) -> String {
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    format!(r#"{{"edits":[{{"file_path":{},"old_string":{},"new_string":{}}}]}}"#, s(file), s(old), s(new))
+}
+
+/// An 80-line `a.rs` (`x1`…`x80`) whose edits land unseen (review at the end).
+fn tall_scene(name: &str) -> (Editor, crate::scratch::Scratch, u64) {
+    let (mut ed, dir, g) = scene(name);
+    let text: String = (1..=80).map(|i| format!("    let x{i} = {i};\n")).collect();
+    std::fs::write(dir.join("a.rs"), &text).unwrap();
+    crate::typed::execute(&mut ed, "reload").unwrap();
+    ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.to_path_buf());
+    frame(&mut ed, 100, 30);
+    (ed, dir, g)
+}
+
+/// tarae's edit `t1` writing 40 lines (`y1`…`y40`) over line 10 of `tall_scene`'s file — `more` items after it —
+/// streamed a frame each ten lines to its end, `keys` pressed before its last ten, and whole. Its input.
+fn write_tall(ed: &mut Editor, g: u64, keys: &str, more: &str) -> String {
+    let new: String = (1..=40).map(|i| format!("    let y{i} = {i};\n")).collect();
+    let input = edit_of("a.rs", "    let x10 = 10;\n", &new).replace("}]}", &format!("}}{more}]}}"));
+    let mut w = Writer::new("t1", Tool::Edit);
+    let upto = |n: usize| input.find(&format!("y{n} = ")).unwrap();
+    w.send(ed, g, &input[..upto(1)], &[], false);
+    settle(ed, |ed| shown(ed.doc()).is_some());
+    let mut at = upto(1);
+    for n in [10, 20, 30, 40] {
+        if n == 40 {
+            press(ed, keys);
+        }
+        w.send(ed, g, &input[at..upto(n)], &[], false);
+        at = upto(n);
+        frame(ed, 100, 30);
+    }
+    w.send(ed, g, &input[at..], &[], true);
+    input
+}
+
+/// `tall_scene` with `write_tall`'s edit streamed in sight to its end — whole, not made yet: the view went down with
+/// its writing and stays there. The editor, its folder, the generation, the edit's input and the screen row its last
+/// line is on.
+fn written_down(name: &str) -> (Editor, crate::scratch::Scratch, u64, String, usize) {
+    let (mut ed, dir, g) = tall_scene(name);
+    let input = write_tall(&mut ed, g, "", "");
+    // (the follow card may cover a row's end)
+    let rows = frame(&mut ed, 100, 30);
+    let row = rows.iter().position(|r| r.contains("let y40 ")).expect("its last line in sight");
+    assert!(
+        !rows.iter().any(|r| r.contains("let x9 ")),
+        "whole: the view where the writing ended, not back up to its first line: {rows:#?}"
+    );
+    (ed, dir, g, input, row)
+}
+
+/// A streamed edit taller than the screen lands (unseen, review at the end): the view stays where its writing ended —
+/// on the last line it wrote, the screen as it was — never back up to its first changed line; your cursor never led.
+#[test]
+fn a_streamed_edit_landing_leaves_the_view_where_its_writing_ended() {
+    let (mut ed, _dir, g, input, row) = written_down("writing-stays");
+    call_edit(&mut ed, g, "t1", 2, &input);
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let y40 = 40;"));
+    assert!(ed.session.review.is_none(), "unseen");
+    let last = ed.doc().text.to_string().lines().position(|l| l == "    let y40 = 40;").unwrap();
+    assert_eq!((led(&ed), ed.cursor_line()), (Some(last), 0), "on the last line it wrote");
+    let rows = frame(&mut ed, 100, 30);
+    let now = rows.iter().position(|r| r.contains("let y40 ")).expect("still in sight");
+    assert!(now.abs_diff(row) <= 1, "landed: the screen as it was (row {row} → {now}): {rows:#?}");
+    assert!(!rows.iter().any(|r| r.contains("let x9 ")), "never back up to its first line: {rows:#?}");
+    assert!(status(&rows).contains("● follow"));
+}
+
+/// Drawn in the buffer in front but its end written while you had the view (a key of yours paused follow), then
+/// follow on again (`C-f`) and a piece of another call before it lands: nobody watched it end, so landing takes the
+/// view to its first changed line.
+#[test]
+fn an_edit_whose_end_you_did_not_watch_goes_to_its_first_line() {
+    let (mut ed, _dir, g) = tall_scene("writing-stays-unled");
+    let input = write_tall(&mut ed, g, "j", "");
+    assert!(ed.session.chat.as_ref().unwrap().follow.paused, "j: you took over");
+    crate::follow::toggle(&mut ed);
+    assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "C-f: following again");
+    // (a call made beside it streams on: what's drawn is laid out again, follow leading now)
+    Writer::new("t2", Tool::Edit).send(&mut ed, g, r#"{"edits":[{"file_path":"a.rs""#, &[], false);
+    call_edit(&mut ed, g, "t1", 2, &input);
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let y40 = 40;"));
+    assert_eq!(led(&ed), Some(9), "the view on its first changed line");
+}
+
+/// `write_tall`'s edit with a delete beside it (`c.rs`), review at the end off: it waits on its change-set card, then
+/// `y` — the editor, the generation, whether you moved (`G`) while the card waited.
+fn on_its_card(name: &str, keys: &str) -> (Editor, crate::scratch::Scratch, u64) {
+    let (mut ed, dir, g) = tall_scene(name);
+    std::fs::write(dir.join("c.rs"), "gone soon\n").unwrap();
+    ed.session.chat.as_mut().unwrap().edits.at_end = None;
+    let input = write_tall(&mut ed, g, "", r#",{"file_path":"c.rs","delete":true}"#);
+    call_edit(&mut ed, g, "t1", 2, &input);
+    let card = |ed: &Editor| {
+        ed.offers.iter().find_map(|o| match o.what {
+            crate::offer::What::ChangeSet { whose, .. } => Some((o.id, whose)),
+            _ => None,
+        })
+    };
+    settle(&mut ed, |ed| card(ed).is_some());
+    frame(&mut ed, 100, 30);
+    press(&mut ed, keys);
+    let (id, whose) = card(&ed).unwrap();
+    crate::refactor::accept_all(&mut ed, id, whose);
+    settle(&mut ed, |ed| !dir.join("c.rs").exists() && ed.doc().text.to_string().contains("let y40 = 40;"));
+    (ed, dir, g)
+}
+
+/// A streamed edit that waited on its card, `y` given, follow leading there still: the view stays where its writing
+/// ended.
+#[test]
+fn an_edit_from_its_card_stays_where_its_writing_ended() {
+    let (mut ed, _dir, _g) = on_its_card("writing-stays-card", "");
+    let last = ed.doc().text.to_string().lines().position(|l| l == "    let y40 = 40;").unwrap();
+    assert_eq!((led(&ed), ed.cursor_line()), (Some(last), 0), "on the last line it wrote");
+    let rows = frame(&mut ed, 100, 30);
+    assert!(!rows.iter().any(|r| r.contains("let x9 ")), "not back up to its first line: {rows:#?}");
+}
+
+/// … you moved while its card waited (`G`): follow paused, your view stays yours — the landing takes it nowhere.
+#[test]
+fn an_edit_from_its_card_leaves_your_view_yours_once_you_moved() {
+    let (mut ed, _dir, _g) = on_its_card("writing-stays-card-moved", "G");
+    assert!(ed.session.chat.as_ref().unwrap().follow.paused, "G: you took over");
+    let end = crate::movement::last_line(&ed.doc().text);
+    assert_eq!((led(&ed), ed.cursor_line()), (None, end), "your cursor, your view");
+    let rows = frame(&mut ed, 100, 30);
+    assert!(rows.iter().any(|r| r.contains("let x80 ")), "where you went: {rows:#?}");
+}
+
+/// A key sequence of yours under way (`g`) as the edit lands: follow holds the view, and it's where the writing
+/// ended — not taken back up to the change's first line; your cursor where it was, follow still on.
+#[test]
+fn a_key_sequence_under_way_holds_the_view_where_the_writing_ended() {
+    let (mut ed, _dir, g, input, _) = written_down("writing-stays-pending");
+    press(&mut ed, "g");
+    call_edit(&mut ed, g, "t1", 2, &input);
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let y40 = 40;"));
+    assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "g: not paused");
+    let last = ed.doc().text.to_string().lines().position(|l| l == "    let y40 = 40;").unwrap();
+    assert_eq!((led(&ed), ed.cursor_line()), (Some(last), 0), "held where it was");
+    let rows = frame(&mut ed, 100, 30);
+    assert!(!rows.iter().any(|r| r.contains("let x9 ")), "not back up to its first line: {rows:#?}");
+}
+
+/// A whole block taller than the screen, follow off (your cursor's view is yours): your cursor on the line it rewrites
+/// keeps the block's first rows in sight — never pinned to its last row as follow's view is.
+#[test]
+fn a_whole_block_follow_does_not_lead_leaves_your_cursor_in_sight() {
+    let (mut ed, _dir, g) = tall_scene("writing-tall-unled");
+    ed.session.chat.as_mut().unwrap().follow.on = false;
+    let at = ed.doc().text.line_to_byte(9);
+    ed.doc_mut().set_selection(crate::selection::Selection::point(at));
+    frame(&mut ed, 100, 30);
+    let new: String = (1..=40).map(|i| format!("    let y{i} = {i};\n")).collect();
+    write(&mut ed, g, "t1", Tool::Edit, &edit_of("a.rs", "    let x10 = 10;\n", &new), &[]);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    let rows = frame(&mut ed, 100, 30);
+    assert!(rows.iter().any(|r| r.contains("let x10 ")), "your cursor's line in sight: {rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("let y1 ")), "the block's first rows: {rows:#?}");
+    assert_eq!(ed.cursor_line(), 9);
+}
+
+/// One edit of three items, the last one written above the one before it (and below a first that adds lines): the
+/// view stays where its writing ended — the last line the last item wrote, moved by the lines the first added — not at
+/// the edit's lowest change.
+#[test]
+fn a_many_item_edit_stays_at_its_last_written_items_end() {
+    let (mut ed, _dir, g) = tall_scene("writing-stays-items");
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let item = |old: &str, new: &str| {
+        format!(r#"{{"file_path":"a.rs","old_string":{},"new_string":{}}}"#, s(old), s(new))
+    };
+    let input = format!(
+        r#"{{"edits":[{},{},{}]}}"#,
+        item("    let x5 = 5;\n", "    let x5 = 50;\n    let x5b = 51;\n    let x5c = 52;\n"),
+        item("    let x70 = 70;\n", "    let x70 = 700;\n"),
+        item("    let x40 = 40;\n", "    let z1 = 1;\n    let z2 = 2;\n    let z3 = 3;\n")
+    );
+    let cuts: Vec<usize> = input.match_indices(r#"{"file_path""#).map(|(i, _)| i).collect();
+    let mut w = Writer::new("t1", Tool::Edit);
+    let mut at = 0;
+    for (n, &cut) in cuts[1..].iter().chain([&input.len()]).enumerate() {
+        w.send(&mut ed, g, &input[at..cut], &[], cut == input.len());
+        at = cut;
+        settle(&mut ed, |ed| shown(ed.doc()).is_some_and(|s| s.blocks.len() == n + 1));
+        frame(&mut ed, 100, 30);
+        // (each jump to the next item's place taken at once)
+        crate::clock::advance(crate::follow::PACE);
+    }
+    call_edit(&mut ed, g, "t1", 2, &input);
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let z3 = 3;"));
+    let lines: Vec<String> = ed.doc().text.to_string().lines().map(String::from).collect();
+    let z3 = lines.iter().position(|l| l == "    let z3 = 3;").unwrap();
+    assert_eq!(z3, 43, "x40's line (39) moved by the two x5 added, its own last");
+    assert_eq!(led(&ed), Some(z3), "the last line the last item wrote");
+}
+
+/// Claude's next edit after it, elsewhere in the file (three lines, not streamed: nothing showed it) — the one before
+/// still listed, its result not come yet: the view goes there, on its first changed line.
+#[test]
+fn the_next_edit_elsewhere_takes_the_view_there() {
+    let (mut ed, _dir, g, input, _) = written_down("writing-stays-next");
+    call_edit(&mut ed, g, "t1", 2, &input);
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let y40 = 40;"));
+    let three = "    let x70 = 700;\n    let x71 = 710;\n    let x72 = 720;\n";
+    call_edit(&mut ed, g, "t2", 3, &edit_of("a.rs", "    let x70 = 70;\n", three));
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let x72 = 720;"));
+    let changed = ed.doc().text.to_string().lines().position(|l| l == "    let x70 = 700;").unwrap();
+    assert_eq!((led(&ed), ed.cursor_line()), (Some(changed), 0), "the view on its first changed line");
+    let rows = frame(&mut ed, 100, 30);
+    assert!(rows.iter().any(|r| r.contains("let x70 ")), "in sight: {rows:#?}");
+}
+
+/// An edit landing in a file not in front (nothing showed it as it was written): the view there, on its first
+/// changed line, so it's seen at all.
+#[test]
+fn an_edit_landing_in_another_file_takes_the_view_to_its_first_line() {
+    let (mut ed, dir, g) = scene("writing-elsewhere");
+    let text: String = (1..=80).map(|i| format!("    let x{i} = {i};\n")).collect();
+    std::fs::write(dir.join("b.rs"), &text).unwrap();
+    ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.to_path_buf());
+    frame(&mut ed, 100, 30);
+    call_edit(&mut ed, g, "t1", 2, &edit_of("b.rs", "    let x50 = 50;\n", "    let x50 = 500;\n"));
+    settle(&mut ed, |ed| ed.doc().text.to_string().contains("let x50 = 500;"));
+    assert_eq!(
+        (led(&ed), ed.cursor_line()),
+        (Some(49), 0),
+        "b.rs in front, the view on its first changed line"
+    );
+    let rows = frame(&mut ed, 100, 30);
+    assert!(rows.iter().any(|r| r.contains("let x50 ")), "in sight: {rows:#?}");
 }
 
 /// Performance budget: a stream's batch while an edit is written into a 200k-line file — its pieces read, its rows

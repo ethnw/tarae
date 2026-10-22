@@ -446,7 +446,10 @@ where Claude is reading while it works — **the view, never your cursor**: your
 sight or not, and the screen follows Claude's place. Each file it reads opens with the range read placed as a whole: left where it is if it's all on screen already, centred if it fits, and starting
 near the top if it's taller than the screen. Those lines get a faint accent wash. Each edit is shown once it's
 written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
-above them, the view on its first changed line — so too after your `y` in its review. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
+above them. An edit you watched being written leaves the view where its writing ended — no jump back to its first
+line once it lands; Claude's next read or edit moves it. One nothing showed as it came (in a file not in front, or
+one that didn't stream) takes the view to its first changed line, so it's seen at all — so too after your `y` in
+its review. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
 file`), and the finished answer takes you to its first `path:line`. A card beside the code says what Claude is at
 and for how long (`thinking 3.2s`) and the turn as the chat shows it: its stops as knots, the one in hand `●` (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`), and
 what Claude thinks and says between them, a running log of the turn: a new thought goes under the last one

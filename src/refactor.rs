@@ -301,7 +301,7 @@ fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
             for (f, r) in written {
                 let outcome = match r {
                     Ok(stamp) => {
-                        landed(ed, &f, stamp, l.whose);
+                        landed(ed, &f, stamp, l.whose, l.row.as_deref());
                         Outcome::Written
                     }
                     Err(o) => o,
@@ -315,8 +315,14 @@ fn write(ed: &mut Editor, mut l: Landing, unseen: Vec<FileChange>) {
 
 /// A change written: an open buffer takes the new text (a deleted or moved file's buffer closes — it never
 /// has the user's unsaved edits: `edittool` refuses those), what Claude knows of the file is its new stamp
-/// (Claude's change only: of the user's it has seen nothing).
-fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>, whose: Whose) {
+/// (Claude's change only: of the user's it has seen nothing). `row`: Claude's call it is (`Landing.row`).
+fn landed(
+    ed: &mut Editor,
+    f: &FileChange,
+    stamp: Option<crate::disk::Stamp>,
+    whose: Whose,
+    row: Option<&str>,
+) {
     let saw = |ed: &mut Editor, p: &Path| {
         if let Whose::Claude(_) = whose {
             crate::edittool::saw(ed, p, stamp)
@@ -332,9 +338,9 @@ fn landed(ed: &mut Editor, f: &FileChange, stamp: Option<crate::disk::Stamp>, wh
         Op::Text | Op::Create => {
             ed.disk_take(&f.path, &f.after, stamp);
             saw(ed, &f.path);
-            // (Claude's, landed unseen: follow at its first changed line)
+            // (Claude's, landed unseen: follow where its writing ended, else at its first changed line)
             if let Whose::Claude(_) = whose {
-                crate::follow::wrote(ed, &f.path, &f.before, &f.after);
+                crate::follow::wrote(ed, row, &f.path, &f.before, &f.after);
             }
         }
         Op::Delete => close(ed, &f.path),
@@ -651,8 +657,8 @@ pub fn accept_all(ed: &mut Editor, id: u64, whose: Whose) {
     let (step, what) = (l.step, l.what.clone());
     // (Claude's call, answered on its card: its row takes the card's key — for the files written now; one with
     // your unsaved edits comes up in its own review, whose keys it takes)
-    if let Some(row) = row.filter(|_| !now.is_empty()) {
-        crate::chat::stamp_call(ed, &row, &[crate::stamp::Stamp('y')]);
+    if let Some(row) = row.as_ref().filter(|_| !now.is_empty()) {
+        crate::chat::stamp_call(ed, row, &[crate::stamp::Stamp('y')]);
     }
     // (for `space u`: a deleted file has no text after — undo writes it again; a moved one is gone from its
     // place and made at the new one)
@@ -677,7 +683,7 @@ pub fn accept_all(ed: &mut Editor, id: u64, whose: Whose) {
                 for (r, f) in written {
                     let outcome = match r {
                         Ok(stamp) => {
-                            landed(ed, &f, stamp, whose);
+                            landed(ed, &f, stamp, whose, row.as_deref());
                             Outcome::Accepted
                         }
                         Err(o) => {
@@ -870,9 +876,10 @@ fn reviewed(ed: &mut Editor, f: FileChange, whose: Whose, doc_id: DocId, dirty: 
         None => Outcome::Failed("its buffer was closed".into()),
         Some(now) if now == f.before => Outcome::Declined,
         Some(now) => {
-            // (Claude's, its `y` given: follow at its first changed line, as for one landed unseen)
+            // (Claude's, its `y` given: follow at its first changed line — the review showed it, its rows aren't the
+            // writing's: `writing::reviewed`)
             if let Whose::Claude(_) = whose {
-                crate::follow::wrote(ed, &f.path, &f.before, &now);
+                crate::follow::wrote(ed, None, &f.path, &f.before, &now);
             }
             match front(ed, whose).filter(|_| whose == Whose::Yours).map(|l| (l.step, l.what.clone())) {
                 Some((step, what)) => {

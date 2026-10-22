@@ -408,15 +408,28 @@ pub fn place(ed: &Editor, doc: &crate::document::Document) -> Option<usize> {
     (doc.id == ed.doc().id && !writing && leads(ed)).then(|| view_line(ed)).flatten()
 }
 
-/// tarae's `edit` landed in `path` — unseen, or through its review (`refactor.rs`): the view on its first changed
-/// line, as an Edit is once written (`landed`) — while following; the selection the review left stays yours.
-pub fn wrote(ed: &mut Editor, path: &Path, before: &ropey::Rope, after: &ropey::Rope) {
+/// tarae's `edit` — Claude's call `call` (None: not known) — landed in `path`, unseen, from its card or through its
+/// review (`refactor.rs`), while following. Watched as it was written (its rows drawn in the document in front, follow
+/// leading the view on them to its last piece: `writing::written_end`), the view stays where the writing ended — on
+/// the last line its last item wrote, the rows it took out gone — and Claude's next read or edit moves it; a key
+/// sequence of yours under way holds the view, and that's where it is. Nothing showed it (another file, not streamed,
+/// follow not leading there, a review's rows): the view on its first changed line, as an Edit is once written
+/// (`landed`), so it's seen at all. The selection the review left stays yours.
+pub fn wrote(ed: &mut Editor, call: Option<&str>, path: &Path, before: &ropey::Rope, after: &ropey::Rope) {
     if !ed.session.chat.as_ref().is_some_and(|c| c.follow.active())
         || ed.background()
         || !path.is_file()
         || !in_project(ed, path)
     {
         return;
+    }
+    if let Some(end) = call.and_then(|c| crate::writing::written_end(ed, c, path, before, after)) {
+        let id = ed.doc().id;
+        if let Some(f) = follow(ed) {
+            f.led = Some((id, end));
+        }
+        // (the text it changed isn't an edit of yours — `watch`)
+        return settle(ed);
     }
     let line = first_difference(before, after);
     go_range(ed, path, line..line + 1);
@@ -450,6 +463,19 @@ fn first_difference(a: &ropey::Rope, b: &ropey::Rope) -> usize {
         (x, y) = (&x[n..], &y[n..]);
     }
     a.byte_to_line(at.min(a.len_bytes()))
+}
+
+/// The last line of `b` that differs from `a`, by whole lines — the end of the least change (`disk::minimal_change`,
+/// memcmp from both ends) snapped to lines: where the change's text ends inside a line whole in both (lines added
+/// whose indentation the common start took), that line isn't changed and the one before it is.
+pub fn last_difference(a: &ropey::Rope, b: &ropey::Rope) -> usize {
+    let Some(c) = crate::disk::minimal_change(a, b) else { return 0 };
+    let first = b.byte_to_line(c.from);
+    let end = c.from + c.insert.len();
+    let line = b.byte_to_line(end);
+    let kept =
+        b.line_to_byte(line) == end || (end < b.len_bytes() && b.line(line) == a.line(a.byte_to_line(c.to)));
+    if kept { line.saturating_sub(1).max(first) } else { line }
 }
 
 /// Whether `lines` of `path` are all in the focused pane as the last frame drew it.
@@ -1563,6 +1589,26 @@ mod first_difference_tests {
         let longer = Rope::from_str(&format!("{text}more\n"));
         assert_eq!(super::first_difference(&a, &longer), 20_000, "added at the end");
         assert_eq!(super::first_difference(&a, &a.clone()), 20_000, "the same: its end");
+    }
+
+    /// The last line a change wrote, by whole lines: one line rewritten, lines added (their indentation shared with the
+    /// line after them), lines that replace one, lines taken out (the line they stood before), at the file's end.
+    #[test]
+    fn the_last_changed_line_by_whole_lines() {
+        let text = "fn f() {\n    let a = 1;\n    let b = 2;\n    g();\n}\n";
+        let a = Rope::from_str(text);
+        let last =
+            |from: &str, to: &str| super::last_difference(&a, &Rope::from_str(&text.replace(from, to)));
+        assert_eq!(last("b = 2", "b = 3"), 2, "rewritten");
+        assert_eq!(last("    let b = 2;\n", "    let b = 2;\n    let c = 3;\n"), 3, "added after");
+        assert_eq!(last("    let b = 2;\n", "    let x = 0;\n    let b = 2;\n"), 2, "added before");
+        assert_eq!(
+            last("    let b = 2;\n", "    let c = 3;\n    let d = 4;\n    let e = 5;\n"),
+            4,
+            "replaced"
+        );
+        assert_eq!(last("    let b = 2;\n", ""), 2, "taken out: the line after it");
+        assert_eq!(last("}\n", "}\n// end\n"), 5, "at the end");
     }
 }
 
