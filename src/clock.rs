@@ -96,7 +96,7 @@ mod tests {
         ("gitrepo.rs", 1),
         ("grammar.rs", 4),
         ("inbox.rs", 4),
-        ("llm.rs", 6),
+        ("llm.rs", 3),
         ("log.rs", 1),
         ("lsp.rs", 3),
         ("lsp_editor.rs", 15),

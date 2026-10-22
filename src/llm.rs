@@ -14,7 +14,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
@@ -815,9 +815,16 @@ pub enum StreamEv {
     Exit(String),
 }
 
+/// How long streamed text and an edit's input are held to go with what comes after them (`pump`): a batch goes out
+/// this long after the last one, whether another line came or not — a pause in the stream never holds what came
+/// before it (measured, `cargo xtask stream`: the old rule, sent with the next line, held a delta 120 ms at the p90).
+pub const FLUSH: Duration = Duration::from_millis(25);
+
 /// Reader thread body: parses stdout line by line and sends closures built by `route` to the main loop.
 /// With `once`, reaps the process after the first turn (ask). Otherwise runs until the process exits (chat).
 /// stderr is drained separately (so a full pipe doesn't stall the child) — its last line is the error text.
+/// stdout is read on a thread of its own (`tarae-llm-lines`), its lines handed over through a channel this one
+/// waits on no longer than what it holds may wait (`FLUSH`).
 pub fn pump(
     mut child: Child,
     once: bool,
@@ -850,105 +857,138 @@ pub fn pump(
             (t.is_empty() || send(if thought { StreamEv::Thought(t) } else { StreamEv::Text(t) }))
                 && writing.borrow_mut().take().into_iter().all(|d| send(StreamEv::Writing(d)))
         };
-        let mut last_flush = Instant::now();
+        let mut last_flush = crate::clock::now();
         let mut thinking_sent = false;
         let mut done = false;
         let mut model = String::new();
-        if let Some(out) = child.stdout.take() {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-                // (what it costs — the same line may carry a tool call or the turn's end too)
-                if let Some(u) = usage_line(&ev, crate::usage::now_ms())
-                    && !send(u)
-                {
+        let (line_tx, lines) = channel::<String>();
+        match child.stdout.take() {
+            Some(out) => {
+                crate::event::thread("tarae-llm-lines", move || {
+                    for line in BufReader::new(out).lines().map_while(Result::ok) {
+                        if line_tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            // (no stdout: no lines — its end at once, the process reaped and its end told)
+            None => drop(line_tx),
+        }
+        loop {
+            // What's held goes out when its time is up, whether another line came or not
+            let held = !pending.is_empty() || writing.borrow().holds();
+            let left = FLUSH.saturating_sub(crate::clock::since(last_flush));
+            if held && left.is_zero() {
+                last_flush = crate::clock::now();
+                if !flush(&mut pending, pending_thought) {
                     break;
                 }
-                if let Some(m) = crate::billing::refusal(&ev)
-                    && !send(StreamEv::Money(m))
-                {
+                continue;
+            }
+            let line = match held {
+                true => lines.recv_timeout(left).map_err(|e| e == RecvTimeoutError::Disconnected),
+                false => lines.recv().map_err(|_| true),
+            };
+            let line = match line {
+                Ok(line) => line,
+                Err(false) => continue,
+                // (stdout closed: what it held goes, then its end is told)
+                Err(true) => {
+                    flush(&mut pending, pending_thought);
                     break;
                 }
-                if let Some(m) = answered_by(&ev).filter(|m| *m != model) {
-                    model = m.to_string();
-                    if !send(StreamEv::Answered(model.clone())) {
+            };
+            let Ok(ev) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            // (what it costs — the same line may carry a tool call or the turn's end too)
+            if let Some(u) = usage_line(&ev, crate::usage::now_ms())
+                && !send(u)
+            {
+                break;
+            }
+            if let Some(m) = crate::billing::refusal(&ev)
+                && !send(StreamEv::Money(m))
+            {
+                break;
+            }
+            if let Some(m) = answered_by(&ev).filter(|m| *m != model) {
+                model = m.to_string();
+                if !send(StreamEv::Answered(model.clone())) {
+                    break;
+                }
+            }
+            // An edit's input: read as it comes, sent at the batch's time — at once when its block ends
+            if writing.borrow_mut().line(&ev) {
+                let ended = ev["event"]["type"] == "content_block_stop";
+                if ended || crate::clock::since(last_flush) >= FLUSH {
+                    last_flush = crate::clock::now();
+                    if !flush(&mut pending, pending_thought) {
                         break;
                     }
                 }
-                // An edit's input: read as it comes, sent at the batch's time — at once when its block ends
-                if writing.borrow_mut().line(&ev) {
-                    let ended = ev["event"]["type"] == "content_block_stop";
-                    if ended || crate::clock::since(last_flush) >= Duration::from_millis(25) {
+                continue;
+            }
+            // Tool calls arrive whole in the assistant message — text streamed before them goes first
+            let tools = tool_events(&ev);
+            if !tools.is_empty() {
+                if !flush(&mut pending, pending_thought) {
+                    break;
+                }
+                thinking_sent = false;
+                if !tools.into_iter().all(&send) {
+                    break;
+                }
+                continue;
+            }
+            match parse_line(&ev) {
+                Some(ev @ (StreamEv::Text(_) | StreamEv::Thought(_))) => {
+                    let (t, thought) = match ev {
+                        StreamEv::Thought(t) => (t, true),
+                        StreamEv::Text(t) => (t, false),
+                        _ => unreachable!(),
+                    };
+                    if thought != pending_thought {
+                        if !flush(&mut pending, pending_thought) {
+                            break;
+                        }
+                        pending_thought = thought;
+                    }
+                    pending.push_str(&t);
+                    thinking_sent = thought;
+                    if crate::clock::since(last_flush) >= FLUSH {
                         last_flush = crate::clock::now();
                         if !flush(&mut pending, pending_thought) {
                             break;
                         }
                     }
-                    continue;
                 }
-                // Tool calls arrive whole in the assistant message — text streamed before them goes first
-                let tools = tool_events(&ev);
-                if !tools.is_empty() {
-                    if !flush(&mut pending, pending_thought) {
+                // Answered on the main loop · said where it happened (text streamed before it goes first)
+                Some(c @ (StreamEv::Control { .. } | StreamEv::Compaction(_))) => {
+                    if !flush(&mut pending, pending_thought) || !send(c) {
                         break;
                     }
+                }
+                Some(
+                    e @ (StreamEv::Conversation { .. } | StreamEv::Initialized { .. } | StreamEv::Limits(_)),
+                ) => {
+                    if !send(e) {
+                        break;
+                    }
+                }
+                Some(StreamEv::Thinking) if !thinking_sent => {
+                    thinking_sent = true;
+                    send(StreamEv::Thinking);
+                }
+                Some(d @ StreamEv::Done(_)) => {
+                    flush(&mut pending, pending_thought);
                     thinking_sent = false;
-                    if !tools.into_iter().all(&send) {
+                    let ok = send(d);
+                    if once || !ok {
+                        done = true;
                         break;
                     }
-                    continue;
                 }
-                match parse_line(&ev) {
-                    Some(ev @ (StreamEv::Text(_) | StreamEv::Thought(_))) => {
-                        let (t, thought) = match ev {
-                            StreamEv::Thought(t) => (t, true),
-                            StreamEv::Text(t) => (t, false),
-                            _ => unreachable!(),
-                        };
-                        if thought != pending_thought {
-                            if !flush(&mut pending, pending_thought) {
-                                break;
-                            }
-                            pending_thought = thought;
-                        }
-                        pending.push_str(&t);
-                        thinking_sent = thought;
-                        if last_flush.elapsed() >= Duration::from_millis(25) {
-                            last_flush = Instant::now();
-                            if !flush(&mut pending, pending_thought) {
-                                break;
-                            }
-                        }
-                    }
-                    // Answered on the main loop · said where it happened (text streamed before it goes first)
-                    Some(c @ (StreamEv::Control { .. } | StreamEv::Compaction(_))) => {
-                        if !flush(&mut pending, pending_thought) || !send(c) {
-                            break;
-                        }
-                    }
-                    Some(
-                        e @ (StreamEv::Conversation { .. }
-                        | StreamEv::Initialized { .. }
-                        | StreamEv::Limits(_)),
-                    ) => {
-                        if !send(e) {
-                            break;
-                        }
-                    }
-                    Some(StreamEv::Thinking) if !thinking_sent => {
-                        thinking_sent = true;
-                        send(StreamEv::Thinking);
-                    }
-                    Some(d @ StreamEv::Done(_)) => {
-                        flush(&mut pending, pending_thought);
-                        thinking_sent = false;
-                        let ok = send(d);
-                        if once || !ok {
-                            done = true;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
+                _ => {}
             }
         }
         if once {
@@ -2066,6 +2106,95 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         drop(stdin);
+    }
+
+    /// A claude with no stdout to read: the reader ends at once — the process reaped, its end told — never waits
+    /// on lines that can't come.
+    #[test]
+    fn a_claude_without_stdout_is_reaped_and_its_end_told() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (tx, rx) = channel::<bool>();
+        let ed = crate::editor::Editor::new(crate::config::Config::default());
+        pump(child, false, ed.events.sender(), move |ev| {
+            let _ = tx.send(matches!(ev, StreamEv::Exit(_)));
+            None
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "its end told");
+        assert!(!UNREAPED.lock().unwrap().contains(&pid), "reaped");
+    }
+
+    /// A delta that came within `FLUSH` of the last batch goes out when its time is up — never held for the next
+    /// line, however long the stream pauses before it: text and an edit's input alike.
+    #[test]
+    fn a_held_delta_goes_out_by_its_time_not_with_the_next_line() {
+        let delta = |index: u8, delta: serde_json::Value| {
+            serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": index,
+                "delta": delta}})
+            .to_string()
+        };
+        let text = |t: &str| delta(0, serde_json::json!({"type": "text_delta", "text": t}));
+        let input = |j: &str| delta(1, serde_json::json!({"type": "input_json_delta", "partial_json": j}));
+        let start = serde_json::json!({"type": "stream_event", "event": {"type": "content_block_start",
+            "index": 1, "content_block": {"type": "tool_use", "id": "w1", "name": "Write", "input": {}}}});
+        // (four lines at once, a pause of 2 s, the next)
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", r#"printf '%s\n' "$1" "$2" "$3" "$4" "$5"; sleep 2; printf '%s\n' "$6""#, "sh"])
+            .args([
+                text("one"),
+                text("two"),
+                start.to_string(),
+                input(r#"{"file_path": "a.rs", "content": "x"#),
+                input("y"),
+                text("three"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (tx, rx) = channel::<(std::time::Instant, String)>();
+        let ed = crate::editor::Editor::new(crate::config::Config::default());
+        let _ = child.stdin.take();
+        pump(child, false, ed.events.sender(), move |ev| {
+            let said = match ev {
+                StreamEv::Text(t) => format!("text {t}"),
+                StreamEv::Writing(d) => d
+                    .pieces
+                    .iter()
+                    .map(|p| match p {
+                        crate::writing::Piece::Text { add, .. } => format!("input {add}"),
+                        _ => String::new(),
+                    })
+                    .collect(),
+                _ => return None,
+            };
+            let _ = tx.send((std::time::Instant::now(), said));
+            None
+        });
+        let mut got: Vec<(std::time::Instant, String)> = Vec::new();
+        while !got.iter().any(|g| g.1.contains("three")) {
+            got.push(rx.recv_timeout(Duration::from_secs(10)).expect("the stream's lines"));
+        }
+        // (what came at once may go in one batch: `text onetwo`, `input xy`)
+        let at = |kind: &str, end: &str| {
+            let g = got.iter().find(|g| g.1.starts_with(kind) && g.1.ends_with(end));
+            g.map(|g| g.0).unwrap_or_else(|| panic!("{kind} …{end}: {got:?}"))
+        };
+        let three = at("text", "three");
+        for (kind, end) in [("text", "two"), ("input", "y")] {
+            let sent = at(kind, end);
+            assert!(
+                sent + Duration::from_secs(1) < three,
+                "{kind} …{end} went out before the pause ended: {got:?}"
+            );
+        }
     }
 
     /// Tests never start the real claude (card model P2 caught one reading ~/.claude.json and the keychain):

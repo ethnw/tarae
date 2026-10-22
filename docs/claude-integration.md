@@ -586,7 +586,10 @@ says so on its review.
 
 You watch an edit being written. Once Claude has written what a change replaces and it's in the file once, the
 lines it writes appear there as it writes them, under the lines they replace, on the washes its review will have,
-the last words of the line in progress still wet ([`editor.motion`](reference/settings.md)). Nothing is applied or
+the last words of the line in progress still wet ([`editor.motion`](reference/settings.md)). Claude's stream brings
+an edit in lumps (about 190 characters every 0.6 s); tarae types each lump out at the stream's own speed, so it's
+shown by about when the next one is due, and anything still left shows within 0.15 s once the edit is complete.
+With `editor.motion = "none"` each lump appears at once. Nothing is applied or
 decided and no key is taken: you keep working — the drawing stays while you edit elsewhere in the file and goes
 if you change those lines. Each change of a
 call appears where it goes. When it's out of sight, follow takes you there and places it where the review will

@@ -2198,6 +2198,7 @@ impl Editor {
         self.disk_sync();
         self.recovery_sync();
         self.saves_due(false);
+        crate::writing::reveal(self);
         crate::follow::watch(self);
         crate::presence::sync(self);
         crate::overlap::sync(self);
@@ -2974,7 +2975,9 @@ impl Editor {
         let settle = crate::view::terminal_settling(self).then_some(crate::view::SETTLE);
         // A session's name tag on its clock: as its stay ends, then while it fades (`presence::tag_wake`)
         let tag = crate::presence::tag_wake(self);
-        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle, tag]
+        // Claude's writing shown at its pace: a frame each `REVEAL_EVERY` while there's text left to show
+        let reveal = crate::writing::reveal_wake(self).filter(|_| !self.unfocused);
+        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle, tag, reveal]
             .into_iter()
             .flatten()
             .min()

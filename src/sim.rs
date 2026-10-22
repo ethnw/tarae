@@ -42,6 +42,7 @@ mod ptybroker;
 mod quota;
 mod quotes;
 mod rebasemsg;
+mod reveal;
 mod reviews;
 mod rundoc;
 mod sessions;

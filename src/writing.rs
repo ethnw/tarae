@@ -6,12 +6,15 @@
 //! the call is whole the review opens on the same rows (the same diff of the same bytes); Claude's write landing
 //! unasked moves the buffer on and the rows go, follow's shown edit taking their place.
 //!
-//! Frames: the reader batches the input as it batches text (25 ms) — only while the model writes.
+//! Frames: the reader batches the input as it batches text (`llm::FLUSH`); what came is shown at the stream's own
+//! pace (`Pace`, `reveal`) — a frame every `REVEAL_EVERY` only while there's text left to show.
 
 pub mod scan;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ropey::Rope;
 pub use scan::{Field, Piece, Scan, Tool};
@@ -104,6 +107,11 @@ impl Reading {
         }
     }
 
+    /// Whether there's something for the next batch to send.
+    pub fn holds(&self) -> bool {
+        !self.ready.is_empty()
+    }
+
     /// What the next batch sends.
     pub fn take(&mut self) -> Vec<Delta> {
         std::mem::take(&mut self.ready)
@@ -111,9 +119,129 @@ impl Reading {
 }
 
 /// A chat's edits being written (`Chat.writing`): each call's items as far as they came, and where each goes.
-#[derive(Default)]
 pub struct Live {
     pub calls: Vec<Call>,
+    /// What came is shown at the stream's pace (`reveal`) — off in tests (an animation: shown as it comes) but where
+    /// a test sets it.
+    pub paced: bool,
+}
+
+impl Default for Live {
+    fn default() -> Live {
+        Live { calls: Vec::new(), paced: !cfg!(test) }
+    }
+}
+
+/// How often the reveal moves while there's written text left to show: 40 frames a second — at the measured
+/// 300 characters a second (`cargo xtask stream --edit`), about 8 characters a frame.
+pub const REVEAL_EVERY: Duration = Duration::from_millis(25);
+
+/// Pieces closer than this are one: the reader sends a lump's first delta at once and the rest `llm::FLUSH` (25 ms)
+/// after it — measured, claude streams an edit's input as 12 deltas at once (~190 characters) every ~640 ms.
+const BURST: Duration = Duration::from_millis(40);
+
+/// The gap to the next piece while only one has come (measured: an input's first deltas come singly ~50 ms apart,
+/// the text's median gap is 48 ms).
+const FIRST_GAP: Duration = Duration::from_millis(50);
+
+/// The longest gap the pace goes by: a pause (Claude thinking mid-edit) doesn't slow what comes after it past this
+/// (measured: the lumps' gaps 560–690 ms).
+const GAP_MAX: Duration = Duration::from_millis(1000);
+
+/// What's left to show once the text is whole shows within this.
+pub const WHOLE: Duration = Duration::from_millis(150);
+
+/// The gaps the pace is worked out from — their median, so one pause doesn't set it.
+const GAPS: usize = 3;
+
+/// How far an item's new text is shown, and the pace it goes at: pieces come in lumps, shown as typed at the stream's
+/// own speed — what came by about when the next piece is due (the last few gaps' median after the last piece).
+#[derive(Default)]
+pub struct Pace {
+    /// Bytes of the text shown (a character's boundary).
+    pub shown: usize,
+    /// When the last few pieces came (pieces within `BURST` are one).
+    came: VecDeque<Instant>,
+    /// The reveal's last move: where it goes on from.
+    stepped: Option<Instant>,
+    /// When the text came whole.
+    whole: Option<Instant>,
+}
+
+impl Pace {
+    /// A piece came at `now` onto a text `before` bytes long.
+    pub fn came(&mut self, now: Instant, before: usize) {
+        // (all of it was shown: the reveal goes on from now, not from its last move)
+        if self.shown >= before {
+            self.stepped = Some(now);
+        }
+        if self.came.back().is_none_or(|&b| now.saturating_duration_since(b) >= BURST) {
+            self.came.push_back(now);
+            if self.came.len() > GAPS + 1 {
+                self.came.pop_front();
+            }
+        }
+    }
+
+    /// The text came whole at `now`.
+    pub fn closed(&mut self, now: Instant) {
+        self.whole.get_or_insert(now);
+    }
+
+    /// When all that came should be shown: the next piece's time, from the last few gaps — sooner once it's whole.
+    fn due(&self) -> Option<Instant> {
+        let last = *self.came.back()?;
+        let mut gaps: Vec<Duration> = self
+            .came
+            .iter()
+            .zip(self.came.iter().skip(1))
+            .map(|(a, b)| b.saturating_duration_since(*a))
+            .collect();
+        crate::sorting::sort(&mut gaps);
+        let gap = gaps.get(gaps.len() / 2).copied().unwrap_or(FIRST_GAP).clamp(REVEAL_EVERY, GAP_MAX);
+        let due = last + gap;
+        Some(self.whole.map_or(due, |w| due.min(w + WHOLE)))
+    }
+
+    /// The reveal moved on to `now` over `text` (what came so far): whether it moved. Evenly from its last move to
+    /// when it's due; past that, all of it.
+    pub fn step(&mut self, text: &str, now: Instant) -> bool {
+        let total = text.len();
+        if self.shown >= total {
+            return false;
+        }
+        let from = self.stepped.unwrap_or(now);
+        let to = match self.due() {
+            Some(due) if due > now && due > from => {
+                let part = now.saturating_duration_since(from).as_secs_f64() / (due - from).as_secs_f64();
+                self.shown + ((total - self.shown) as f64 * part).ceil() as usize
+            }
+            _ => total,
+        };
+        self.stepped = Some(now);
+        let to = cluster_end(text, to.min(total));
+        let moved = to > self.shown;
+        self.shown = to.max(self.shown);
+        moved
+    }
+
+    /// Whether there's text left to show.
+    pub fn behind(&self, text: &str) -> bool {
+        self.shown < text.len()
+    }
+}
+
+/// The first character's end in `text` at or after byte `at` — a grapheme cluster's (a character is one: never half
+/// of one shown).
+fn cluster_end(text: &str, mut at: usize) -> usize {
+    while !text.is_char_boundary(at) {
+        at += 1;
+    }
+    let mut c = unicode_segmentation::GraphemeCursor::new(at, text.len(), true);
+    match c.is_boundary(text, 0) {
+        Ok(false) => c.next_boundary(text, 0).ok().flatten().unwrap_or(text.len()),
+        _ => at,
+    }
 }
 
 pub struct Call {
@@ -140,6 +268,8 @@ pub struct Item {
     pub followed: bool,
     /// Its text whole and drawn: `followed` stays as it was then (a `C-f` after, another call's piece, change nothing).
     ended: bool,
+    /// How much of `new` is shown — at the stream's pace (`reveal`): the rows are laid out from that much.
+    pub pace: Pace,
     /// Its block as last laid out, and what for: the buffer's version, the new text's length, whether whole —
     /// laid out again only when one of them moved (a finished item costs a batch nothing).
     drawn: Option<((u64, usize, bool), Arc<Block>)>,
@@ -351,6 +481,7 @@ pub fn on_delta(ed: &mut Editor, d: Delta) {
             live.calls.len() - 1
         }
     };
+    let (paced, now) = (live.paced, crate::clock::now());
     let call = &mut live.calls[k];
     call.done |= d.done;
     for p in d.pieces {
@@ -375,8 +506,21 @@ pub fn on_delta(ed: &mut Editor, d: Delta) {
                     }
                     Field::All => continue,
                 };
+                let before = t.s.len();
                 t.s.push_str(&add);
                 t.closed |= closed;
+                // (the text it writes: shown at the stream's pace — from when each piece came)
+                if matches!(field, Field::New) {
+                    if !add.is_empty() {
+                        it.pace.came(now, before);
+                    }
+                    if closed {
+                        it.pace.closed(now);
+                    }
+                    if !paced {
+                        it.pace.shown = it.new.s.len();
+                    }
+                }
             }
             Piece::Flag { field: Field::Other, on: true, .. } => it.other = true,
             Piece::Flag { .. } => {}
@@ -535,11 +679,14 @@ pub fn sync(ed: &mut Editor) {
                     version = doc.version();
                     f.bound = Some((id, version));
                 }
-                let key = (version, it.new.s.len(), it.new.closed);
+                // (as much of it as is shown: whole once all of it is)
+                let shown = &it.new.s[..it.pace.shown.min(it.new.s.len())];
+                let whole = it.new.closed && shown.len() == it.new.s.len();
+                let key = (version, shown.len(), whole);
                 let b = match &it.drawn {
                     Some((k, b)) if *k == key => b.clone(),
                     before => {
-                        let mut b = block(&doc.text, (f.from, f.to), &it.new.s, it.new.closed);
+                        let mut b = block(&doc.text, (f.from, f.to), shown, whole);
                         b.protected = f.protected;
                         let b = match before.as_ref().filter(|(k, _)| k.0 == version) {
                             Some((_, before)) => b.after(before),
@@ -594,9 +741,55 @@ pub fn sync(ed: &mut Editor) {
                 _ => None,
             };
             it.followed = leads && bound == Some(front);
-            it.ended = it.new.closed && bound.is_some();
+            it.ended = it.new.closed && !it.pace.behind(&it.new.s) && bound.is_some();
         }
     }
+}
+
+/// The reveal moved on to now — after every event, a frame's tick (`reveal_wake`) among them: each item's text shown
+/// as far as its pace has come, its rows laid out again where that moved (follow's caret and view with them) or where
+/// its buffer changed since (an edit landed mid-reveal: its rows go, and the frames).
+pub fn reveal(ed: &mut Editor) {
+    let Some(c) = ed.session.chat.as_ref().filter(|c| c.writing.paced && !c.writing.calls.is_empty()) else {
+        return;
+    };
+    let changed = c.writing.calls.iter().flat_map(|c| &c.items).any(|it| match &it.place {
+        Place::Found(Found { bound: Some((id, v)), .. }) => {
+            ed.docs.iter().any(|d| d.id == *id && d.version() != *v)
+        }
+        _ => false,
+    });
+    // (`editor.motion = "none"`: shown as it comes — what's left, at once)
+    let still = ed.motion() == crate::motion::Motion::None;
+    let Some(c) = ed.session.chat.as_mut() else { return };
+    let now = crate::clock::now();
+    let mut moved = changed;
+    for it in c.writing.calls.iter_mut().flat_map(|c| &mut c.items) {
+        moved |= match still {
+            true => std::mem::replace(&mut it.pace.shown, it.new.s.len()) != it.new.s.len(),
+            false => it.pace.step(&it.new.s, now),
+        };
+    }
+    if moved {
+        sync(ed);
+        ed.unchanged = false;
+    }
+}
+
+/// When the reveal moves next while an item drawn has text left to show — None: nothing left, no frame.
+pub fn reveal_wake(ed: &Editor) -> Option<Duration> {
+    let c =
+        ed.session.chat.as_ref().filter(|c| c.writing.paced && ed.motion() != crate::motion::Motion::None)?;
+    c.writing
+        .calls
+        .iter()
+        .flat_map(|c| &c.items)
+        .filter(|it| it.pace.behind(&it.new.s) && matches!(&it.place, Place::Found(f) if f.bound.is_some()))
+        .map(|it| {
+            let since = it.pace.stepped.map_or(Duration::ZERO, crate::clock::since);
+            REVEAL_EVERY.saturating_sub(since).max(Duration::from_millis(1))
+        })
+        .min()
 }
 
 /// How far from where it was the text an item replaces is looked for once its buffer changed (`relocate`).

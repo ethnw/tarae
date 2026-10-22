@@ -282,7 +282,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "editor.motion",
         kind: Kind::Enum(crate::motion::VALUES),
-        doc: "How much moves: full; calm — nothing on a clock (the waiting wave still, toasts without fading), the head of what Claude writes still wet; none — nothing wet either. macOS's Reduce Motion makes full calm",
+        doc: "How much moves: full; calm — nothing on a clock (the waiting wave still, toasts without fading), the head of what Claude writes still wet; none — nothing wet either, what Claude writes shown as it comes. macOS's Reduce Motion makes full calm",
         get: |c| Value::from(c.motion.as_str()),
         set: |c, v| c.motion = v.as_str().unwrap_or("full").to_string(),
     },

@@ -2,6 +2,8 @@
 
 use serde_json::{Value, json};
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::chat::State;
 use crate::config::Config;
@@ -1309,6 +1311,69 @@ fn perf_budget_stream_frame_with_live_rows() {
     assert!(worst < budget, "a batch took {worst:?} (budget {budget:?})");
 }
 
+/// Performance budget: a frame while an edit's text is shown at its pace (`reveal`) in a 200k-line file — the reveal
+/// moved, the rows laid out again, the frame drawn — within one frame (16 ms; `TARAE_PERF_SLACK` loosens it); the
+/// measured stream: a lump of ~190 characters every 640 ms, a frame every `REVEAL_EVERY`; the worst frame, each its
+/// best of 3 rounds.
+#[test]
+fn perf_budget_reveal_frame_with_live_rows() {
+    if crate::test_results::unoptimized("writing::tests::perf_budget_reveal_frame_with_live_rows") {
+        return;
+    }
+    let slack = std::env::var("TARAE_PERF_SLACK").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+    let budget = Duration::from_millis(16) * slack.max(1);
+    let text: String =
+        (0..200_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
+    let old: String =
+        (100_000..100_005).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
+    let new: String = (0..40).map(|i| format!("    let written_{i} = compute({i}, \"타래\");\n")).collect();
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let input =
+        format!(r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#, s(&old), s(&new));
+    let chars: Vec<char> = input.chars().collect();
+    let head = input.find("new_string").unwrap() + 14;
+    // (four lumps of 190 characters, 640 ms apart: 25 frames each)
+    let lumps: Vec<usize> = (0..5).map(|k| (head + k * 190).min(chars.len())).collect();
+    let frames = 4 * 25;
+    let mut best = vec![Duration::MAX; frames];
+    for _ in 0..3 {
+        let (mut ed, dir, g) = scene("writing-perf-reveal");
+        ed.session.chat.as_mut().unwrap().writing.paced = true;
+        std::fs::write(dir.join("a.rs"), &text).unwrap();
+        crate::typed::execute(&mut ed, "reload").unwrap();
+        let mut buf = Vec::with_capacity(1 << 16);
+        crate::term::render(&mut ed, &mut buf, 120, 40).unwrap();
+        let mut w = Writer::new("t1", Tool::Edit);
+        let first: String = chars[..head].iter().collect();
+        w.send(&mut ed, g, &first, &[], false);
+        settle(&mut ed, |ed| shown(ed.doc()).is_some());
+        let mut sim = crate::sim::Sim::new(
+            "writing_perf_reveal",
+            crate::sim::Choices::seeded(1),
+            Duration::from_secs(120),
+        );
+        for (k, pair) in lumps.windows(2).enumerate() {
+            let piece: String = chars[pair[0]..pair[1]].iter().collect();
+            w.send(&mut ed, g, &piece, &[], false);
+            for f in 0..25 {
+                sim.wait(REVEAL_EVERY + Duration::from_micros(600));
+                let t = Instant::now();
+                tick(&mut ed);
+                buf.clear();
+                crate::term::render(&mut ed, &mut buf, 120, 40).unwrap();
+                best[k * 25 + f] = best[k * 25 + f].min(t.elapsed());
+            }
+        }
+        assert!(shown(ed.doc()).is_some_and(|s| s.blocks[0].rows.len() > 10), "its rows drawn");
+        drop(sim);
+    }
+    let worst = best.iter().max().copied().unwrap_or_default();
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let line = format!("PERF reveal_frame_with_live_rows {:.3} budget={:.0}\n", ms(worst), ms(budget));
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    assert!(worst < budget, "a frame took {worst:?} (budget {budget:?})");
+}
+
 /// Claude Code's own Edit, from the stream's lines to the rows: its block read by the reader (`Reading`), its
 /// pieces drawn where they go. A message's start begins its blocks anew: a piece for a block of the message before
 /// is no one's.
@@ -1539,4 +1604,215 @@ fn an_edit_ending_in_a_wide_character_is_placed() {
         shown(ed.doc()).map(|s| s.blocks.iter().map(|b| (b.first, b.last)).collect::<Vec<_>>()),
         Some(vec![(1, 1)])
     );
+}
+
+/// The pace (`Pace`), on the measured stream (`cargo xtask stream --edit`: lumps of ~190 characters every ~640 ms,
+/// each lump's tail `llm::FLUSH` after its head): a lump is shown evenly until the next is due — never all at once as
+/// it comes, all of it by then — and once the text is whole, what's left within `WHOLE`.
+#[test]
+fn what_came_is_shown_evenly_by_when_the_next_piece_is_due() {
+    let t0 = Instant::now();
+    let mut p = Pace::default();
+    let mut text = String::new();
+    // (time in 5 ms steps; a frame every 25 ms: (at, shown, came by then))
+    let mut frames: Vec<(u64, usize, usize)> = Vec::new();
+    for t in (0..3200u64).step_by(5) {
+        let now = t0 + Duration::from_millis(t);
+        let lump = t / 640;
+        if lump < 4 && t % 640 == 0 {
+            p.came(now, text.len());
+            text.push_str(&"a".repeat(20));
+        }
+        if lump < 4 && t % 640 == 25 {
+            p.came(now, text.len());
+            text.push_str(&"b".repeat(170));
+        }
+        if t == 2600 {
+            p.closed(now);
+        }
+        if t % 25 == 0 {
+            p.step(&text, now);
+            frames.push((t, p.shown, text.len()));
+        }
+    }
+    for w in frames.windows(2).filter(|w| w[0].0 >= 640) {
+        let ((_, a, _), (t, b, _)) = (w[0], w[1]);
+        assert!(b >= a && b - a <= 12, "{} bytes in one frame at {t} ms: {frames:?}", b - a);
+    }
+    // (all of a lump shown by the next one's time: the frame before it within a frame's worth)
+    for next in [1280, 1920] {
+        let &(t, shown, came) = frames.iter().rfind(|f| f.0 < next).unwrap();
+        assert!(came - shown <= 10, "{} left at {t} ms: {frames:?}", came - shown);
+    }
+    let whole = frames.iter().find(|f| f.1 == text.len()).map(|f| f.0);
+    assert!(whole.is_some_and(|t| t <= 2600 + 150), "all of it within WHOLE once whole: {whole:?}");
+}
+
+/// A piece after a pause (all shown, then quiet for 3 s) is shown from when it came — not all at once on the next
+/// frame; nor does the pause slow the pace past `GAP_MAX`.
+#[test]
+fn a_piece_after_a_pause_is_shown_from_when_it_came() {
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let mut p = Pace::default();
+    let mut text = String::new();
+    for k in 0..3u64 {
+        p.came(at(k * 640), text.len());
+        text.push_str(&"a".repeat(190));
+    }
+    p.step(&text, at(2000));
+    assert_eq!(p.shown, text.len(), "caught up");
+    p.came(at(5000), text.len());
+    text.push_str(&"b".repeat(190));
+    p.step(&text, at(5025));
+    let first = p.shown - 570;
+    assert!(first > 0 && first <= 12, "a frame's worth, not all: {first}");
+    p.step(&text, at(5000) + GAP_MAX);
+    assert_eq!(p.shown, text.len(), "all of it by GAP_MAX at the most");
+}
+
+/// The reveal never shows half a character: a step ending inside a cluster goes on to its end.
+#[test]
+fn the_reveal_never_cuts_a_character() {
+    let text = "ab e\u{301}\u{301}—한";
+    for at in 0..=text.len() {
+        let end = cluster_end(text, at);
+        assert!(text.is_char_boundary(end) && end >= at, "{at} → {end}");
+        assert!(![4, 5, 6, 7].contains(&end), "inside é́: {at} → {end}");
+    }
+}
+
+/// A frame's tick, as the loop brings one: an event with nothing in it (the reveal moves after every event).
+fn tick(ed: &mut Editor) {
+    ed.handle_event(crate::event::Event::Job(Box::new(|_: &mut Editor| {})));
+}
+
+/// The row a line of the code area shows with `text` in it.
+fn row_with(ed: &mut Editor, text: &str) -> Option<String> {
+    frame(ed, 100, 30).into_iter().find(|r| r.contains(text))
+}
+
+/// Paced (`Live.paced`, on a simulation's clock): a piece isn't drawn as it comes — the frames after it show it a
+/// little at a time, Claude's caret at the shown head; once whole, the rest within `WHOLE`; a frame is asked only
+/// while there's text left to show.
+#[test]
+fn a_piece_is_drawn_as_typed_at_the_streams_pace() {
+    let (mut ed, _dir, g) = scene("writing-paced");
+    ed.session.chat.as_mut().unwrap().writing.paced = true;
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 2000000000;\n");
+    let head = input.find("2000").unwrap();
+    let tail = head + input[head..].find(';').unwrap();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..head], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    let mut sim =
+        crate::sim::Sim::new("writing_paced", crate::sim::Choices::seeded(1), Duration::from_secs(30));
+    sim.wait(Duration::from_secs(2));
+    tick(&mut ed);
+    assert!(row_with(&mut ed, "let b = ").is_some(), "what came before, shown by now");
+    assert_eq!(reveal_wake(&ed), None, "nothing left to show: no frame");
+    w.send(&mut ed, g, &input[head..tail], &[], false);
+    tick(&mut ed);
+    // (`let b = 2;` is the line it takes out)
+    assert!(row_with(&mut ed, "let b = 20").is_none(), "not drawn as it came");
+    assert!(reveal_wake(&ed).is_some_and(|d| d <= REVEAL_EVERY), "a frame asked");
+    assert!(ed.tick_wanted().is_some_and(|d| d <= REVEAL_EVERY), "the loop's next frame that soon");
+    sim.wait(Duration::from_millis(250));
+    tick(&mut ed);
+    let row = row_with(&mut ed, "let b = 20").expect("some of it, a frame later");
+    assert!(!row.contains("2000000000"), "not all of it: {row}");
+    // (Claude's caret right after what's shown)
+    let b = shown(ed.doc()).and_then(|s| s.blocks.iter().find(|b| b.head.is_some()).cloned()).unwrap();
+    assert!(matches!(&b.rows[b.head.unwrap()], Row::Other { text, .. } if row.ends_with(text.as_str())));
+    w.send(&mut ed, g, &input[tail..], &[], true);
+    tick(&mut ed);
+    sim.wait(WHOLE + REVEAL_EVERY);
+    tick(&mut ed);
+    assert!(row_with(&mut ed, "let b = 2000000000;").is_some(), "whole within WHOLE");
+    assert_eq!(reveal_wake(&ed), None, "all shown: no more frames");
+    drop(sim);
+}
+
+/// The terminal unfocused (nobody sees it): no reveal frames asked — and the next event, focus back among them,
+/// catches the reveal up.
+#[test]
+fn an_unfocused_tarae_asks_no_reveal_frames_and_catches_up() {
+    let (mut ed, _dir, g) = scene("writing-paced-unfocused");
+    ed.session.chat.as_mut().unwrap().writing.paced = true;
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 2000000000;\n");
+    let head = input.find("2000").unwrap();
+    let tail = head + input[head..].find(';').unwrap();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..head], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    let mut sim = crate::sim::Sim::new(
+        "writing_paced_unfocused",
+        crate::sim::Choices::seeded(1),
+        Duration::from_secs(30),
+    );
+    sim.wait(Duration::from_secs(2));
+    tick(&mut ed);
+    ed.handle_event(crate::event::Event::Focus(false));
+    w.send(&mut ed, g, &input[head..tail], &[], false);
+    tick(&mut ed);
+    assert!(reveal_wake(&ed).is_some(), "text left to show");
+    assert!(ed.tick_wanted().is_none_or(|d| d > REVEAL_EVERY), "but no frame asked for it");
+    sim.wait(Duration::from_secs(2));
+    ed.handle_event(crate::event::Event::Focus(true));
+    assert!(row_with(&mut ed, "let b = 2000000000").is_some(), "caught up as focus came back");
+    assert_eq!(reveal_wake(&ed), None);
+    drop(sim);
+}
+
+/// `editor.motion = "none"`: what's written is shown as it comes, no frames of its own.
+#[test]
+fn without_motion_the_writing_is_shown_as_it_comes() {
+    let (mut ed, _dir, g) = scene("writing-paced-still");
+    ed.session.chat.as_mut().unwrap().writing.paced = true;
+    ed.config.motion = "none".into();
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 3000;\n");
+    let head = input.find("3000").unwrap();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..head], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    let sim =
+        crate::sim::Sim::new("writing_paced_still", crate::sim::Choices::seeded(1), Duration::from_secs(30));
+    // (up to its closing `\n"}]}`; the event it came in, no time passing)
+    w.send(&mut ed, g, &input[head..input.len() - 6], &[], false);
+    tick(&mut ed);
+    assert!(row_with(&mut ed, "let b = 3000;").is_some(), "all that came, at once");
+    assert_eq!(reveal_wake(&ed), None, "no frames of its own");
+    drop(sim);
+}
+
+/// The edit lands while its text is still being shown: the landed text is the buffer's at once, the rows go with the
+/// next frame, and no frame is asked after.
+#[test]
+fn an_edit_landing_mid_reveal_shows_what_landed() {
+    let (mut ed, dir, g) = scene("writing-paced-lands");
+    ed.session.chat.as_mut().unwrap().writing.paced = true;
+    frame(&mut ed, 100, 30);
+    let input = edit_input("    let b = 2000000000;\n");
+    let head = input.find("2000").unwrap();
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input[..head], &[], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    let mut sim =
+        crate::sim::Sim::new("writing_paced_lands", crate::sim::Choices::seeded(1), Duration::from_secs(30));
+    sim.wait(Duration::from_secs(2));
+    tick(&mut ed);
+    w.send(&mut ed, g, &input[head..], &[], true);
+    sim.wait(REVEAL_EVERY);
+    tick(&mut ed);
+    assert!(reveal_wake(&ed).is_some(), "mid-reveal");
+    std::fs::write(dir.join("a.rs"), TEXT.replace("let b = 2;", "let b = 2000000000;")).unwrap();
+    crate::typed::execute(&mut ed, "reload").unwrap();
+    assert!(shown(ed.doc()).is_none(), "the rows of another version aren't drawn");
+    assert!(row_with(&mut ed, "let b = 2000000000;").is_some(), "what landed");
+    tick(&mut ed);
+    assert_eq!(reveal_wake(&ed), None, "landed: no more frames");
+    drop(sim);
 }

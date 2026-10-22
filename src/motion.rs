@@ -2,7 +2,8 @@
 //! waiting wave, a toast's fade) moves only at `full`; at `calm` the wave holds still, its time counted by the
 //! second, and a toast comes and goes whole. Wet ink (번짐 — the head of what's being written, a function of
 //! where the stream is, never of time) stays at `calm` and goes at `none`; the rows of an edit being written and
-//! a decision's stamp stay at all three. macOS's Reduce Motion (read once at start, on a worker) makes `full`
+//! a decision's stamp stay at all three — shown at the stream's pace (`writing::Pace`: it takes the lumps' jumps out)
+//! at `full` and `calm`, as they come at `none`. macOS's Reduce Motion (read once at start, on a worker) makes `full`
 //! behave as `calm`; an explicit `none` stays `none`.
 
 use crate::editor::Editor;

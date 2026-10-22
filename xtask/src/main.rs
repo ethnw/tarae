@@ -18,8 +18,9 @@
 //! - `linux [clippy|test]` — the checks on Linux in Docker, on the pinned toolchain, the tree read-only (see
 //!   [`linux`]).
 //! - `deb [--binary PATH]` — tarae as a `.deb`, its AppArmor profile beside it (see [`deb`]).
-//! - `stream [--model M] [prompt]`, `stream --file F` — one real streamed answer from the chat's model (`llm.model`),
-//!   timed line by line: its bursts, and what tarae's text batching adds to them (see [`stream`]).
+//! - `stream [--model M] [--edit] [prompt]`, `stream --file F` — one real streamed answer from the chat's model
+//!   (`llm.model`), timed line by line: its bursts, and what tarae's batching adds to them — `--edit` an edit's
+//!   input as it streams (see [`stream`]).
 //! - `trace [offcpu|syscalls|pty] [scenario …]`, `trace test` — tarae measured with eBPF on Linux, in a
 //!   container: off-CPU time by stack, the syscall mix, terminal write latency, over perf scenarios (see
 //!   [`trace`]).
@@ -85,7 +86,7 @@ fn main() {
         Some("compat") => compat::run(&args[1..]),
         Some("glyphs") => glyphs::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | reviews [PATH …] | turns [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
+            "usage: cargo xtask vendor-grammars | shot out.png [keys …] | scenes [--out DIR] [scene …] | perf | linux [--platform P] [clippy|test] | deb [--binary PATH] | stream [--model M] [--edit] [prompt] | stream --file F | trace [offcpu|syscalls|pty] [scenario …] | trace test|clippy | claude-stub serve|drive|summary | cards [PATH …] | reviews [PATH …] | turns [PATH …] | compat [stack …] [--lane gate|quick|net] [--linux a+|c|all] [--dry-run] | glyphs [chars]"
                 .into(),
         ),
     };
