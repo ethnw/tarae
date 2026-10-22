@@ -436,10 +436,11 @@ main that has what it waits for, and the user says go:
   terminal's waits for the engine → **P3** panes of their own (the tests panel
   the first linked group; its 12 decisions taken 2026-10-22; step 1 (`3d7ca662`): the
   slot's header in the line where it meets the code, one drawer with a frame's top line, the code a row taller; step 2
-  (`3b00bb04`): groups as one model; step 3: the task's places and a preflight's steps as linked groups, the one output
-  scrolled to the place's line or the step's heading), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
-  a session = one participant, a workspace = a checkout with its layout; C1 where
-  every session reads and writes, shown wherever that file is; C2 an overlap between workspaces said the moment it
+  (`3b00bb04`): groups as one model; step 3 (`66a80e78`): the task's places and a preflight's steps as linked groups, the
+  one output scrolled to the place's line or the step's heading; step 3b under way: a group's panes named in their own
+  stretch of the line, the one with the keys lit, side by side or stacked when narrow — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
+  every session reads and writes, shown wherever that file is, each session its name in its colour; C2 an overlap between workspaces said the moment it
   would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the merged view — everyone works in their own workspace and tarae shows the merge, each change in its
   participant's colour, the merged tree's preflight on demand; C3 workspaces kept close to main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
