@@ -1,4 +1,4 @@
-//! collab C2b — the merged view (`target/sb/collab-plan.md` §3.2): a file as every workspace's changes merge onto
+//! collab C2b — the woven view (`target/sb/collab-plan.md` §3.2): a file as every workspace's changes merge onto
 //! the base's tip, in memory, unsaved changes too — a read-only document in a code pane, each change washed and
 //! barred in its participant's colour (C1's `ui.participant.N`, its name's prefix in the sign column: never the colour
 //! alone), each conflict its parts one after another (the base's lines, then each side's) — drawn side by side where
@@ -46,7 +46,7 @@ pub enum Land {
     Conflict(Option<crate::overlap::Other>),
 }
 
-/// The merged view of a file, on its document (`Document.merged`).
+/// The woven view of a file, on its document (`Document.woven`).
 pub struct Shown {
     /// The file from a checkout's top — the same path in each.
     pub rel: String,
@@ -75,6 +75,9 @@ pub struct Shown {
     pub land: Option<Land>,
     /// The code's width it was last laid out at: whether its conflicts show side by side (`columns`).
     pub cols: std::cell::Cell<usize>,
+    /// The part of a side by side conflict a click picked (conflict, part — 0 the tip's, the line it put the cursor
+    /// on): where `enter` goes while the cursor stays there (`there`) — a column can't hold the cursor.
+    pub picked: Option<(usize, usize, usize)>,
     /// Merges landed (tests count them).
     pub merges: u64,
 }
@@ -92,13 +95,15 @@ pub struct Side {
 }
 
 /// A clean change of the merged text: its lines there (empty: a removal, above `lines.start`), whose (`side`, and
-/// the sides that made the same change — `with`), and how many of the tip's lines it replaced.
+/// the sides that made the same change — `with`), how many of the tip's lines it replaced, and its lines in its
+/// side's own text (`own` — empty for a removal: where the lines went; `enter` goes there).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub side: usize,
     pub with: Vec<usize>,
     pub lines: Range<usize>,
     pub removed: usize,
+    pub own: Range<usize>,
 }
 
 /// A conflict in the merged text: its parts one after another — the tip's lines (`base`), then each side's version
@@ -163,9 +168,9 @@ struct Hunk {
     tip: bool,
 }
 
-/// The document's merged view, if it is one.
+/// The document's woven view, if it is one.
 pub fn of(doc: &crate::document::Document) -> Option<&Shown> {
-    doc.merged.as_deref()
+    doc.woven.as_deref()
 }
 
 /// Whether conflict `c` of `doc` shows side by side at `cols` cells of code: each part a column of `COLUMN_MIN` at
@@ -191,6 +196,15 @@ pub fn column_w(cols: usize, n: usize) -> usize {
 /// The rows a side by side conflict takes: its head, then its longest part's lines.
 pub fn column_rows(c: &Conflict) -> usize {
     1 + c.spans().map(|(r, _)| r.len()).max().unwrap_or(0)
+}
+
+/// The removals whose head stands above line `l` (where their lines went): the changes that only take lines out.
+pub fn gone_at(m: &Merge, l: usize) -> impl Iterator<Item = usize> + '_ {
+    m.changes
+        .iter()
+        .enumerate()
+        .filter(move |(_, c)| c.lines.is_empty() && c.lines.start == l)
+        .map(|(i, _)| i)
 }
 
 /// The heads above line `l`, stacked: (the conflict, which part — 0 the tip's).
@@ -245,7 +259,7 @@ pub fn tag_at(m: &Shown, cursor: usize) -> Option<(usize, String, Option<u8>)> {
     None
 }
 
-/// The sign column's width for `doc`: a merged view's longest prefix, else one cell.
+/// The sign column's width for `doc`: a woven view's longest prefix, else one cell.
 pub fn signs(doc: &crate::document::Document) -> usize {
     use unicode_width::UnicodeWidthStr;
     of(doc).map_or(1, |m| m.prefixes.iter().map(|p| p.width()).max().unwrap_or(1).clamp(1, 3))
@@ -265,7 +279,7 @@ fn branch(ed: &Editor) -> Option<String> {
     }
 }
 
-/// `:merged`, `space v j`: the merged view of `path` (the current file's when None) — the one open already, else a
+/// `:weave`, `space v w`: the woven view of `path` (the current file's when None) — the one open already, else a
 /// new read-only document; `land`: where its cursor goes once merged.
 pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Result<(), String> {
     let path = match path {
@@ -273,7 +287,7 @@ pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Resul
         None => match (ed.doc().path.clone(), of(ed.doc())) {
             (_, Some(m)) => ed.session.root.join(&m.rel),
             (Some(p), None) => p,
-            (None, None) => return Err("no file here to merge — open one".into()),
+            (None, None) => return Err("no file here to weave — open one".into()),
         },
     };
     let rel = match path.strip_prefix(&ed.session.root) {
@@ -281,7 +295,7 @@ pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Resul
         _ => return Err(format!("{} isn't in this workspace", path.display())),
     };
     if crate::sandbox::key_named_in(&ed.session.root, &path) {
-        return Err(format!("{rel} is named like a key — it isn't merged"));
+        return Err(format!("{rel} is named like a key — it isn't woven"));
     }
     // (not known yet — a session just opened or switched to, its branch not read yet: the merge reads it)
     let branch = branch(ed);
@@ -289,7 +303,7 @@ pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Resul
     if let Some(i) = ed.docs.iter().position(|d| mine.contains(&d.id) && of(d).is_some_and(|m| m.rel == rel))
     {
         ed.current = i;
-        if let Some(m) = ed.docs[i].merged.as_mut() {
+        if let Some(m) = ed.docs[i].woven.as_mut() {
             m.land = land.or(m.land.take());
         }
         place(ed);
@@ -299,27 +313,9 @@ pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Resul
         Some(b) => crate::overlap::named_branch(ed, b),
         None => (String::new(), None),
     };
-    let id = ed.open_virtual(&format!("merged · {rel}"), "");
+    let id = ed.open_virtual(&format!("woven · {rel}"), "");
     let doc = ed.docs.iter_mut().find(|d| d.id == id).expect("just opened");
-    doc.merged = Some(Box::new(Shown {
-        rel,
-        branch,
-        tip_name,
-        sides: Vec::new(),
-        prefixes: Vec::new(),
-        unchanged: 0,
-        left: Vec::new(),
-        merge: Arc::new(Merge::default()),
-        text: ropey::Rope::new(),
-        version: doc.version(),
-        of: None,
-        asking: false,
-        tip: None,
-        said: None,
-        land,
-        cols: std::cell::Cell::new(0),
-        merges: 0,
-    }));
+    doc.woven = Some(Box::new(Shown::new(rel, branch, tip_name, doc.version(), land)));
     if let Some(spec) = crate::syntax::detect(&path) {
         ed.load_language(id, spec);
     }
@@ -327,10 +323,52 @@ pub fn open(ed: &mut Editor, path: Option<PathBuf>, land: Option<Land>) -> Resul
     Ok(())
 }
 
-/// Every event: what an edit did to a merged view put back (it's read-only — said), and the views in sight merged
+impl Shown {
+    /// A view of `rel` with nothing woven yet.
+    fn new(
+        rel: String,
+        branch: Option<String>,
+        tip_name: (String, Option<u8>),
+        version: u64,
+        land: Option<Land>,
+    ) -> Self {
+        Shown {
+            rel,
+            branch,
+            tip_name,
+            sides: Vec::new(),
+            prefixes: Vec::new(),
+            unchanged: 0,
+            left: Vec::new(),
+            merge: Arc::new(Merge::default()),
+            text: ropey::Rope::new(),
+            version,
+            of: None,
+            asking: false,
+            tip: None,
+            said: None,
+            land,
+            cols: std::cell::Cell::new(0),
+            picked: None,
+            merges: 0,
+        }
+    }
+}
+
+/// A woven view of `rel` (`text`, nothing woven) in front, never asked — no git runs (the routing test's).
+#[cfg(test)]
+pub fn stand_in(ed: &mut Editor, rel: &str, text: &str) {
+    let id = ed.open_virtual(&format!("woven · {rel}"), text);
+    let d = ed.docs.iter_mut().find(|d| d.id == id).expect("just opened");
+    let mut m = Shown::new(rel.into(), Some("main".into()), ("main".into(), None), d.version(), None);
+    (m.asking, m.text) = (true, ropey::Rope::from_str(text));
+    d.woven = Some(Box::new(m));
+}
+
+/// Every event: what an edit did to a woven view put back (it's read-only — said), and the views in sight merged
 /// again where what they were merged from moved (one at a time each: the last merge shown meanwhile).
 pub fn sync(ed: &mut Editor) {
-    if !ed.docs.iter().any(|d| d.merged.is_some()) {
+    if !ed.docs.iter().any(|d| d.woven.is_some()) {
         return;
     }
     read_only(ed);
@@ -350,13 +388,13 @@ pub fn sync(ed: &mut Editor) {
     }
 }
 
-/// A merged view's text as merged.rs set it: an edit's put back (and insert mode left), said where you look.
+/// A woven view's text as weave.rs set it: an edit's put back (and insert mode left), said where you look.
 fn read_only(ed: &mut Editor) {
     let current = ed.doc().id;
     let mut said = false;
     for d in ed.docs.iter_mut() {
         let version = d.version();
-        let Some(m) = d.merged.as_mut() else { continue };
+        let Some(m) = d.woven.as_mut() else { continue };
         if version == m.version {
             continue;
         }
@@ -364,7 +402,7 @@ fn read_only(ed: &mut Editor) {
         crate::disk::reload_text(d, &text);
         d.drop_history();
         let version = d.version();
-        if let Some(m) = d.merged.as_mut() {
+        if let Some(m) = d.woven.as_mut() {
             m.version = version;
         }
         said |= d.id == current;
@@ -375,7 +413,7 @@ fn read_only(ed: &mut Editor) {
         ed.insert_rec = None;
     }
     if said || typing {
-        ed.set_status("the merged view is read-only — edit in your workspace");
+        ed.set_status("the woven view is read-only — edit in your workspace");
     }
 }
 
@@ -384,8 +422,7 @@ fn key(ed: &Editor, rel: &str) -> Key {
     sessions(ed)
         .map(|l| {
             let path = l.root.join(rel);
-            let doc =
-                ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path()) && d.merged.is_none());
+            let doc = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path()) && d.woven.is_none());
             let snap = crate::overlap::snapshot_commit(ed, l.id);
             (l.id, doc.map(|d| (d.id, d.version())), l.wrote, snap)
         })
@@ -428,7 +465,7 @@ struct Worked {
 
 /// The merge worked out on a worker, landed on view `id` (`landed`).
 fn ask(ed: &mut Editor, id: DocId, key: Key) {
-    let Some(m) = ed.docs.iter_mut().find(|d| d.id == id).and_then(|d| d.merged.as_mut()) else { return };
+    let Some(m) = ed.docs.iter_mut().find(|d| d.id == id).and_then(|d| d.woven.as_mut()) else { return };
     m.asking = true;
     let (rel, branch, tip) = (m.rel.clone(), m.branch.clone(), m.tip.clone());
     let top = ed.session.root.clone();
@@ -436,8 +473,7 @@ fn ask(ed: &mut Editor, id: DocId, key: Key) {
     let ins: Vec<In> = sessions(ed)
         .map(|l| {
             let path = l.root.join(&rel);
-            let doc =
-                ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path()) && d.merged.is_none());
+            let doc = ed.docs.iter().find(|d| d.path.as_deref() == Some(path.as_path()) && d.woven.is_none());
             In {
                 id: l.id,
                 name: l.label().to_string(),
@@ -460,7 +496,7 @@ fn ask(ed: &mut Editor, id: DocId, key: Key) {
             ),
             Err(e) => format!("{rel}: {e}"),
         };
-        crate::log::line("merged", "info", &line);
+        crate::log::line("weave", "info", &line);
         move |ed: &mut Editor| landed(ed, id, key, r)
     });
 }
@@ -481,7 +517,7 @@ fn blob(root: &Path, rev: &str, rel: &str) -> Result<String, String> {
     let size: usize =
         git(root, &["cat-file", "-s", &format!("{rev}:{rel}")])?.parse().map_err(|_| "no size")?;
     if size > TEXT_MAX {
-        return Err("too large to merge here".into());
+        return Err("too large to weave here".into());
     }
     let all: Vec<&str> = crate::gitrepo::NO_HOOKS.iter().copied().chain(["cat-file", "blob"]).collect();
     let mut cmd = crate::gitrepo::repo(root)?.command(&all);
@@ -490,8 +526,8 @@ fn blob(root: &Path, rev: &str, rel: &str) -> Result<String, String> {
     let b = crate::gitrepo::finish(&cmd, None)?;
     // (the base's own text: nothing to merge onto — said for the whole view)
     text_of(b).map_err(|why| match why {
-        TOO_LARGE => "too large to merge here".to_string(),
-        _ => "binary — nothing to merge by lines".to_string(),
+        TOO_LARGE => "too large to weave here".to_string(),
+        _ => "binary — nothing to weave by lines".to_string(),
     })
 }
 
@@ -521,10 +557,10 @@ fn work(
     let branch = match branch {
         Some(b) => b,
         None => git(home, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-            .map_err(|_| "no base branch to merge onto — the home checkout's HEAD is detached".to_string())?,
+            .map_err(|_| "no base branch to weave onto — the home checkout's HEAD is detached".to_string())?,
     };
     let at = git(top, &["rev-parse", "--verify", "--quiet", &format!("{branch}^{{commit}}")])
-        .map_err(|_| format!("no branch {branch} to merge onto"))?;
+        .map_err(|_| format!("no branch {branch} to weave onto"))?;
     let tip = match tip {
         Some((t, text)) if t == at => (t, text),
         _ => (at.clone(), Arc::new(blob(top, &at, rel)?)),
@@ -542,6 +578,15 @@ fn work(
         let path = w.root.join(rel);
         // (a file named like a key: never read — whose ever it is)
         if crate::sandbox::key_named_in(&w.root, &path) {
+            continue;
+        }
+        // (a buffer whose file is a link now — swapped in since it was opened, its reload the link's target —
+        // isn't that side's text: left out as its disk copy would be; gone from disk, the buffer stands)
+        if w.buffer.is_some()
+            && let Err(Read::Refused(why)) = plain(&w.root, rel)
+        {
+            crate::log::line("weave", "info", &why);
+            left.push((w.name, NOT_PLAIN));
             continue;
         }
         let (text, unsaved) = match w.buffer {
@@ -563,14 +608,14 @@ fn work(
                     continue;
                 }
                 Read::Refused(why) => {
-                    crate::log::line("merged", "info", &why);
+                    crate::log::line("weave", "info", &why);
                     left.push((w.name, NOT_PLAIN));
                     continue;
                 }
                 Read::Failed(e) => match w.snap.as_ref().and_then(|s| s.read(rel)) {
                     Some(t) => (t, false),
                     None => {
-                        crate::log::line("merged", "info", &format!("{}: {e}", path.display()));
+                        crate::log::line("weave", "info", &format!("{}: {e}", path.display()));
                         left.push((w.name, "unreadable"));
                         continue;
                     }
@@ -608,27 +653,10 @@ enum Read {
 /// the file opened through no link from the checkout's real path, only a plain file, its size taken from the open
 /// descriptor before a byte is read (`TEXT_MAX`).
 fn read_beneath(root: &Path, rel: &str) -> Read {
-    let rel = Path::new(rel);
-    let (Some(name), parent) = (rel.file_name(), rel.parent().unwrap_or(Path::new(""))) else {
-        return Read::Refused(format!("{}: not a file's path", rel.display()));
+    let (dir, name) = match plain(root, rel) {
+        Ok(found) => found,
+        Err(why) => return why,
     };
-    let dir = match crate::beneath::Dir::root(root).and_then(|d| d.folder(parent, false)) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
-        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Read::Gone,
-        Err(e) => return Read::Refused(e.to_string()),
-    };
-    match dir.kind(name) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
-        Err(e) => return Read::Failed(e.to_string()),
-        Ok(crate::beneath::Kind::File) => {}
-        Ok(k) => {
-            return Read::Refused(format!(
-                "{}: a {k:?}, not a plain file — not read",
-                dir.at.join(name).display()
-            ));
-        }
-    }
     match dir.read_at_most(name, TEXT_MAX) {
         Ok(Some(b)) => Read::Text(b),
         Ok(None) => Read::Gone,
@@ -636,6 +664,31 @@ fn read_beneath(root: &Path, rel: &str) -> Read {
         // (swapped since its kind was looked at — a link, a FIFO now: refused all the same)
         Err(e) if e.kind() == std::io::ErrorKind::Other => Read::Refused(e.to_string()),
         Err(e) => Read::Failed(e.to_string()),
+    }
+}
+
+/// File `rel` of the checkout at `root` looked at as `read_beneath` reads it, nothing read: the folder it's in,
+/// every folder on the way opened through no link from the checkout's real path, and its name there — when it's a
+/// plain file; else why not (`Gone`, `Refused`, `Failed`).
+fn plain<'a>(root: &Path, rel: &'a str) -> Result<(crate::beneath::Dir, &'a std::ffi::OsStr), Read> {
+    let rel = Path::new(rel);
+    let (Some(name), parent) = (rel.file_name(), rel.parent().unwrap_or(Path::new(""))) else {
+        return Err(Read::Refused(format!("{}: not a file's path", rel.display())));
+    };
+    let dir = match crate::beneath::Dir::root(root).and_then(|d| d.folder(parent, false)) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Read::Gone),
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Err(Read::Gone),
+        Err(e) => return Err(Read::Refused(e.to_string())),
+    };
+    match dir.kind(name) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Read::Gone),
+        Err(e) => Err(Read::Failed(e.to_string())),
+        Ok(crate::beneath::Kind::File) => Ok((dir, name)),
+        Ok(k) => Err(Read::Refused(format!(
+            "{}: a {k:?}, not a plain file — not read",
+            dir.at.join(name).display()
+        ))),
     }
 }
 
@@ -648,7 +701,7 @@ fn landed(ed: &mut Editor, id: DocId, key: Key, r: Result<Worked, String>) {
         ed.unchanged = true;
         return;
     };
-    let Some(m) = d.merged.as_mut() else { return };
+    let Some(m) = d.woven.as_mut() else { return };
     m.asking = false;
     m.of = Some(key);
     if let (Ok(w), Some(named)) = (&r, named) {
@@ -674,6 +727,9 @@ fn landed(ed: &mut Editor, id: DocId, key: Key, r: Result<Worked, String>) {
     m.left = w.left;
     m.said = None;
     m.tip = w.tip;
+    if !same {
+        m.picked = None;
+    }
     let mut all = names;
     for s in &w.sides {
         if !all.contains(&s.name) {
@@ -697,10 +753,10 @@ fn landed(ed: &mut Editor, id: DocId, key: Key, r: Result<Worked, String>) {
     }
     d.drop_history();
     let version = d.version();
-    if let Some(m) = d.merged.as_mut() {
+    if let Some(m) = d.woven.as_mut() {
         m.version = version;
     }
-    let landing = d.merged.as_mut().and_then(|m| m.land.take());
+    let landing = d.woven.as_mut().and_then(|m| m.land.take());
     if same && landing.is_none() {
         ed.unchanged = true;
         return;
@@ -713,7 +769,7 @@ fn landed(ed: &mut Editor, id: DocId, key: Key, r: Result<Worked, String>) {
 /// The current view's cursor where it was asked to land, once it has a merge.
 fn place(ed: &mut Editor) {
     let id = ed.doc().id;
-    let land = ed.doc_mut().merged.as_mut().filter(|m| m.of.is_some()).and_then(|m| m.land.take());
+    let land = ed.doc_mut().woven.as_mut().filter(|m| m.of.is_some()).and_then(|m| m.land.take());
     if land.is_some() {
         place_in(ed, id, land);
     }
@@ -740,7 +796,225 @@ fn place_in(ed: &mut Editor, id: DocId, land: Option<Land>) {
     ed.goto_line(line);
 }
 
-/// `]m`/`[m` on a merged view: to the next (previous) conflict — its lines selected. None: not a merged view.
+/// Where `enter` on a woven view's line goes: a side's workspace at its own line (its own text's numbers), or the
+/// checkout that has the base's branch at the tip's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum There {
+    Side { side: usize, line: usize },
+    Tip { line: usize },
+}
+
+/// Where `enter` on merged line `l` goes: a change's line (the same line of it in its side's text), a conflict part's
+/// (stacked, or the column picked — else the part holding the cursor; the tip's part the tip's line), the line a
+/// removal's head stands above (or the last line, a removal at the end below it). None: a line nobody changed.
+pub fn there(m: &Shown, l: usize, last: usize) -> Option<There> {
+    let merge = &m.merge;
+    let at = |own: &Range<usize>, k: usize| own.start + k.min(own.len().saturating_sub(1));
+    if let Some(c) = merge.changes.iter().find(|c| c.lines.contains(&l)) {
+        return Some(There::Side { side: c.side, line: at(&c.own, l - c.lines.start) });
+    }
+    if let Some(i) = merge.conflict_at(l) {
+        let c = &merge.conflicts[i];
+        let spans: Vec<Range<usize>> = c.spans().map(|(r, _)| r).collect();
+        let picked = m.picked.filter(|&(ci, k, at)| ci == i && k < spans.len() && at == l).map(|(_, k, _)| k);
+        let k = picked.or_else(|| spans.iter().position(|r| r.contains(&l)))?;
+        let into = if spans[k].contains(&l) { l - spans[k].start } else { 0 };
+        return Some(match k {
+            0 => There::Tip { line: tip_line(merge, c.base.start) + into },
+            k => {
+                let p = &c.parts[k - 1];
+                There::Side { side: p.side, line: at(&p.own, into) }
+            }
+        });
+    }
+    let gone = |c: &&Change| c.lines.is_empty() && (c.lines.start == l || (l == last && c.lines.start > l));
+    let c = merge.changes.iter().find(gone)?;
+    Some(There::Side { side: c.side, line: c.own.start })
+}
+
+/// The number woven line `l` goes by (from 0): where it is in the text it came from — a change's or a conflict part's
+/// that side's own line (`own`), the tip's lines (a conflict's base part, every line nobody changed) the tip's. The
+/// gutter, the status line and `:N` read these, so a line reads as it does in every workspace and as Claude is told.
+pub fn number(m: &Shown, l: usize) -> usize {
+    if let Some(c) = m.merge.changes.iter().find(|c| c.lines.contains(&l)) {
+        return c.own.start + (l - c.lines.start);
+    }
+    if let Some(c) = m.merge.conflicts.iter().find(|c| c.lines().contains(&l)) {
+        return match c.parts.iter().find(|p| p.lines.contains(&l)) {
+            Some(p) => p.own.start + (l - p.lines.start),
+            None => tip_line(&m.merge, c.base.start) + (l - c.base.start),
+        };
+    }
+    tip_line(&m.merge, l)
+}
+
+/// The woven line the tip's line `tip` (from 0) is at — `:N`, `NG` go by the numbers you read: past the end of what's
+/// there, the woven view's end; a line a change replaced or took out, where that change is.
+pub fn woven_line(m: &Shown, tip: usize) -> usize {
+    let mut items: Vec<(Range<usize>, usize, bool)> =
+        m.merge.changes.iter().map(|c| (c.lines.clone(), c.removed, false)).collect();
+    items.extend(m.merge.conflicts.iter().map(|c| (c.lines(), c.base.len(), true)));
+    crate::sorting::by_key(&mut items, |i| i.0.start);
+    let mut shift = 0isize;
+    for (lines, removed, conflict) in items {
+        let start = (lines.start as isize - shift).max(0) as usize;
+        if tip < start {
+            break;
+        }
+        if tip < start + removed {
+            // (a conflict's first part is the tip's own lines)
+            return if conflict { lines.start + (tip - start) } else { lines.start };
+        }
+        shift += lines.len() as isize - removed as isize;
+    }
+    (tip as isize + shift).max(0) as usize
+}
+
+/// The widest number a woven view's gutter holds (from 1): a side's own numbers can pass the view's own line count
+/// (another side took lines out that this one kept).
+pub fn numbers_max(doc: &crate::document::Document) -> usize {
+    let lines = doc.text.len_lines();
+    let Some(m) = of(doc) else { return lines };
+    let own = m.merge.changes.iter().map(|c| c.own.end);
+    let parts = m.merge.conflicts.iter().flat_map(|c| c.parts.iter().map(|p| p.own.end));
+    own.chain(parts).max().unwrap_or(0).max(number(m, crate::movement::last_line(&doc.text)) + 1).max(lines)
+}
+
+/// Merged line `l` (before any change or conflict it starts) as the tip's line: what came in before it taken off.
+fn tip_line(m: &Merge, l: usize) -> usize {
+    let mut shift = 0isize;
+    for c in m.changes.iter().filter(|c| c.lines.end <= l && (c.lines.start < l || c.lines.is_empty())) {
+        shift += c.lines.len() as isize - c.removed as isize;
+    }
+    for c in m.conflicts.iter().filter(|c| c.lines().end <= l) {
+        shift += c.lines().len() as isize - c.base.len() as isize;
+    }
+    (l as isize - shift).max(0) as usize
+}
+
+/// Whether `enter` is the woven view's now (`enter` — the layer `keys_chain` names `Region::Weave`): normal mode on one,
+/// nothing under way.
+pub fn takes(ed: &Editor) -> bool {
+    ed.mode == crate::editor::Mode::Normal
+        && ed.pending.is_empty()
+        && ed.prompt.is_none()
+        && ed.on_next_char.is_none()
+        && of(ed.doc()).is_some()
+}
+
+/// `enter` on a woven view goes there (`go`); false: not its key — another key of the code's lets a column's pick go.
+pub fn enter(ed: &mut Editor, key: crate::key::Key) -> bool {
+    let picked = ed.doc_mut().woven.as_mut().and_then(|m| m.picked.take());
+    if key != crate::key::Key::plain(crate::key::Code::Enter) || !takes(ed) {
+        return false;
+    }
+    if let Some(m) = ed.doc_mut().woven.as_mut() {
+        m.picked = picked;
+    }
+    ed.count = None;
+    go(ed);
+    if let Some(m) = ed.docs.iter_mut().filter_map(|d| d.woven.as_mut()).find(|m| m.picked.is_some()) {
+        m.picked = None;
+    }
+    true
+}
+
+/// `enter` on a woven view: into that change's workspace (as following a session takes you into its workspace), its
+/// file at its own line — the tip's part the checkout that has the base's branch (C2's naming). Said where there's
+/// nowhere to go: a line nobody changed, a workspace that ended, a branch no checkout here has.
+pub fn go(ed: &mut Editor) {
+    let Some(m) = of(ed.doc()) else { return };
+    let last = crate::movement::last_line(&ed.doc().text);
+    let Some(there) = there(m, ed.cursor_line(), last) else {
+        return ed.set_status("nobody changed this line — enter goes to a change's workspace");
+    };
+    let rel = m.rel.clone();
+    let (id, name, line) = match there {
+        There::Side { side, line } => {
+            let Some(s) = m.sides.get(side) else { return };
+            (Some(s.session), s.name.clone(), line)
+        }
+        There::Tip { line } => {
+            let branch = m.branch.clone().unwrap_or_default();
+            match sessions(ed).find(|l| l.git_branch.as_deref() == Some(branch.as_str())) {
+                Some(l) => (Some(l.id), l.label().to_string(), line),
+                None => (None, branch, line),
+            }
+        }
+    };
+    let Some(id) = id else {
+        return ed.set_status(format!("no workspace here has {name} — its tip is only in git"));
+    };
+    let Some(root) = sessions(ed).find(|l| l.id == id).map(|l| l.root.clone()) else {
+        return ed.set_status(format!("{name}'s workspace has ended"));
+    };
+    let path = root.join(&rel);
+    // (opened only as the weave reads it: never a file named like a key, and a plain file reached through no link —
+    // a link planted there, or swapped in since the weave, would land its target in that workspace's buffer)
+    if crate::sandbox::key_named_in(&root, &path) {
+        return ed.set_warning(format!("{rel} is named like a key — not opened from the woven view"));
+    }
+    match plain(&root, &rel) {
+        Ok(_) => {}
+        Err(Read::Gone) if ed.docs.iter().any(|d| d.path.as_deref() == Some(path.as_path())) => {}
+        Err(Read::Gone) => return ed.set_status(format!("{rel} is gone from {name}'s workspace")),
+        Err(Read::Refused(why)) => {
+            crate::log::line("weave", "info", &why);
+            return ed.set_warning(format!("{rel} in {name}'s workspace isn't a plain file — not opened"));
+        }
+        Err(Read::Failed(e)) => return ed.set_error(format!("{rel} in {name}'s workspace: {e}")),
+        Err(Read::Text(_) | Read::TooLarge) => {}
+    }
+    if id != ed.session.id && !ed.session_switch(id) {
+        return ed.set_status(format!("{name}'s workspace has ended"));
+    }
+    // (its file may have changed since the weave: the line kept to it)
+    match ed.open(&path) {
+        Ok(()) => {
+            let line = line.min(ed.doc().text.len_lines().saturating_sub(1));
+            ed.goto_line(line);
+            ed.set_status(format!("{name} · {rel}:{}", line + 1));
+        }
+        Err(e) => ed.set_error(format!("{e:#}")),
+    }
+}
+
+/// A click on a side by side conflict of the woven view in front: the column clicked is the part `enter` goes to
+/// (`picked`), the cursor on its line there (`row`: the conflict's rows from its head, `x`: the code's cell). None:
+/// not a column of one (the click lands as any).
+pub fn pick(ed: &mut Editor, at: usize, row: usize, x: usize) -> Option<usize> {
+    let editing = ed.editing_in(true);
+    let doc = ed.doc();
+    let m = of(doc)?;
+    let i = m.merge.conflict_at(at)?;
+    let c = &m.merge.conflicts[i];
+    let cols = m.cols.get();
+    if !columns(ed, doc, c, cols, editing) {
+        return None;
+    }
+    let spans: Vec<Range<usize>> = c.spans().map(|(r, _)| r).collect();
+    let k = (x / (column_w(cols, spans.len()) + 1)).min(spans.len() - 1);
+    let r = &spans[k];
+    let line = match r.is_empty() {
+        true => c.base.start,
+        false => (r.start + row.saturating_sub(1)).min(r.end - 1),
+    };
+    ed.doc_mut().woven.as_mut()?.picked = Some((i, k, line));
+    Some(line)
+}
+
+/// The part of conflict `i` `enter` goes to now, while the cursor (`cursor`) is in it: the column picked (the cursor
+/// still where the click put it), else the part holding it — drawn a step stronger.
+pub fn part_here(m: &Shown, i: usize, cursor: usize) -> Option<usize> {
+    let c = m.merge.conflicts.get(i)?;
+    if !c.lines().contains(&cursor) {
+        return None;
+    }
+    let picked = m.picked.filter(|&(ci, _, at)| ci == i && at == cursor).map(|(_, k, _)| k);
+    picked.or_else(|| c.spans().position(|(r, _)| r.contains(&cursor)))
+}
+
+/// `]m`/`[m` on a woven view: to the next (previous) conflict — its lines selected. None: not a woven view.
 pub fn step(ed: &mut Editor, forward: bool) -> Option<()> {
     let m = of(ed.doc())?;
     let line = ed.cursor_line();
@@ -753,12 +1027,12 @@ pub fn step(ed: &mut Editor, forward: bool) -> Option<()> {
     .cloned();
     match target {
         Some(r) => ed.goto_line(r.start),
-        None => ed.set_status(if none { "no conflicts — it merges clean" } else { "no more conflicts" }),
+        None => ed.set_status(if none { "no conflicts — it weaves clean" } else { "no more conflicts" }),
     }
     Some(())
 }
 
-/// `]g`/`[g` on a merged view: its changes and conflicts as hunks, in order (`codeview::Changes::Merged`).
+/// `]g`/`[g` on a woven view: its changes and conflicts as hunks, in order (`codeview::Changes::Woven`).
 pub fn hunks(m: &Shown) -> Vec<crate::git::Hunk> {
     use crate::git::{Hunk, HunkKind};
     let mut out: Vec<Hunk> = m
@@ -786,7 +1060,7 @@ pub fn hunks(m: &Shown) -> Vec<crate::git::Hunk> {
     out
 }
 
-/// What Claude's `edit` or `read` answer of `path` says of the merged view: where a merge of that file was worked
+/// What Claude's `edit` or `read` answer of `path` says of the woven view: where a merge of that file was worked
 /// out with its own session's change in it, a line per conflict its change is in — `src/a.rs: merged with fix's
 /// change: conflict at L30–34` (its own lines, the other's name) — nothing when it merges clean. Never the merged
 /// text, never another side's lines. None: no merge of it worked out (C2's line stands).
@@ -947,6 +1221,15 @@ pub fn lay(tip: &str, sides: &[Input]) -> Merge {
     let owns: Vec<Vec<&str>> = laid.iter().map(|t| lines(&t.0)).collect();
     let maps: Vec<std::cell::OnceCell<Option<crate::presence::LineMap>>> =
         laid.iter().map(|_| std::cell::OnceCell::new()).collect();
+    // (lines of a side's laid text as lines of its own: a side laid on the tip first has the tip's lines in it)
+    let own_of = |s: usize, own: Range<usize>| match maps[s].get_or_init(|| own_map(&laid[s].0, &sides[s])) {
+        Some(map) if own.is_empty() => {
+            let at = map.range(own.start..own.start + 1).start;
+            at..at
+        }
+        Some(map) => map.range(own),
+        None => own,
+    };
     let mut m = Merge::default();
     let mut n = 0usize;
     // (a line ends before the next one starts — a side's last line without its `\n` mid-conflict too)
@@ -991,7 +1274,9 @@ pub fn lay(tip: &str, sides: &[Input]) -> Merge {
             }
             let with = versions[1..].iter().map(|v| v.0).collect();
             let removed = (span.end - span.start) as usize;
-            m.changes.push(Change { side: versions[0].0, with, lines: start..n, removed });
+            let (side, own) = (versions[0].0, versions[0].2 as usize);
+            let own = own_of(side, own..own + versions[0].1.len());
+            m.changes.push(Change { side, with, lines: start..n, removed, own });
         } else {
             let start = n;
             for l in &base[span.start as usize..span.end as usize] {
@@ -1004,16 +1289,7 @@ pub fn lay(tip: &str, sides: &[Input]) -> Merge {
                 for l in v {
                     push(&mut m, &mut n, l);
                 }
-                // (in its own text: a side laid on the tip first has the tip's lines in its laid text — mapped back)
-                let own = *own as usize..*own as usize + v.len();
-                let own = match maps[*s].get_or_init(|| own_map(&laid[*s].0, &sides[*s])) {
-                    Some(map) if own.is_empty() => {
-                        let at = map.range(own.start..own.start + 1).start;
-                        at..at
-                    }
-                    Some(map) => map.range(own),
-                    None => own,
-                };
+                let own = own_of(*s, *own as usize..*own as usize + v.len());
                 parts.push(Part { side: *s, lines: start..n, own });
             }
             m.conflicts.push(Conflict { base: base_lines, parts, tip: tip_met });

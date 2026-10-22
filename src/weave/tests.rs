@@ -1,4 +1,4 @@
-//! The merged view (`merged.rs`): the merge itself, and three checkouts of a fixture repository merged in memory —
+//! The woven view (`weave.rs`): the merge itself, and three checkouts of a fixture repository merged in memory —
 //! what's shown, in whose colour, what keys do there, and what Claude hears.
 
 use std::process::Command;
@@ -114,7 +114,7 @@ fn a_side_behind_the_tip_is_laid_on_it_first() {
 /// sides each with a dozen changes far apart and two meeting on one line — as the worker lays it on each buffer's move.
 #[test]
 fn perf_merge_a_big_file() {
-    if crate::test_results::unoptimized("merged::tests::perf_merge_a_big_file") {
+    if crate::test_results::unoptimized("weave::tests::perf_merge_a_big_file") {
         return;
     }
     use std::io::Write as _;
@@ -226,13 +226,13 @@ fn save_line(ed: &mut Editor, path: &Path, n: usize, text: &str) {
     ed.wrote(path);
 }
 
-/// The front document's merged view.
+/// The front document's woven view.
 fn shown(ed: &Editor) -> &Shown {
-    of(ed.doc()).expect("a merged view in front")
+    of(ed.doc()).expect("a woven view in front")
 }
 
-/// Events until the merged view in front has had `n` merges land and none is under way.
-fn merged_to(ed: &mut Editor, n: u64) {
+/// Events until the woven view in front has had `n` merges land and none is under way.
+fn woven_to(ed: &mut Editor, n: u64) {
     sync(ed);
     let end = std::time::Instant::now() + Duration::from_secs(20);
     while shown(ed).merges < n || shown(ed).asking {
@@ -290,7 +290,7 @@ fn cell_of<'a>(p: &'a vt100::Parser, word: &str) -> &'a vt100::Cell {
 /// path bar naming them (`fix unsaved`); saved, `unsaved` goes — nothing in any `.git` written.
 #[test]
 fn three_workspaces_merge_clean_each_change_in_its_colour() {
-    let Scene { mut ed, main, fix, docs, ids, dir } = scene("merged-clean");
+    let Scene { mut ed, main, fix, docs, ids, dir } = scene("weave-clean");
     // (a session on another repository, its `a.rs` changed: never a side)
     let other = dir.join("other");
     std::fs::create_dir_all(&other).unwrap();
@@ -306,8 +306,8 @@ fn three_workspaces_merge_clean_each_change_in_its_colour() {
     save_line(&mut ed, &main.join("a.rs"), 2, "two, main");
     save_line(&mut ed, &docs.join("a.rs"), 11, "eleven, docs");
     type_line(&mut ed, 6, "six, fix");
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     let m = shown(&ed);
     assert_eq!(m.rel, "a.rs");
     let names: Vec<(&str, bool)> = m.sides.iter().map(|s| (s.name.as_str(), s.unsaved)).collect();
@@ -326,7 +326,7 @@ fn three_workspaces_merge_clean_each_change_in_its_colour() {
     let line = |t: &str| r.iter().find(|l| l.contains(t)).unwrap_or_else(|| panic!("{t} in {r:#?}")).clone();
     assert!(line("six, fix").trim_start().starts_with('f'), "{}", line("six, fix"));
     assert!(line("two, main").trim_start().starts_with('m'));
-    assert!(line("merged · a.rs").contains("fix unsaved · main · docs"), "{}", line("merged · a.rs"));
+    assert!(line("woven · a.rs").contains("fix unsaved · main · docs"), "{}", line("woven · a.rs"));
     let colours = |ids: &[SessionId]| -> Vec<u8> {
         ids.iter().map(|id| ed.sessions_in_order().iter().find(|l| l.id == *id).unwrap().colour).collect()
     };
@@ -354,7 +354,7 @@ fn three_workspaces_merge_clean_each_change_in_its_colour() {
     save.unwrap();
     ed.docs[a].mark_saved();
     ed.wrote(&fix.join("a.rs"));
-    merged_to(&mut ed, n + 1);
+    woven_to(&mut ed, n + 1);
     assert!(!shown(&ed).sides[0].unsaved);
     assert_eq!(files(&main.join(".git")), before, "nothing written in the repository's git folder");
 }
@@ -364,14 +364,14 @@ fn three_workspaces_merge_clean_each_change_in_its_colour() {
 /// session left out and said on the path bar with why, every other side still merged (one copy can't blank the view).
 #[test]
 fn another_workspaces_link_fifo_or_huge_file_is_never_read() {
-    let Scene { mut ed, main, docs, dir, .. } = scene("merged-link");
+    let Scene { mut ed, main, docs, dir, .. } = scene("weave-link");
     std::fs::write(dir.join("secret.txt"), "SECRET-STAND-IN\n").unwrap();
     save_line(&mut ed, &main.join("a.rs"), 2, "two, main");
     std::fs::remove_file(docs.join("a.rs")).unwrap();
     std::os::unix::fs::symlink(dir.join("secret.txt"), docs.join("a.rs")).unwrap();
     ed.wrote(&docs.join("a.rs"));
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     let m = shown(&ed);
     assert!(!ed.doc().text.to_string().contains("SECRET"), "a link never gone through");
     assert_eq!(m.left, [("docs".to_string(), "not a plain file")]);
@@ -385,7 +385,7 @@ fn another_workspaces_link_fifo_or_huge_file_is_never_read() {
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     ed.wrote(&docs.join("a.rs"));
     let n = shown(&ed).merges;
-    merged_to(&mut ed, n + 1);
+    woven_to(&mut ed, n + 1);
     assert_eq!(shown(&ed).left, [("docs".to_string(), "not a plain file")], "a FIFO left out");
     // Past `TEXT_MAX`, then binary: that side left out, said with why — main's change still merged
     let still = |ed: &Editor, why: &'static str| {
@@ -397,13 +397,13 @@ fn another_workspaces_link_fifo_or_huge_file_is_never_read() {
     std::fs::remove_file(docs.join("a.rs")).unwrap();
     std::fs::write(docs.join("a.rs"), "x".repeat(TEXT_MAX + 1)).unwrap();
     ed.wrote(&docs.join("a.rs"));
-    merged_to(&mut ed, n + 2);
+    woven_to(&mut ed, n + 2);
     still(&ed, "too large");
     let r = rows(&frame(&mut ed, 160));
     assert!(r[0].contains("docs left out: too large"), "{}", r[0]);
     std::fs::write(docs.join("a.rs"), with(4, "four\0docs")).unwrap();
     ed.wrote(&docs.join("a.rs"));
-    merged_to(&mut ed, n + 3);
+    woven_to(&mut ed, n + 3);
     still(&ed, "binary");
 }
 
@@ -411,7 +411,7 @@ fn another_workspaces_link_fifo_or_huge_file_is_never_read() {
 /// session's conflict — not the first one — and on a view open already, the cursor taken there too; the hint says it.
 #[test]
 fn the_lists_v_opens_the_overlaps_file_at_that_sessions_conflict() {
-    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("merged-list-v");
+    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("weave-list-v");
     save_line(&mut ed, &docs.join("a.rs"), 3, "three, docs");
     save_line(&mut ed, &main.join("a.rs"), 9, "nine, main");
     type_line(&mut ed, 3, "three, fix");
@@ -437,9 +437,9 @@ fn the_lists_v_opens_the_overlaps_file_at_that_sessions_conflict() {
     };
     to_row(&mut ed, ids[0]);
     let p = frame(&mut ed, 160);
-    assert!(rows(&p)[29].contains("v merged"), "the hint: {}", rows(&p)[29]);
+    assert!(rows(&p)[29].contains("v woven"), "the hint: {}", rows(&p)[29]);
     press(&mut ed, "v");
-    merged_to(&mut ed, 1);
+    woven_to(&mut ed, 1);
     let m = shown(&ed);
     assert_eq!((m.rel.as_str(), m.merge.conflicts.len()), ("a.rs", 2));
     let with_main = m.merge.conflicts[1].clone();
@@ -476,12 +476,12 @@ fn files(dir: &Path) -> Vec<(PathBuf, u64)> {
 /// character over it opens it stacked, as a folded block; `]m`/`[m` go to it, `]g` steps the changes.
 #[test]
 fn a_conflict_shows_side_by_side_wide_and_stacked_narrow() {
-    let Scene { mut ed, main, ids, dir: _dir, .. } = scene("merged-conflict");
+    let Scene { mut ed, main, ids, dir: _dir, .. } = scene("weave-conflict");
     save_line(&mut ed, &main.join("a.rs"), 5, "five, main");
     type_line(&mut ed, 5, "five, fix");
     type_line(&mut ed, 10, "ten, fix");
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     let m = shown(&ed);
     assert_eq!(m.merge.conflicts.len(), 1);
     let c = m.merge.conflicts[0].clone();
@@ -527,30 +527,30 @@ fn a_conflict_shows_side_by_side_wide_and_stacked_narrow() {
     assert!(!r.iter().any(|l| l.contains("┬─ fix")), "{r:#?}");
 }
 
-/// The home checkout in front with its branch not read yet (a session just switched to): `:merged` isn't refused —
+/// The home checkout in front with its branch not read yet (a session just switched to): `:weave` isn't refused —
 /// the merge reads the branch from its HEAD, and the view is named by it once it lands.
 #[test]
 fn a_branch_not_read_yet_is_read_with_the_merge() {
-    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("merged-branch");
+    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("weave-branch");
     assert!(ed.session_switch(ids[0]));
     ed.session.git_branch = None;
     ed.open(&main.join("a.rs")).unwrap();
     save_line(&mut ed, &docs.join("a.rs"), 4, "four, docs");
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     let m = shown(&ed);
     assert_eq!((m.said.as_deref(), m.branch.as_deref()), (None, Some("main")));
     assert_eq!(m.sides.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["docs"]);
 }
 
-/// The merged view is read-only: an edit put back and insert mode left, said where you look; the buffer of your own
+/// The woven view is read-only: an edit put back and insert mode left, said where you look; the buffer of your own
 /// workspace untouched.
 #[test]
-fn the_merged_view_is_read_only() {
-    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("merged-readonly");
+fn the_woven_view_is_read_only() {
+    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("weave-readonly");
     save_line(&mut ed, &main.join("a.rs"), 2, "two, main");
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     let text = ed.doc().text.to_string();
     press(&mut ed, "ggdd");
     assert_eq!(ed.doc().text.to_string(), text, "put back");
@@ -563,20 +563,20 @@ fn the_merged_view_is_read_only() {
     assert_eq!(own.text.to_string(), twelve(), "your own buffer untouched");
 }
 
-/// `space v j` opens the current file's merged view, and from it again the same one; the session list's `v` on a
+/// `space v w` opens the current file's woven view, and from it again the same one; the session list's `v` on a
 /// session opens the file it changed.
 #[test]
-fn space_v_j_and_the_lists_v_open_it() {
-    let Scene { mut ed, docs, ids, dir: _dir, .. } = scene("merged-open");
-    press(&mut ed, " vj");
+fn space_v_w_and_the_lists_v_open_it() {
+    let Scene { mut ed, docs, ids, dir: _dir, .. } = scene("weave-open");
+    press(&mut ed, " vw");
     assert_eq!(shown(&ed).rel, "a.rs");
     let id = ed.doc().id;
-    press(&mut ed, " vj");
+    press(&mut ed, " vw");
     assert_eq!(ed.doc().id, id, "the one open already");
     // (a file named like a key: never merged — nobody's copy of it read)
-    let e = crate::typed::execute(&mut ed, "merged server.pem").unwrap_err();
+    let e = crate::typed::execute(&mut ed, "weave server.pem").unwrap_err();
     assert!(e.contains("named like a key"), "{e}");
-    merged_to(&mut ed, 1);
+    woven_to(&mut ed, 1);
     assert!(shown(&ed).sides.is_empty(), "no session changed it");
     // (the list's `v`: docs's file — where it is, else the first it changed; none yet: said)
     let _ = docs;
@@ -592,21 +592,21 @@ fn space_v_j_and_the_lists_v_open_it() {
     }
     assert!(on(&ed), "docs's row in hand");
     press(&mut ed, "v");
-    assert!(ed.messages.iter().any(|m| m.2.contains("nothing of it to merge yet")), "{:?}", ed.messages);
+    assert!(ed.messages.iter().any(|m| m.2.contains("nothing of it to weave yet")), "{:?}", ed.messages);
 }
 
 /// Claude's `read` of a file in its workspace whose merge was worked out: a line where its change meets another's —
 /// its own lines, the other's name — nothing where it merges clean (C2's line held back too).
 #[test]
 fn claude_hears_where_its_change_meets_another_only() {
-    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("merged-told");
+    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("weave-told");
     let mut c = crate::chat::Chat::new();
     let _ = crate::chat::stand_in(&mut c);
     ed.session.chat = Some(c);
     save_line(&mut ed, &main.join("a.rs"), 5, "five, main");
     type_line(&mut ed, 5, "five, fix");
-    crate::typed::execute(&mut ed, "merged").unwrap();
-    merged_to(&mut ed, 1);
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
     assert_eq!(
         told(&ed, &fix.join("a.rs")),
         Some(vec!["a.rs: merged with main's change: conflict at L5".to_string()])
@@ -627,7 +627,7 @@ fn claude_hears_where_its_change_meets_another_only() {
     // (its own edit just resolved it: the merge from before isn't told — C2's line stands, none here)
     assert_eq!(told(&ed, &fix.join("a.rs")), None, "a merge from before the edit");
     assert!(crate::overlap::told(&ed, &fix.join("a.rs")).is_empty());
-    merged_to(&mut ed, n + 1);
+    woven_to(&mut ed, n + 1);
     assert!(shown(&ed).merge.conflicts.is_empty());
     assert_eq!(told(&ed, &fix.join("a.rs")), Some(Vec::new()));
     let answer = |ed: &mut Editor, n: u64| {
@@ -647,4 +647,327 @@ fn claude_hears_where_its_change_meets_another_only() {
     crate::readtool::call(&mut ed, crate::tools::Call::test(81), &json!({"files": ["a.rs"]})).unwrap();
     let r = answer(&mut ed, 81);
     assert!(!r.contains("merged with") && !r.contains("conflict"), "{r}");
+}
+
+/// The woven view of `view` in front again, in fix's workspace (after an `enter` took you elsewhere).
+fn back(ed: &mut Editor, fix: SessionId, view: crate::document::DocId) {
+    if ed.session.id != fix {
+        assert!(ed.session_switch(fix));
+    }
+    ed.current = ed.docs.iter().position(|d| d.id == view).expect("the view");
+}
+
+/// Where `enter` took you: the session, the file, the line.
+fn went(ed: &Editor) -> (SessionId, PathBuf, usize) {
+    (ed.session.id, ed.doc().path.clone().unwrap_or_default(), ed.cursor_line())
+}
+
+/// `enter` on a change's line: that session's workspace, its file at that line of its own text (not the woven view's
+/// numbers — another's lines above it there); on a line nobody changed it says so and nothing moves; the path bar says
+/// `enter go there`, the buffer list `woven ·`.
+#[test]
+fn enter_on_a_change_goes_to_its_workspace_at_its_own_line() {
+    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("weave-enter");
+    std::fs::write(docs.join("a.rs"), format!("new 1\nnew 2\n{}", twelve())).unwrap();
+    ed.wrote(&docs.join("a.rs"));
+    save_line(&mut ed, &main.join("a.rs"), 6, "six, main");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let view = ed.doc().id;
+    let r = rows(&frame(&mut ed, 160));
+    let bar = r.iter().find(|l| l.contains("enter go there")).unwrap_or_else(|| panic!("{r:#?}"));
+    assert!(bar.contains("woven · a.rs"), "{bar}");
+    let at = ed.doc().text.to_string().lines().position(|l| l == "six, main").unwrap();
+    assert_eq!(at, 7, "two of docs's lines above it here");
+    ed.goto_line(at + 2);
+    press(&mut ed, "<ret>");
+    assert_eq!((ed.session.id, ed.doc().id), (ids[1], view), "nothing moved");
+    assert!(ed.messages.iter().any(|m| m.2.contains("nobody changed this line")), "{:?}", ed.messages);
+    ed.goto_line(at);
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[0], main.join("a.rs"), 5), "main's a.rs, its own line 6");
+    // docs's: its second added line
+    back(&mut ed, ids[1], view);
+    ed.goto_line(1);
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[2], docs.join("a.rs"), 1));
+}
+
+/// A conflict: `enter` on a stacked part's line goes to that part's workspace at its own line, on the tip's part to the
+/// checkout that has the base's branch at the tip's line — none has it: said; side by side, the column clicked is where
+/// it goes (its wash a step stronger); a side whose workspace ended meanwhile: said, nothing moves.
+#[test]
+fn enter_on_a_conflicts_part_goes_to_whose_it_is() {
+    let Scene { mut ed, main, docs, ids, dir: _dir, .. } = scene("weave-enter-part");
+    // (docs's own line above it too: the parts' lines and the tip's are each their own text's)
+    std::fs::write(docs.join("a.rs"), format!("new 1\n{}", twelve().replace("line 5\n", "five, docs\n")))
+        .unwrap();
+    ed.wrote(&docs.join("a.rs"));
+    type_line(&mut ed, 5, "five, fix");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let view = ed.doc().id;
+    let c = shown(&ed).merge.conflicts[0].clone();
+    let part = |ed: &Editor, name: &str| {
+        let m = shown(ed);
+        c.parts.iter().find(|p| m.sides[p.side].name == name).unwrap().lines.start
+    };
+    // Stacked: docs's part, then the tip's
+    frame(&mut ed, 80);
+    ed.goto_line(part(&ed, "docs"));
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[2], docs.join("a.rs"), 5));
+    back(&mut ed, ids[1], view);
+    ed.goto_line(c.base.start);
+    assert_eq!(c.base.start, 5, "docs's line above it here");
+    press(&mut ed, "<ret>");
+    assert_eq!(
+        went(&ed),
+        (ids[0], main.join("a.rs"), 4),
+        "the base's branch is main's checkout, its own line"
+    );
+    // Side by side: a click on docs's column picks it
+    back(&mut ed, ids[1], view);
+    ed.goto_line(c.base.start);
+    let p = frame(&mut ed, 160);
+    let before = cell_of(&p, "five, docs").bgcolor();
+    let r = rows(&p);
+    let y = r.iter().position(|l| l.contains("five, docs")).unwrap_or_else(|| panic!("{r:#?}"));
+    let x = r[y][..r[y].find("five, docs").unwrap()].chars().count();
+    for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false };
+        ed.handle_event(crate::event::Event::Mouse(m));
+    }
+    assert_eq!(ed.cursor_line(), part(&ed, "docs"), "the cursor on its line");
+    let p = frame(&mut ed, 160);
+    assert_ne!(cell_of(&p, "five, docs").bgcolor(), before, "its wash a step stronger");
+    assert!(rows(&p).iter().any(|l| l.contains("┬─ docs")), "still side by side");
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[2], docs.join("a.rs"), 5));
+    // The tip's part where no checkout has the branch: said
+    back(&mut ed, ids[1], view);
+    ed.session_by_id(ids[0]).unwrap().git_branch = Some("elsewhere".into());
+    ed.goto_line(c.base.start);
+    press(&mut ed, "<ret>");
+    assert_eq!((ed.session.id, ed.doc().id), (ids[1], view));
+    assert!(ed.messages.iter().any(|m| m.2.contains("no workspace here has main")), "{:?}", ed.messages);
+    // docs's workspace ended meanwhile (its side still in the last weave): said
+    let _ = ed.session_close(&docs);
+    ed.goto_line(part(&ed, "docs"));
+    press(&mut ed, "<ret>");
+    assert_eq!((ed.session.id, ed.doc().id), (ids[1], view));
+    assert!(ed.messages.iter().any(|m| m.2.contains("docs's workspace has ended")), "{:?}", ed.messages);
+}
+
+/// A change that only takes lines out: a head where they went — whose (its prefix in the sign column, its name), how
+/// many — on no line of its own; `]g` lands under it, `enter` there goes to that workspace where the lines were.
+#[test]
+fn a_removal_shows_its_head_and_enter_goes_there() {
+    let Scene { mut ed, main, ids, dir: _dir, .. } = scene("weave-gone");
+    let text: String = (1..=12).filter(|n| !(7..=8).contains(n)).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(main.join("a.rs"), text).unwrap();
+    ed.wrote(&main.join("a.rs"));
+    type_line(&mut ed, 2, "two, fix");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    for w in [80, 160] {
+        let r = rows(&frame(&mut ed, w));
+        let head =
+            r.iter().position(|l| l.contains("main · 2 lines removed")).unwrap_or_else(|| panic!("{r:#?}"));
+        assert!(r[head - 1].contains("line 6") && r[head + 1].contains("line 9"), "{r:#?}");
+        let (sign, rule) = r[head].trim_start().split_once("─ main").unwrap();
+        assert_eq!(sign.trim(), "m", "its prefix in the sign column, no number: {}", r[head]);
+        assert!(rule.ends_with('─'), "{}", r[head]);
+    }
+    let p = frame(&mut ed, 80);
+    let colour = ed.sessions_in_order().iter().find(|l| l.id == ids[0]).unwrap().colour;
+    assert_eq!(cell_of(&p, "main · 2").fgcolor(), participant(&ed, colour), "its name in its colour");
+    // Its row counted where the view scrolls: from the top of a short pane down past it, the cursor's line in sight
+    let short = |ed: &mut Editor| {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 80, 9).unwrap();
+        let mut p = vt100::Parser::new(9, 80, 0);
+        p.process(&bytes);
+        rows(&p)
+    };
+    // (no margin: the line just in sight, its head's row above it counted)
+    ed.config.scrolloff = 0;
+    press(&mut ed, "gg");
+    short(&mut ed);
+    ed.goto_line(7);
+    let r = short(&mut ed);
+    assert!(r.iter().any(|l| l.contains("line 10")), "{r:#?}");
+    press(&mut ed, "gg]g]g");
+    assert_eq!(ed.cursor_line(), 6, "under the head: line 9's");
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[0], main.join("a.rs"), 6), "main's a.rs where the lines were");
+}
+
+/// The gutter's number on the row whose text ends `text` (none: no such row, or no number there).
+fn number_at(r: &[String], text: &str) -> Option<usize> {
+    let row = r.iter().find(|l| l.trim_end().ends_with(&format!(" {text}")))?;
+    let before = &row[..row.trim_end().len() - text.len()];
+    before.split_whitespace().last()?.trim_start_matches(|c: char| !c.is_ascii_digit()).parse().ok()
+}
+
+/// A woven view's numbers are where each line is, not its rows: a conflict's three parts all 5 (the tip's, fix's and
+/// main's own line), the line after it 6 as everywhere; side by side each side's column says its own at its head; the
+/// status line counts so; `:6` and `6G` go to the tip's line 6.
+#[test]
+fn a_woven_views_numbers_are_where_each_line_is() {
+    let Scene { mut ed, main, dir: _dir, .. } = scene("weave-numbers");
+    save_line(&mut ed, &main.join("a.rs"), 5, "five, main");
+    type_line(&mut ed, 5, "five, fix");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let r = rows(&frame(&mut ed, 80));
+    let n = |t: &str| number_at(&r, t);
+    assert_eq!((n("line 5"), n("five, fix"), n("five, main")), (Some(5), Some(5), Some(5)), "{r:#?}");
+    assert_eq!((n("line 4"), n("line 6"), n("line 12")), (Some(4), Some(6), Some(12)), "{r:#?}");
+    let at = |ed: &Editor, t: &str| ed.doc().text.to_string().lines().position(|l| l == t).unwrap();
+    ed.goto_line(at(&ed, "five, main"));
+    let r = rows(&frame(&mut ed, 80));
+    assert!(r[29].contains(" 5:1"), "the status line: {}", r[29]);
+    // Side by side: the tip's number in the gutter, each side's at its column's head
+    let r = rows(&frame(&mut ed, 160));
+    let head = r.iter().find(|l| l.contains("conflict 1 of 1")).unwrap();
+    assert!(head.trim_start().starts_with("≈ 5 ─ conflict"), "the tip's number in the gutter: {head}");
+    assert!(head.contains("fix 5 ─") && head.contains("main 5 ─"), "{head}");
+    assert_eq!(number_at(&r, "line 6"), Some(6), "{r:#?}");
+    // `:6`, `6G`: the tip's line 6 — past the conflict, not the view's sixth row
+    crate::typed::execute(&mut ed, "6").unwrap();
+    assert_eq!(ed.cursor_line(), at(&ed, "line 6"));
+    press(&mut ed, "gg6G");
+    assert_eq!(ed.cursor_line(), at(&ed, "line 6"));
+    crate::typed::execute(&mut ed, "5").unwrap();
+    assert_eq!(ed.cursor_line(), at(&ed, "line 5"), "the tip's line 5: the conflict's first part");
+}
+
+/// A side behind the tip: its change laid on the tip, numbered by its own lines (one fewer than the tip's there — the
+/// tip has a line above it docs hasn't), the tip's lines by the tip's.
+#[test]
+fn a_side_behinds_change_is_numbered_by_its_own_lines() {
+    let Scene { mut ed, main, docs, dir: _dir, .. } = scene("weave-numbers-behind");
+    std::fs::write(main.join("a.rs"), format!("new 0\n{}", twelve())).unwrap();
+    git(&main, &["commit", "-qam", "a line above"]);
+    ed.wrote(&main.join("a.rs"));
+    save_line(&mut ed, &docs.join("a.rs"), 9, "nine, docs");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    assert_eq!(shown(&ed).sides.iter().find(|s| s.name == "docs").and_then(|s| s.behind), Some(1));
+    let r = rows(&frame(&mut ed, 80));
+    let n = |t: &str| number_at(&r, t);
+    assert_eq!((n("line 8"), n("nine, docs"), n("line 10")), (Some(9), Some(9), Some(11)), "{r:#?}");
+}
+
+/// A conflict part with no lines (a side took them out) shows side by side as an empty column: a click on it is where
+/// `enter` goes — that side's workspace where the lines were — while the cursor stays where the click put it.
+#[test]
+fn an_empty_column_is_picked_by_its_click() {
+    let Scene { mut ed, docs, ids, dir: _dir, .. } = scene("weave-enter-empty");
+    std::fs::write(docs.join("a.rs"), twelve().replace("line 5\n", "")).unwrap();
+    ed.wrote(&docs.join("a.rs"));
+    type_line(&mut ed, 5, "five, fix");
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let view = ed.doc().id;
+    let c = shown(&ed).merge.conflicts[0].clone();
+    let p = frame(&mut ed, 160);
+    let r = rows(&p);
+    let y = r.iter().position(|l| l.contains("┬─ docs")).unwrap_or_else(|| panic!("{r:#?}"));
+    let x = r[y][..r[y].find("┬─ docs").unwrap()].chars().count() + 4;
+    for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+        let m = crate::event::Mouse { kind, x: x as u16, y: (y + 1) as u16, alt: false };
+        ed.handle_event(crate::event::Event::Mouse(m));
+    }
+    assert_eq!(ed.cursor_line(), c.base.start, "no line of its own: the conflict's first");
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[2], docs.join("a.rs"), 4), "docs's a.rs where line 5 was");
+    // Used, the pick is gone: the tip's part again
+    back(&mut ed, ids[1], view);
+    press(&mut ed, "<ret>");
+    assert_eq!(ed.session.id, ids[0], "the tip's part: main's checkout");
+}
+
+/// A click, `x` the cell and `y` the row.
+fn click(ed: &mut Editor, x: usize, y: usize) {
+    for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
+        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false };
+        ed.handle_event(crate::event::Event::Mouse(m));
+    }
+}
+
+/// `enter` opens a workspace's file only as the weave reads it: a link planted at the tip's checkout (its copy left
+/// out of the weave) or swapped in at a session's since the weave is refused and said — nothing moves, the link's
+/// target in no buffer; and a buffer whose file became a link isn't that side's text.
+#[test]
+fn enter_never_goes_through_a_link() {
+    let Scene { mut ed, main, fix, docs, ids, dir } = scene("weave-enter-link");
+    std::fs::write(dir.join("secret.txt"), "SECRET-STAND-IN\n").unwrap();
+    let link = |path: &Path| {
+        std::fs::remove_file(path).unwrap();
+        std::os::unix::fs::symlink(dir.join("secret.txt"), path).unwrap();
+    };
+    save_line(&mut ed, &docs.join("a.rs"), 5, "five, docs");
+    type_line(&mut ed, 5, "five, fix");
+    link(&main.join("a.rs"));
+    ed.wrote(&main.join("a.rs"));
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let view = ed.doc().id;
+    assert_eq!(shown(&ed).left, [("main".to_string(), "not a plain file")]);
+    let c = shown(&ed).merge.conflicts[0].clone();
+    let refused = |ed: &Editor, n: usize, what: &str| {
+        assert_eq!((ed.session.id, ed.doc().id), (ids[1], view), "{what}: nothing moved");
+        let said = ed.messages.iter().filter(|m| m.2.contains("isn't a plain file — not opened")).count();
+        assert_eq!(said, n, "{what}: said {:?}", ed.messages);
+        assert!(!ed.docs.iter().any(|d| d.text.to_string().contains("SECRET")), "{what}: in no buffer");
+    };
+    // The tip's part: main's checkout, where a.rs is a link
+    ed.goto_line(c.base.start);
+    press(&mut ed, "<ret>");
+    refused(&ed, 1, "the tip's part");
+    // docs's part, its file a link since the weave (nothing said of it)
+    link(&docs.join("a.rs"));
+    let docs_part = c.parts.iter().find(|p| shown(&ed).sides[p.side].name == "docs").unwrap().lines.start;
+    ed.goto_line(docs_part);
+    press(&mut ed, "<ret>");
+    refused(&ed, 2, "swapped in since");
+    // fix's buffer (unsaved), its file a link now: left out as its disk copy would be
+    link(&fix.join("a.rs"));
+    ed.wrote(&fix.join("a.rs"));
+    let n = shown(&ed).merges;
+    woven_to(&mut ed, n + 1);
+    let m = shown(&ed);
+    assert!(m.left.contains(&("fix".to_string(), "not a plain file")), "{:?}", m.left);
+    assert!(!m.sides.iter().any(|s| s.name == "fix"), "its buffer not that side's text");
+    assert!(!ed.doc().text.to_string().contains("SECRET"));
+}
+
+/// The view starting inside a side by side conflict (its head and first row above the screen): a click on a column is
+/// that row of the part — counted from the conflict's head, not from the first row in sight — and `enter` goes to that
+/// line of its file.
+#[test]
+fn a_click_in_a_conflict_the_view_starts_inside_is_its_own_row() {
+    let Scene { mut ed, main, fix, ids, dir: _dir, .. } = scene("weave-click-scrolled");
+    for (n, w) in [(5, "five"), (6, "six"), (7, "seven")] {
+        save_line(&mut ed, &main.join("a.rs"), n, &format!("{w}, main"));
+        type_line(&mut ed, n, &format!("{w}, fix"));
+    }
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    woven_to(&mut ed, 1);
+    let c = shown(&ed).merge.conflicts[0].clone();
+    // (the cursor on the line after it, in sight; the view from the conflict's third row)
+    ed.config.scrolloff = 0;
+    ed.goto_line(c.lines().end);
+    let doc = ed.doc_mut();
+    (doc.top, doc.top_rows) = (c.base.start, Some((c.base.start, 2)));
+    let r = rows(&frame(&mut ed, 160));
+    assert!(!r.iter().any(|l| l.contains("five, fix") || l.contains("conflict 1 of 1")), "inside it: {r:#?}");
+    let y = r.iter().position(|l| l.contains("six, fix")).unwrap_or_else(|| panic!("{r:#?}"));
+    click(&mut ed, r[y][..r[y].find("six, fix").unwrap()].chars().count(), y);
+    let six = ed.doc().text.to_string().lines().position(|l| l == "six, fix").unwrap();
+    assert_eq!(ed.cursor_line(), six, "the row clicked, not the part's first");
+    press(&mut ed, "<ret>");
+    assert_eq!(went(&ed), (ids[1], fix.join("a.rs"), 5), "fix's own line 6");
 }

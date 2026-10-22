@@ -317,6 +317,8 @@ type Scene = (&'static str, fn(&mut Editor));
 /// meet (a card over the chat, a prompt over the terminal, a review under a side panel …).
 const SCENES: &[Scene] = &[
     ("the code", |_| {}),
+    // (collab C2b: its `enter` is its own — `a_woven_views_enter_goes_where_keys_to_says`)
+    ("a woven view in front", |ed| crate::weave::stand_in(ed, "a.rs", "one\ntwo\n")),
     ("insert mode", |ed| feed(ed, &["i"])),
     ("select mode", |ed| feed(ed, &["v"])),
     ("a prefix under way", |ed| feed(ed, &["g"])),
@@ -1029,6 +1031,39 @@ fn no_key_is_refused_in_silence() {
         })
         .collect();
     assert!(off.is_empty(), "keys refused in silence:\n{}", off.join("\n"));
+}
+
+/// A woven view's `enter` (`weave::enter` — not among the probes: in the chat it starts a claude) goes where `keys_to`
+/// says — its own in normal mode, the code's or the prompt's with a sequence under way, a character awaited, insert
+/// mode, the command line over it — and never in silence: on a line nobody changed it says so.
+#[test]
+fn a_woven_views_enter_goes_where_keys_to_says() {
+    if no_pty_here("a_woven_views_enter_goes_where_keys_to_says") {
+        return;
+    }
+    let cases: &[(&str, &[&str], Region)] = &[
+        ("normal mode", &[], Region::Weave),
+        ("a prefix under way", &["g"], Region::Code),
+        ("a character awaited", &["f"], Region::Code),
+        ("insert mode", &["i"], Region::Code),
+        ("the command line", &[":"], Region::Prompt),
+    ];
+    for (name, keys, want) in cases {
+        let mut ed = editor();
+        crate::weave::stand_in(&mut ed, "a.rs", "one\ntwo\n");
+        frame(&mut ed);
+        feed(&mut ed, keys);
+        let said = ed.keys_to().route(key("<ret>"));
+        assert_eq!(said, *want, "{name}");
+        let before = ed.said;
+        TOOK.set(None);
+        ed.handle_key(key("<ret>"));
+        assert_eq!(TOOK.get(), Some(said.handler()), "{name}");
+        if said == Region::Weave {
+            assert_ne!(ed.said, before, "{name}: said");
+            assert!(ed.messages.iter().any(|m| m.2.contains("nobody changed this line")), "{name}");
+        }
+    }
 }
 
 /// In every scene the keys go somewhere on screen — the minimized chat too, since its first key brings it

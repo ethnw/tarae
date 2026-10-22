@@ -363,8 +363,8 @@ pub struct Document {
     /// Follow took the editor to what's being written at this line: the next frame puts it where the review
     /// will (`term::render_frame`).
     pub writing_align: Option<usize>,
-    /// The merged view of a file this read-only document shows (`merged.rs`) — its sides, changes and conflicts.
-    pub merged: Option<Box<crate::merged::Shown>>,
+    /// The woven view of a file this read-only document shows (`weave.rs`) — its sides, changes and conflicts.
+    pub woven: Option<Box<crate::weave::Shown>>,
     /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
     /// lands they're coloured one line at a time. It follows sight as the document's own trees do
     /// (`Editor::trees_follow_sight`: gone with them, parsed again when shown). `base_seq` tells a parse of an
@@ -471,7 +471,7 @@ impl Document {
             shown: None,
             writing: None,
             writing_align: None,
-            merged: None,
+            woven: None,
         }
     }
 

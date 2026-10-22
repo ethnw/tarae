@@ -229,9 +229,9 @@ const OVERLAP_STRIP: &[&str] = overlap_keys!(" ", "l", "@2");
 const OVERLAP_LIST: &[&str] = overlap_keys!(" ", "W", "@2");
 // (…the file tree: `≈m` on src/main.rs — main's initial in its colour — and the row in hand's words at its foot)
 const OVERLAP_FILES: &[&str] = overlap_keys!(" ", "e", "@?main.rs", "@1");
-// (collab C2b: …and fix's `println!` line changed too, unsaved, then `:merged` — the conflict side by side where it's
+// (collab C2b: …and fix's `println!` line changed too, unsaved, then `:weave` — the conflict side by side where it's
 // wide, stacked at 80; fix's change in its colour, `fix unsaved` in the path bar)
-const MERGED: &[&str] = overlap_keys!(
+const WEAVE: &[&str] = overlap_keys!(
     "/",
     "println",
     "\r",
@@ -239,15 +239,15 @@ const MERGED: &[&str] = overlap_keys!(
     " // and fix's",
     "\x1b",
     ":",
-    "merged",
+    "weave",
     "\r",
     "@10?conflict 1 of 1",
     "@1"
 );
 /// Three checkouts changing `src/main.rs` far apart — main's `threads.insert` line saved, docs's `println!` saved, fix's
-/// `mod thread` unsaved — then `:merged` in fix: a clean merge, each change in its session's colour, its prefix in the
-/// sign column (`mergedclean`, collab C2b); the cursor on fix's change, `‹fix›` at its end.
-const MERGED_CLEAN: &[&str] = &[
+/// `mod thread` unsaved — then `:weave` in fix: a clean merge, each change in its session's colour, its prefix in the
+/// sign column (`weaveclean`, collab C2b); the cursor on fix's change, `‹fix›` at its end.
+const WEAVE_CLEAN: &[&str] = &[
     "@1",
     "/",
     "threads.insert",
@@ -296,13 +296,59 @@ const MERGED_CLEAN: &[&str] = &[
     " // fix's way",
     "\x1b",
     ":",
-    "merged",
+    "weave",
     "\r",
     "@10?docs' way",
     "/",
     "fix's way",
     "\r",
     ";",
+    "@1",
+];
+/// collab C2b part 1b: main takes the two lines after `threads.insert` out (saved), fix changes `mod thread` unsaved,
+/// `:weave` in fix — main's removal a head where its lines went (`m ─ main · 2 lines removed ──`), the path bar's
+/// `enter go there`, the buffer list's `woven · src/main.rs`; the cursor under the head (`]g` twice).
+const WEAVE_GONE: &[&str] = &[
+    "@1",
+    "/",
+    "threads.insert",
+    "\r",
+    "j",
+    "x",
+    "x",
+    "d",
+    ":",
+    "w",
+    "\r",
+    "@1",
+    ":",
+    "sh git worktree add -q ../fix",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../fix",
+    "\r",
+    "@3",
+    ":",
+    "e src/main.rs",
+    "\r",
+    "@1",
+    "/",
+    "mod thread",
+    "\r",
+    "A",
+    " // fix's way",
+    "\x1b",
+    ":",
+    "weave",
+    "\r",
+    "@10?lines removed",
+    "g",
+    "g",
+    "]",
+    "g",
+    "]",
+    "g",
     "@1",
 ];
 
@@ -1786,9 +1832,11 @@ const SCENES: &[Scene] = &[
     Scene { name: "overlapstrip", claude: "writemid", files: MAIN, keys: OVERLAP_STRIP },
     Scene { name: "overlaplist", claude: "writemid", files: MAIN, keys: OVERLAP_LIST },
     Scene { name: "overlapfiles", claude: "writemid", files: MAIN, keys: OVERLAP_FILES },
-    // (collab C2b: the merged view — a conflict side by side and stacked, and a clean merge of three in their colours)
-    Scene { name: "merged", claude: "writemid", files: MAIN, keys: MERGED },
-    Scene { name: "mergedclean", claude: "writemid", files: MAIN, keys: MERGED_CLEAN },
+    // (collab C2b: the woven view — a conflict side by side and stacked, a clean weave of three in their colours, and a
+    // removal's head where its lines went)
+    Scene { name: "weave", claude: "writemid", files: MAIN, keys: WEAVE },
+    Scene { name: "weaveclean", claude: "writemid", files: MAIN, keys: WEAVE_CLEAN },
+    Scene { name: "weavegone", claude: "writemid", files: MAIN, keys: WEAVE_GONE },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))

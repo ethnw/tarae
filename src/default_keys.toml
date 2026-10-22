@@ -191,7 +191,7 @@ a = "review_at_end"
 t = "review_turn"
 u = "review_undo_change"
 z = "review_wide"
-j = "merged_view"
+w = "woven_view"
 
 [normal.space.x]
 x = "test_nearest"

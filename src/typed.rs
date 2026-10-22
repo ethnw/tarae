@@ -139,9 +139,9 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         "sh" | "run-shell-command" => shell(editor, rest),
         "diff" => editor.diff_against(rest.trim()),
         "diff-off" => editor.diff_off(),
-        "merged" => {
+        "weave" => {
             let path = Some(rest.trim()).filter(|p| !p.is_empty()).map(|p| editor.session.root.join(p));
-            crate::merged::open(editor, path, None)
+            crate::weave::open(editor, path, None)
         }
         "session-open" if !rest.trim().is_empty() => {
             let id = editor.session_open(Path::new(rest.trim()))?;
@@ -496,7 +496,10 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         n if n.parse::<usize>().is_ok() => {
-            editor.goto_line(n.parse::<usize>().unwrap().saturating_sub(1));
+            // (a woven view's numbers are where each line is: the tip's line N — `weave::woven_line`)
+            let line = n.parse::<usize>().unwrap().saturating_sub(1);
+            let line = crate::weave::of(editor.doc()).map_or(line, |m| crate::weave::woven_line(m, line));
+            editor.goto_line(line);
             Ok(())
         }
         // Commands plugins registered (`:name args`, `":name"` in a keymap)

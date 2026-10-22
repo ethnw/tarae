@@ -78,6 +78,8 @@ pub enum Region {
     View(crate::view::Surface),
     /// A run panel's output (`rundoc.rs`): normal mode on its read-only document, the panel's keys over it.
     Output(crate::rundoc::Run),
+    /// A woven view in the code (`weave.rs`): `enter` goes to that change's workspace.
+    Weave,
 }
 
 impl Region {
@@ -101,6 +103,7 @@ impl Region {
             Region::Point => "point".into(),
             Region::View(s) => format!("view:{}", s.name()),
             Region::Output(r) => format!("output:{}", r.name()),
+            Region::Weave => "weave".into(),
         }
     }
 
@@ -128,6 +131,7 @@ impl Region {
             Region::View(crate::view::Surface::Chat) => Handler::ChatView,
             Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
             Region::Output(_) => Handler::Output,
+            Region::Weave => Handler::Weave,
         }
     }
 }
@@ -176,6 +180,7 @@ pub enum Handler {
     PluginPanel,
     List,
     Prompt,
+    Weave,
     Code,
 }
 
@@ -200,6 +205,7 @@ impl Handler {
             Handler::PluginPanel => "plugin",
             Handler::List => "list",
             Handler::Prompt => "prompt",
+            Handler::Weave => "weave",
             Handler::Code => "code",
         }
     }
@@ -508,6 +514,10 @@ impl Editor {
         if self.prompt.is_some() {
             v.push(layer(Region::Prompt, Filter::All));
         }
+        // `weave::enter`: a woven view's `enter`, in normal mode with nothing under way
+        if crate::weave::takes(self) && !self.doc().loading {
+            v.push(shortcut(Region::Weave, Filter::Only(vec![Key::plain(Code::Enter)])));
+        }
         v.push(layer(Region::Code, Filter::All));
         v
     }
@@ -648,7 +658,9 @@ impl Editor {
         match r {
             // (its focused pane — the one the keys go to — with room: a chat filling a narrow screen leaves
             // the code's panes laid out zero wide)
-            Region::Code => s.panes.iter().any(|p| p.0 == self.session.focus && p.1.w > 0) || self.welcome(),
+            Region::Code | Region::Weave => {
+                s.panes.iter().any(|p| p.0 == self.session.focus && p.1.w > 0) || self.welcome()
+            }
             Region::Prompt => s.width.is_some(),
             Region::Picker => s.picker_list.is_some(),
             Region::Chat => s.chat_w > 0,
@@ -680,7 +692,7 @@ impl Editor {
     fn element_id(&self, r: Region) -> String {
         match r {
             Region::Card(id) => format!("card#{id}"),
-            Region::Code => format!("pane#{}", self.session.focus),
+            Region::Code | Region::Weave => format!("pane#{}", self.session.focus),
             Region::Side(crate::sidebar::Mode::Git) => "git".into(),
             Region::Side(_) => "side".into(),
             Region::Slot(Slot::Terminal) | Region::Program | Region::View(crate::view::Surface::Terminal) => {

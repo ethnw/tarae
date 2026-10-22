@@ -34,7 +34,6 @@ mod commit;
 mod diskwatch;
 mod hosts;
 mod instructions;
-mod merged;
 mod overlap;
 mod panes;
 mod presence;
@@ -51,6 +50,7 @@ mod shuttle;
 mod stuckstop;
 mod termview;
 mod watchers;
+mod weave;
 mod writing;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

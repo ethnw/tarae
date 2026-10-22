@@ -233,8 +233,8 @@ impl Editor {
 
     /// `]m` / `[m` — the next / previous conflict (wrapping).
     pub fn conflict_step(&mut self, forward: bool) {
-        // (a merged view's conflicts are its merge's — `merged.rs`)
-        if crate::merged::step(self, forward).is_some() {
+        // (a woven view's conflicts are its merge's — `weave.rs`)
+        if crate::weave::step(self, forward).is_some() {
             return;
         }
         self.conflicts_now();

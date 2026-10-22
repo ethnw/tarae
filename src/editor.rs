@@ -2261,7 +2261,7 @@ impl Editor {
         crate::follow::watch(self);
         crate::presence::sync(self);
         crate::overlap::sync(self);
-        crate::merged::sync(self);
+        crate::weave::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);
@@ -2910,6 +2910,22 @@ impl Editor {
         }
         self.completion = None;
         self.popup = None;
+        // (a woven view's conflict side by side: the column clicked is the part `enter` goes to, the cursor on its
+        // line there — the row's own place in the conflict as drawn, the rows the view starts past counted too)
+        let woven = |r: &crate::codeview::Row| match *r {
+            crate::codeview::Row::Other { at, kind: crate::codeview::OtherKind::Woven(w), .. } => match w {
+                crate::codeview::WovenRow::Head { part: None, .. } => Some((at, 0)),
+                crate::codeview::WovenRow::Columns { index, .. } => Some((at, index + 1)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let picked = match (m.kind, self.view.get(row).and_then(woven)) {
+            (K::Down, Some((at, into))) if !m.alt => {
+                crate::weave::pick(self, at, into, x.saturating_sub(rect.x + gutter))
+            }
+            _ => None,
+        };
         let tab = self.config.tab_width;
         let doc = self.doc();
         let last = mv::last_line(&doc.text);
@@ -2935,7 +2951,10 @@ impl Editor {
                 // A wrapped row: cells after its indent, never past its end (that's the next row's)
                 let col =
                     (c0 + x.saturating_sub(rect.x + gutter).saturating_sub(x0)).min(end.saturating_sub(1));
-                let pos = mv::pos_at_col(&doc.text, line, col, tab);
+                let pos = match picked {
+                    Some(l) => doc.text.line_to_byte(l),
+                    None => mv::pos_at_col(&doc.text, line, col, tab),
+                };
                 let text = doc.text.clone();
                 let anchor = self.mouse_anchor;
                 let doc = self.doc_mut();
@@ -4320,6 +4339,10 @@ impl Editor {
             self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(digit));
             return;
         }
+        // A woven view's `enter`: to that change's workspace (`weave.rs`)
+        if crate::weave::enter(self, key) {
+            return took(Handler::Weave);
+        }
         self.pending.push(key);
         self.dispatch_pending();
     }
@@ -4472,12 +4495,12 @@ impl Editor {
     /// step over it as one line.
     pub fn folded_doc_block_at(&self, line: usize) -> Option<(usize, usize)> {
         let doc = self.doc();
-        // (a merged view's conflict side by side, at the width it was last drawn — `merged.rs`)
-        if let Some(m) = crate::merged::of(doc)
+        // (a woven view's conflict side by side, at the width it was last drawn — `weave.rs`)
+        if let Some(m) = crate::weave::of(doc)
             && let Some(c) = m.merge.conflict_at(line).map(|i| &m.merge.conflicts[i])
         {
             let r = c.lines();
-            return crate::merged::columns(self, doc, c, m.cols.get(), self.editing_in(true))
+            return crate::weave::columns(self, doc, c, m.cols.get(), self.editing_in(true))
                 .then(|| (r.start, r.end - 1));
         }
         if !self.doc_comments_render(doc.lang_name()) {

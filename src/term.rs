@@ -1098,8 +1098,8 @@ impl Layout {
         let total = all - bar;
         // The sign column (breakpoints, diagnostics) right after the gutter, the numbers after it
         let doc = editor.doc();
-        // (a merged view's sign column holds its sides' prefixes — `merged::signs`)
-        let gutter = crate::merged::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
+        // (a woven view's sign column holds its sides' prefixes — `weave::signs`)
+        let gutter = crate::weave::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > total;
         // The review's file rail when there's room for it and the code (else the header says where you are)
         // …or the side panel (files / outline): the chat's and its widths are yours or automatic, the panel
@@ -1345,7 +1345,7 @@ impl Layout {
         editor: &Editor,
     ) -> Layout {
         let rows = r.h.saturating_sub(title as usize).max(1);
-        let gutter = crate::merged::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
+        let gutter = crate::weave::signs(doc).max(crate::chrome::SIGNS) + num_w(doc);
         let scrollbar = editor.config.scrollbar && doc.text.len_lines() > rows;
         Layout {
             x0: r.x,
@@ -3878,7 +3878,8 @@ fn draw_pane_title(
 /// Line-number column width (the sign column before it aside) — two digits at least, so a file growing
 /// past nine lines doesn't move its text.
 fn num_w(doc: &crate::document::Document) -> usize {
-    doc.text.len_lines().to_string().len().max(2) + 1
+    // (a woven view's numbers are where each line is — a side's own can pass its line count: `weave::numbers_max`)
+    crate::weave::numbers_max(doc).to_string().len().max(2) + 1
 }
 
 /// Cursor char to draw: in insert mode the head (between chars), otherwise the block cursor char.
@@ -5002,20 +5003,20 @@ fn draw_text(
         };
         Some(Style { bg: blend(color, ui.tint, k).or(ui.base.bg), ..ui.base })
     };
-    // A merged view (`merged.rs`): each change's lines on its participant's wash (a step stronger on the cursor
+    // A woven view (`weave.rs`): each change's lines on its participant's wash (a step stronger on the cursor
     // line), a conflict's base part on a faint one; in the sign column a change's first line says whose by its
     // prefix, bold in its colour (never the colour alone), its other lines and a conflict part's a `▎` in it
-    let merged = crate::merged::of(doc);
-    let merged_bg = |line: usize, here: bool| -> Option<Style> {
-        let (colour, _) = crate::merged::mark(merged?, line)?;
+    let woven = crate::weave::of(doc);
+    let woven_bg = |line: usize, here: bool| -> Option<Style> {
+        let (colour, _) = crate::weave::mark(woven?, line)?;
         let (fg, k) = match colour {
             Some(c) => (ui.participant(c, true), if here { 0.20 } else { 0.11 }),
             None => (ui.linenr.fg, if here { 0.14 } else { 0.07 }),
         };
         Some(Style { bg: blend(fg, ui.tint, k).or(ui.base.bg), ..ui.base })
     };
-    let merged_sign = |line: usize| -> Option<(&str, Style)> {
-        let (colour, prefix) = crate::merged::mark(merged?, line)?;
+    let woven_sign = |line: usize| -> Option<(&str, Style)> {
+        let (colour, prefix) = crate::weave::mark(woven?, line)?;
         let fg = ui.participant(colour?, true);
         Some(match prefix {
             Some(p) => (p, Style { fg, bold: true, ..ui.base }),
@@ -5025,8 +5026,8 @@ fn draw_text(
     // git: sign per visible line (glyph, color)
     let git_color = |k: &str| Style { fg: editor.theme.try_get(k).and_then(|s| s.fg), ..ui.base };
     let mut git_marks: Vec<Option<(&str, Style)>> = vec![None; span];
-    // (a merged view's changes are marked in their participants' colours instead — `merged_bg`, `merged_sign`)
-    for h in hunks.iter().filter(|_| shows.changes != crate::codeview::Changes::Merged) {
+    // (a woven view's changes are marked in their participants' colours instead — `woven_bg`, `woven_sign`)
+    for h in hunks.iter().filter(|_| shows.changes != crate::codeview::Changes::Woven) {
         let (glyph, st, lines) = match h.kind {
             crate::git::HunkKind::Added => ("▎", git_color("diff.plus"), h.lines.clone()),
             crate::git::HunkKind::Modified => ("▎", git_color("diff.delta"), h.lines.clone()),
@@ -5203,7 +5204,7 @@ fn draw_text(
                 if *index == 0 {
                     let num = match shows.numbers {
                         LineNumber::Relative if !here => start.abs_diff(cur_line),
-                        _ => start + 1,
+                        _ => woven.map_or(*start, |m| crate::weave::number(m, *start)) + 1,
                     };
                     queue!(out, Print(format!("{num:>w$}")))?;
                 } else {
@@ -5224,11 +5225,11 @@ fn draw_text(
             }
             // The edit review's change head: the review draws it over this row (`draw_review`)
             Some(crate::codeview::Row::Header { .. }) => continue,
-            // A merged view's conflict: a part's head, or a side by side one's head and rows of columns
-            Some(crate::codeview::Row::Other { kind: crate::codeview::OtherKind::Merged(r), .. }) => {
-                if let Some(m) = merged {
+            // A woven view's conflict: a part's head, or a side by side one's head and rows of columns
+            Some(crate::codeview::Row::Other { kind: crate::codeview::OtherKind::Woven(r), .. }) => {
+                if let Some(m) = woven {
                     let cursor = cur_shown.then_some(cur_line);
-                    draw_merged_row(out, editor, (doc, m), *r, (ui, lay, y, signs), cursor, &mut qcursor)?;
+                    draw_woven_row(out, editor, (doc, m), *r, (ui, lay, y, signs), cursor, &mut qcursor)?;
                 }
                 continue;
             }
@@ -5244,7 +5245,7 @@ fn draw_text(
                     // (an edit being written: on the wash its review will have, nothing decided)
                     OtherKind::Writing { .. } => (Mark::Added { washed: true }, None),
                     // (drawn by their own arm above)
-                    OtherKind::Merged(_) => (Mark::Kept, None),
+                    OtherKind::Woven(_) => (Mark::Kept, None),
                 };
                 let bg = match mark {
                     Mark::Taken => removed_bg,
@@ -5348,7 +5349,7 @@ fn draw_text(
             Style { bg: blend(stop_color, ui.tint, 0.18).or(ui.base.bg), ..ui.base }
         } else if let Some(st) = conflict_bg(line) {
             st
-        } else if let Some(st) = merged_bg(line, here) {
+        } else if let Some(st) = woven_bg(line, here) {
             st
         } else if taken {
             // A line the edit under review takes out
@@ -5369,9 +5370,10 @@ fn draw_text(
             }
         };
         ground(out, lay, y, line_base)?;
+        // (a woven view's: where the line is — the tip's numbers, a side's own on its change — `weave::number`)
         let num = match shows.numbers {
             LineNumber::Relative if line != cur_line => line.abs_diff(cur_line),
-            _ => line + 1,
+            _ => woven.map_or(line, |m| crate::weave::number(m, line)) + 1,
         };
         // The screen's first row inside a line it starts past (`top_rows`): the line's sign and number all the
         // same, `↑` before it — the line goes on above
@@ -5388,10 +5390,10 @@ fn draw_text(
             queue!(out, Spaces(lay.gutter - 1))?;
         } else if signs > 0 {
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
-            // (under them all: a merged view's whose — then a session's place, `presence.rs`, the one you follow in
+            // (under them all: a woven view's whose — then a session's place, `presence.rs`, the one you follow in
             // the accent; its cell kept, a click follows it, the mouse over it shows its tag)
             let (glyph, st) = match sign_of(line, line) {
-                (" ", _) if merged.is_some() => merged_sign(line).unwrap_or((" ", ui.base)),
+                (" ", _) if woven.is_some() => woven_sign(line).unwrap_or((" ", ui.base)),
                 (" ", _) => match presence_sign(line) {
                     Some(s) => {
                         if let Some(m) = shows.presence.iter().find(|m| m.lines.contains(&line)) {
@@ -5936,9 +5938,9 @@ fn draw_text(
                 gap = " ";
             }
         }
-        // A merged view: whose change the cursor is on, at its first line's end (`‹fix›` — C1's tag rule: only while it
+        // A woven view: whose change the cursor is on, at its first line's end (`‹fix›` — C1's tag rule: only while it
         // says something new), in its colour; only where the line end is free
-        if let Some(m) = merged
+        if let Some(m) = woven
             && cur_shown
             && last
             && !clipped
@@ -5947,7 +5949,7 @@ fn draw_text(
             && note_here.is_none()
             && hint_here.is_none()
             && risk_here.is_none()
-            && let Some((at, name, colour)) = crate::merged::tag_at(m, cur_line)
+            && let Some((at, name, colour)) = crate::weave::tag_at(m, cur_line)
             && at == line
         {
             let used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
@@ -5988,36 +5990,41 @@ fn draw_text(
     Ok(cursor)
 }
 
-/// A merged view's conflict row (`merged.rs`) that isn't a line: a stacked part's head (`─ conflict 1 of 2 · base ──`,
+/// A woven view's conflict row (`weave.rs`) that isn't a line: a stacked part's head (`─ conflict 1 of 2 · base ──`,
 /// `─ fix ──` — its prefix in the sign column), or one side by side — its head (`─ conflict 1 of 2 ── base ──┬─
 /// main ──┬─ fix ──`, its first line's number) and its rows of columns, each part's lines cut to its column on its
 /// participant's wash, a `│` between. `≈` in warning where a conflict starts; names bold in their colours, the rules
 /// faint.
-fn draw_merged_row(
+fn draw_woven_row(
     out: &mut impl Write,
     editor: &Editor,
-    (doc, m): (&crate::document::Document, &crate::merged::Shown),
-    row: crate::codeview::MergedRow,
+    (doc, m): (&crate::document::Document, &crate::weave::Shown),
+    row: crate::codeview::WovenRow,
     (ui, lay, y, signs): (&Ui, &Layout, u16, usize),
     cursor: Option<usize>,
     qcursor: &mut QueryCursor,
 ) -> io::Result<()> {
-    use crate::codeview::MergedRow;
+    use crate::codeview::WovenRow;
     let (i, part) = match row {
-        MergedRow::Head { conflict, part } => (conflict, part),
-        MergedRow::Columns { conflict, .. } => (conflict, None),
+        WovenRow::Head { conflict, part } => (conflict, part),
+        WovenRow::Columns { conflict, .. } => (conflict, None),
+        WovenRow::Gone { change } => return draw_woven_gone(out, m, change, (ui, lay, y, signs)),
     };
     let Some(c) = m.merge.conflicts.get(i) else { return ground(out, lay, y, ui.base) };
     let spans: Vec<(std::ops::Range<usize>, Option<usize>)> = c.spans().collect();
     let warn = ui.base.patch(ui.sign[2]);
     let faint = Style { fg: ui.linenr.fg, ..ui.base };
-    let wash = |side: Option<usize>| -> Style {
-        let (fg, k) = match m.part_name(c, side).1 {
-            Some(col) => (ui.participant(col, true), 0.11),
-            None => (ui.linenr.fg, 0.07),
+    // (the part `enter` goes to a step stronger, as the cursor's line is — `weave::part_here`)
+    let wash = |side: Option<usize>, here: bool| -> Style {
+        let (fg, k) = match (m.part_name(c, side).1, here) {
+            (Some(col), false) => (ui.participant(col, true), 0.11),
+            (Some(col), true) => (ui.participant(col, true), 0.20),
+            (None, false) => (ui.linenr.fg, 0.07),
+            (None, true) => (ui.linenr.fg, 0.14),
         };
         Style { bg: blend(fg, ui.tint, k).or(ui.base.bg), ..ui.base }
     };
+    let enter_part = cursor.and_then(|l| crate::weave::part_here(m, i, l));
     let named = |side: Option<usize>| -> (String, Style) {
         let (name, col) = m.part_name(c, side);
         let fg = col.and_then(|col| ui.participant(col, true)).or(ui.base.fg);
@@ -6027,8 +6034,8 @@ fn draw_merged_row(
     ground(out, lay, y, ui.base)?;
     // The sign column and the numbers: `≈` and the conflict's first line where it starts, a part's prefix on its head
     let sign = match (row, part) {
-        (MergedRow::Head { .. }, None | Some(0)) => Some(("≈".to_string(), warn)),
-        (MergedRow::Head { .. }, Some(k)) => spans.get(k).and_then(|(_, s)| *s).map(|s| {
+        (WovenRow::Head { .. }, None | Some(0)) => Some(("≈".to_string(), warn)),
+        (WovenRow::Head { .. }, Some(k)) => spans.get(k).and_then(|(_, s)| *s).map(|s| {
             let p = m.prefixes.get(s).cloned().unwrap_or_default();
             (p, named(Some(s)).1)
         }),
@@ -6047,16 +6054,16 @@ fn draw_merged_row(
     let w = lay.gutter.saturating_sub(signs + 1);
     let here = cursor.is_some_and(|l| c.lines().contains(&l));
     match row {
-        MergedRow::Head { part: None, .. } => {
+        WovenRow::Head { part: None, .. } => {
             apply(out, if here { ui.linenr_selected } else { ui.linenr })?;
-            queue!(out, Print(format!("{:>w$}", c.base.start + 1)), Print(" "))?;
+            queue!(out, Print(format!("{:>w$}", crate::weave::number(m, c.base.start) + 1)), Print(" "))?;
         }
         _ => queue!(out, Spaces(w + 1))?,
     }
     let cols = lay.text_cols;
     match row {
         // Stacked: this part's head across the code
-        MergedRow::Head { part: Some(k), .. } => {
+        WovenRow::Head { part: Some(k), .. } => {
             let side = spans.get(k).and_then(|(_, s)| *s);
             let mut words = Vec::new();
             if k == 0 {
@@ -6064,11 +6071,11 @@ fn draw_merged_row(
                 words.push(("·".into(), faint));
             }
             words.push(named(side));
-            merged_rule(out, faint, &words, cols)
+            woven_rule(out, faint, &words, cols)
         }
         // Side by side: a column's head each, `┬` between
-        MergedRow::Head { part: None, .. } => {
-            let cw = crate::merged::column_w(cols, spans.len());
+        WovenRow::Head { part: None, .. } => {
+            let cw = crate::weave::column_w(cols, spans.len());
             for (k, (_, side)) in spans.iter().enumerate() {
                 if k > 0 {
                     apply(out, faint)?;
@@ -6080,15 +6087,21 @@ fn draw_merged_row(
                     words.push(("──".into(), faint));
                 }
                 words.push(named(*side));
+                // (a side's column its own first line's number, where it fits — the tip's is the gutter's)
+                if let Some(p) = k.checked_sub(1).and_then(|k| c.parts.get(k)) {
+                    let n =
+                        if p.lines.is_empty() { p.own.start } else { crate::weave::number(m, p.lines.start) };
+                    words.push(((n + 1).to_string(), faint));
+                }
                 let last = k + 1 == spans.len();
-                merged_rule(out, faint, &words, if last { cols - k * (cw + 1) } else { cw })?;
+                woven_rule(out, faint, &words, if last { cols - k * (cw + 1) } else { cw })?;
             }
             Ok(())
         }
-        MergedRow::Columns { index, .. } => {
+        WovenRow::Columns { index, .. } => {
             let tab = editor.config.tab_width;
             let capture_styles = editor.theme.capture_styles();
-            let cw = crate::merged::column_w(cols, spans.len());
+            let cw = crate::weave::column_w(cols, spans.len());
             for (k, (r, side)) in spans.iter().enumerate() {
                 if k > 0 {
                     apply(out, faint)?;
@@ -6097,7 +6110,7 @@ fn draw_merged_row(
                 let width = if k + 1 == spans.len() { cols - k * (cw + 1) } else { cw };
                 let line = r.start + index;
                 let st = match line < r.end {
-                    true => wash(*side),
+                    true => wash(*side, enter_part == Some(k)),
                     false => ui.base,
                 };
                 apply(out, st)?;
@@ -6130,16 +6143,56 @@ fn draw_merged_row(
             }
             Ok(())
         }
+        // (drawn by `draw_woven_gone`, above)
+        WovenRow::Gone { .. } => Ok(()),
     }
 }
 
-/// A rule with words on it: `─ words ───…` to `width` cells — the words that fit, cut, the rule faint.
-fn merged_rule(
+/// A woven view's removal head (`weave.rs`), where the lines went: whose — its prefix in the sign column, as a
+/// change's first line has it — and how many, on a faint rule: `f ─ fix · 3 lines removed ──`, each name bold in its
+/// colour (the sides that made the same removal after it), no number (the line below has its own).
+fn draw_woven_gone(
     out: &mut impl Write,
-    faint: Style,
-    words: &[(String, Style)],
-    width: usize,
+    m: &crate::weave::Shown,
+    change: usize,
+    (ui, lay, y, signs): (&Ui, &Layout, u16, usize),
 ) -> io::Result<()> {
+    ground(out, lay, y, ui.base)?;
+    let Some(c) = m.merge.changes.get(change) else { return Ok(()) };
+    let faint = Style { fg: ui.linenr.fg, ..ui.base };
+    let named = |s: usize| -> Option<(String, Style)> {
+        let side = m.sides.get(s)?;
+        let fg = ui.participant(side.colour, true).or(ui.base.fg);
+        Some((side.name.clone(), Style { fg, bold: true, ..ui.base }))
+    };
+    apply(out, ui.base)?;
+    match (m.prefixes.get(c.side), named(c.side)) {
+        (Some(p), Some((_, st))) if signs > 0 => {
+            let g = fit(p, signs);
+            queue!(out, Spaces(signs - g.width()))?;
+            apply(out, st)?;
+            queue!(out, Print(g))?;
+        }
+        _ => queue!(out, Spaces(signs))?,
+    }
+    apply(out, ui.base)?;
+    queue!(out, Spaces(lay.gutter.saturating_sub(signs)))?;
+    let mut words = Vec::new();
+    for s in std::iter::once(c.side).chain(c.with.iter().copied()) {
+        if let Some(w) = named(s) {
+            if !words.is_empty() {
+                words.push(("·".to_string(), faint));
+            }
+            words.push(w);
+        }
+    }
+    words.push(("·".to_string(), faint));
+    words.push((format!("{} removed", crate::nav::count(c.removed, "line")), faint));
+    woven_rule(out, faint, &words, lay.text_cols)
+}
+
+/// A rule with words on it: `─ words ───…` to `width` cells — the words that fit, cut, the rule faint.
+fn woven_rule(out: &mut impl Write, faint: Style, words: &[(String, Style)], width: usize) -> io::Result<()> {
     let mut used = 0;
     for (k, (t, st)) in words.iter().enumerate() {
         let lead = if k == 0 { "─ " } else { " " };
@@ -6198,7 +6251,7 @@ fn rows_pane(
     shows: &Shows,
     lay: &Layout,
 ) -> Vec<crate::codeview::Row> {
-    use crate::codeview::{MergedRow, OtherKind, Part, Row};
+    use crate::codeview::{OtherKind, Part, Row, WovenRow};
     use crate::doccomment::parts;
     let text = &doc.text;
     let rows = lay.text_rows;
@@ -6262,46 +6315,52 @@ fn rows_pane(
         let room = rows.saturating_sub(view.len());
         view.extend(b.screen_rows(text, (wrap_w, tab), skip, room));
     };
-    // A merged view (`merged.rs`): a stacked conflict's head above each part; one side by side its head and rows of
+    // A woven view (`weave.rs`): a stacked conflict's head above each part; one side by side its head and rows of
     // columns in place of its lines — from the top's skipped rows when the screen starts inside it, as a folded block's
-    let merged = crate::merged::of(doc);
-    if let Some(m) = merged {
+    let woven = crate::weave::of(doc);
+    if let Some(m) = woven {
         m.cols.set(lay.text_cols);
     }
-    let end = end + usize::from(merged.is_some());
+    let end = end + usize::from(woven.is_some());
     let side_by_side =
-        |c: &crate::merged::Conflict| crate::merged::columns(editor, doc, c, lay.text_cols, shows.editing);
-    let merged_heads = |view: &mut Vec<Row>, line: usize| {
-        let Some(m) = merged else { return };
-        for (conflict, part) in crate::merged::heads_at(&m.merge, line) {
+        |c: &crate::weave::Conflict| crate::weave::columns(editor, doc, c, lay.text_cols, shows.editing);
+    let woven_heads = |view: &mut Vec<Row>, line: usize| {
+        let Some(m) = woven else { return };
+        for change in crate::weave::gone_at(&m.merge, line) {
+            if view.len() < rows {
+                let kind = OtherKind::Woven(WovenRow::Gone { change });
+                view.push(Row::Other { at: line, text: String::new(), kind, part: None });
+            }
+        }
+        for (conflict, part) in crate::weave::heads_at(&m.merge, line) {
             if view.len() < rows && !side_by_side(&m.merge.conflicts[conflict]) {
-                let kind = OtherKind::Merged(MergedRow::Head { conflict, part: Some(part) });
+                let kind = OtherKind::Woven(WovenRow::Head { conflict, part: Some(part) });
                 view.push(Row::Other { at: line, text: String::new(), kind, part: None });
             }
         }
     };
     let push_columns = |view: &mut Vec<Row>, line: usize| -> Option<usize> {
-        let m = merged?;
+        let m = woven?;
         let conflict = m.merge.conflict_at(line)?;
         let c = &m.merge.conflicts[conflict];
         if !side_by_side(c) {
             return None;
         }
         let r = c.lines();
-        let n = crate::merged::column_rows(c);
+        let n = crate::weave::column_rows(c);
         let skip = if line == r.start && line == top { top_skip } else { line - r.start };
         for k in skip.min(n - 1)..n {
             if view.len() == rows {
                 break;
             }
             let kind = match k {
-                0 => MergedRow::Head { conflict, part: None },
-                _ => MergedRow::Columns { conflict, index: k - 1 },
+                0 => WovenRow::Head { conflict, part: None },
+                _ => WovenRow::Columns { conflict, index: k - 1 },
             };
             view.push(Row::Other {
                 at: r.start,
                 text: String::new(),
-                kind: OtherKind::Merged(kind),
+                kind: OtherKind::Woven(kind),
                 part: None,
             });
         }
@@ -6316,7 +6375,7 @@ fn rows_pane(
                 line = next;
                 continue;
             }
-            merged_heads(&mut view, line);
+            woven_heads(&mut view, line);
             if let Some(b) = writing.and_then(|w| w.at(line)) {
                 push_writing(&mut view, b, line);
                 line = b.last + 1;
@@ -6345,7 +6404,7 @@ fn rows_pane(
             line = next;
             continue;
         }
-        merged_heads(&mut view, line);
+        woven_heads(&mut view, line);
         if line > max_line {
             break;
         }
@@ -8237,14 +8296,15 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
         left.push(Seg { text: "  ▲ changed on disk".into(), style: ui.base.patch(warn), keep: 246 });
     }
-    // A merged view (`merged.rs`): whose changes it merges — each name in its colour, how far behind the base's tip,
+    // A woven view (`weave.rs`): whose changes it merges — each name in its colour, how far behind the base's tip,
     // unsaved — and its conflicts in warning; what it couldn't merge, said
-    if let Some(m) = crate::merged::of(doc) {
+    let mut hint = Vec::new();
+    if let Some(m) = crate::weave::of(doc) {
         let warn = ui.base.patch(ui.sign[2]);
         match (&m.said, m.sides.is_empty()) {
             (Some(why), _) => left.push(Seg { text: format!("  {why}"), style: warn, keep: 244 }),
             (None, true) if m.asking || m.merges == 0 => {
-                left.push(Seg { text: "  merging…".into(), style: faint, keep: 244 })
+                left.push(Seg { text: "  weaving…".into(), style: faint, keep: 244 })
             }
             (None, true) if m.left.is_empty() => {
                 left.push(Seg { text: "  no session changed it".into(), style: faint, keep: 244 })
@@ -8272,9 +8332,14 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
                     let text = format!("  ≈ {}", crate::nav::count(n, "conflict"));
                     left.push(Seg { text, style: warn, keep: 244 });
                 }
+                // (what `enter` does on a change — `weave::go`: at the end, after the scope; folded first)
+                hint.push(Seg { text: "  ".into(), style: faint, keep: 238 });
+                for s in hint_spans(ui, &[("enter", "go there")], dim, faint) {
+                    hint.push(Seg { text: s.text, style: s.style, keep: 238 });
+                }
             }
         }
-        // (a session whose file couldn't be merged — a link, a FIFO, too large, binary: said, each with why)
+        // (a session whose file couldn't be woven — a link, a FIFO, too large, binary: said, each with why)
         if m.said.is_none() {
             for (name, why) in &m.left {
                 let text = format!("  {name} left out: {why}");
@@ -8305,6 +8370,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
             left.push(Seg { text: name, style: dim, keep });
         }
     }
+    left.extend(hint);
     let mut right = Vec::new();
     // (the front session's buffers)
     let buffers = editor.buffers();
@@ -8903,6 +8969,8 @@ fn draw_statusline(
     }
     // The column two cells at least: the right side is right-aligned, and `l`/`w` crossing column 10 would
     // slide everything left of it back and forth (the line number changes digits far less often)
+    // (a woven view's line as its gutter numbers it: where the line is)
+    let line = crate::weave::of(doc).map_or(line, |m| crate::weave::number(m, line));
     let at = format!("{}:{:<2} ", line + 1, col);
     // Keys pending (a count, `g`, `space w` …) in its place, as wide, in the typed keys' accent
     let pending = editor.pending_display();
@@ -16005,18 +16073,18 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             _ => false,
         };
         let follow: &[(&'static str, &str)] = if working { &[("f", "follow")] } else { &[] };
-        // (`v`: its changes merged with the rest — where it would conflict first, `merged.rs`)
-        let merged: &[(&'static str, &str)] = match p.current().map(|i| &i.action) {
+        // (`v`: its changes woven with the rest — where it would conflict first, `weave.rs`)
+        let woven: &[(&'static str, &str)] = match p.current().map(|i| &i.action) {
             Some(Action::Session(id))
                 if !editor.sessions.is_empty() && crate::overlap::file_of(editor, *id).is_some() =>
             {
-                &[("v", "merged")]
+                &[("v", "woven")]
             }
             _ => &[],
         };
         let with = |rest: &[(&'static str, &str)]| {
             let (enter, rest) = rest.split_at(1);
-            hints(&[enter, merged, follow, marks, rest].concat())
+            hints(&[enter, woven, follow, marks, rest].concat())
         };
         match p.current().map(|i| &i.action) {
             None => with(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),

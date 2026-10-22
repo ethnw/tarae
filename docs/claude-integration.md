@@ -518,17 +518,26 @@ only in the answer of the tool that touches that file — its `edit` or `read` o
 `src/term.rs: fix's change would conflict here: L30–34` (its own lines, the other's name, never the other's lines
 or text) — never as a note of its own, never a feed of what the others do.
 
-**The merged view.** `:merged` (or `space v j`, or `v` on a session in the list — at its conflict) shows the file in
-front as every session's changes merge onto the base's tip: the open buffers, unsaved changes too, else what's on
-disk, merged in memory on a worker and merged again as any of them moves. It's a read-only document (an edit is put
-back and said): each change on its session's colour, its first line's sign column saying whose (`f`, `m` — the
-side panel's prefixes), the cursor's change named at its end (`‹fix›`); a conflict is the base's lines then each
-session's version, side by side where the pane is wide and stacked under a head each where it isn't (a selection
-over it opens it stacked, as a folded block); `]m`/`[m` go to the conflicts, `]g`/`[g` to each change. A session
-behind the base's tip has its change laid on the tip first; where it meets the tip's own change, the conflict's
-first part is the tip's, named by its branch. The path bar names whose changes it merges, how far behind each is,
-which are unsaved. Where a merge of the file was worked out, Claude's `edit` or `read` of it says that merge's word
-instead of the overlap's — `src/a.rs: merged with fix's change: conflict at L30–34`, nothing when it merges clean.
+**The woven view.** `:weave` (or `space v w`, or `v` on a session in the list — at its conflict) shows the file in
+front as every session's changes weave onto the base's tip — every session's thread woven into one file, a view,
+never a merge done: the open buffers, unsaved changes too, else what's on disk, woven in memory on a worker and
+again as any of them moves. It's a read-only document, `woven · src/a.rs` in the path bar and the buffer list (an
+edit is put back and said): each change on its session's colour, its first line's sign column saying whose (`f`,
+`m` — the side panel's prefixes), the cursor's change named at its end (`‹fix›`); a change that only takes lines out
+is a head where they went (`m ─ main · 3 lines removed ──`); a conflict is the base's lines then each session's
+version, side by side where the pane is wide and stacked under a head each where it isn't (a selection over it opens
+it stacked, as a folded block); `]m`/`[m` go to the conflicts, `]g`/`[g` to each change. Its line numbers are where
+each line is, not the view's rows: the tip's lines by the tip's numbers, a change and a conflict's part by that
+session's own (a conflict's three parts can all be 10, the line after it 11, as in every workspace and as Claude is
+told); side by side, each side's column says its number at its head; the status line and `:N`/`NG` go by them too (the
+tip's line N). `enter` goes there: on a
+change, a conflict's part or the line under a removal's head, into that session's workspace, its file at that line of
+its own text; on the tip's part, into the checkout that has the base's branch; side by side, a click on a column picks
+the part `enter` goes to (its wash a step stronger). A session behind the base's tip has its change laid on the tip
+first; where it meets the tip's own change, the conflict's first part is the tip's, named by its branch. The path bar
+names whose changes it weaves, how far behind each is, which are unsaved, and `enter go there`. Where the file was
+woven, Claude's `edit` or `read` of it says so in plain words instead of the overlap's line — `src/a.rs: merged with
+fix's change: conflict at L30–34`, nothing when it weaves clean.
 
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,

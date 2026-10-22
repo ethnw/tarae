@@ -1106,12 +1106,12 @@ pub fn file_of(ed: &Editor, id: SessionId) -> Option<(String, Option<Other>)> {
     snap.changed.iter().find(|p| !key_named(&snap.top, p)).map(|p| (p.clone(), None))
 }
 
-/// Session `id`'s working tree as last taken (its commit) — the merged view asks again when it moves.
+/// Session `id`'s working tree as last taken (its commit) — the woven view asks again when it moves.
 pub fn snapshot_commit(ed: &Editor, id: SessionId) -> Option<String> {
     ed.overlap.places.get(&id)?.snap.as_ref().map(|s| s.commit.clone())
 }
 
-/// Session `id`'s working tree as last taken, to read a file of (`merged.rs`, when its disk text can't be read).
+/// Session `id`'s working tree as last taken, to read a file of (`weave.rs`, when its disk text can't be read).
 pub fn snapshot_reader(ed: &Editor, id: SessionId) -> Option<SnapRead> {
     let p = ed.overlap.places.get(&id)?;
     let s = p.snap.as_ref()?;
@@ -1258,12 +1258,13 @@ pub fn in_file(ed: &Editor, rel: &Path) -> Vec<(String, Option<u8>, Option<Range
     out
 }
 
-/// What Claude's `edit` or `read` answer says of `path` (in its session's checkout) — the merged view's words where
-/// one of the file was worked out (`merged::told`), else a line per other side its file would conflict with — `src/a.rs: fix's change would conflict here: L30–34` — its own lines, the other's name,
-/// nothing else. None: no overlap there.
+/// What Claude's `edit` or `read` answer says of `path` (in its session's checkout) — the woven view's words where
+/// one of the file was worked out (`weave::told`), else a line per other side its file would conflict with —
+/// `src/a.rs: fix's change would conflict here: L30–34` — its own lines, the other's name, nothing else. None: no
+/// overlap there.
 pub fn told(ed: &Editor, path: &Path) -> Vec<String> {
-    // (where the file was merged in memory — the buffers, unsaved too — that merge says it: `merged::told`)
-    if let Some(lines) = crate::merged::told(ed, path) {
+    // (where the file was woven in memory — the buffers, unsaved too — that weave says it: `weave::told`)
+    if let Some(lines) = crate::weave::told(ed, path) {
         return lines;
     }
     if ed.overlap.now.is_empty() {

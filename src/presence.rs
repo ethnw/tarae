@@ -596,7 +596,7 @@ pub fn at(ed: &Editor, id: SessionId) -> Option<String> {
     })
 }
 
-/// The file session `id` is in now, from its checkout's top (the session list's `v` — `merged.rs`).
+/// The file session `id` is in now, from its checkout's top (the session list's `v` — `weave.rs`).
 pub fn path_of(ed: &Editor, id: SessionId) -> Option<String> {
     let p = ed.presence.now.iter().find(|p| p.session == id && p.here && live(ed, p))?;
     Some(p.path.strip_prefix(&p.root).ok()?.to_string_lossy().into_owned())

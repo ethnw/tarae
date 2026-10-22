@@ -237,7 +237,7 @@ commands! {
         review_turn => "Review Claude's last turn",
         review_undo_change => "Take this change back",
         review_wide => "Read wide: hide rail and chat",
-        merged_view => "File as all sessions merge",
+        woven_view => "This file, all sessions woven",
         session_new => "New session (its own branch)",
         session_list => "Sessions: switch, end, new",
         follow_next => "Follow next session at work",
@@ -604,8 +604,13 @@ fn goto_line_number(cx: &mut Context, line: usize) {
     let extend = is_select(cx);
     motion(cx, |t, r| r.put_cursor(t, mv::line_start(t, line.min(mv::last_line(t))), extend));
 }
+/// A count's line: the line numbered so — on a woven view where each line is, the tip's (`weave::woven_line`).
+fn counted_line(cx: &Context, n: usize) -> usize {
+    let line = n.saturating_sub(1);
+    crate::weave::of(cx.editor.doc()).map_or(line, |m| crate::weave::woven_line(m, line))
+}
 fn goto_file_start(cx: &mut Context) {
-    let line = cx.count.map(|n| n.saturating_sub(1)).unwrap_or(0);
+    let line = cx.count.map(|n| counted_line(cx, n)).unwrap_or(0);
     cx.editor.push_jump();
     goto_line_number(cx, line)
 }
@@ -614,7 +619,7 @@ fn goto_last_line(cx: &mut Context) {
     goto_line_number(cx, usize::MAX)
 }
 fn goto_line(cx: &mut Context) {
-    let line = cx.count.map(|n| n.saturating_sub(1)).unwrap_or(usize::MAX);
+    let line = cx.count.map(|n| counted_line(cx, n)).unwrap_or(usize::MAX);
     cx.editor.push_jump();
     goto_line_number(cx, line)
 }
@@ -1785,8 +1790,8 @@ fn goto_change(cx: &mut Context, forward: bool, parts: bool) {
     // (the view's one diff: a shown edit's over the index's — `codeview::Changes`)
     let changes = crate::codeview::Changes::of(doc);
     let shown = changes.hunks(doc);
-    // (a merged view's changes are each someone's: never one region — `merged.rs`)
-    let whole = parts || changes == crate::codeview::Changes::Merged;
+    // (a woven view's changes are each someone's: never one region — `weave.rs`)
+    let whole = parts || changes == crate::codeview::Changes::Woven;
     let mut hunks = if whole { shown.into_owned() } else { crate::git::regions(&shown) };
     if let Some(new) = &new {
         let has = |h: &crate::git::Hunk| {
@@ -2044,8 +2049,8 @@ fn review_close(cx: &mut Context) {
     crate::codereview::close_asked(cx.editor);
 }
 
-fn merged_view(cx: &mut Context) {
-    if let Err(e) = crate::merged::open(cx.editor, None, None) {
+fn woven_view(cx: &mut Context) {
+    if let Err(e) = crate::weave::open(cx.editor, None, None) {
         cx.editor.set_status(e);
     }
 }

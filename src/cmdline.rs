@@ -177,7 +177,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["git-amend"], Arg::None, "Amend the last commit (as A)"),
     c(&["diff"], Arg::File, "Show changes against HEAD, a file, or a revision"),
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
-    c(&["merged"], Arg::File, "This file as all sessions' changes merge"),
+    c(&["weave"], Arg::File, "This file with every session's changes woven in"),
     c(&["session-open"], Arg::File, "Work in another checkout beside this one"),
     c(&["session-switch"], Arg::None, "Bring another session to the front"),
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),

@@ -340,7 +340,6 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space v C` | `review_board` | A board reviews the changes |
 | `space v h` | `review_hunk_seen` | Looked at this risky change |
 | `space v H` | `review_file_seen` | Looked at all drawn in file |
-| `space v j` | `merged_view` | File as all sessions merge |
 | `space v m` | `review_viewed` | Mark this file viewed |
 | `space v M` | `review_unviewed` | Unmark this file viewed |
 | `space v q` | `review_close` | End the review |
@@ -349,6 +348,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space v t` | `review_turn` | Review Claude's last turn |
 | `space v u` | `review_undo_change` | Take this change back |
 | `space v v` | `review_start` | Review the changes |
+| `space v w` | `woven_view` | This file, all sessions woven |
 | `space v z` | `review_wide` | Read wide: hide rail and chat |
 
 ### `space w`
@@ -678,7 +678,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:git-amend` |  | Amend the last commit (as A) |
 | `:diff` |  | Show changes against HEAD, a file, or a revision |
 | `:diff-off` |  | Stop showing the diff |
-| `:merged` |  | This file as all sessions' changes merge |
+| `:weave` |  | This file with every session's changes woven in |
 | `:session-open` |  | Work in another checkout beside this one |
 | `:session-switch` |  | Bring another session to the front |
 | `:session-new` |  | New session: a branch in its own checkout |
