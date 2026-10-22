@@ -12,7 +12,10 @@ use super::{Choices, Sim};
 use crate::editor::Editor;
 use crate::offer::What;
 
-const SEEDS: &[u64] = &[0, 1];
+/// (4: a carried-out line left out of the main checkout's, then written over by the session's next look; 6: a
+/// line of the main checkout's the session left out, taken out of it by the session's carry-out; 22: a carry-out
+/// card parked in another session kept beside the one asked again)
+const SEEDS: &[u64] = &[0, 1, 4, 6, 22];
 
 const INPUTS: usize = 30;
 

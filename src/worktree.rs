@@ -4300,6 +4300,122 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// simseeds (`sim::instructions` seed 4): a carried-out session's change that touches the main checkout's own
+    /// is left out of it — and stays the session's: its next look doesn't take the session's copy as untouched and
+    /// write the main checkout's over it, it asks.
+    #[test]
+    fn a_session_line_left_out_of_a_carry_out_stays_its_own() {
+        let (repo, dir) = place("instructions-left");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\nrule three\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+        // (its top line carried; its last beside the main checkout's own, left out)
+        std::fs::write(wt.join("CLAUDE.md"), "top\nrule one\nrule two\nrule three\nmine\n").unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\nrule three\nmain\n").unwrap();
+        git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "its own"]);
+        let title = "CLAUDE.md: this session's changes for the main checkout";
+        let _ = ed.session_bring("feat");
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        while ed.offers.first().is_some_and(|o| o.title != title) {
+            let o = ed.offers.remove(0);
+            ed.offers.push(o);
+        }
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| says(ed, "takes this session's changes") || says(ed, "CLAUDE.md: "));
+        assert_eq!(
+            read(&repo.join("CLAUDE.md")),
+            "top\nrule one\nrule two\nrule three\nmain\n",
+            "{}",
+            said(&ed)
+        );
+        let found = crate::instructions::look(&wt, &repo, &[]);
+        assert_eq!(read(&wt.join("CLAUDE.md")), "top\nrule one\nrule two\nrule three\nmine\n", "{found:?}");
+        assert!(found.updated.is_empty() && found.both.len() == 1, "asked, not taken: {found:?}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// simseeds (`sim::instructions` seed 22): a session's changes asked for the main checkout from one session,
+    /// its card parked there, then asked again from another — one card for the file, the new one, wherever the
+    /// first waited; the first's going said.
+    #[test]
+    fn a_carry_out_card_asked_again_from_another_session_takes_the_parked_ones_place() {
+        let (repo, dir) = place("instructions-twice");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let feat = ed.session.id;
+        new_session(&mut ed, "other");
+        let other = ed.session.id;
+        std::fs::write(wt.join("CLAUDE.md"), "rule\nmine\n").unwrap();
+        let cards = |ed: &Editor| -> Vec<u64> {
+            let all =
+                std::iter::once(&ed.session).chain(&ed.sessions).flat_map(|l| &l.parked).chain(&ed.offers);
+            all.filter(|o| matches!(&o.what, crate::offer::What::Instructions(b) if b.out.is_some()))
+                .map(|o| o.id)
+                .collect()
+        };
+        // Asked from feat, which goes behind before the look lands: its card waits there
+        ed.session_switch(feat);
+        crate::instructions::carry_out(&mut ed, wt.clone());
+        ed.session_switch(other);
+        settle_until(&mut ed, |ed| !cards(ed).is_empty());
+        let first = cards(&ed)[0];
+        let parked =
+            ed.sessions.iter().find(|l| l.id == feat).is_some_and(|l| l.parked.iter().any(|o| o.id == first));
+        assert!(parked, "parked in feat");
+        // Asked again from the session in front
+        crate::instructions::carry_out(&mut ed, wt.clone());
+        settle_until(&mut ed, |ed| cards(ed).iter().any(|&id| id != first));
+        assert_eq!(cards(&ed).len(), 1, "one card for the file: {:?}", cards(&ed));
+        let how = format!("replaced by card#{}", cards(&ed)[0]);
+        assert_eq!(ed.ui_card_how.get(&first), Some(&how), "its going said, naming the new one");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// simseeds (`sim::instructions` seed 6): a change of the main checkout's the session left out (`n`) isn't the
+    /// session's own — its carry-out takes in only what the session wrote, never the main checkout's line out.
+    #[test]
+    fn a_main_line_a_session_left_out_isnt_carried_out_of_the_main_checkout() {
+        let (repo, dir) = place("instructions-declined");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule one\nrule two\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let wt = new_session(&mut ed, "feat");
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+        std::fs::write(wt.join("CLAUDE.md"), "rule one\nrule two\nmine\n").unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "main\nrule one\nrule two\n").unwrap();
+        let both = crate::instructions::look(&wt, &repo, &[]).both.pop().expect("changed on both sides");
+        crate::instructions::answer(&mut ed, both, false);
+        settle_until(&mut ed, |ed| says(ed, "kept as it is") || says(ed, "CLAUDE.md: "));
+        let out = crate::instructions::look_out(&wt, &repo);
+        assert_eq!(out.len(), 1, "{}", said(&ed));
+        assert!(!out[0].view_text().contains("- main"), "{}", out[0].view_text());
+        git_in(&wt, &["commit", "-q", "--allow-empty", "-m", "its own"]);
+        let title = "CLAUDE.md: this session's changes for the main checkout";
+        let _ = ed.session_bring("feat");
+        settle_until(&mut ed, |ed| card(ed, title).is_some());
+        while ed.offers.first().is_some_and(|o| o.title != title) {
+            let o = ed.offers.remove(0);
+            ed.offers.push(o);
+        }
+        ed.offer_accept();
+        settle_until(&mut ed, |ed| says(ed, "takes this session's changes") || says(ed, "CLAUDE.md: "));
+        assert_eq!(read(&repo.join("CLAUDE.md")), "main\nrule one\nrule two\nmine\n", "{}", said(&ed));
+        // (and the session's copy still without the line it left out — only the main checkout's later ones asked)
+        let found = crate::instructions::look(&wt, &repo, &[]);
+        assert_eq!(read(&wt.join("CLAUDE.md")), "rule one\nrule two\nmine\n", "{found:?}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// frictions29 #79 at a session's end (the review of frictions36: only a bring asked): its CLAUDE.md changes are
     /// read before its checkout goes, and asked once it's gone — `y` carries what the card showed into the main
     /// checkout's.

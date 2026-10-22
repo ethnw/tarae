@@ -17,6 +17,30 @@ fn feed(ed: &mut Editor, keys: &str) {
     }
 }
 
+/// simseeds (`sim::reviews` seed 350): a change followed when it was its text's only one in the file keeps the id
+/// of that first sight (`#0`); one alike that turns up ahead of it later is the first of its text found now — and
+/// took that same id. Each has its own: the new one the next no change of the file has.
+#[test]
+fn a_change_alike_turning_up_ahead_of_a_followed_one_has_its_own_id() {
+    let mut w = Watch::new(Of::Edit(1), "uncommitted", Instant::now(), 0);
+    let text = text_id("b.txt", ["kiwi two"], ["kiwi TWO"]);
+    let found = |lines: std::ops::Range<usize>, nth| Found {
+        lines,
+        text: text.clone(),
+        nth,
+        added: 1,
+        removed: 1,
+        rule: None,
+        secret: false,
+    };
+    w.apply("b.txt", (1, 1, 1), vec![found(3..4, 0)], None, &[]);
+    w.apply("b.txt", (1, 2, 2), vec![found(1..2, 0), found(3..4, 1)], None, &[(3..4, false)]);
+    let ids: Vec<&str> = w.changes.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids.len(), 2, "the one at line 3 followed still, one new: {ids:?}");
+    assert_eq!(ids[0], change_id(&text, 0), "the first keeps the id of its first sight");
+    assert_eq!(ids[1], change_id(&text, 1), "the new one its own");
+}
+
 /// A frame drawn, as the terminal would get it — what the record's time is counted from.
 fn frame(ed: &mut Editor) {
     crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();

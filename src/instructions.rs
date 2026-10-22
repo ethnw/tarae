@@ -15,12 +15,49 @@ use std::path::{Path, PathBuf};
 use crate::editor::Editor;
 use crate::offer::{Offer, What};
 
-/// The folder in a checkout's git folder that holds its instruction files as copied.
+/// The folder in a checkout's git folder that holds its instruction files as copied — then as last taken from
+/// the main checkout or left (`n`): the base its changes are asked from.
 const BASES: &str = "tarae-instructions";
+
+/// The folder in `BASES` with what a session's own changes are told against (`look_out`), only where it isn't
+/// the base: once the session left a change of the main checkout's out (`n`, or one touching its own) — else
+/// the main checkout's line would look taken out by the session — or the main checkout left one of the
+/// session's out — else the session's line would look as the main checkout's, written over by the next look.
+const OWN: &str = "own";
 
 /// The bases' folder of the checkout at `root` (git runs the first time: a worker).
 fn bases(root: &Path) -> Option<PathBuf> {
     crate::gitrepo::repo(root).ok().map(|r| r.git_dir.join(BASES))
+}
+
+/// What the session's own changes to `rel` are told against: `OWN`'s, else the base (None: neither kept).
+fn own_base(dir: &Path, rel: &str) -> Option<String> {
+    let own = std::fs::read_to_string(dir.join(OWN).join(rel));
+    own.or_else(|_| std::fs::read_to_string(dir.join(rel))).ok()
+}
+
+/// `rel`'s base and what the session's own changes are told against kept — the second in `OWN` only where
+/// they differ.
+fn keep_both(dir: &Path, rel: &str, base: &str, own: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(rel), base)?;
+    let at = dir.join(OWN).join(rel);
+    if own != base {
+        return std::fs::create_dir_all(dir.join(OWN)).and_then(|_| std::fs::write(at, own));
+    }
+    match std::fs::remove_file(at) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// `old` with the changes `from` → `to` (one side's taken by the other) over it — or `old` as it is when one
+/// of them doesn't fit (then they're asked again, never lost).
+fn carried(from: &str, to: &str, old: &str) -> String {
+    match crate::checkpoint::rebase(from, to, old) {
+        (text, 0) => text,
+        _ => old.to_string(),
+    }
 }
 
 /// The new checkout `path`'s copies from `top` (`copied`, relative) kept as their bases — the three files only.
@@ -40,7 +77,8 @@ pub struct Both {
     /// The session's checkout, the file (relative).
     pub root: PathBuf,
     pub rel: String,
-    /// As copied — None: copied before bases were kept.
+    /// As copied, or as last taken or left (`BASES`) — None: copied before bases were kept. Carried out: what
+    /// the session's own changes are told against (`OWN`).
     pub base: Option<String>,
     /// The session's now, the main checkout's now.
     pub here: String,
@@ -225,10 +263,10 @@ pub fn look(root: &Path, main: &Path, dirty: &[PathBuf]) -> Found {
         }
         // (the base is in the checkout's git folder, which no run writes)
         let base = std::fs::read_to_string(dir.join(rel)).ok();
-        let keep =
-            |text: &str| std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(rel), text));
+        // (the same on both sides now: nothing of either's left out)
+        let keep = |text: &str| keep_both(&dir, rel, text, text);
         if here == main_text {
-            if base.as_deref() != Some(main_text.as_str()) {
+            if base.as_deref() != Some(main_text.as_str()) || dir.join(OWN).join(rel).exists() {
                 let _ = keep(&main_text);
             }
             continue;
@@ -273,7 +311,7 @@ pub fn look_out(root: &Path, main: &Path) -> Vec<Both> {
     let mut out = Vec::new();
     for rel in crate::worktree::INSTRUCTIONS.iter().filter(|r| untracked.iter().any(|u| u == *r)) {
         let (Some(main_text), Some(here)) = (plain(main, rel), plain(root, rel)) else { continue };
-        let Ok(base) = std::fs::read_to_string(dir.join(rel)) else { continue };
+        let Some(base) = own_base(&dir, rel) else { continue };
         if here == base || here == main_text {
             continue;
         }
@@ -321,13 +359,24 @@ pub fn look_out_of(root: &Path) -> Vec<Both> {
     main.map(|main| look_out(&real, &main)).unwrap_or_default()
 }
 
-/// `b`'s card, in place of one up for the same file and direction — an ended session's (`Both.ended`): its `n`
-/// drops them, never asked again, said on the card.
+/// `b`'s card, in place of one for the same file and direction wherever it waits — up, or parked in any session:
+/// a carry-out is asked from the session in front, whichever session's file it is (simseeds: `sim::instructions`
+/// seed 22 had two). Its going said (the gone ring). An ended session's (`Both.ended`): its `n` drops them, never
+/// asked again, said on the card.
 pub(crate) fn push_card(ed: &mut Editor, b: Both) {
     let ended = b.ended;
     let mine = |o: &Offer| matches!(&o.what, What::Instructions(x) if x.root == b.root && x.rel == b.rel && x.out == b.out);
+    let waiting: Vec<u64> = std::iter::once(&ed.session)
+        .chain(&ed.sessions)
+        .flat_map(|l| &l.parked)
+        .chain(&ed.offers)
+        .filter(|o| mine(o))
+        .map(|o| o.id)
+        .collect();
     ed.offers.retain(|o| !mine(o));
-    ed.session.parked.retain(|o| !mine(o));
+    for l in std::iter::once(&mut ed.session).chain(&mut ed.sessions) {
+        l.parked.retain(|o| !mine(o));
+    }
     let mut card = b.card();
     if ended {
         card.question = card.question.replacen(
@@ -337,6 +386,11 @@ pub(crate) fn push_card(ed: &mut Editor, b: Both) {
         );
     }
     ed.push_offer(card);
+    // (named by the id `push_offer` gave it)
+    let id = ed.offer_seq;
+    for old in waiting {
+        ed.card_how(old, format!("replaced by card#{id}"));
+    }
 }
 
 /// A session's look under way, and another asked for meanwhile — one at a time, so two never write over each
@@ -467,8 +521,9 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
                 return Err("it changed since the card — asked again at claude's next start".into());
             }
         }
-        // (into the main checkout's — still as the card read it; this session's copy then its base: the main
-        // checkout's other changes come back here as untouched ones do)
+        // (into the main checkout's — still as the card read it; then the changes carried are in both bases: the
+        // main checkout's other changes come back here as untouched ones do, or asked beside the session's left
+        // ones — never taken as untouched and written over them)
         if let Some(main) = &b.out {
             if !take {
                 return Ok(gone);
@@ -492,18 +547,30 @@ pub fn answer(ed: &mut Editor, b: Both, take: bool) {
                 return Ok(true);
             }
             let dir = bases(&b.root).ok_or("no git folder")?;
-            return std::fs::write(dir.join(&b.rel), &b.here).map(|_| false).map_err(|e| e.to_string());
-        }
-        if take {
-            crate::beneath::Dir::root(&b.root)
-                .and_then(|d| d.replace(OsStr::new(&b.rel), b.merged().as_bytes()))
-                .map_err(|e| e.to_string())?;
+            let own = match (&b.base, b.left) {
+                (Some(own), 1..) => carried(&b.main, &merged, own),
+                _ => b.here.clone(),
+            };
+            let base = std::fs::read_to_string(dir.join(&b.rel))
+                .map_or_else(|_| own.clone(), |old| carried(&b.main, &merged, &old));
+            return keep_both(&dir, &b.rel, &base, &own).map(|_| false).map_err(|e| e.to_string());
         }
         let dir = bases(&b.root).ok_or("no git folder")?;
-        std::fs::create_dir_all(&dir)
-            .and_then(|_| std::fs::write(dir.join(&b.rel), &b.main))
-            .map(|_| false)
-            .map_err(|e| e.to_string())
+        // (`n`: the main checkout's changes left out stay out of what the session's own are told against — a
+        // carry-out would take them out of the main checkout's; `y`: the ones taken go in)
+        let own = own_base(&dir, &b.rel);
+        let own = match (take, own) {
+            (true, own) => {
+                let merged = b.merged();
+                crate::beneath::Dir::root(&b.root)
+                    .and_then(|d| d.replace(OsStr::new(&b.rel), merged.as_bytes()))
+                    .map_err(|e| e.to_string())?;
+                own.filter(|_| b.base.is_some())
+                    .map_or_else(|| b.main.clone(), |own| carried(&b.here, &merged, &own))
+            }
+            (false, own) => own.unwrap_or_else(|| b.main.clone()),
+        };
+        keep_both(&dir, &b.rel, &b.main, &own).map(|_| false).map_err(|e| e.to_string())
     };
     let state = &mut ed.session.instructions;
     (state.answered, state.answering) = (state.answered + 1, state.answering + 1);

@@ -544,9 +544,17 @@ impl Watch {
         Some(of)
     }
 
-    /// Change `x` followed from now on (not seen yet), its index.
+    /// Change `x` followed from now on (not seen yet), its index. Its id is its own: `x.nth` counts the changes
+    /// alike found now, and one followed before keeps the id of its first sight — one alike that turns up ahead of
+    /// it would take that id again (simseeds: `sim::reviews` seed 350), so it takes the next one no change of the
+    /// file has.
     fn follow(&mut self, file: &str, x: &Found) -> usize {
-        let i = self.add(file, (x.text.clone(), x.nth), (x.added, x.removed), x.lines.clone());
+        let taken = |n: usize| {
+            let id = change_id(&x.text, n);
+            self.changes.iter().any(|c| c.file == file && c.id == id)
+        };
+        let nth = (x.nth..).find(|&n| !taken(n)).unwrap_or(x.nth);
+        let i = self.add(file, (x.text.clone(), nth), (x.added, x.removed), x.lines.clone());
         let c = &mut self.changes[i];
         (c.rule, c.secret, c.seen) = (x.rule.clone(), x.secret, false);
         i

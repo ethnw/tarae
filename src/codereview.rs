@@ -88,9 +88,10 @@ pub struct CodeReview {
     pub base: Base,
     pub root: PathBuf,
     pub files: Vec<File>,
-    /// Files marked viewed before their base was there (a click on a file still opening, #67) — marked
-    /// once it is. The marks themselves are the session's (`Session.viewed`, kept past the review).
-    pending: Vec<PathBuf>,
+    /// Files marked viewed before their base was there (a click on a file still opening, #67), with the hash
+    /// of the text the mark was made on (None: still loading) — marked once it is, unless the text changed
+    /// meanwhile. The marks themselves are the session's (`Session.viewed`, kept past the review).
+    pending: Vec<(PathBuf, Option<u64>)>,
     /// Documents diffed against the review's base (back to the index when it ends).
     pub docs: Vec<DocId>,
     /// Once this document's diff arrives, select its first (or, going back, last) change — or the one at a
@@ -495,7 +496,7 @@ impl CodeReview {
         // before, still against HEAD, whose diff a turn that committed leaves empty)
         let back = !(f.new || f.gone || f.binary)
             && f.added + f.removed > 0
-            && !self.pending.contains(&f.path)
+            && !self.waits(&f.path)
             && doc_of(ed, f).is_some_and(|d| {
                 self.docs.contains(&d.id)
                     && d.review_base.is_some()
@@ -1321,8 +1322,10 @@ pub struct Since {
     pub unsure: bool,
 }
 
-/// A text's hash (the toolchain's `DefaultHasher`): a viewed mark's, a hint while a diff is worked out again —
-/// never a gate.
+/// A text's hash (the toolchain's `DefaultHasher`, 64 bits): a viewed mark's, a hint while a diff is worked out
+/// again — and whether a mark waiting for its file's base was made on the text there when it came
+/// (`marks_due`): a collision there keeps that one mark on a changed text, the odds 2⁻⁶⁴. Never a gate on what
+/// runs or what's written.
 fn rope_hash(r: &ropey::Rope) -> u64 {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1569,7 +1572,7 @@ impl CodeReview {
     /// as nothing since). Open or not: its lines new since (its grades' keys), and its added lines taken out
     /// since (`counts_of` — one it can't tell makes it `unsure`).
     pub fn since(&self, ed: &Editor, f: &File) -> Option<Since> {
-        if self.pending.contains(&f.path) {
+        if self.waits(&f.path) {
             return Some(Since::default());
         }
         let v = ed.session.viewed.get(&f.path)?;
@@ -1614,6 +1617,11 @@ impl CodeReview {
         let since = Since { new, out, unsure };
         v.checked.set(Some((stamp, since)));
         Some(since)
+    }
+
+    /// Whether the file at `path` has a mark waiting for its base.
+    fn waits(&self, path: &Path) -> bool {
+        self.pending.iter().any(|(p, _)| p == path)
     }
 
     /// The lines (0-based, now) of `f` new since its viewed mark — what `]g` goes to in a file partly viewed.
@@ -1750,13 +1758,17 @@ fn mark(ed: &mut Editor, i: usize) {
         r.graded(ed, f).iter().filter(|g| of_lines(g)).flat_map(|g| g.keys.iter().copied()).collect();
     keys.extend(before.into_iter().flat_map(|v| v.keys.iter().copied()));
     let path = f.path.clone();
+    // (the text the mark is made on; None while the document is still loading — a big file read on a worker: no
+    // text of it is in tarae yet, so none was seen, and reading the disk here would be a wait on the key path;
+    // the mark is then the text that loads)
+    let seen = doc_of(ed, f).filter(|d| !d.loading).map(|d| rope_hash(&d.text));
     let r = ed.session.code_review.as_mut().expect("checked");
     match now {
         Some(added) => {
-            r.pending.retain(|p| *p != path);
+            r.pending.retain(|(p, _)| *p != path);
             ed.session.viewed.insert(path, Viewed::new(keys, added, text));
         }
-        None if !r.pending.contains(&path) => r.pending.push(path),
+        None if !r.waits(&path) => r.pending.push((path, seen)),
         None => {}
     }
 }
@@ -1769,13 +1781,25 @@ pub fn mark_for_test(ed: &mut Editor, path: &Path) {
     ed.session.viewed.insert(path.to_path_buf(), mark);
 }
 
-/// A file's base just came: the marks waiting for it.
+/// A file's base just came: the marks waiting for it — but one whose text changed since the mark (a turn's
+/// write, a reload) isn't put on what no one saw: dropped, and said (simseeds: `sim::commit` seed 127).
 fn marks_due(ed: &mut Editor) {
     let Some(r) = ed.session.code_review.as_ref() else { return };
-    let due: Vec<usize> =
-        r.files.iter().enumerate().filter(|(_, f)| r.pending.contains(&f.path)).map(|(i, _)| i).collect();
+    let (mut due, mut changed) = (Vec::new(), Vec::new());
+    for (i, f) in r.files.iter().enumerate() {
+        let Some((_, seen)) = r.pending.iter().find(|(p, _)| *p == f.path) else { continue };
+        match doc_of(ed, f).filter(|d| !d.loading && d.review_base.is_some()) {
+            Some(d) if seen.is_some_and(|h| h != rope_hash(&d.text)) => changed.push(i),
+            _ => due.push(i),
+        }
+    }
     for i in due {
         mark(ed, i);
+    }
+    for i in changed {
+        unmark(ed, i);
+        let rel = ed.session.code_review.as_ref().map(|r| r.files[i].rel.clone()).unwrap_or_default();
+        ed.set_status(format!("{rel} changed before its diff came — not viewed, space v m marks it"));
     }
 }
 
@@ -4558,7 +4582,7 @@ pub fn unmark_viewed(ed: &mut Editor) {
     let Some(i) = file_in_hand(ed) else { return };
     let r = ed.session.code_review.as_ref().expect("in hand");
     let f = &r.files[i];
-    if !ed.session.viewed.contains_key(&f.path) && !r.pending.contains(&f.path) {
+    if !ed.session.viewed.contains_key(&f.path) && !r.waits(&f.path) {
         let rel = f.rel.clone();
         return ed.set_status(format!("{rel} isn't marked viewed — space v m marks it"));
     }
@@ -4574,7 +4598,7 @@ fn unmark(ed: &mut Editor, i: usize) {
     };
     ed.session.viewed.remove(&path);
     if let Some(r) = ed.session.code_review.as_mut() {
-        r.pending.retain(|p| *p != path);
+        r.pending.retain(|(p, _)| *p != path);
     }
 }
 
@@ -5705,6 +5729,30 @@ mod tests {
         assert_eq!(count(&ed), 3);
         feed(&mut ed, "]u");
         assert!(ed.toasts.iter().any(|t| t.text == "all 3 files viewed"), "{:?}", ed.toasts);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// simseeds (`sim::commit` seed 127): a mark made while the file's base is on the way waits for it (#67) —
+    /// and a file changed meanwhile isn't marked as it is when the base comes: no one saw that text. Said.
+    #[test]
+    fn a_mark_waiting_for_its_base_isnt_put_on_a_text_changed_meanwhile() {
+        let files = [("0.txt", "0\n", "02\n"), ("a.txt", "a\n", "a2\n"), ("b.txt", "b\n", "b2\n")];
+        let (mut ed, dir) = reviewing("mark-waits", &files);
+        for (i, f) in [(1, "a.txt"), (2, "b.txt")] {
+            show(&mut ed, i, false);
+            // (its base not in yet: the mark waits)
+            mark_viewed(&mut ed);
+            assert!(ed.session.code_review.as_ref().unwrap().waits(&dir.join(f)), "{f}: waits");
+        }
+        // b changes on disk and its buffer is reloaded before its base comes
+        std::fs::write(dir.join("b.txt"), "b3\n").unwrap();
+        let d = ed.docs.iter_mut().find(|d| d.path.as_deref() == Some(&dir.join("b.txt"))).unwrap();
+        crate::disk::reload_text(d, &ropey::Rope::from_str("b3\n"));
+        settle_until(&mut ed, |ed| ed.session.code_review.as_ref().unwrap().pending.is_empty());
+        assert!(viewed_now(&ed, "a.txt"), "the one unchanged is marked as it was");
+        assert!(!viewed_now(&ed, "b.txt"), "the one changed meanwhile isn't");
+        let said = ed.toasts.iter().any(|t| t.text.starts_with("b.txt changed before its diff came"));
+        assert!(said, "{:?}", ed.toasts);
         std::fs::remove_dir_all(&dir).ok();
     }
 

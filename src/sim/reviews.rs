@@ -27,8 +27,9 @@ use crate::reviews::{IDLE, probe};
 /// The seeds every `cargo test` runs, each twice: 155 steps a second at opt-level 0 (2026-10-18, macOS,
 /// `TARAE_SIM_SEEDS=12`: 3,234 steps in 20.9 s), ~135 steps a run, the five in ~8 s. 3, 4 and 5 are the first
 /// that took a check's break (`target/sb/reviewlens-sim-break.sh`): seed 3 a change whose text turned
-/// token-like keeping its id, seed 4 a finding applied at a text gone, seed 5 a rule kept by what it matched.
-const SEEDS: &[u64] = &[0, 1, 3, 4, 5];
+/// token-like keeping its id, seed 4 a finding applied at a text gone, seed 5 a rule kept by what it matched;
+/// 350 (simseeds) a change alike turning up ahead of a followed one, given the followed one's id.
+const SEEDS: &[u64] = &[0, 1, 3, 4, 5, 350];
 
 /// The scenario's own steps a run (the jobs' and results' come between them).
 const INPUTS: usize = 80;

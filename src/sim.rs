@@ -542,6 +542,16 @@ impl Sim {
         }
     }
 
+    /// A check once the walk ended (all quiet): an Err or a panic fails the run as a step's check does — with
+    /// the trace's end, the seed and its choices kept for a replay.
+    pub fn at_end(&mut self, check: impl FnOnce() -> Result<(), String>) {
+        match caught(check) {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => self.fail_now(format!("at its end: {why}")),
+            Err(p) => self.fail_now(format!("the end's check panicked: {p}")),
+        }
+    }
+
     fn options(&self, inputs: bool) -> Vec<Next> {
         let s = self.h.lock();
         let mut v = Vec::new();
@@ -601,7 +611,12 @@ impl Sim {
     fn fail_now(&mut self, why: String) -> ! {
         let file = self.choices_file();
         let body: String = self.choices.made.iter().map(|c| format!("{c}\n")).collect();
-        let kept = std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, body));
+        let kept = match self.choices.given.is_some() {
+            true => Ok(()),
+            false => {
+                std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, body))
+            }
+        };
         let replay = match kept {
             Ok(()) => format!("replay: TARAE_SIM_REPLAY={} cargo test {}", file.display(), self.name),
             Err(e) => format!("(its choices not written: {e})"),
@@ -618,6 +633,10 @@ impl Sim {
     }
 
     fn choices_file(&self) -> PathBuf {
+        // (a replay failing again: the file it replayed, which holds the run already — never written over)
+        if self.choices.given.is_some() {
+            return PathBuf::from(&self.choices.from);
+        }
         let tag: String = self.choices.from.chars().filter(char::is_ascii_alphanumeric).collect();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sim");
         dir.join(format!("{}-{}.choices", self.name, tag.trim_start_matches("seed")))
@@ -854,6 +873,38 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("replay: TARAE_SIM_REPLAY=") && file.exists(), "{said}");
+    }
+
+    /// simseeds (the reviewer's note): a check at the run's end (`at_end`) fails it as a step's check does — an
+    /// Err and a panic alike, the seed said and its choices written; a replay of it that fails again names the
+    /// file it replayed and writes nothing over it (a broken run failing earlier would have cut it short).
+    #[test]
+    fn an_end_check_fails_the_run_with_its_replay_and_a_replay_keeps_its_file() {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sim/end_check-3.choices");
+        std::fs::remove_file(&file).ok();
+        let fail = |choices: Choices, check: Box<dyn FnOnce() -> Result<(), String>>| {
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut sim = Sim::new("end_check", choices, LIMIT);
+                let mut ed = Editor::new(crate::config::Config::default());
+                sim.walk(&mut ed, 3, |_, _| "an input".into(), |_| Ok(()), |_| String::new());
+                sim.at_end(check);
+            }));
+            failed.err().map(|p| panic_said(&*p)).unwrap_or_default()
+        };
+        let replay = format!("replay: TARAE_SIM_REPLAY={} ", file.display());
+        let said = fail(Choices::seeded(3), Box::new(|| Err("the end's own".into())));
+        assert!(
+            said.starts_with("simulation end_check (seed 3) failed after 3 steps: at its end: the end's own"),
+            "{said}"
+        );
+        assert!(said.contains(&replay) && file.exists(), "{said}");
+        // (a line no replay reads: gone if the file were written again)
+        let kept = std::fs::read_to_string(&file).unwrap() + "# kept\n";
+        std::fs::write(&file, &kept).unwrap();
+        let said = fail(Choices::replay(&file), Box::new(|| panic!("the end's panic")));
+        assert!(said.contains("failed after 3 steps: the end's check panicked: the end's panic"), "{said}");
+        assert!(said.contains(&replay), "names the file it replayed: {said}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), kept, "the replayed file as it was");
     }
 
     /// Second review 5 (the reviewer's note on threads the loop starts): one the loop lets go that ends a

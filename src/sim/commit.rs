@@ -13,7 +13,8 @@ use super::sessions::git;
 use super::{Choices, Sim};
 use crate::editor::Editor;
 
-const SEEDS: &[u64] = &[0, 1];
+/// (127: a mark waiting for its file's base, put on a text changed meanwhile)
+const SEEDS: &[u64] = &[0, 1, 127];
 
 const INPUTS: usize = 30;
 
@@ -70,26 +71,40 @@ fn run(choices: Choices) -> Vec<String> {
         |ed| held(ed, &repo, &seen.borrow()),
         |ed| print(ed, &repo),
     );
-    let trace = sim.trace().to_vec();
     // (quiet now: every `:commit` taken has run)
-    let failed = ed.messages.iter().filter(|m| m.2.starts_with("commit: ")).count();
-    let commits: usize = out(&repo, &["rev-list", "--count", "HEAD"]).parse().unwrap_or(0);
-    let taken = seen.borrow().taken;
-    assert_eq!(commits, 1 + taken - failed, "{taken} taken, {failed} said failed:\n{}", trace.join("\n"));
-    let staged = !out(&repo, &["diff", "--cached", "--name-only"]).is_empty();
-    let said = ed.messages.iter().any(|m| m.2.contains("stays staged"));
-    assert!(!staged || said, "staged, unsaid:\n{}", trace.join("\n"));
-    // (frictions29 82: a file changed since its mark — open or closed — isn't viewed once the jobs ran)
-    if let Some(r) = ed.session.code_review.as_ref() {
-        for f in r.files.iter().filter(|f| r.viewed(&ed, f)) {
-            let now = std::fs::read_to_string(&f.path).unwrap_or_default();
-            let then = seen.borrow().marked.get(&f.path).cloned();
-            assert_eq!(then.as_deref(), Some(now.as_str()), "{} viewed:\n{}", f.rel, trace.join("\n"));
-        }
-    }
+    sim.at_end(|| ended(&ed, &repo, &seen.borrow()));
+    let trace = sim.trace().to_vec();
     drop(sim);
     drop(ed);
     trace
+}
+
+/// Each `:commit` taken committed or its failure said, nothing staged unsaid, and no file viewed that changed
+/// since its mark.
+fn ended(ed: &Editor, repo: &std::path::Path, seen: &Seen) -> Result<(), String> {
+    let failed = ed.messages.iter().filter(|m| m.2.starts_with("commit: ")).count();
+    let commits: usize = out(repo, &["rev-list", "--count", "HEAD"]).parse().unwrap_or(0);
+    if commits != 1 + seen.taken - failed {
+        return Err(format!("{commits} commits: {} taken, {failed} said failed", seen.taken));
+    }
+    let staged = !out(repo, &["diff", "--cached", "--name-only"]).is_empty();
+    if staged && !ed.messages.iter().any(|m| m.2.contains("stays staged")) {
+        return Err("staged, unsaid".into());
+    }
+    // (frictions29 82: a file changed since its mark — open or closed — isn't viewed once the jobs ran)
+    if let Some(r) = ed.session.code_review.as_ref() {
+        for f in r.files.iter().filter(|f| r.viewed(ed, f)) {
+            let now = std::fs::read_to_string(&f.path).unwrap_or_default();
+            if seen.marked.get(&f.path) != Some(&now) {
+                return Err(format!(
+                    "{} viewed: marked at {:?}, now {now:?}",
+                    f.rel,
+                    seen.marked.get(&f.path)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &RefCell<Seen>) -> String {
