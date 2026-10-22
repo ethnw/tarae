@@ -104,6 +104,12 @@ const fn turn_time(row: u16, cols: (u16, u16)) -> Varies {
     Varies { row, cols, what: "a turn's time (`2.0s`)", holds: seconds }
 }
 
+/// How long Claude has waited, as the follow card's head says it after `waiting`, right-aligned in `cols` of `row`:
+/// `4.7s` — the scene's own pace on tarae's clock, never the same twice.
+const fn wait_time(row: u16, cols: (u16, u16)) -> Varies {
+    Varies { row, cols, what: "the follow card's wait (`4.7s`)", holds: seconds }
+}
+
 /// `2.0s`, `12.3s`: seconds to a tenth.
 fn seconds(t: &str) -> bool {
     t.strip_suffix('s').and_then(|n| n.split_once('.')).is_some_and(|(a, b)| {
@@ -508,13 +514,14 @@ const DOCS: &[DocShot] = &[
     row("m4-chat-hanji.png", Some("chatanswer"), S).light().varies(&[turn_time(24, (103, 111))]),
     row("chat-plan.png", None, S),
     // (its head quotes what was asked, as every review of Claude's change does — frictions34 43)
-    row("chat-edit.png", Some("review"), S),
+    // (the follow card's wait on its head row, right-aligned: how long the scene took to get there)
+    row("chat-edit.png", Some("review"), S).varies(&[wait_time(17, (103, 111))]),
     row("chat-edit-why.png", None, S),
     row("chat-turn-review.png", None, (200, 36)),
     row("chat-review-at-end.png", None, S),
     row("chat-undo-turn.png", None, S),
     row("chat-tests.png", None, S),
-    row("chat-run.png", Some("runcard"), S),
+    row("chat-run.png", Some("runcard"), S).varies(&[wait_time(3, (103, 111))]),
     row("notes.png", None, S),
     row("commit-draft.png", None, S),
     row("review.png", Some("codereview"), S),

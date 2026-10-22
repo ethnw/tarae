@@ -8842,7 +8842,8 @@ impl OfferCard {
             |scope: &str| Style { fg: editor.theme.try_get(scope).and_then(|s| s.fg).or(body.fg), ..body };
         let (plus, minus) = (sign("diff.plus"), sign("diff.minus"));
         let mut row = self.y + self.pad;
-        spot(self.id, self.x, row, width);
+        // (its label on its title's row: framed, the frame's top line)
+        spot(self.id, self.x, if self.boxed { self.y } else { row }, width);
         for (i, (text, faint)) in self.lines.iter().enumerate() {
             // (framed, its title is the frame's name)
             if self.boxed && i == 0 {

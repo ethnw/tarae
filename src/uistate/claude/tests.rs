@@ -371,6 +371,28 @@ fn pointing_puts_an_elements_id_in_the_chat() {
     assert!(ed.pointing.is_none() && ed.session.is_at(crate::session::At::Chat));
 }
 
+/// A framed card's label sits on its title's row — the frame's top line (`ui.edge = "lines"`), where its name
+/// is — at its left edge: the spot the state gives and the frame drawn agree.
+#[test]
+fn a_framed_cards_label_is_on_its_title_row() {
+    let mut ed = editor();
+    let id = card(&mut ed, "End the review?");
+    chat(&mut ed, "");
+    let before = frame(&mut ed);
+    let title = before.lines().position(|l| l.contains("End the review?")).expect(&before);
+    ed.handle_key(key("<C-o>"));
+    let p = ed.pointing.clone().expect("labels up");
+    let t = p.targets.iter().find(|t| t.id == format!("card#{id}")).expect("the card has a label");
+    assert_eq!(t.at.1, title, "on the title's row:\n{before}");
+    let row = before.lines().nth(title).unwrap();
+    let x = row[..row.find("End the review?").unwrap()].chars().count();
+    assert!(t.at.0 < x && x - t.at.0 <= 3, "at the card's left edge, before its name:\n{before}");
+    let text = frame(&mut ed);
+    let (a, b) = crate::labels::Labels::label(p.targets.iter().position(|u| u.id == t.id).unwrap());
+    let row = text.lines().nth(title).unwrap_or_default();
+    assert!(row.contains(&format!("{a}{b}")) && row.contains("End the review?"), "{text}");
+}
+
 /// A click while labels are up picks the element under it — here a side panel's row, by its content.
 #[test]
 fn pointing_by_a_click() {
