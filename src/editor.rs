@@ -296,10 +296,44 @@ impl Screen {
     pub fn list(&self, kind: crate::pane::GroupKind) -> Option<(usize, usize, usize)> {
         self.lists.borrow().iter().find(|l| l.0 == kind).map(|l| l.1)
     }
+
+    /// The column past the bottom slot's last — the chat's first (or a group docked right's), as last drawn.
+    pub fn slot_end(&self) -> usize {
+        match self.slot_w {
+            0 => self.chat_x.unwrap_or(usize::MAX),
+            w => self.slot_x + w,
+        }
+    }
 }
 
 /// A list as drawn (`Screen.lists`): its first row's screen row, the rows it has, the first of its rows in sight.
 pub type ListDrawn = (usize, usize, usize);
+
+/// Where each run panel drew its output this frame (`Screen.run_rows`) — one, or a docked group's beside the slot's.
+#[derive(Clone, Debug, Default)]
+pub struct RunRows(std::cell::RefCell<Vec<(crate::sizes::Slot, usize, usize, usize)>>);
+
+impl RunRows {
+    /// Panel `r.0`'s: (its panel, first screen row, the text's first column, rows).
+    pub fn set(&self, r: Option<(crate::sizes::Slot, usize, usize, usize)>) {
+        if let Some(r) = r {
+            let mut all = self.0.borrow_mut();
+            all.retain(|e| e.0 != r.0);
+            all.push(r);
+        }
+    }
+
+    /// The one recorded last.
+    #[cfg(test)]
+    pub fn get(&self) -> Option<(crate::sizes::Slot, usize, usize, usize)> {
+        self.0.borrow().last().copied()
+    }
+
+    /// Panel `slot`'s.
+    pub fn of(&self, slot: crate::sizes::Slot) -> Option<(crate::sizes::Slot, usize, usize, usize)> {
+        self.0.borrow().iter().find(|e| e.0 == slot).copied()
+    }
+}
 
 /// Screen layout of the last frame (term.rs fills it on every draw).
 #[derive(Clone, Debug, Default)]
@@ -310,6 +344,8 @@ pub struct Screen {
     /// Every pane of the tree that had room, where it was laid out (panes P2b) — what `C-w h/j/k/l` hop between
     /// and the dividers are found from. Filling the screen, the one pane.
     pub leaves: Vec<(crate::split::PaneId, crate::split::Rect)>,
+    /// How each group laid out was laid (side by side, over and under, stacked) — what `C-w t` turns.
+    pub shapes: Vec<(crate::pane::GroupKind, crate::pane::Shape)>,
     /// The document each of `panes` drew (in their order) — its rows are that one's lines, whatever the pane
     /// shows since (`rows_of`).
     pub pane_docs: Vec<DocId>,
@@ -328,9 +364,16 @@ pub struct Screen {
     pub chat_view: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
     /// Where the run panel in front drew its output (the tests' detail): (its panel, first screen row, the text's
     /// first column, rows) — the mouse finds a row of its view there.
-    pub run_rows: std::cell::Cell<Option<(crate::sizes::Slot, usize, usize, usize)>>,
-    /// …and its columns: how wide its text is (`rundoc.rs` keeps the cursor's column in sight).
-    pub run_cols: std::cell::Cell<usize>,
+    pub run_rows: RunRows,
+    /// …and its columns, each panel's: how wide its text is (`rundoc.rs` keeps the cursor's column in sight).
+    pub run_cols: std::cell::RefCell<Vec<(crate::sizes::Slot, usize)>>,
+    /// The groups docked in sight as drawn: their kind and their leaf's rect (P3 step 6) — the mouse finds them.
+    pub docked: std::cell::RefCell<Vec<(crate::pane::GroupKind, crate::split::Rect)>>,
+    /// The groups docked over the code folded into the slot this frame, by `dock_index` — the code and the slot under
+    /// them leave them too few rows (`term::over_fold`).
+    pub over_folded: [bool; 4],
+    /// The bottom slot's width (from `slot_x`) — a group docked right of the code is past it.
+    pub slot_w: usize,
     /// First row and row count of the picker list.
     pub picker_list: Option<(usize, usize)>,
     /// Grammar download offer buttons: (row, start col, end col, key to feed when clicked).
@@ -1648,7 +1691,7 @@ impl Editor {
         if order.is_empty() {
             order = self.code_leaves();
         }
-        let mut here = self.session.at_pane().unwrap_or(self.session.focus);
+        let mut here = self.at_pane().unwrap_or(self.session.focus);
         // (the slot's keys on a group: its detail's)
         if !order.contains(&here)
             && let Some(d) = self.hosted_detail(here, &self.screen.leaves)
@@ -1664,10 +1707,16 @@ impl Editor {
     }
 
     /// `C-w H J K L` (Helix's `swap_view_*`): this code pane and the code pane that way trade places, the keys
-    /// staying with this one. The panels keep their places (moving one out of the slot comes with P3) — said.
+    /// staying with this one. From a group's member it docks the group on that side, `C-w J` back to the slot
+    /// (`dock_key`, P3 §3.2); the side panel and the chat keep their places — said.
     pub fn swap_view(&mut self, dx: i32, dy: i32) {
+        if self.dock_key(dx, dy) {
+            return;
+        }
         if !self.session.is_at(At::Code) {
-            return self.set_status("the panels keep their places — C-w H J K L moves the code's panes");
+            return self.set_status(
+                "the side panel and the chat keep their places — C-w H J K L moves the code's panes and docks a group",
+            );
         }
         // (the last frame's panes: one closed since — `C-w o`, no frame between — is no pane to trade with)
         let live = |to: &crate::split::PaneId| {
@@ -1682,6 +1731,10 @@ impl Editor {
     /// `C-w t` (Helix's `transpose_view`): the split of the code's panes around the one last focused turned — side by
     /// side ↔ stacked; the panels around it stay.
     pub fn transpose_view(&mut self) {
+        // (from a group's member: its members turned — side by side ↔ over and under, `dock::group_turn`)
+        if let Some(kind) = self.group_in_hand() {
+            return self.group_turn(kind);
+        }
         let views: Vec<_> = self.session.views.iter().map(|v| v.id).collect();
         if !self.session.split.transpose(self.session.focus, &|id| views.contains(&id)) {
             self.set_status("one code pane — nothing to turn (C-w v splits it)");
@@ -1694,7 +1747,7 @@ impl Editor {
     /// the terminal's view mode, the chat's input, the side panel on the row for where the code is. Nothing that way
     /// is said.
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        let Some(mut from) = self.session.at_pane() else { return self.nothing_toward(dx, dy) };
+        let Some(mut from) = self.at_pane() else { return self.nothing_toward(dx, dy) };
         let leaves = &self.screen.leaves;
         // (the slot's keys on a group: its detail's — the slot's leaf is its members on screen)
         if let Some(d) = self.hosted_detail(from, leaves) {
@@ -1731,7 +1784,7 @@ impl Editor {
     pub fn focus_pane(&mut self, id: crate::split::PaneId) {
         use crate::pane::Shows;
         let Some(shows) = self.session.shows(id) else { return };
-        if !matches!(shows, Shows::Slot | Shows::List(_) | Shows::Detail(_)) {
+        if !matches!(shows, Shows::Slot | Shows::List(_) | Shows::Detail(_) | Shows::Group(_)) {
             self.plugin_panel_unfocus();
             self.procs_unfocus();
         }
@@ -1748,6 +1801,12 @@ impl Editor {
             Shows::List(k) => self.list_focus(k),
             // (a detail in the slot is the slot's view mode on it)
             Shows::Detail(k) => self.detail_focus(k),
+            // (a docked group's leaf: the member it had last — its output alone while it lists nothing)
+            Shows::Group(k) => {
+                if let Some(s) = k.slot() {
+                    self.slot_show(s);
+                }
+            }
         }
     }
 
@@ -2516,10 +2575,24 @@ impl Editor {
                 return;
             }
         }
-        // The bottom slot's columns: under the code, between the side panel and the chat
-        let in_slot = x >= s.slot_x && s.chat_x.is_none_or(|cx| x < cx);
+        // A group docked beside the code (P3 step 6): what's under the pointer in its rect is its panel's
+        let docked = s
+            .docked
+            .borrow()
+            .iter()
+            .find(|d| (d.1.x..d.1.x + d.1.w).contains(&x) && (d.1.y..d.1.y + d.1.h).contains(&y))
+            .map(|d| d.0);
+        // The bottom slot's columns: under the code, between the side panel (or a group docked left) and the chat
+        // (or one docked right) — or a docked group's
+        let in_slot = docked.is_some() || (x >= s.slot_x && x < s.slot_end());
+        // (the run panel there: the docked one's, else the slot's)
+        let slot = match docked {
+            Some(k) => k.slot(),
+            None => self.slot_shown(),
+        };
         // The terminal: the wheel scrolls back, a click gives it the keys (a click anywhere else takes them)
-        let in_terminal = s.terminal_rows.is_some_and(|(y0, y1)| (y0..=y1).contains(&y)) && in_slot;
+        let in_terminal =
+            s.terminal_rows.is_some_and(|(y0, y1)| (y0..=y1).contains(&y)) && in_slot && docked.is_none();
         // A press anywhere ends a selection whose release was lost (a pane switch mid-drag)
         let owned = std::mem::replace(&mut self.mouse_in_terminal, false) && m.kind != K::Down;
         if m.kind == K::Down
@@ -2560,12 +2633,12 @@ impl Editor {
         if let Some(a) = s.procs_panel.get()
             && (a.top..=a.bottom).contains(&y)
             && in_slot
-            && self.slot() == Some(crate::sizes::Slot::Procs)
+            && slot == Some(crate::sizes::Slot::Procs)
         {
             let detail = s
                 .run_rows
-                .get()
-                .filter(|r| r.0 == crate::sizes::Slot::Procs && (r.1..r.1 + r.3).contains(&y) && x + 1 >= r.2)
+                .of(crate::sizes::Slot::Procs)
+                .filter(|r| (r.1..r.1 + r.3).contains(&y) && x + 1 >= r.2)
                 .filter(|_| !(a.x..a.x + a.w).contains(&x));
             let slot = crate::sizes::Slot::Procs;
             match m.kind {
@@ -2606,12 +2679,11 @@ impl Editor {
         }
         // The test panel: the wheel scrolls its detail (the failure's message, or the output) — its document's rows
         // while it has the keys; a press gives it the keys — on its detail, the cursor there
-        let slot = self.slot();
         // (the row of the output under the pointer, and its column — as the panel drew them, `Screen.run_rows`)
         let run_row = |slot: crate::sizes::Slot| {
             s.run_rows
-                .get()
-                .filter(|r| r.0 == slot && (r.1..r.1 + r.3).contains(&y) && x >= r.2)
+                .of(slot)
+                .filter(|r| (r.1..r.1 + r.3).contains(&y) && x >= r.2)
                 .map(|r| (y - r.1, x - r.2))
         };
         if let Some((y0, y1, _)) = s.test_panel.get()
@@ -2629,7 +2701,7 @@ impl Editor {
                     None if let Some(i) = self.list_row(crate::pane::GroupKind::Tests, x, y) => {
                         crate::grouplist::click(self, crate::pane::GroupKind::Tests, i)
                     }
-                    None => self.bottom_take_keys(),
+                    None => self.panel_take_keys(crate::sizes::Slot::Test),
                 },
                 _ => {}
             }
@@ -2647,7 +2719,9 @@ impl Editor {
             let step = chip.and_then(|k| Some(self.session.preflight.as_ref()?.steps.get(k)?.name.clone()));
             let at = run_row(crate::sizes::Slot::Task);
             // (a row of its list — its places, a preflight's steps — laid out beside the output)
-            let listed = self.slot_group().and_then(|g| Some((g.kind, self.list_row(g.kind, x, y)?)));
+            let listed = self
+                .kind_of(crate::sizes::Slot::Task)
+                .and_then(|kind| Some((kind, self.list_row(kind, x, y)?)));
             match m.kind {
                 K::Down if let Some((kind, i)) = listed => crate::grouplist::click(self, kind, i),
                 K::ScrollDown | K::ScrollUp => {
@@ -2659,7 +2733,7 @@ impl Editor {
                 }
                 K::Down => match at {
                     Some((r, c)) => crate::rundoc::click(self, crate::sizes::Slot::Task, r, c),
-                    None => self.bottom_take_keys(),
+                    None => self.panel_take_keys(crate::sizes::Slot::Task),
                 },
                 _ => {}
             }
@@ -2830,6 +2904,10 @@ impl Editor {
         self.plugin_panel_unfocus();
         self.procs_unfocus();
         self.session.leave(At::Slot);
+        // (a group's list, in the slot or docked: the code's too)
+        if let At::List(id) = self.session.docked() {
+            self.session.leave(At::List(id));
+        }
         self.completion = None;
         self.popup = None;
         let tab = self.config.tab_width;

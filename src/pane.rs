@@ -29,6 +29,9 @@ pub enum Shows {
     List(GroupKind),
     /// …and its detail, a pane of its own (`Detail::Pane`) — the tests': the failure picked, else the run's output.
     Detail(GroupKind),
+    /// A docked group's host (§3.1, `Place::Docked`): a leaf of the tree beside the code, the group's two members laid
+    /// out in it as the slot lays them.
+    Group(GroupKind),
 }
 
 impl Shows {
@@ -42,20 +45,27 @@ impl Shows {
             Shows::Chat => "chat".into(),
             Shows::List(k) => format!("list:{}", k.name()),
             Shows::Detail(k) => format!("detail:{}", k.name()),
+            Shows::Group(k) => format!("group:{}", k.name()),
         }
     }
 
-    /// A surface of the tree's (`SURFACES`, the code) by its name — a group's members aren't kept by name: the
-    /// group comes with its host (`Session.groups`).
+    /// A surface of the tree's (`SURFACES`, the code, a docked group's host) by its name — a group's members aren't
+    /// kept by name: the group comes with its host (`Session.groups`).
     pub fn of_name(s: &str) -> Option<Self> {
+        if let Some(k) = s.strip_prefix("group:").and_then(GroupKind::of_name) {
+            return k.dockable().then_some(Shows::Group(k));
+        }
         [Shows::Code, Shows::Side, Shows::Rail, Shows::Slot, Shows::Chat].into_iter().find(|k| k.name() == s)
     }
 }
 
 /// What a linked group lists (§2.1–2.2): one model for every master–detail surface. The tests', the task's, the
-/// preflight's and `:procs`' are built (in the slot). The git tab and the review's rail drive the code as `Detail::Code`
-/// says (step 5: `Editor::git_inline_sync`, `codereview::show`) from the side column, outside `Session.groups` — they
-/// join it when a group can be docked (step 6), the side column a place like the slot.
+/// preflight's and `:procs`' are built — in the slot or docked beside the code (step 6, `Place`). The git tab and the
+/// review's rail drive the code as `Detail::Code` says (step 5: `Editor::git_inline_sync`, `codereview::show`) from the
+/// left column, and stay outside `Session.groups`: what's there is what moves between places (`Group.place`, its host
+/// leaf, its own detail pane), and these two have no place to move to — the side panel and the rail stay the left
+/// column (§3.7: how you move, not what you look at), their detail is the code pane itself, never a pane of theirs.
+/// Their kinds name them where the keys go (`Region::List`), as the others'.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GroupKind {
     Tests,
@@ -97,6 +107,77 @@ impl GroupKind {
     fn detail_is_code(self) -> bool {
         matches!(self, GroupKind::Git | GroupKind::Review)
     }
+
+    /// It can leave the slot and dock beside the code (§3.1): the slot's groups. The git tab and the review's rail
+    /// are the left column's (§3.7: how you move, not what you look at) — their detail is the code itself.
+    pub fn dockable(self) -> bool {
+        !self.detail_is_code()
+    }
+
+    /// Its index among the dockable kinds (`Sizes.docked`).
+    pub fn dock_index(self) -> usize {
+        match self {
+            GroupKind::Tests => 0,
+            GroupKind::Task => 1,
+            GroupKind::Preflight => 2,
+            GroupKind::Procs | GroupKind::Git | GroupKind::Review => 3,
+        }
+    }
+}
+
+/// Where a group is (§3.1): a tab of the slot, or docked beside the code on a side — a leaf of the tree
+/// (`Shows::Group`). Kept per kind (`Group.place`) while the group comes and goes: a run of a kind you docked comes
+/// back docked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Place {
+    #[default]
+    Slot,
+    Docked(Side),
+}
+
+/// The side a group docks on (`C-w H/L/K`): left of the code (right of the side panel or the rail), right of it
+/// (left of the chat), above it in its column. `C-w J` — below — is the slot's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Top,
+}
+
+impl Side {
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+            Side::Top => "top",
+        }
+    }
+
+    pub fn of_name(s: &str) -> Option<Self> {
+        [Side::Left, Side::Right, Side::Top].into_iter().find(|k| k.name() == s)
+    }
+
+    /// Beside the code (a column of its own, the whole height) — not over it.
+    pub fn beside(self) -> bool {
+        self != Side::Top
+    }
+}
+
+impl Place {
+    /// Its name in the state (`panes[].place`) and the restart's file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Place::Slot => "slot",
+            Place::Docked(s) => s.name(),
+        }
+    }
+
+    pub fn of_name(s: &str) -> Option<Self> {
+        match s {
+            "slot" => Some(Place::Slot),
+            s => Side::of_name(s).map(Place::Docked),
+        }
+    }
 }
 
 /// A group's detail: a pane of its own, or the code pane last focused, which the list drives (git, review).
@@ -115,12 +196,63 @@ pub enum Detail {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
     pub kind: GroupKind,
-    /// The leaf that holds it: the slot's (a docked leaf's or a floating frame's come with steps 6–7).
+    /// The leaf that holds it: the slot's, or its own docked leaf's (`Shows::Group`, `place` docked) — the slot's
+    /// again for a frame it folds into the slot (`Editor::group_host`). (A floating frame's comes with step 7.)
     pub host: PaneId,
     pub list: PaneId,
     pub detail: Detail,
     /// The member that had the keys last — the one in sight while the group is stacked (§2.3); the list at first.
     pub front: Member,
+    /// Where it is: the slot, or docked on a side (§3.1) — kept when it closes, for its kind's next run.
+    pub place: Place,
+    /// How its members are laid in its pane: by the pane's shape, or as `C-w t` chose — kept as its place is.
+    pub laid: Laid,
+}
+
+/// How a group lays its two members (user, 2026-10-23): by its pane's shape (`Auto` — side by side where both fit,
+/// over and under where the pane is tall, else stacked), or side by side or over and under as `C-w t` turned it (a
+/// choice that doesn't fit is stacked for that frame, not forgotten). `C-w =` makes it automatic again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Laid {
+    #[default]
+    Auto,
+    Beside,
+    Over,
+}
+
+/// How a group's members are laid in its pane in a frame (`Group.laid` where it fits, else stacked — `term.rs`'s
+/// `group_shape`; `Screen.shapes` the last frame's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Beside,
+    Over,
+    Stacked,
+}
+
+impl Shape {
+    /// Its words in what's said (`C-w t`).
+    pub fn words(self) -> &'static str {
+        match self {
+            Shape::Beside => "side by side",
+            Shape::Over => "over and under",
+            Shape::Stacked => "stacked",
+        }
+    }
+}
+
+impl Laid {
+    /// Its name in the restart's file and `layouts.json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Laid::Auto => "auto",
+            Laid::Beside => "beside",
+            Laid::Over => "over",
+        }
+    }
+
+    pub fn of_name(s: &str) -> Option<Self> {
+        [Laid::Auto, Laid::Beside, Laid::Over].into_iter().find(|l| l.name() == s)
+    }
 }
 
 /// One of a group's two members.
@@ -135,7 +267,7 @@ impl Group {
     /// code.
     pub fn new(kind: GroupKind, host: PaneId, first: PaneId) -> Self {
         let detail = if kind.detail_is_code() { Detail::Code } else { Detail::Pane(first + 1) };
-        Group { kind, host, list: first, detail, front: Member::List }
+        Group { kind, host, list: first, detail, front: Member::List, place: Place::Slot, laid: Laid::Auto }
     }
 
     /// The ids it takes from `first` (`new`).

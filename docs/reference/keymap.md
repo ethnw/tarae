@@ -239,13 +239,13 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w >` | `panel_wider` | Wider: chat or side panel |
 | `C-w e` | `focus_side_panel` | To the side panel and back |
 | `C-w h` | `jump_view_left` | Window to the left |
-| `C-w H` | `swap_view_left` | Swap with the window left |
+| `C-w H` | `swap_view_left` | Swap left · dock a group |
 | `C-w j` | `jump_view_down` | Window below |
-| `C-w J` | `swap_view_down` | Swap with the window below |
+| `C-w J` | `swap_view_down` | Swap down · group to the slot |
 | `C-w k` | `jump_view_up` | Window above |
-| `C-w K` | `swap_view_up` | Swap with the window above |
+| `C-w K` | `swap_view_up` | Swap up · dock a group on top |
 | `C-w l` | `jump_view_right` | Window to the right |
-| `C-w L` | `swap_view_right` | Swap with the window right |
+| `C-w L` | `swap_view_right` | Swap right · dock a group |
 | `C-w o` | `wonly` | Close all other windows |
 | `C-w q` | `wclose` | Close this window or panel |
 | `C-w s` | `hsplit` | Split the window top / bottom |
@@ -361,13 +361,13 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w >` | `panel_wider` | Wider: chat or side panel |
 | `space w e` | `focus_side_panel` | To the side panel and back |
 | `space w h` | `jump_view_left` | Window to the left |
-| `space w H` | `swap_view_left` | Swap with the window left |
+| `space w H` | `swap_view_left` | Swap left · dock a group |
 | `space w j` | `jump_view_down` | Window below |
-| `space w J` | `swap_view_down` | Swap with the window below |
+| `space w J` | `swap_view_down` | Swap down · group to the slot |
 | `space w k` | `jump_view_up` | Window above |
-| `space w K` | `swap_view_up` | Swap with the window above |
+| `space w K` | `swap_view_up` | Swap up · dock a group on top |
 | `space w l` | `jump_view_right` | Window to the right |
-| `space w L` | `swap_view_right` | Swap with the window right |
+| `space w L` | `swap_view_right` | Swap right · dock a group |
 | `space w o` | `wonly` | Close all other windows |
 | `space w q` | `wclose` | Close this window or panel |
 | `space w s` | `hsplit` | Split the window top / bottom |

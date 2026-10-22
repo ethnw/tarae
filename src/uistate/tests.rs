@@ -563,6 +563,39 @@ const SCENES: &[Scene] = &[
         frame(ed);
         feed(ed, &["<C-w>"]);
     }),
+    // (P3 step 6: the tests group docked right of the code, a task in the slot — where a group is doesn't change
+    // what its keys do)
+    ("list:tests docked right, a task in the slot", |ed| {
+        task_panel(ed);
+        tests_group_list(ed);
+        frame(ed);
+        ed.dock(crate::pane::GroupKind::Tests, crate::pane::Side::Right);
+    }),
+    // (…and the window prefix taken there: `C-w t` turns its members, the code's split untouched)
+    ("list:tests docked right, the window prefix taken from it", |ed| {
+        task_panel(ed);
+        tests_group_list(ed);
+        frame(ed);
+        ed.dock(crate::pane::GroupKind::Tests, crate::pane::Side::Right);
+        frame(ed);
+        feed(ed, &["<C-w>"]);
+    }),
+    ("detail:tests docked right (the run's output), a task in the slot, by tab from its list", |ed| {
+        task_panel(ed);
+        tests_group_list(ed);
+        frame(ed);
+        ed.dock(crate::pane::GroupKind::Tests, crate::pane::Side::Right);
+        frame(ed);
+        feed(ed, &["<tab>"]);
+    }),
+    ("the task's output in the slot, the tests docked over the code", |ed| {
+        task_panel(ed);
+        tests_group_list(ed);
+        frame(ed);
+        ed.dock(crate::pane::GroupKind::Tests, crate::pane::Side::Top);
+        frame(ed);
+        ed.bottom_take_keys();
+    }),
     // (P3 §2.2: the task's places, a preflight's steps — `list:task`, `list:preflight`)
     ("list:task, the task's places", |ed| {
         task_panel(ed);

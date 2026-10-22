@@ -520,6 +520,34 @@ fn each_kind(root: &std::path::Path) -> Vec<(Editor, GroupKind, &'static str, &'
     ]
 }
 
+/// Over and under (user, 2026-10-23): each kind docked right of the code (tall, 64 wide) lays its list over its detail
+/// — the list's first row under the group's line, the detail's own top line after the list's rows naming it, the
+/// detail under that; `:procs`' table and its detail too.
+#[test]
+fn every_kind_lays_over_and_under_docked_tall() {
+    let dir = crate::scratch::Scratch::new("group-over");
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n".repeat(5)).unwrap();
+    let mut all = each_kind(dir.path());
+    let mut procs = editor(dir.path());
+    procs.session.task_run = None;
+    procs.procs_toggle();
+    all.push((procs, GroupKind::Procs, "processes", "detail", "PID"));
+    for (mut ed, kind, _, detail, first) in all {
+        cells(&mut ed, 160);
+        ed.dock(kind, crate::pane::Side::Right);
+        cells(&mut ed, 160);
+        let p = cells(&mut ed, 160);
+        let g = ed.session.group(kind).unwrap();
+        let leaf = |id| ed.screen.leaves.iter().find(|l| l.0 == id).map(|l| l.1).unwrap_or_default();
+        let (l, d) = (leaf(g.list), leaf(g.detail_pane().unwrap()));
+        assert!(l.w > 0 && (l.x, l.w) == (d.x, d.w) && d.y == l.y + l.h + 1, "{kind:?}: {l:?} {d:?}");
+        let line: String = row(&p, (d.y - 1) as u16).into_iter().skip(l.x).collect();
+        assert!(line.starts_with(&format!("─ {detail} ")), "{kind:?}: its top line: {line}");
+        let top: String = row(&p, l.y as u16).into_iter().skip(l.x).collect();
+        assert!(top.contains(first), "{kind:?}: the list's first row: {top}");
+    }
+}
+
 /// A frame's row `y`, a char a cell.
 fn row(p: &vt100::Parser, y: u16) -> Vec<char> {
     let w = p.screen().size().1;

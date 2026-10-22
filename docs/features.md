@@ -248,7 +248,10 @@ configs carry over as they are.
     line between them lit while either has them. A click on a name gives that pane the keys. Too narrow for both
     (the list under 24 columns or the detail under 40), they're stacked, as zellij stacks panes: one open, both
     named in its line (`results · failure`); `tab` or `C-w h`/`l` open the other, and the one that had the keys last
-    stays open. Narrow, the line folds what the run says (its time, then its counts) before the names. A run under
+    stays open. Docked tall beside the code they're over and under instead: the list as tall as its rows (a third of
+    the pane at most), the detail under it, named in its own top line (`├─ failure ── src/main.rs:31 ─`); `C-w t`
+    turns them side by side ↔ over and under, kept for that kind (and across `:restart`) until `C-w =` — where the
+    choice has no room they're stacked until there is. Narrow, the line folds what the run says (its time, then its counts) before the names. A run under
     way says so once, by its name (the wave); where its details go, the time it has run so far, which becomes its
     whole when it ends.
   - **A task's places and a preflight's steps are lists too** — a run that pointed at two places or more lists them
@@ -325,8 +328,14 @@ configs carry over as they are.
 - **Split windows** — every surface is a pane (the code's, the side panel, the review's rail, the bottom slot, the
   chat): `C-w v` side by side · `C-w s` stacked (from the chat or a panel it's the code pane last focused that splits;
   the terminal says a second one comes with the terminal work) · `C-w h j k l` to the pane that way, any kind · `C-w
-  w` the next pane, every kind · `C-w H J K L` swap this code pane with the one that way · `C-w t` turn the code's
-  split (side by side ↔ stacked) · `C-w q` close — the window, or the panel that has the keys (side panel, the
+  w` the next pane, every kind · `C-w H J K L` swap this code pane with the one that way — from a group (the tests',
+  a task's, a preflight's, `:procs`) they dock it beside the code instead: `C-w L` right of it, `C-w H` left of it,
+  `C-w K` over it, `C-w J` back to the bottom slot; a docked group is a pane of its own, the whole height, its name in
+  its top line, its keys the ones it has in the slot; its size its kind's own (`C-w < >`, `C-w - +` over the code, a
+  drag of its line, `C-w =`); closed, the code takes the room and its next run lands there again; too narrow for the
+  code beside it (or, over it, too short for the code and the slot under it), it folds back into the slot's tabs until
+  there's room · `C-w t` turn the code's
+  split (side by side ↔ stacked) — from a group, its members (side by side ↔ over and under) · `C-w q` close — the window, or the panel that has the keys (side panel, the
   review's rail, `:procs`, a test, task or terminal panel, as its own `q` does; the chat closes with `space L`, so a
   slip can't cut Claude's turn off) · `C-w o` only this one (`space w` works too); `:vsplit file`, `:hsplit file`.
   Each pane has a title line; the focused one gets an accent bar and the rest dim, the line beside it lit. The same

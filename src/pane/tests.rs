@@ -152,12 +152,15 @@ fn c_w_swaps_and_turns_the_codes_panes_and_c_w_w_goes_round_every_kind() {
     assert_eq!(ed.session.views.len(), 1);
     ed.session.at = At::Chat;
     feed(&mut ed, "<C-w>J");
-    assert!(ed.toasts.iter().any(|t| t.text.starts_with("the panels keep their places")), "said");
+    assert!(
+        ed.toasts.iter().any(|t| t.text.starts_with("the side panel and the chat keep their places")),
+        "said"
+    );
     // (round every kind)
     let mut seen = Vec::new();
     for _ in 0..8 {
         feed(&mut ed, "<C-w>w");
-        let id = ed.session.at_pane().unwrap();
+        let id = ed.at_pane().unwrap();
         seen.push(ed.session.shows(id).unwrap());
     }
     for kind in [Shows::Side, Shows::Code, Shows::Slot, Shows::Chat] {

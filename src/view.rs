@@ -444,6 +444,7 @@ fn terminal_enter(ed: &mut Editor, land: Land, by_wheel: Option<Was>) {
     let made_of = Made { generation, size, back, lines: last + 1 };
     ed.session.view = Some(made(doc, by_wheel, made_of, wraps));
     ed.session.at = At::Slot;
+    ed.session.hand = None;
     ed.session.slot_front = Some(crate::sizes::Slot::Terminal);
     in_sight(ed);
 }

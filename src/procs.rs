@@ -2751,8 +2751,7 @@ pub(crate) mod tests {
         keys(&mut ed, "j");
         assert_eq!(region(&ed), "list:procs", "C-w j from the code: the table, as before");
         // A click on the detail: its keys, the cursor there; on the table, its
-        let r =
-            ed.screen.run_rows.get().filter(|r| r.0 == crate::sizes::Slot::Procs).expect("the detail drawn");
+        let r = ed.screen.run_rows.of(crate::sizes::Slot::Procs).expect("the detail drawn");
         let click = |ed: &mut Editor, x: usize, y: usize| {
             let kind = crate::event::MouseKind::Down;
             ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false })
@@ -2918,8 +2917,7 @@ pub(crate) mod tests {
         keys(&mut ed, "j");
         let (w, h) = (160, 20);
         screen(&mut ed, w, h);
-        let r =
-            ed.screen.run_rows.get().filter(|r| r.0 == crate::sizes::Slot::Procs).expect("the detail drawn");
+        let r = ed.screen.run_rows.of(crate::sizes::Slot::Procs).expect("the detail drawn");
         let rows = r.3;
         let slot = crate::sizes::Slot::Procs;
         let lines = ed.session.outputs.get(slot).unwrap().lines();

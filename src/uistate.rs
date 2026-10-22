@@ -1006,6 +1006,9 @@ pub struct PaneState {
     pub rect: Option<(usize, usize, usize, usize)>,
     pub at: bool,
     pub float: bool,
+    /// A docked group's host: the side it's on (`left`, `right`, `top` — P3 step 6); its members: the host's id.
+    pub place: Option<&'static str>,
+    pub group: Option<String>,
 }
 
 impl PaneState {
@@ -1017,6 +1020,12 @@ impl PaneState {
         if self.float {
             v["float"] = json!(true);
         }
+        if let Some(p) = self.place {
+            v["place"] = json!(p);
+        }
+        if let Some(g) = &self.group {
+            v["group"] = json!(g);
+        }
         v
     }
 }
@@ -1027,16 +1036,29 @@ impl Editor {
     fn panes_state(&self, l: &crate::session::Session, is_front: bool) -> Vec<PaneState> {
         use crate::pane::Shows;
         let floats_keys = matches!(l.at, At::Float(_));
-        let mut at = l.at_pane().filter(|_| !floats_keys);
+        // (a session behind: its docked group in hand as it was left)
+        let mut at = l.at_pane(|k| !is_front || self.docked_in_sight(k)).filter(|_| !floats_keys);
         // (a group on screen: its members after its host, the host's keys its detail's)
         let mut ids = l.split.leaves();
+        // (a docked group's members name their host)
+        let mut docked: Vec<(crate::split::PaneId, String)> = Vec::new();
         for g in l.groups.iter().filter(|g| is_front && self.screen.leaves.iter().any(|r| r.0 == g.list)) {
-            let Some(i) = ids.iter().position(|&id| id == g.host) else { continue };
+            let host = self.group_host(g).unwrap_or(g.host);
+            let Some(i) = ids.iter().position(|&id| id == host) else { continue };
             ids.splice(i + 1..i + 1, std::iter::once(g.list).chain(g.detail_pane()));
-            if at == Some(g.host) {
+            if host == g.host && self.dock_leaf(g) {
+                docked.extend(
+                    std::iter::once(g.list).chain(g.detail_pane()).map(|m| (m, format!("pane#{host}"))),
+                );
+            }
+            if at == Some(host) {
                 at = g.detail_pane().or(at);
             }
         }
+        let place = |id: crate::split::PaneId| match l.shows(id) {
+            Some(Shows::Group(k)) => l.group(k).map(|g| g.place.name()),
+            _ => None,
+        };
         let mut out: Vec<PaneState> = ids
             .into_iter()
             .filter_map(|id| {
@@ -1056,7 +1078,16 @@ impl Editor {
                         self.screen.leaves.iter().find(|r| r.0 == id).map(|r| (r.1.x, r.1.y, r.1.w, r.1.h))
                     })
                     .flatten();
-                Some(PaneState { id: format!("pane#{id}"), shows, rect, at: at == Some(id), float: false })
+                let group = docked.iter().find(|d| d.0 == id).map(|d| d.1.clone());
+                Some(PaneState {
+                    id: format!("pane#{id}"),
+                    shows,
+                    rect,
+                    at: at == Some(id),
+                    float: false,
+                    place: place(id),
+                    group,
+                })
             })
             .collect();
         if is_front {
@@ -1067,7 +1098,15 @@ impl Editor {
                     crate::pane::Floating::Card(_) => self.screen.offer_card,
                     _ => None,
                 };
-                out.push(PaneState { id: f.id(), shows: f.kind().into(), rect, at: has, float: true });
+                out.push(PaneState {
+                    id: f.id(),
+                    shows: f.kind().into(),
+                    rect,
+                    at: has,
+                    float: true,
+                    place: None,
+                    group: None,
+                });
             }
         }
         out

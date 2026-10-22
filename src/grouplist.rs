@@ -208,9 +208,11 @@ impl Editor {
     pub fn group_laid(&self, g: &Group) -> bool {
         match g.kind {
             GroupKind::Tests | GroupKind::Task | GroupKind::Preflight | GroupKind::Procs => {
-                g.kind.slot().is_some_and(|s| self.slot() == Some(s))
-                    && listed(self, g.kind)
-                    && self.session.leaf(crate::pane::Shows::Slot) == Some(g.host)
+                // (docked in sight: its own leaf; else the slot's, its panel the one in front there)
+                let there = self.docked_in_sight(g.kind)
+                    || (g.kind.slot().is_some_and(|s| self.slot_shown() == Some(s))
+                        && self.session.leaf(crate::pane::Shows::Slot).is_some());
+                there && listed(self, g.kind)
             }
             _ => false,
         }
@@ -302,19 +304,30 @@ impl Editor {
             return self.set_status(why);
         }
         let Some(g) = self.group_made(kind) else { return };
-        self.session.slot_front = kind.slot();
+        self.hand_to(kind);
         self.plugin_panel_unfocus();
         self.session.at = At::List(g.list);
         crate::rundoc::sync(self);
     }
 
-    /// The keys to kind `kind`'s detail — in the slot, normal mode on its document (`rundoc.rs`).
+    /// The keys to kind `kind`'s detail — in the slot or docked, normal mode on its document (`rundoc.rs`).
     pub fn detail_focus(&mut self, kind: GroupKind) {
-        if let Some(s) = kind.slot() {
-            self.session.slot_front = Some(s);
+        if kind.slot().is_some() {
+            self.hand_to(kind);
             self.plugin_panel_unfocus();
             self.session.at = At::Slot;
             crate::rundoc::sync(self);
+        }
+    }
+
+    /// The keys go to a member of kind `kind`'s group: docked, it's in hand (`Session.hand` — folded into the slot
+    /// too, for when it's back); in the slot, its panel comes to the slot's front.
+    fn hand_to(&mut self, kind: GroupKind) {
+        let docked =
+            self.session.group(kind).is_some_and(|g| matches!(g.place, crate::pane::Place::Docked(_)));
+        self.session.hand = docked.then_some(kind);
+        if !self.docked_in_sight(kind) {
+            self.session.slot_front = kind.slot();
         }
     }
 
@@ -326,7 +339,11 @@ impl Editor {
         leaves: &[(crate::split::PaneId, crate::split::Rect)],
     ) -> Option<crate::split::PaneId> {
         let laid = |id: &crate::split::PaneId| leaves.iter().any(|l| l.0 == *id);
-        self.session.groups.iter().filter(|g| g.host == host).find_map(|g| g.detail_pane().filter(laid))
+        self.session
+            .groups
+            .iter()
+            .filter(|g| self.group_host(g) == Some(host))
+            .find_map(|g| g.detail_pane().filter(laid))
     }
 }
 

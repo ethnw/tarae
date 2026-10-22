@@ -162,6 +162,9 @@ pub struct Session {
     /// so a new one is told from one already seen (`chrome::slot_sync`).
     pub slot_front: Option<crate::sizes::Slot>,
     pub slot_seen: Vec<(crate::sizes::Slot, Option<std::time::Instant>)>,
+    /// A docked group whose member has the keys (P3 §3.3: `At::Slot` is then its detail's, `At::List` its list's) —
+    /// what `Editor::slot()` names while they're there (`slot_in_hand`); let go once they leave it (`focus_sync`).
+    pub hand: Option<crate::pane::GroupKind>,
     /// The list `]q` goes through (quickfix.rs).
     pub qlist: Option<crate::quickfix::List>,
     /// Git: the repository's status (the side panel's git tab) · a discard waiting for its second `d` · a
@@ -401,6 +404,7 @@ impl Session {
             task_last: None,
             slot_front: None,
             slot_seen: Vec::new(),
+            hand: None,
             qlist: None,
             git_status: None,
             git_discard_asked: None,
@@ -506,13 +510,18 @@ impl Session {
     }
 
     /// The pane the keys are in (`at`'s): the code pane last focused, the chat's, the slot's (the terminal's
-    /// program, `:procs`, a plugin's panel are the slot's panels), the side panel's, the rail's.
-    pub fn at_pane(&self) -> Option<crate::split::PaneId> {
+    /// program, `:procs`, a plugin's panel are the slot's panels), the side panel's, the rail's — a docked group's
+    /// detail its own leaf only while `in_sight` says it's docked in sight (folded, the slot's: `Editor::at_pane`).
+    pub fn at_pane(&self, in_sight: impl Fn(crate::pane::GroupKind) -> bool) -> Option<crate::split::PaneId> {
         use crate::pane::Shows;
         self.leaf(match self.docked() {
             At::List(id) => return Some(id),
             At::Float(_) | At::Code => Shows::Code,
             At::Chat => Shows::Chat,
+            // (a docked group's detail: its own leaf's)
+            At::Slot if let Some(g) = self.hand.filter(|&k| in_sight(k)).and_then(|k| self.group(k)) => {
+                return Some(g.host);
+            }
             At::Program | At::Slot | At::Plugin => Shows::Slot,
             At::Side => Shows::Side,
             At::Rail => Shows::Rail,

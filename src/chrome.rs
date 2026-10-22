@@ -312,8 +312,16 @@ impl Editor {
         self.session.slot_front.filter(|&s| self.slot_there(s, true))
     }
 
-    /// Every panel the slot has, in `ORDER`, with how it's doing — the slot's title row.
+    /// Every panel the slot has, in `ORDER`, with how it's doing — the slot's title row; a group docked in sight is
+    /// a pane of its own, not among them (P3 §3.1).
     pub fn slot_tabs(&self) -> Vec<Tab> {
+        let mut tabs = self.panel_tabs();
+        tabs.retain(|t| !self.slot_docked(t.slot));
+        tabs
+    }
+
+    /// Every panel there is, docked or in the slot, in `ORDER`, with how it's doing.
+    pub fn panel_tabs(&self) -> Vec<Tab> {
         use crate::dap::State as D;
         ORDER
             .iter()
@@ -379,6 +387,15 @@ impl Editor {
         if !self.slot_there(s, false) {
             return;
         }
+        // (a docked group's name in its line: the keys to the member it had last)
+        if self.slot_docked(s)
+            && let Some(g) = self.kind_of(s).and_then(|k| self.session.group(k))
+        {
+            return match (g.front, crate::grouplist::listed(self, g.kind)) {
+                (crate::pane::Member::List, true) => self.list_focus(g.kind),
+                _ => self.detail_focus(g.kind),
+            };
+        }
         let keys = self.bottom_has_keys();
         if s == Slot::Terminal
             && let Some(t) = self.session.terminal.as_mut()
@@ -405,6 +422,16 @@ impl Editor {
     /// to its detail, from the detail on to the next tab, which starts at its first member, the list; `S-tab` the
     /// other way, onto a group at its last member, the detail.
     pub fn slot_step(&mut self, by: isize) {
+        // (a docked group: its own members only — the slot's tabs are the slot's)
+        if self.slot_in_hand().is_some() {
+            if let Some(g) = self.slot_group()
+                && let Some(detail) = g.detail_pane()
+            {
+                let on_list = self.session.is_at(crate::session::At::List(g.list));
+                return self.focus_pane(if on_list { detail } else { g.list });
+            }
+            return self.set_status("its output is all it has yet — C-w J back to the slot");
+        }
         let tabs = self.slot_tabs();
         if tabs.is_empty() {
             return self.set_status("nothing at the bottom — tests, tasks and the terminal show there");

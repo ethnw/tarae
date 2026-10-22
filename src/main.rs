@@ -48,6 +48,7 @@ mod diagram;
 mod diffview;
 mod disk;
 mod doccomment;
+mod dock;
 mod docpane;
 mod document;
 mod dsyms;

@@ -272,7 +272,9 @@ side git · 4 rows · in hand git:src/term.rs
     code:src/a.rs | side | rail | slot | chat, rect, at}` (rects the front's, as the last frame laid them out), the
     members of a group after its host while it lays them out (`list:tests`, `detail:tests`, `list:task` … — the host's keys the
     detail's), then the floating ones up (`card#N`, `picker`, `prompt`, `which-key`, `float: true`); `at` is true on
-    exactly the one with the keys.
+    exactly the one with the keys. A group docked beside the code (panes P3 step 6) is a leaf of its own, `shows:
+    group:<kind>` with `place: left | right | top`, its members after it with `group: pane#N` (its host); while it
+    has the keys `keys.region` is its member's as in the slot (`list:tests`, `output:tests`).
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).
   - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `quiet` (cardburden 5: a run of
     Claude's printing nothing, held from the stuck card — under its own time limit still to come, or its work

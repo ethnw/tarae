@@ -302,7 +302,12 @@ pub fn rows(ed: &Editor, slot: Slot) -> usize {
 
 /// The rows and columns its text has, as the last frame drew it.
 fn viewport(ed: &Editor, slot: Slot) -> (usize, usize) {
-    let cols = ed.screen.run_rows.get().filter(|r| r.0 == slot).map_or(60, |_| ed.screen.run_cols.get());
+    let cols = ed
+        .screen
+        .run_rows
+        .of(slot)
+        .and_then(|_| ed.screen.run_cols.borrow().iter().rev().find(|c| c.0 == slot).map(|c| c.1));
+    let cols = cols.unwrap_or(60);
     (rows(ed, slot), cols.max(1))
 }
 
@@ -1011,7 +1016,7 @@ pub fn wheel(ed: &mut Editor, slot: Slot, up: bool) {
 pub fn click(ed: &mut Editor, slot: Slot, row: usize, col: usize) {
     match slot {
         Slot::Procs => ed.detail_focus(crate::pane::GroupKind::Procs),
-        _ => ed.bottom_take_keys(),
+        _ => ed.panel_take_keys(slot),
     }
     let Some(d) = ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut()) else { return };
     let line = (d.top + row).min(mv::last_line(&d.text));
@@ -1036,7 +1041,7 @@ pub fn step(ed: &mut Editor, name: &str) {
     let heading = format!("── {name} ──");
     let at = ed.session.task_run.as_ref().and_then(|r| r.output.iter().position(|l| l.1 == heading));
     let Some(at) = at else { return ed.set_status("that step hasn't printed anything yet") };
-    ed.bottom_take_keys();
+    ed.panel_take_keys(Slot::Task);
     show_line(ed, at, true);
 }
 

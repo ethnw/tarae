@@ -1446,8 +1446,9 @@ pub(crate) fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::
             let mut next = first + ids.len() as u64;
             let groups = groups
                 .iter()
-                .map(|&(kind, host)| {
-                    let g = crate::pane::Group::new(kind, new(host), next);
+                .map(|&(kind, host, place, laid)| {
+                    let mut g = crate::pane::Group::new(kind, new(host), next);
+                    (g.place, g.laid) = (place, laid);
                     next += crate::pane::Group::ids(kind);
                     g
                 })
@@ -1515,16 +1516,34 @@ pub(crate) fn split_json(s: &Split) -> Value {
 
 /// A session's linked groups as kept: each one's kind and the leaf that holds it — its members' ids are made anew.
 pub(crate) fn groups_json(groups: &[crate::pane::Group]) -> Value {
-    json!(groups.iter().map(|g| json!({ "kind": g.kind.name(), "host": g.host })).collect::<Vec<_>>())
+    json!(
+        groups
+            .iter()
+            .map(|g| {
+                json!({ "kind": g.kind.name(), "host": g.host, "place": g.place.name(), "laid": g.laid.name() })
+            })
+            .collect::<Vec<_>>()
+    )
 }
 
-/// The groups kept (kind, host) — None unless each kind is there once and the tests' is (every session has it).
-pub(crate) fn groups_of(v: &Value) -> Option<Vec<(crate::pane::GroupKind, crate::split::PaneId)>> {
-    use crate::pane::GroupKind;
+/// The groups kept (kind, host, place, how its members are laid) — None unless each kind is there once and the tests'
+/// is (every session has it). A docked one's host is its own leaf while its kind had something to show, the slot's
+/// while not (`dock_sync`).
+#[allow(clippy::type_complexity)]
+pub(crate) fn groups_of(
+    v: &Value,
+) -> Option<Vec<(crate::pane::GroupKind, crate::split::PaneId, crate::pane::Place, crate::pane::Laid)>> {
+    use crate::pane::{GroupKind, Laid, Place};
     let groups: Vec<_> = v
         .as_array()?
         .iter()
-        .map(|g| Some((GroupKind::of_name(g["kind"].as_str()?)?, g["host"].as_u64()?)))
+        .map(|g| {
+            let kind = GroupKind::of_name(g["kind"].as_str()?)?;
+            let place = Place::of_name(g["place"].as_str()?)?;
+            let host = g["host"].as_u64()?;
+            let laid = Laid::of_name(g["laid"].as_str()?)?;
+            (place == Place::Slot || kind.dockable()).then_some((kind, host, place, laid))
+        })
         .collect::<Option<_>>()?;
     let once = GroupKind::ALL.iter().all(|k| groups.iter().filter(|g| g.0 == *k).count() <= 1);
     (once && groups.iter().any(|g| g.0 == GroupKind::Tests)).then_some(groups)
@@ -2095,7 +2114,11 @@ mod tests {
         let state = snapshot(&mut ed);
         drop(ed);
         let host = state["groups"][0]["host"].clone();
-        assert_eq!(state["groups"], json!([{ "kind": "tests", "host": host }]), "kept: kind and host");
+        assert_eq!(
+            state["groups"],
+            json!([{ "kind": "tests", "host": host, "place": "slot", "laid": "auto" }]),
+            "kept: kind, host, place and how it's laid"
+        );
         let again = |state: &Value| {
             let mut ed = started_in(&dir, &front);
             restore(&mut ed, state);
@@ -2124,6 +2147,37 @@ mod tests {
             assert_eq!(ed.session.views.len(), 1, "{broken}: the default layout");
             assert!(ed.session.group(GroupKind::Tests).is_some(), "{broken}: its tests group still");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P3 step 6 (§5.3): a docked group comes back docked — its leaf in the tree (`group:tests`), its place, how `C-w t`
+    /// laid its members; with no run of its kind after the restart its leaf goes, its place kept, and the next run
+    /// lands there.
+    #[test]
+    fn a_docked_group_comes_back_docked() {
+        use crate::pane::{GroupKind, Laid, Place, Shows, Side};
+        let (front, _back, dir, mut ed) = two_sessions("docked");
+        ed.open(&front.join("f.txt")).unwrap();
+        ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
+        ed.focus_sync();
+        ed.dock(GroupKind::Tests, Side::Right);
+        ed.group_turn(GroupKind::Tests);
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let kept = &state["groups"][0];
+        assert_eq!((&kept["place"], &kept["laid"]), (&json!("right"), &json!("over")), "{kept}");
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        let g = ed.session.group(GroupKind::Tests).unwrap();
+        assert_eq!((g.place, g.laid), (Place::Docked(Side::Right), Laid::Over));
+        assert_eq!(ed.session.shows(g.host), Some(Shows::Group(GroupKind::Tests)), "its leaf, renumbered");
+        ed.focus_sync();
+        let g = ed.session.group(GroupKind::Tests).unwrap();
+        assert!(!ed.dock_leaf(&g), "no run: its leaf goes");
+        assert_eq!((g.place, Some(g.host)), (Place::Docked(Side::Right), ed.session.leaf(Shows::Slot)));
+        ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
+        ed.focus_sync();
+        assert!(ed.docked_in_sight(GroupKind::Tests), "the next run lands docked");
         std::fs::remove_dir_all(&dir).ok();
     }
 
