@@ -203,11 +203,10 @@ impl Shot {
         });
     }
 
-    /// The frame as the terminal gets it, whole: the cards seated as it's read (`Screen::present`).
+    /// The frame as the terminal gets it, whole (`Screen::present`).
     fn frame(&mut self) -> Vec<u8> {
         let buf = self.drawn();
-        let edges = self.ed.screen.edges.borrow();
-        crate::screen::Screen::new().present(&buf, self.w, self.h, &edges).to_vec()
+        crate::screen::Screen::new().present(&buf, self.w, self.h).to_vec()
     }
 
     /// The frame as `render` draws it, before `Screen::present` reads it.
@@ -2635,70 +2634,10 @@ fn five_and_thirty_added() -> (String, String) {
     (base, now)
 }
 
-/// A card's top and bottom rows (`rect`, as `editor.screen` has it) are its half-block edges, and each
-/// edge cell's outer half has the background `without` (the same screen with no card) shows in that cell —
-/// what's under the card. Those backgrounds.
-fn edges_seated(
-    with: &vt100::Parser,
-    without: &vt100::Parser,
-    (x, y, w, h): (usize, usize, usize, usize),
-    surface: vt100::Color,
-) -> Vec<vt100::Color> {
-    let mut under = Vec::new();
-    for row in [y, y + h - 1] {
-        for col in x..x + w {
-            let c = with.screen().cell(row as u16, col as u16).unwrap();
-            assert!(
-                ["▄", "▀"].contains(&c.contents()) && c.fgcolor() == surface,
-                "{row},{col}: {:?} isn't the card's edge",
-                c.contents()
-            );
-            let was = without.screen().cell(row as u16, col as u16).unwrap().bgcolor();
-            assert_eq!(c.bgcolor(), was, "{row},{col}: the edge's outer half on what's under it");
-            under.push(was);
-        }
-    }
-    under
-}
-
-/// A card's half-row edges sit on what's under them — no strip of ground between the card and a review's
-/// wash, nor the code.
+/// A card through the main loop's diffs: its `Screen`, which showed the frames before, sends what makes the screen
+/// a whole frame makes — as a card comes, moves over the wash, and goes.
 #[test]
-fn card_edges_sit_on_what_is_under_them() {
-    // Over a review's wash: a note on an added line, its card on the added lines below
-    let (base, now) = five_and_thirty_added();
-    let mut s = review_of(112, 30, &base, &now);
-    // (half-block edges are `ground`'s: under `lines` a card's edge rows are its own colour)
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    let (ground, surface, _) = chrome_colors(&s.ed);
-    let path = s.ed.doc().path.clone().unwrap();
-    crate::notes::add(&mut s.ed, &path, 11..12, crate::notes::By::Author, "A remark about this added line.");
-    s.ed.goto_line(11);
-    let with = cells(&s.frame(), s.w, s.h);
-    let rect = s.ed.screen.note_card.get().expect("the note card");
-    s.ed.session.notes.list.clear();
-    let without = cells(&s.frame(), s.w, s.h);
-    let under = edges_seated(&with, &without, rect, surface);
-    // (the pane's padding, left of the wash, is ground — per column)
-    let washed = under.iter().filter(|&&c| c != ground).count();
-    assert!(washed > under.len() / 2, "the wash is under it: {under:?}");
-    // Over the code: hover docs
-    let mut s = Shot::new(100, 24);
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    s.file("src/demo.rs", DEMO_RS);
-    s.ed.goto_line(5);
-    s.ed.popup = Some(crate::markdown::render("Counts how often each word appears.", &s.ed.theme, None));
-    let with = cells(&s.frame(), s.w, s.h);
-    let rect = s.ed.screen.popup.get().expect("the hover card");
-    s.ed.popup = None;
-    let without = cells(&s.frame(), s.w, s.h);
-    edges_seated(&with, &without, rect, surface);
-}
-
-/// Seated through the main loop's diffs too: its `Screen`, which showed the frames before, sends what makes
-/// the screen a whole seated frame makes — as a card comes, moves over the wash, and goes.
-#[test]
-fn card_edges_stay_seated_through_diffs() {
+fn a_card_comes_moves_and_goes_through_diffs() {
     let (base, now) = five_and_thirty_added();
     let mut s = review_of(112, 30, &base, &now);
     let path = s.ed.doc().path.clone().unwrap();
@@ -2711,7 +2650,7 @@ fn card_edges_stay_seated_through_diffs() {
     for line in [3, 11, 20, 11, 3] {
         s.ed.goto_line(line);
         let drawn = s.drawn();
-        through_diffs.process(screen.present(&drawn, s.w, s.h, &s.ed.screen.edges.borrow()));
+        through_diffs.process(screen.present(&drawn, s.w, s.h));
         cards.push(s.ed.screen.note_card.get().map(|r| r.1));
         let whole = cells(&s.frame(), s.w, s.h);
         for (y, x) in (0..s.h).flat_map(|y| (0..s.w).map(move |x| (y, x))) {
@@ -2764,38 +2703,6 @@ fn a_note_card_stays_in_its_pane() {
     s.keys("<C-w>v<C-w>h");
     assert_eq!(s.ed.screen.panes.len(), 2, "two panes");
     inside(&mut s, "split");
-}
-
-/// A card over a panel — the prompt's card standing on the status line over the task panel in the bottom
-/// slot, both `ui.popup`-coloured — is a tone up from it, so it stands apart from the panel as it does from
-/// the ground, in the light theme too.
-#[test]
-fn a_card_over_a_panel_stands_apart_from_it() {
-    for light in [false, true] {
-        let mut s = Shot::new(112, 24);
-        if light {
-            s.ed.theme = crate::theme::load("hanji").unwrap();
-        }
-        // (panels of their own surface are `ground`'s; under `lines` the prompt's frame sets it apart)
-        s.ed.theme.edge = crate::theme::Edge::Ground;
-        s.file("src/demo.rs", DEMO_RS);
-        let cwd = std::env::current_dir().unwrap();
-        s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo done".into(), cwd });
-        s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
-        s.ed.toasts.clear();
-        s.keys(":w");
-        let (ground, surface, _) = chrome_colors(&s.ed);
-        let p = cells(&s.frame(), s.w, s.h);
-        let rows: Vec<String> = p.screen().rows(0, s.w).collect();
-        let y = rows.iter().rposition(|r| r.contains(":w")).expect("the prompt");
-        let slot = s.ed.screen.text_top + s.ed.screen.body_h - s.ed.screen.bottom_h;
-        assert!(s.ed.screen.bottom_h > 0 && y >= slot, "the task panel is up, the prompt over it");
-        let bg = |x: usize| p.screen().cell(y as u16, x as u16).unwrap().bgcolor();
-        let x = s.ed.screen.prompt_card.get().expect("the prompt's card").0 + 1;
-        assert!(bg(x) != surface && bg(x) != ground, "light {light}: the card over the panel {:?}", bg(x));
-        // (beside the card, the panel's own surface is still there)
-        assert_eq!(bg(s.w as usize - 3), surface, "light {light}: the panel");
-    }
 }
 
 /// #18: a message of yours with line breaks is drawn line by line, blank lines kept — one span with its
@@ -5783,8 +5690,7 @@ fn snapshot_terminal_panel() {
     s.check("terminal_panel");
     // A drag over its first line (the screen row under the slot's header — the line over it; its text starts at
     // the padding, two columns in): selected on the selection's color, copied on release
-    let first =
-        s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::slot_head(s.ed.theme.edge);
+    let first = s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::SLOT_HEAD;
     let y = first as u16;
     let mouse = |s: &mut Shot, kind, x| {
         s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
@@ -5798,7 +5704,7 @@ fn snapshot_terminal_panel() {
     s.until("the copy", |ed| ed.toasts.iter().any(|t| t.text == "copied 12 characters"));
     let shot = snapshot(&s.ed, "t", &bytes, s.w, s.h);
     let bg_row = shot.lines().skip_while(|l| !l.starts_with("## bg")).nth(first + 1).unwrap();
-    // (the panel on the ground under `lines`: only the selected cells have a colour of their own)
+    // (the panel on the ground: only the selected cells have a colour of their own)
     assert_eq!(bg_row.get(4..).map(str::trim_end), Some(" VVVVVVVVVVVV"), "the selected cells: {bg_row:?}");
     // A drag begun in the code isn't the terminal's when it crosses it — nor is its cursor moved by it
     let at = |s: &mut Shot, kind, x, y| {
@@ -5931,12 +5837,9 @@ fn completion_docs_left_of_the_list_leave_no_letter_between() {
     let list = rows.iter().position(|r| r.contains("push")).expect("the list");
     let x = rows[list].find("push").unwrap();
     assert!(rows[list][..x].contains("Appends"), "docs on the left: {:?}", rows[list]);
-    // No `x` of the code sits between the cards — on their half-block edge rows either
-    for r in [rows[list - 1], rows[list], rows[list + 1]] {
-        let edge = |c: char| c == '▄' || c == '▀';
-        let (Some(a), Some(b)) = (r.find(edge), r.rfind(edge)) else { continue };
-        assert!(!r[a..b].contains('x'), "{r:?}");
-    }
+    // No `x` of the code sits between the cards
+    let a = rows[list].find("Appends").unwrap();
+    assert!(!rows[list][a..x].contains('x'), "{:?}", rows[list]);
 }
 
 /// The cursor line's blame shows at its end in normal mode — not while typing there.
@@ -6129,18 +6032,16 @@ fn chrome_colors(ed: &Editor) -> (vt100::Color, vt100::Color, vt100::Color) {
 }
 
 /// The side panel, the code with a task under it, the chat — one set of rules: every title on the screen's
-/// first row with a thin rule under it, text `PAD` in from each panel's edge, the code's numbers (and its
-/// path bar) right after its sign column, half a cell of ground between regions — the gutter's half block,
-/// the panel's half in its own colour, faded or not — the same everywhere, and the rule of what has the keys
-/// in the accent, following them from the code to the chat, the side panel and the bottom slot, the status
-/// line naming each; what hasn't them keeps `FADE` of its text's contrast.
+/// first row with a thin rule under it (the slot's in the line over it), text `PAD` in from each panel's edge, the
+/// code's numbers (and its path bar) right after its sign column, the same everywhere, and the rule of what has
+/// the keys in the accent, following them from the code to the chat, the side panel and the bottom slot, the
+/// status line naming each; what hasn't them keeps `FADE` of its text's contrast. (The lines between them:
+/// `the_edges_light_with_the_keys`.)
 #[test]
 fn the_panels_follow_one_set_of_rules() {
-    use crate::chrome::{GAP, HEAD, PAD, PAD_R, SIGNS};
+    use crate::chrome::{GAP, HEAD, PAD, PAD_R, SIGNS, SLOT_HEAD};
     let (w, h) = (150u16, 36u16);
     let mut s = Shot::new(w, h);
-    // (`ground`'s rules: `lines`' are `the_edges_light_with_the_keys`)
-    s.ed.theme.edge = crate::theme::Edge::Ground;
     let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     let sb = crate::sidebar::Sidebar::with_files(cwd.clone(), vec!["src/demo.rs".into(), "README.md".into()]);
@@ -6151,7 +6052,7 @@ fn the_panels_follow_one_set_of_rules() {
     s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
     s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
     s.ed.toasts.clear();
-    let (ground, surface, accent) = chrome_colors(&s.ed);
+    let (_, _, accent) = chrome_colors(&s.ed);
     let p = cells(&s.frame(), w, h);
     let at = |y: usize, x: usize| p.screen().cell(y as u16, x as u16).unwrap().clone();
     let blank = |y: usize, x: usize| at(y, x).contents().trim().is_empty();
@@ -6160,40 +6061,15 @@ fn the_panels_follow_one_set_of_rules() {
     let end = sc.text_top + sc.body_h;
     let slot_y = end - sc.bottom_h;
     assert!(side > 0 && sc.bottom_h > 0 && slot_x == side, "the slot under the code only");
-    // Half a cell of ground between regions, the whole height: a gutter's left half is what's left of it —
-    // a panel's surface (unfaded, though neither panel has the keys), or the ground beside the code — its
-    // right half ground, what's right of it from the next cell
-    let half = |y: usize, x: usize| {
-        let c = at(y, x);
-        (c.contents().to_string(), c.fgcolor(), c.bgcolor())
-    };
-    for y in 0..end {
-        assert_eq!(half(y, side - GAP), ("▌".into(), surface, ground), "row {y}: the side panel's gutter");
-        let chat_gutter = half(y, chat);
-        match y < slot_y {
-            true => assert_eq!((chat_gutter.0, chat_gutter.2), (" ".into(), ground), "row {y}: by the code"),
-            false => assert_eq!(chat_gutter, ("▌".into(), surface, ground), "row {y}: by the slot"),
-        }
-        assert_eq!(at(y, side - GAP - 1).bgcolor(), surface, "row {y}: the side panel up to its gutter");
-        assert_eq!(at(y, chat + GAP).bgcolor(), surface, "row {y}: the chat from its gutter");
-    }
-    for y in slot_y..end {
-        assert_eq!(at(y, slot_x).bgcolor(), surface, "row {y}: the slot right after the side's gutter");
-        assert_eq!(at(y, chat - 1).bgcolor(), surface, "row {y}: …up to the chat's");
-    }
-    // Every title on the first row, its text at the padding; the slot's tabs too
+    // Every title on the first row, its text at the padding; the slot's tabs in its line, after its lead `─ `
     let first = |y: usize, a: usize, b: usize| (a..b).find(|&x| !blank(y, x));
     assert_eq!(first(0, 0, side), Some(PAD), "the side panel's title");
     assert_eq!(first(0, side, chat), Some(side + SIGNS), "the code's path bar, where its numbers start");
     assert_eq!(first(0, chat + GAP, w as usize), Some(chat + GAP + PAD), "the chat's title");
-    assert_eq!(first(slot_y, slot_x, chat), Some(slot_x + PAD), "the slot's tabs");
+    let tab = s.ed.screen.slot_tabs.borrow()[0];
+    assert_eq!((tab.0, tab.1), (slot_y, slot_x + PAD), "the slot's tabs");
     // …a thin rule under each, from padding to padding (the code's from its numbers)
-    let regions = [
-        (1, 0, side - GAP, PAD),
-        (1, side, chat, SIGNS),
-        (1, chat + GAP, w as usize, PAD),
-        (slot_y + 1, slot_x, chat, PAD),
-    ];
+    let regions = [(1, 0, side - GAP, PAD), (1, side, chat, SIGNS), (1, chat + GAP, w as usize, PAD)];
     for (y, a, b, pad) in regions {
         let line: String = (a + pad..b - PAD_R).map(|x| at(y, x).contents().to_string()).collect();
         assert!(line.chars().all(|c| c == '─'), "row {y} from {a}: {line:?}");
@@ -6207,9 +6083,9 @@ fn the_panels_follow_one_set_of_rules() {
     let row_with = |t: &str| (0..end).find(|&y| p.screen().rows(0, w).nth(y).is_some_and(|r| r.contains(t)));
     let ask = row_with("Ask Claude").expect("the chat's empty state");
     assert_eq!(first(ask, chat + GAP, w as usize), Some(chat + GAP + PAD));
-    assert_eq!(first(slot_y + HEAD, slot_x, chat), Some(slot_x + PAD), "the task's output");
-    // What has the keys: its rule in the accent, the status line's label naming it
-    let rules = [(1, PAD), (1, side + SIGNS), (1, chat + GAP + PAD), (slot_y + 1, slot_x + PAD)];
+    assert_eq!(first(slot_y + SLOT_HEAD, slot_x, chat), Some(slot_x + PAD), "the task's output");
+    // What has the keys: its rule in the accent (the slot's line), the status line's label naming it
+    let rules = [(1, PAD), (1, side + SIGNS), (1, chat + GAP + PAD), (slot_y, slot_x)];
     let keys = |s: &mut Shot| -> (Vec<bool>, String) {
         let p = cells(&s.frame(), w, h);
         let lit =
@@ -6233,21 +6109,23 @@ fn the_panels_follow_one_set_of_rules() {
         c => panic!("{c:?}"),
     };
     let rgb = |c: Option<crossterm::style::Color>| c.and_then(crate::chrome::rgb).unwrap();
-    let (ground_rgb, surface_rgb) = (rgb(ui.base.bg), rgb(card_style(&ui, &s.ed, "ui.popup").bg));
+    let ground_rgb = rgb(ui.base.bg);
+    let panel_rgb = rgb(s.ed.theme.try_get("ui.panel").and_then(|s| s.bg).or(ui.base.bg));
     let dim = rgb(ui.virt.fg);
     let fade = |c, bg| crate::chrome::fade(c, bg, crate::chrome::FADE);
-    assert_eq!(fg(0, chat + GAP + PAD), fade(dim, surface_rgb), "the chat's title, faded");
-    let name = p.screen().rows(0, w).next().unwrap().find("demo.rs").unwrap();
+    assert_eq!(fg(0, chat + GAP + PAD), fade(dim, panel_rgb), "the chat's title, faded");
+    let row: String = p.screen().rows(0, w).next().unwrap();
+    let name = row[..row.find("demo.rs").unwrap()].chars().count();
     let focus = rgb(s.ed.theme.try_get("ui.text.focus").and_then(|s| s.fg));
     assert_eq!(fg(0, name), fade(focus, ground_rgb), "the code's file name, faded");
     assert_ne!(fade(focus, ground_rgb), focus);
 }
 
-/// Under `ui.edge = "lines"` (D2) every place two docked surfaces meet is one thin line in the gutter's whole cell
+/// (D2) Every place two docked surfaces meet is one thin line in the gutter's whole cell
 /// — `│` beside the code, `├`/`┤` where the slot's top edge (its header rule, across it whole) meets it — and
 /// the surface with the keys has its lines lit: a hop moves the accent from the code's lines to the side panel's,
 /// the chat's and the slot's, the rest the faint wash (`ui.window`); a picker with the keys lights none; the
-/// screen's edge draws no line. Under `"ground"` none is drawn at all.
+/// screen's edge draws no line.
 #[test]
 fn the_edges_light_with_the_keys() {
     let (w, h) = (150u16, 36u16);
@@ -6320,19 +6198,11 @@ fn the_edges_light_with_the_keys() {
     s.keys(" ?");
     assert_eq!(s.ed.keys_at(), crate::chrome::Keys::Picker);
     assert_eq!(Ui::new(&s.ed).lit, None, "what floats says it with its frame");
-    s.keys("<esc>");
-    // Under `ground`: no line between surfaces of their own colour
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    let p = cells(&s.frame(), w, h);
-    for y in 0..end {
-        let c = p.screen().cell(y as u16, gx as u16).unwrap();
-        assert!(!"│├┤".contains(c.contents()) || c.contents().is_empty(), "row {y}: {:?}", c.contents());
-    }
 }
 
-/// panes P3 §1: under `lines` the slot's header is the line where it meets the code — its names, details and keys set
-/// in it, its body on the next row, the code keeping the row a rule took (under `ground` today's title row and rule);
-/// a press on the line beside its tabs drags the slot's height, one on a tab brings that tab in front.
+/// panes P3 §1: the slot's header is the line where it meets the code — its names, details and keys set in it, its
+/// body on the next row, the code keeping the row a rule took; a press on the line beside its tabs drags the slot's
+/// height, one on a tab brings that tab in front.
 #[test]
 fn the_slots_header_is_the_line_where_it_meets_the_code() {
     let (w, h) = (120u16, 30u16);
@@ -6345,9 +6215,9 @@ fn the_slots_header_is_the_line_where_it_meets_the_code() {
     let at = |s: &mut Shot| {
         let rows: Vec<String> = cells(&s.frame(), w, h).screen().rows(0, w).collect();
         let sc = &s.ed.screen;
-        (rows, sc.text_top + sc.body_h - sc.bottom_h, sc.bottom_h)
+        (rows, sc.text_top + sc.body_h - sc.bottom_h)
     };
-    let (rows, y, slot_h) = at(&mut s);
+    let (rows, y) = at(&mut s);
     let line = rows[y].trim_end();
     assert!(line.starts_with("─ check ● ── ok ") && line.ends_with(" ─"), "the header in the line: {line:?}");
     assert!(line.contains("────") && line.contains("C-w j scroll"), "its run of line, its keys: {line:?}");
@@ -6361,16 +6231,8 @@ fn the_slots_header_is_the_line_where_it_meets_the_code() {
     assert_eq!(s.ed.border_at(tab.1, y), None, "a tab is clicked, not dragged");
     // Filling the screen (`C-w z`): its line the first row, no path bar and rule over it
     s.keys("<C-w>j<C-w>z");
-    let (zoomed, zy, _) = at(&mut s);
+    let (zoomed, zy) = at(&mut s);
     assert!(zy == 0 && zoomed[0].starts_with("─ check ● ── ok "), "{:?}", &zoomed[..2]);
-    s.keys("<C-w>z<C-w>k");
-    // Under `ground`: the title row and its rule — the same body a row lower, the code a row shorter
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    let (ground, gy, ground_h) = at(&mut s);
-    assert_eq!((gy + 1, ground_h), (y, slot_h + 1), "the row the rule took");
-    assert!(ground[gy].trim_start().starts_with("check "), "{:?}", ground[gy]);
-    assert!(ground[gy + 1].trim().chars().all(|c| c == '─'), "its rule: {:?}", ground[gy + 1]);
-    assert_eq!(ground[gy + 2], rows[y + 1], "the same body");
 }
 
 /// panes P3 §1.4: a top line says the same wherever it's drawn — the slot's header and a frame's top line are one
@@ -6418,7 +6280,7 @@ fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
 /// D3: what takes the keys floats in a frame with its name set into the top line — a card with the keys (its
 /// title the name, its answers in the bottom line), which-key (`space`), a picker (its title, gone from the input
 /// row), a prompt (`command`) — the lines in the faint wash, the name in `ui.text.focus`; a card without the keys
-/// (the chat has them) has none, nor does anything under `ui.edge = "ground"`.
+/// (the chat has them) has none.
 #[test]
 fn what_takes_the_keys_is_framed_with_its_name() {
     let (w, h) = (100u16, 30u16);
@@ -6490,16 +6352,10 @@ fn what_takes_the_keys_is_framed_with_its_name() {
     // A prompt: what it's for
     s.keys("<esc>:");
     assert!(rows(&mut s).iter().any(|row| row.contains("╭─ command ─")), "the prompt");
-    // Under `ground`: no frame anywhere
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    assert!(!rows(&mut s).iter().any(|row| row.contains('╭') || row.contains('╰')), "ground: as before");
-    s.keys("<esc> ");
-    assert!(!rows(&mut s).iter().any(|row| row.contains('╭')), "ground: which-key as before");
 }
 
 /// Panes plan §2.1c: a stacked group names all its members where a pane's name goes — the side panel's
 /// views, the slot's panels — `·` between, the one in sight lit, the others in the dim wash; `tab` lights the next.
-/// Under `ground` the names stand apart by blanks as before.
 #[test]
 fn a_group_names_its_members_one_lit() {
     let (w, h) = (120u16, 30u16);
@@ -6555,13 +6411,9 @@ fn a_group_names_its_members_one_lit() {
         p.screen().cell(slot as u16, x as u16).unwrap().bold()
     };
     assert_eq!(tabs.iter().filter(|t| bold(t)).count(), 1, "one lit: {header:?}");
-    // Under `ground`: blanks between, as before
-    s.ed.theme.edge = crate::theme::Edge::Ground;
-    s.frame();
-    assert!(!row(&s, 0).contains(" · ") && !row(&s, slot).contains(" · "), "{:?}", row(&s, slot));
 }
 
-/// Friction 92: under `lines` the code|chat boundary is one glyph on every row — the chat's line, nothing of a
+/// Friction 92: the code|chat boundary is one glyph on every row — the chat's line, nothing of a
 /// half block beside it (the scrollbar's thumb, a git or diagnostic mark on it, the cursor's row), wherever the
 /// cursor is.
 #[test]
@@ -6700,18 +6552,11 @@ fn two_cards_never_touch() {
     assert_ne!(bg(back, tab), ground, "the card behind on a surface of its own");
 }
 
-/// Every panel's text starts the same distance in from its visible edge — `PAD` cells from where its
-/// surface shows: the side panel's (from the screen's edge), the bottom slot's (past the side panel's
-/// gutter) and the chat's, beside the code and beside the slot alike. Measured in half cells: a half block
-/// shows two colours. Under `ui.edge = "lines"` the visible edge is the line: `PAD` cells from its cell.
+/// Every panel's text starts the same distance in from its visible edge — `PAD` cells from the line where it meets
+/// what's beside it: the side panel's (from the screen's edge), the bottom slot's (past the side panel's line) and
+/// the chat's, beside the code and beside the slot alike.
 #[test]
 fn every_panel_starts_its_text_the_same_distance_in() {
-    for edge in [crate::theme::Edge::Lines, crate::theme::Edge::Ground] {
-        panels_start_their_text_the_same_distance_in(edge);
-    }
-}
-
-fn panels_start_their_text_the_same_distance_in(edge_value: crate::theme::Edge) {
     use crate::chrome::{GAP, PAD};
     let (w, h) = (150u16, 36u16);
     let mut s = Shot::new(w, h);
@@ -6726,67 +6571,45 @@ fn panels_start_their_text_the_same_distance_in(edge_value: crate::theme::Edge) 
     s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
     s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
     s.ed.toasts.clear();
-    s.ed.theme.edge = edge_value;
-    let lines = edge_value == crate::theme::Edge::Lines;
-    let (_, surface, _) = chrome_colors(&s.ed);
     let p = cells(&s.frame(), w, h);
     let sc = &s.ed.screen;
     let (side, chat, slot_y, last) =
         (sc.side_w, sc.chat_x.unwrap(), sc.text_top + sc.body_h - sc.bottom_h, sc.text_top + sc.body_h - 1);
     assert!(slot_y < last, "the chat's last row is beside the slot");
-    // A half cell's colour: half blocks split their cell
-    let surface_at = |y: usize, half: usize| {
-        let c = p.screen().cell(y as u16, (half / 2) as u16).unwrap();
-        let (left, right) = match c.contents() {
-            "▌" => (c.fgcolor(), c.bgcolor()),
-            "▐" => (c.bgcolor(), c.fgcolor()),
-            _ => (c.bgcolor(), c.bgcolor()),
-        };
-        (if half.is_multiple_of(2) { left } else { right }) == surface
-    };
-    // From half cell `from` on: where the panel's surface shows, then its first text → the inset, in halves
-    // (under `lines`: from the cell after the line, the gutter's at half `from - 1` — the screen's edge at 0)
-    let inset = |y: usize, from: usize| {
-        let edge = match lines {
-            true if from == 0 => 0,
-            true => {
-                let gx = from / 2;
-                let c = p.screen().cell(y as u16, gx as u16).unwrap().contents().to_string();
-                assert!(["│", "├", "┤"].contains(&c.as_str()), "row {y}: a line at {gx}: {c:?}");
-                2 * (gx + 1)
-            }
-            false => (from..2 * w as usize).find(|&k| surface_at(y, k)).expect("a surface"),
-        };
-        let text = (edge.div_ceil(2)..w as usize)
+    // From the cell after the line at `gx` (none: the screen's edge) to the first text → the inset
+    let inset = |y: usize, gx: Option<usize>| {
+        let edge = gx.map_or(0, |gx| {
+            let c = p.screen().cell(y as u16, gx as u16).unwrap().contents().to_string();
+            assert!(["│", "├", "┤"].contains(&c.as_str()), "row {y}: a line at {gx}: {c:?}");
+            gx + 1
+        });
+        let text = (edge..w as usize)
             .find(|&x| {
                 let t = p.screen().cell(y as u16, x as u16).unwrap().contents();
-                // (the slot's header is in its line under `lines`: its text set in after `─ `)
-                !t.trim().is_empty() && t != "▌" && t != "▐" && t != "─"
+                // (the slot's header is in its line: its text set in after `─ `)
+                !t.trim().is_empty() && t != "─"
             })
             .expect("text");
-        2 * text - edge
+        text - edge
     };
-    // (the slot's and the chat's from their gutter's right half — its left half is what's left of it)
     let insets = [
-        ("the side panel", inset(0, 0)),
-        ("the slot", inset(slot_y, 2 * (side - GAP) + 1)),
-        ("the chat by the code", inset(0, 2 * chat + 1)),
-        ("the chat by the slot", inset(last, 2 * chat + 1)),
+        ("the side panel", inset(0, None)),
+        ("the slot", inset(slot_y, Some(side - GAP))),
+        ("the chat by the code", inset(0, Some(chat))),
+        ("the chat by the slot", inset(last, Some(chat))),
     ];
-    for (what, halves) in insets {
-        assert_eq!(halves, 2 * PAD, "{edge_value:?}: {what}: its text {halves} half cells in");
+    for (what, n) in insets {
+        assert_eq!(n, PAD, "{what}: its text {n} cells in");
     }
-    // A picker over the editing area hides the slot: no sliver of it left in the chat's gutter (under `lines`
-    // the chat's line, no join with an edge that isn't there)
+    // A picker over the editing area hides the slot: the chat's line beside it, no join with an edge that isn't there
     let ground = chrome_colors(&s.ed).0;
     s.keys(" f");
     let p = cells(&s.frame(), w, h);
     let c = p.screen().cell(last as u16, chat as u16).unwrap();
-    let gutter = if lines { "│" } else { " " };
-    assert_eq!((c.contents(), c.bgcolor()), (gutter, ground), "the chat's gutter beside the picker");
+    assert_eq!((c.contents(), c.bgcolor()), ("│", ground), "the chat's gutter beside the picker");
 }
 
-/// Under `lines` a slot's header is the line its leaves' lines start from: where one goes down, a `┬` — the
+/// A slot's header is the line its leaves' lines start from: where one goes down, a `┬` — the
 /// details (the debugger's program, state and reason; the tests' summary) end short of it and the keys start past
 /// it, never a `│` starting under a letter. They fold whole pieces, the time, then the counts (together: never `● 1`
 /// without its `▲ 1`); only words are cut, never a number half shown (no digit before a `…`).
@@ -6823,7 +6646,6 @@ fn a_slot_headers_lines_down_start_at_a_join() {
     // every width from 104 down to 64, so the room ends inside each piece once — the time's first)
     for w in [140u16].into_iter().chain((64..=104).rev()) {
         let mut s = Shot::new(w, h);
-        s.ed.theme.edge = crate::theme::Edge::Lines;
         s.file("src/demo.rs", DEMO_RS);
         let reason = "breakpoint hit in a function with a long name".to_string();
         s.ed.dap =
@@ -6865,18 +6687,14 @@ fn a_slot_headers_lines_down_start_at_a_join() {
     }
 }
 
-/// The gutters at their edges: the code's sign column is the first cell after the side panel's gutter; a
-/// border held shows the panel's half in the accent; a card's edge over a gutter is seated on the panel's
-/// half (its colour — not the ground, which would bite into the panel's edge); a panel filling the screen
-/// takes its gutter's cell whole (no ground against nothing); a theme whose panels are the ground's colour
-/// gets a `│` there instead, and nothing at the screen's edge.
+/// The gutters at their edges: the code's sign column is the first cell after the side panel's line; a border
+/// held shows its line in the accent; a panel filling the screen takes its gutter's cell whole — no line at the
+/// screen's edge. (Which line is lit with the keys: `the_edges_light_with_the_keys`.)
 #[test]
 fn the_gutters_hold_at_their_edges() {
     use crate::sizes::Border;
     let (w, h) = (120u16, 30u16);
     let mut s = Shot::new(w, h);
-    // (`ground`'s gutters: `lines`' are `the_edges_light_with_the_keys`)
-    s.ed.theme.edge = crate::theme::Edge::Ground;
     let cwd = s.in_project();
     s.file("src/demo.rs", DEMO_RS);
     s.ed.doc_mut().lsp.diagnostics = vec![crate::lsp::Diagnostic {
@@ -6893,54 +6711,26 @@ fn the_gutters_hold_at_their_edges() {
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l<esc>");
-    let (ground, surface, accent) = chrome_colors(&s.ed);
+    let (_, _, accent) = chrome_colors(&s.ed);
     let (side, chat, top, end) =
         (s.ed.screen.side_w, s.ed.screen.chat_x.unwrap(), s.ed.screen.text_top, s.ed.screen.body_h);
     let cell = |s: &mut Shot, y: usize, x: usize| {
         let c = cells(&s.frame(), w, h).screen().cell(y as u16, x as u16).unwrap().clone();
-        (c.contents().to_string(), c.fgcolor(), c.bgcolor())
+        (c.contents().to_string(), c.fgcolor())
     };
     // The sign column right after the gutter: the error's bar there, nothing between
     assert_eq!(cell(&mut s, top, side).0, "▎", "the sign column, first after the gutter");
-    // A border held: the panel's half in the accent
+    // A border held: its line in the accent
     s.ed.dragging = Some(Border::Side);
-    assert_eq!(cell(&mut s, 5, side - 1), ("▌".into(), accent, ground), "the side panel's border, held");
+    assert_eq!(cell(&mut s, 5, side - 1), ("│".into(), accent), "the side panel's border, held");
     s.ed.dragging = Some(Border::Chat);
-    assert_eq!(cell(&mut s, 5, chat), ("▐".into(), accent, ground), "the chat's border, held");
+    assert_eq!(cell(&mut s, 5, chat), ("│".into(), accent), "the chat's border, held");
     s.ed.dragging = None;
-    // A card over the side panel and its gutter — a completion list wider than the code beside the chat,
-    // pushed left over them: its edges there seated on the panel's half
-    let item =
-        |label: &str| json!({ "label": label, "detail": "fn(&str) -> Result<HashMap<String, usize>>" });
-    let items =
-        json!([item("a_name_long_enough_to_fill_its_column_wide"), item("another_name_as_long_as_that")]);
-    let mut list = crate::completion::Completion::new(0, s.ed.doc().id, 0, items);
-    list.filter("");
-    s.ed.completion = Some(list);
-    let edges: Vec<_> =
-        (0..end).map(|y| cell(&mut s, y, side - 1)).filter(|c| c.0 == "▄" || c.0 == "▀").collect();
-    assert!(!edges.is_empty(), "the list's edge crosses the gutter");
-    for c in edges {
-        assert_eq!(c.2, surface, "a card's edge over the gutter: {c:?}");
-    }
-    s.ed.completion = None;
-    // The chat filling the screen: its gutter's cell whole, the screen's edge no ground
+    // The chat filling the screen: its gutter's cell whole, no line at the screen's edge
     s.keys(" l<C-w>z");
     for y in 0..end {
-        let (glyph, _, bg) = cell(&mut s, y, 0);
-        assert_eq!((glyph, bg), (" ".into(), surface), "row {y}, zoomed");
+        assert_eq!(cell(&mut s, y, 0).0, " ", "row {y}, zoomed");
     }
-    s.keys("<C-w>z<esc>");
-    // Panels the ground's colour: a `│` between regions, nothing at the screen's edge
-    let bg = s.ed.theme.get("ui.background").bg;
-    let popup = s.ed.theme.get("ui.popup");
-    s.ed.theme.set("ui.popup", crate::theme::Style { bg, ..popup });
-    for y in [0, 5, end - 1] {
-        assert_eq!(cell(&mut s, y, side - 1).0, "│", "row {y}: the side panel's gutter, no surfaces");
-        assert_eq!(cell(&mut s, y, chat).0, "│", "row {y}: the chat's gutter, no surfaces");
-    }
-    s.keys(" l<C-w>z");
-    assert_eq!(cell(&mut s, 5, 0).0, " ", "zoomed, no surfaces: nothing at the screen's edge");
 }
 
 /// The chat's input says whether it has the keys: its border in the accent and the caret in it while it
@@ -6997,13 +6787,10 @@ fn the_picker_floats_with_equal_margins() {
     let at = |y: usize, x: usize| p.screen().cell(y as u16, x as u16).unwrap().clone();
     let chat = s.ed.screen.chat_x.unwrap();
     let end = s.ed.screen.text_top + s.ed.screen.body_h;
-    // The card: its surface and its half-row edges — under `lines` its frame, a cell out from the cards (the
-    // selected row's bar keeps its edge)
+    // The card: its surface and its frame, a cell out from the cards (the selected row's bar keeps its edge)
     let card = |y, x| {
         let c = at(y, x);
-        c.bgcolor() == surface
-            || (["▄", "▀"].contains(&c.contents()) && c.fgcolor() == surface)
-            || "╭╮╰╯│─┬┴".contains(c.contents()) && !c.contents().is_empty()
+        c.bgcolor() == surface || "╭╮╰╯│─┬┴".contains(c.contents()) && !c.contents().is_empty()
     };
     let rows: Vec<usize> = (0..end).filter(|&y| (0..chat).any(|x| card(y, x))).collect();
     let cols: Vec<usize> = (0..chat).filter(|&x| (0..end).any(|y| card(y, x))).collect();

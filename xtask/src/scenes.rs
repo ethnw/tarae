@@ -569,31 +569,6 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
-    // (…under `ui.edge = "ground"`: both members named in the header row, the list open)
-    Scene {
-        name: "group-task-stacked-ground",
-        claude: "idle",
-        files: MAIN,
-        keys: &[
-            "@?Trust this",
-            "@1",
-            "y",
-            "@1",
-            ":",
-            "task check",
-            "\r",
-            "@20?2 warnings",
-            "@1",
-            " ",
-            "e",
-            "@1",
-            "\x1b",
-            "@1",
-            "\x17",
-            "j",
-            "@1",
-        ],
-    },
     Scene {
         name: "group-tests-stacked",
         claude: "idle",
@@ -1811,15 +1786,6 @@ fn one(
         let theme = if bg == "dark" { "meok-transparent" } else { "hanji-transparent" };
         toml = format!("theme = \"{theme}\"\n{toml}");
     }
-    // (the `-ground` scenes: meok or hanji with `ui.edge = "ground"` — half cells of ground, no lines)
-    if scene.name.ends_with("-ground") {
-        let base = if bg == "dark" { "meok" } else { "hanji" };
-        write(
-            &config.join("tarae/themes/ground.toml"),
-            &format!("inherits = \"{base}\"\n\"ui.edge\" = \"ground\"\n"),
-        )?;
-        toml = format!("theme = \"ground\"\n{toml}");
-    }
     // (the shuttle scenes: a program may type, and the one that does)
     if scene.name.starts_with("shuttle") {
         toml.push_str("\n[ui]\nshuttle-keys = \"light\"\n");
@@ -2034,8 +2000,7 @@ echo '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s'
 /// never cargo's shared one).
 fn run_files(scene: &str) -> Vec<(&'static str, String)> {
     match scene {
-        "output-task" | "panes-task-places" | "group-task-detail" | "group-task-stacked"
-        | "group-task-stacked-ground" => vec![
+        "output-task" | "panes-task-places" | "group-task-detail" | "group-task-stacked" => vec![
             (".tarae.toml", "[task.check]\ncmd = \"sh check.sh\"\n".into()),
             ("check.sh", CHECK_SH.into()),
         ],

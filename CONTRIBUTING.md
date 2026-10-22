@@ -430,8 +430,8 @@ over the committed ones. A new picture in the docs is a row there (a test checks
 The design language:
 
 - **One accent color** (`ui.accent`; if a theme lacks it, the primary cursor background is used)
-- **Floating things are cards** (`card_style`, `card_padding`, `card_edge` — half-cell blocks for half-line padding);
-  themes without a background color get a border instead. Floating things use the same syntax colors as code
+- **Floating things are cards** (`card_style`, a row of air above and below — `card_edge`); what takes the keys floats
+  in a thin frame named in its top line (`draw_frame`). Floating things use the same syntax colors as code
 - Selected row = a `▎` accent bar + `ui.menu.selected`; typed characters = accent bold
 - **Only two dim levels**: `ui.virtual` (dim) and `ui.linenr` (faint)
 - **Glyphs** only from what JetBrains Mono, Hack, Menlo, and SF Mono all have: `ƒ τ ν π § ◦ # ¶ ● ▲ › ▎ ▐ ▌ ▄ ▀`

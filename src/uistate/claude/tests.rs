@@ -371,7 +371,7 @@ fn pointing_puts_an_elements_id_in_the_chat() {
     assert!(ed.pointing.is_none() && ed.session.is_at(crate::session::At::Chat));
 }
 
-/// A framed card's label sits on its title's row — the frame's top line (`ui.edge = "lines"`), where its name
+/// A framed card's label sits on its title's row — the frame's top line, where its name
 /// is — at its left edge: the spot the state gives and the frame drawn agree.
 #[test]
 fn a_framed_cards_label_is_on_its_title_row() {

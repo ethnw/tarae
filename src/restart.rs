@@ -1678,8 +1678,7 @@ mod tests {
             ed.theme = crate::theme::load(theme).unwrap();
             let mut buf = Vec::new();
             crate::term::render(ed, &mut buf, 100, 30).unwrap();
-            let edges = ed.screen.edges.borrow();
-            let bytes = crate::screen::Screen::new().present(&buf, 100, 30, &edges).to_vec();
+            let bytes = crate::screen::Screen::new().present(&buf, 100, 30).to_vec();
             std::fs::write(Path::new(&dir).join(format!("{name}-{theme}.bin")), bytes).unwrap();
         }
         (ed.offer_popups, ed.theme) = (popups, crate::theme::load(&was).unwrap());

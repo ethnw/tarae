@@ -169,7 +169,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             }
             frame.clear();
             render(editor, &mut frame, w, h)?;
-            let bytes = screen.present(&frame, w, h, &editor.screen.edges.borrow());
+            let bytes = screen.present(&frame, w, h);
             let own = std::mem::take(&mut editor.term_out);
             if !bytes.is_empty() || !own.is_empty() {
                 out.write_all(bytes)?;
@@ -410,7 +410,7 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
 fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::Result<()> {
     let lay = Layout::new(editor, w, h);
     let ui = Ui::new(editor);
-    let mut offer = OfferCard::new(editor, &lay, &ui);
+    let mut offer = OfferCard::new(editor, &lay);
     // The front card in sight since when (a new one, or new text, starts it over)
     let front = offer.as_ref().and(editor.offers.first()).map(|o| (o.id, o.rev));
     if front != editor.offer_seen.get().map(|(id, rev, _)| (id, rev)) {
@@ -501,7 +501,6 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         run_cols: Default::default(),
         review_change: Default::default(),
         review_rows: Default::default(),
-        edges: Default::default(),
         task_panel: Default::default(),
         plugin_panel: Default::default(),
         procs_panel: Default::default(),
@@ -659,7 +658,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     {
         editor.offer_read_whole((id, rev));
         // (this frame's card already says so)
-        offer = OfferCard::new(editor, &lay, &ui);
+        offer = OfferCard::new(editor, &lay);
         editor.screen.offer_buttons = offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default();
         editor.screen.offer_card = offer.as_ref().map(OfferCard::rect);
         editor.screen.offer_cut = offer.as_ref().filter(|c| !c.bar).map(|c| c.cut);
@@ -701,7 +700,7 @@ struct Layout {
     debug_h: usize,
     slot_x: usize,
     slot_w: usize,
-    /// The slot's header rows (`chrome::slot_head`): its body starts this far under `slot_y`.
+    /// The slot's header rows (`chrome::SLOT_HEAD`): its body starts this far under `slot_y`.
     slot_head: usize,
     /// The panel columns' height — the side panel's, the chat's: from the screen's first row to the status
     /// line (the card's bar row aside).
@@ -853,11 +852,10 @@ impl Layout {
         // `C-w z`: one pane fills the screen (`sizes::Zoom`)
         let zoom = editor.zoomed();
         let zoom_shows = editor.zoomed_shows();
-        // (the slot's header in the line where it meets what's above under `lines` — panes P3 §1: filling the
-        // screen, that line is its first row, no path bar over it)
-        let slot_head = crate::chrome::slot_head(editor.theme.edge);
-        let header = (editor.config.header || editor.docs.len() > 1)
-            && !(zoom_shows == Some(Shows::Slot) && slot_head < crate::chrome::HEAD);
+        // (the slot's header in the line where it meets what's above — panes P3 §1: filling the screen, that line
+        // is its first row, no path bar over it)
+        let slot_head = crate::chrome::SLOT_HEAD;
+        let header = (editor.config.header || editor.docs.len() > 1) && zoom_shows != Some(Shows::Slot);
         // (the path bar and its rule over the code — `chrome::HEAD`; a short screen keeps the row for code)
         let text_top = match header {
             true if h >= crate::chrome::RULE_MIN_ROWS => crate::chrome::HEAD as u16,
@@ -870,7 +868,7 @@ impl Layout {
         let bar = usize::from(editor.offer_bar() && all > 6);
         let total = all - bar;
         // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1); its header
-        // in the line over it under `lines`: the same body in a row less, the code keeping the row a rule took
+        // in the line over it: the same body in a row less, the code keeping the row a rule took
         let natural = match editor.slot() {
             _ if zoom_shows.is_some_and(|z| z != Shows::Slot) => 0,
             Some(Slot::Procs) => procs_panel_h(editor, total, slot_head),
@@ -1198,7 +1196,7 @@ fn draw_debug_panel(
         for (c, &(x, cw)) in cols.iter().enumerate() {
             if c > 0 {
                 queue!(out, MoveTo((x0 + x - 1) as u16, y))?;
-                leaf_line(out, ui, card, faint, false)?;
+                leaf_line(out, ui, card, false)?;
             }
             // (the first column's text at the panel's padding, the others a cell in from their line)
             let pad = if c == 0 { PAD } else { 1 };
@@ -1466,19 +1464,12 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
 /// front strong, each with its badge — then what the one in front says (`details`) and its keys at the right.
 /// Tabs are clicked (`Screen.slot_tabs`) or `tab` in its view mode. Returns the first row of the panel's body.
 ///
-/// Under `ui.edge = "lines"` it's the line where the slot meets the code above it (panes P3 §1, `top_line` — the
-/// floating frame's top line's drawer): lit while the slot has the keys, `┬` where a line between its leaves starts
-/// below (`splits`, absolute columns), the code keeping the row a rule took:
+/// It's the line where the slot meets the code above it (panes P3 §1, `top_line` — the floating frame's top line's
+/// drawer): lit while the slot has the keys, `┬` where a line between its leaves starts below (`splits`, absolute
+/// columns), the code keeping the row a rule took:
 ///
 /// ```text
 /// ─ terminal · check ▲ · tests ● ── sh ───────────────────────────────────────────── C-\ type  space T hide ─
-/// ```
-///
-/// Under `"ground"` a row of its own, the details after a faint `│`, and the rule under it:
-///
-/// ```text
-///   terminal   check ▲   tests ●  │  sh                                                C-\ type  space T hide
-///   ──────────────────────────────────────────────────────────────────────────────────────────────
 /// ```
 ///
 /// A group in front names its members after the tabs (`members`, panes P3 step 3b): side by side each over its own
@@ -1501,7 +1492,6 @@ fn slot_header(
     splits: &[usize],
     members: Option<&Members>,
 ) -> io::Result<usize> {
-    use crate::chrome::{HEAD, PAD, PAD_R};
     use crate::pane::Member;
     let (x0, y0, w) = (lay.slot_x, lay.slot_y(), lay.slot_w);
     let dim = Style { fg: ui.virt.fg, ..card };
@@ -1510,20 +1500,6 @@ fn slot_header(
         card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let front = editor.slot();
     let tabs = editor.slot_tabs();
-    let lines = ui.edge == crate::theme::Edge::Lines;
-    // (the members' names in the line under `lines`; under `ground` a group side by side keeps its title rows, a
-    // stacked one names both in the header row, as that row names its tabs — the detail's own details after the
-    // run's while it's beside the list or open)
-    let ground_stacked = members.filter(|m| !lines && m.split.is_none());
-    let merged: Vec<(String, Style)>;
-    let details = match members.filter(|m| !lines && (m.split.is_some() || m.front == Member::Detail)) {
-        Some(m) => {
-            merged = details.iter().chain(&m.details).cloned().collect();
-            &merged[..]
-        }
-        None => details,
-    };
-    let members = members.filter(|_| lines);
     // (the line's own cells: its lead `─ `, a blank and a `─` after the names — `top_line`; side by side the tabs
     // share the list's stretch with its name, stacked both members' names. The names stand, the details fold before
     // them — step 1's order, `top_line`'s)
@@ -1532,11 +1508,7 @@ fn slot_header(
         Some(_) => MEMBERS_SEP.width() + m.list.width(),
         None => MEMBERS_SEP.width() + m.list.width() + NAMES_SEP.width() + m.detail.width(),
     });
-    let ground_w = ground_stacked.map_or(0, |m| MEMBERS_SEP.width() + m.list.width() + 3 + m.detail.width());
-    let room = match lines {
-        true => stretch.saturating_sub(TOP_LINE_OWN + member_w),
-        false => w.saturating_sub(PAD + PAD_R + ground_w),
-    };
+    let room = stretch.saturating_sub(TOP_LINE_OWN + member_w);
     // As wide as they come; too wide, the ones behind shorten first, then the one in front
     let badge_w = |t: &crate::chrome::Tab| badge_glyph(t.badge, editor, ui).map_or(0, |(g, _)| 1 + g.width());
     let labels = |behind: usize, ahead: usize| -> Vec<String> {
@@ -1562,144 +1534,80 @@ fn slot_header(
         run.map_or(s, |n| flashed(ui, editor, &format!("run#{n}"), s))
     };
     let mut spots = editor.screen.slot_tabs.borrow_mut();
-    if lines {
-        // The names as a frame's top line has them (`pane_names`' `·` between), each tab its label and badge
-        let mut names = Vec::new();
-        let mut owner = Vec::new();
-        for (i, (t, label)) in tabs.iter().zip(&shown).enumerate() {
-            if i > 0 {
-                names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
-                owner.push(None);
-            }
-            names.push((label.clone(), lit(t, if Some(t.slot) == front { strong } else { dim })));
-            owner.push(Some(t.slot));
-            if let Some((g, fg)) = badge_glyph(t.badge, editor, ui) {
-                names.push((format!(" {g}"), lit(t, Style { fg, ..card })));
-                owner.push(Some(t.slot));
-            }
-        }
-        // The group's members after ` › ` (step 3b): side by side the list's here, the detail's past the `┬`, each
-        // strong with the keys; stacked both, `·` between, the one in sight strong
-        let mut who: Vec<Option<Member>> = vec![None; names.len()];
-        let mut beyond_names = Vec::new();
-        let mut said = details.to_vec();
-        let line = edge_style(ui, card, Region::Slot);
-        let wash = Style { fg: ui.window, ..line };
-        let mut stretches = (line, None);
-        if let Some(m) = members {
-            let name = |of: Member| {
-                let strong_one = if m.split.is_some() { m.keys == Some(of) } else { m.front == of };
-                if strong_one { strong } else { dim }
-            };
-            names.push((MEMBERS_SEP.to_string(), frame_line(ui, card)));
-            names.push((m.list.to_string(), name(Member::List)));
-            who.extend([None, Some(Member::List)]);
-            match m.split {
-                Some(_) => {
-                    beyond_names.push((m.detail.to_string(), name(Member::Detail)));
-                    who.push(Some(Member::Detail));
-                    let of = |who: Member| if m.keys == Some(who) { line } else { wash };
-                    stretches = (of(Member::List), Some(of(Member::Detail)));
-                }
-                None => {
-                    names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
-                    names.push((m.detail.to_string(), name(Member::Detail)));
-                    who.extend([None, Some(Member::Detail)]);
-                    if m.front == Member::Detail {
-                        said.extend(m.details.iter().cloned());
-                    }
-                }
-            }
-        }
-        let key = Style { bold: true, ..dim };
-        let beyond = members.zip(stretches.1).map(|(m, detail_line)| Beyond {
-            names: &beyond_names,
-            details: &m.details,
-            line: detail_line,
-            join: line,
-        });
-        let head = TopLine { names: &names, details: &said, keys: hints, key, faint, plain: false, beyond };
-        let cols = top_line(out, stretches.0, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
-        // (a tab's spot from its label's first cell to its badge's last; a member's its name's)
-        for (slot, (a, b)) in owner.iter().zip(&cols).filter_map(|(o, c)| o.map(|s| (s, *c))) {
-            match spots.last_mut() {
-                Some(last) if last.3 == slot => last.2 = b,
-                _ => spots.push((y0, a, b, slot)),
-            }
-        }
-        if let Some(m) = members {
-            let mut named = editor.screen.member_names.borrow_mut();
-            for (of, (a, b)) in who.iter().zip(&cols).filter_map(|(o, c)| o.map(|o| (o, *c))) {
-                let id = if of == Member::List { m.ids.0 } else { m.ids.1 };
-                if b > a {
-                    named.push((y0, a, b, id));
-                }
-            }
-        }
-        return Ok(y0 + 1);
-    }
-    queue!(out, MoveTo(x0 as u16, y0 as u16))?;
-    apply(out, card)?;
-    queue!(out, Spaces(PAD))?;
-    let mut used = PAD;
+    // The names as a frame's top line has them (`pane_names`' `·` between), each tab its label and badge
+    let mut names = Vec::new();
+    let mut owner = Vec::new();
     for (i, (t, label)) in tabs.iter().zip(&shown).enumerate() {
         if i > 0 {
-            apply(out, card)?;
-            queue!(out, Spaces(3))?;
-            used += 3;
+            names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
+            owner.push(None);
         }
-        let start = x0 + used;
-        let lit = |s: Style| lit(t, s);
-        apply(out, lit(if Some(t.slot) == front { strong } else { dim }))?;
-        queue!(out, Print(label))?;
-        used += label.width();
+        names.push((label.clone(), lit(t, if Some(t.slot) == front { strong } else { dim })));
+        owner.push(Some(t.slot));
         if let Some((g, fg)) = badge_glyph(t.badge, editor, ui) {
-            apply(out, lit(Style { fg, ..card }))?;
-            queue!(out, Print(format!(" {g}")))?;
-            used += 1 + g.width();
+            names.push((format!(" {g}"), lit(t, Style { fg, ..card })));
+            owner.push(Some(t.slot));
         }
-        spots.push((y0, start, x0 + used, t.slot));
     }
-    // A stacked group's members after ` › `, three cells apart as the tabs are, the open one strong (step 3b)
-    if let Some(m) = ground_stacked {
-        apply(out, faint)?;
-        queue!(out, Print(MEMBERS_SEP))?;
-        used += MEMBERS_SEP.width();
-        let mut named = editor.screen.member_names.borrow_mut();
-        for (i, (name, of, id)) in
-            [(m.list, Member::List, m.ids.0), (m.detail, Member::Detail, m.ids.1)].into_iter().enumerate()
-        {
-            if i > 0 {
-                apply(out, card)?;
-                queue!(out, Spaces(3))?;
-                used += 3;
+    // The group's members after ` › ` (step 3b): side by side the list's here, the detail's past the `┬`, each
+    // strong with the keys; stacked both, `·` between, the one in sight strong
+    let mut who: Vec<Option<Member>> = vec![None; names.len()];
+    let mut beyond_names = Vec::new();
+    let mut said = details.to_vec();
+    let line = edge_style(ui, card, Region::Slot);
+    let wash = Style { fg: ui.window, ..line };
+    let mut stretches = (line, None);
+    if let Some(m) = members {
+        let name = |of: Member| {
+            let strong_one = if m.split.is_some() { m.keys == Some(of) } else { m.front == of };
+            if strong_one { strong } else { dim }
+        };
+        names.push((MEMBERS_SEP.to_string(), frame_line(ui, card)));
+        names.push((m.list.to_string(), name(Member::List)));
+        who.extend([None, Some(Member::List)]);
+        match m.split {
+            Some(_) => {
+                beyond_names.push((m.detail.to_string(), name(Member::Detail)));
+                who.push(Some(Member::Detail));
+                let of = |who: Member| if m.keys == Some(who) { line } else { wash };
+                stretches = (of(Member::List), Some(of(Member::Detail)));
             }
-            apply(out, if m.front == of { strong } else { dim })?;
-            queue!(out, Print(name))?;
-            named.push((y0, x0 + used, x0 + used + name.width(), id));
-            used += name.width();
+            None => {
+                names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
+                names.push((m.detail.to_string(), name(Member::Detail)));
+                who.extend([None, Some(Member::Detail)]);
+                if m.front == Member::Detail {
+                    said.extend(m.details.iter().cloned());
+                }
+            }
         }
     }
-    // What the one in front says, set apart from the tabs by a faint `│` — as much as there's room for, folded
-    // as on the line (`fold_details`), the keys keeping theirs
-    let shown = fold_details(details, w.saturating_sub(used + 5 + PAD_R + 2), false);
-    if !shown.is_empty() {
-        apply(out, card)?;
-        queue!(out, Spaces(2))?;
-        apply(out, Style { fg: ui.window, ..card })?;
-        queue!(out, Print("│"))?;
-        apply(out, card)?;
-        queue!(out, Spaces(2))?;
-        used += 5;
+    let key = Style { bold: true, ..dim };
+    let beyond = members.zip(stretches.1).map(|(m, detail_line)| Beyond {
+        names: &beyond_names,
+        details: &m.details,
+        line: detail_line,
+        join: line,
+    });
+    let head = TopLine { names: &names, details: &said, keys: hints, key, faint, plain: false, beyond };
+    let cols = top_line(out, stretches.0, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
+    // (a tab's spot from its label's first cell to its badge's last; a member's its name's)
+    for (slot, (a, b)) in owner.iter().zip(&cols).filter_map(|(o, c)| o.map(|s| (s, *c))) {
+        match spots.last_mut() {
+            Some(last) if last.3 == slot => last.2 = b,
+            _ => spots.push((y0, a, b, slot)),
+        }
     }
-    for (s, st) in &shown {
-        apply(out, *st)?;
-        queue!(out, Print(s))?;
-        used += s.width();
+    if let Some(m) = members {
+        let mut named = editor.screen.member_names.borrow_mut();
+        for (of, (a, b)) in who.iter().zip(&cols).filter_map(|(o, c)| o.map(|o| (o, *c))) {
+            let id = if of == Member::List { m.ids.0 } else { m.ids.1 };
+            if b > a {
+                named.push((y0, a, b, id));
+            }
+        }
     }
-    panel_hints(out, hints, used, w, card, dim, faint)?;
-    header_rule(out, ui, card, (x0, y0 + 1, w), Region::Slot)?;
-    Ok(y0 + HEAD)
+    Ok(y0 + crate::chrome::SLOT_HEAD)
 }
 
 /// A group's members as the slot's line names them (panes P3 step 3b, plan §1.2): their names and pane ids, the
@@ -1748,9 +1656,9 @@ const DETAILS_MIN: usize = 8;
 /// What a header says (`details`), folded into `room` cells: in pieces — a span with leading blanks starts one, the
 /// rest go with it (a count's mark and its number), counts in a row one piece — that go whole from the last, least
 /// important first (the time, then the counts); only a piece of words is cut (`fit_ellipsis`), never a number or a
-/// time half shown (counters and timers keep their width). The first without its leading blanks; `one_phrase` (a top
-/// line): the others a blank apart, as text runs on a line.
-fn fold_details(details: &[(String, Style)], room: usize, one_phrase: bool) -> Vec<(String, Style)> {
+/// time half shown (counters and timers keep their width). The first without its leading blanks, the others a blank
+/// apart, as text runs on a line.
+fn fold_details(details: &[(String, Style)], room: usize) -> Vec<(String, Style)> {
     use std::ops::Range;
     let spans: Vec<(String, Style)> = details
         .iter()
@@ -1758,7 +1666,7 @@ fn fold_details(details: &[(String, Style)], room: usize, one_phrase: bool) -> V
         .enumerate()
         .map(|(i, (s, st))| match s.trim_start() {
             t if i == 0 => (t.to_string(), *st),
-            t if one_phrase && t.len() < s.len() => (format!(" {t}"), *st),
+            t if t.len() < s.len() => (format!(" {t}"), *st),
             _ => (s.clone(), *st),
         })
         .collect();
@@ -1881,7 +1789,7 @@ fn top_line(
         |buf: &mut Vec<u8>, line: Style, details: &[(String, Style)], col: &mut usize, most, bare| {
             let lead = if bare { 2 } else { 4 };
             let details = match room(*col) >= 4 + DETAILS_MIN && most >= DETAILS_MIN {
-                true => fold_details(details, (room(*col) - 4).min(most), true),
+                true => fold_details(details, (room(*col) - 4).min(most)),
                 false => Vec::new(),
             };
             if !details.is_empty() {
@@ -1950,41 +1858,6 @@ fn top_line(
 fn apply_put(out: &mut impl Write, style: Style, text: &str) -> io::Result<()> {
     apply(out, style)?;
     queue!(out, Print(text))
-}
-
-/// Rest of a bottom panel header (`used` cells drawn of `w`): key hints at the right end if they fit.
-fn panel_hints(
-    out: &mut impl Write,
-    hints: &[(&str, &str)],
-    mut used: usize,
-    w: usize,
-    card: Style,
-    dim: Style,
-    faint: Style,
-) -> io::Result<()> {
-    // As many as fit, from the first (the most useful) on
-    let one = |(k, v): &(&str, &str)| k.width() + v.width() + 3;
-    let (mut n, mut hint_w) = (0, 0);
-    for h in hints {
-        if used + hint_w + one(h) + 2 > w {
-            break;
-        }
-        hint_w += one(h);
-        n += 1;
-    }
-    if n > 0 {
-        apply(out, card)?;
-        queue!(out, Spaces(w - used - hint_w - 1))?;
-        for (k, v) in &hints[..n] {
-            apply(out, Style { bold: true, ..dim })?;
-            queue!(out, Print(k))?;
-            apply(out, faint)?;
-            queue!(out, Print(format!(" {v}  ")))?;
-        }
-        used = w - 1;
-    }
-    apply(out, card)?;
-    queue!(out, Spaces(w.saturating_sub(used)))
 }
 
 /// Debug panel value colored by shape, its type faint at the right end of `rest` cells (dropped if no room).
@@ -2099,7 +1972,7 @@ fn step_mark(
     }
 }
 
-/// The fewest rows of output the task panel shows (under its header, `head` rows — `chrome::slot_head`).
+/// The fewest rows of output the task panel shows (under its header, `head` rows — `chrome::SLOT_HEAD`).
 const TASK_PANEL_MIN: usize = 2;
 
 /// The task panel's height (U2): its output whole — the header, the lines, the rows of what waits for it
@@ -2117,7 +1990,7 @@ fn task_panel_h(r: &crate::task::Run, steps: bool, queued: usize, total: usize, 
 }
 
 /// The terminal panel's height for `total` rows of editing area — more than the other panels (a shell wants
-/// room), at most 24 — a row less with its header in the line over it (`head`, `chrome::slot_head`): the shell's
+/// room), at most 24 — a row less with its header in the line over it (`head`, `chrome::SLOT_HEAD`): the shell's
 /// rows the same.
 fn terminal_panel_h(total: usize, head: usize) -> usize {
     // Never more than leaves 4 rows of code; too little room for a header and a row → none
@@ -2444,11 +2317,7 @@ fn draw_task_panel(
     draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at, None)?;
     for i in (0..rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
         apply(out, faint)?;
-        queue!(
-            out,
-            MoveTo((x0 + w).saturating_sub(1) as u16, (y0 + top + i) as u16),
-            Print(thumb_glyph(ui))
-        )?;
+        queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, (y0 + top + i) as u16), Print(THUMB))?;
     }
     Ok(())
 }
@@ -2471,22 +2340,19 @@ fn draw_task_group(
 ) -> io::Result<()> {
     use crate::chrome::PAD;
     use crate::pane::GroupKind;
-    // (stacked, one is none wide; their names are in the slot's line — under `ground` a title row each)
+    // (stacked, one is none wide; their names are in the slot's line)
     let side = list.w > 0 && detail.w > 0;
-    let titled = ui.edge == crate::theme::Edge::Ground && side;
-    let head = usize::from(titled);
     let list_w = list.w;
     let t = &editor.theme;
     let card = panel_style(ui, editor);
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
-    let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let color = |k: &str| t.try_get(k).and_then(|s| s.fg);
     let (good, bad, warn) = (color("diff.plus"), ui.error.fg, color("warning"));
     let (x0, w) = (lay.slot_x, lay.slot_w);
     let right_x = list_w + 1;
     let right_w = w.saturating_sub(right_x + 1);
-    let list_rows = rows.saturating_sub(head);
+    let list_rows = rows;
     let steps = crate::grouplist::preflight(editor).filter(|_| g.kind == GroupKind::Preflight);
     let order = if steps.is_some() { Vec::new() } else { r.place_rows() };
     let (n, sel) = match steps {
@@ -2504,14 +2370,12 @@ fn draw_task_group(
     };
     editor.screen.task_panel.set(Some((lay.slot_y(), last, list_rows)));
     if detail.w > 0 {
-        editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y + head, text.0, list_rows)));
+        editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y, text.0, list_rows)));
     }
     if list.w > 0 {
-        editor.screen.lists.borrow_mut().push((g.kind, (y + head, list_rows, first)));
+        editor.screen.lists.borrow_mut().push((g.kind, (y, list_rows, first)));
     }
     let list_keys = editor.session.is_at(At::List(g.list));
-    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Task);
-    let title = |keys: bool| Style { bold: true, ..if keys { strong } else { faint } };
     // (the line between them lit while either has the keys — it edges both, as a code pane's divider)
     let lit = ui.lit == Some(Region::Slot);
     // (the link, while the list has the keys: the place's line, the step's heading)
@@ -2530,21 +2394,9 @@ fn draw_task_group(
         queue!(out, Spaces(w))?;
         if side {
             queue!(out, MoveTo((x0 + list_w) as u16, yy))?;
-            leaf_line(out, ui, card, faint, lit)?;
+            leaf_line(out, ui, card, lit)?;
         }
-        if titled && i == 0 {
-            if list.w > 0 {
-                apply(out, title(list_keys))?;
-                let name = if steps.is_some() { "STEPS" } else { "PLACES" };
-                queue!(out, MoveTo((x0 + PAD) as u16, yy), Print(name))?;
-            }
-            if detail.w > 0 {
-                apply(out, title(detail_keys))?;
-                queue!(out, MoveTo((text.0) as u16, yy), Print("OUTPUT"))?;
-            }
-            continue;
-        }
-        let idx = first + i - head;
+        let idx = first + i;
         if idx >= n || list.w == 0 {
             continue;
         }
@@ -2599,15 +2451,11 @@ fn draw_task_group(
     if detail.w == 0 {
         return Ok(());
     }
-    let at = (text.0, y + head, text.1, list_rows);
+    let at = (text.0, y, text.1, list_rows);
     draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at, band)?;
     for i in (0..list_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
         apply(out, faint)?;
-        queue!(
-            out,
-            MoveTo((x0 + w).saturating_sub(1) as u16, (y + head + i) as u16),
-            Print(thumb_glyph(ui))
-        )?;
+        queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, (y + i) as u16), Print(THUMB))?;
     }
     Ok(())
 }
@@ -3251,11 +3099,9 @@ fn draw_test_panel(
     let rel = |p: &std::path::Path| p.strip_prefix(cwd).unwrap_or(p).display().to_string();
     let fails = r.failures();
     let selected = r.picked();
-    // (in its stretch of the line — under `ground` its title row's while side by side, else the header row's)
-    let stacked = members.as_ref().is_some_and(|(_, m)| side_by_side(m).is_none());
-    let named = ui.edge == crate::theme::Edge::Lines || stacked;
+    // (in its stretch of the line)
     let mut own = Vec::new();
-    if let Some(c) = selected.filter(|_| named) {
+    if let Some(c) = selected {
         if let Some((p, l)) = &c.at {
             own.push((format!("{}:{}", rel(p), l + 1), faint));
         }
@@ -3333,22 +3179,20 @@ fn draw_test_panel(
         for i in (0..out_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
             let y = (body + note + i) as u16;
             apply(out, faint)?;
-            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
+            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(THUMB))?;
         }
         return Ok(());
     }
     // ── Two columns: result list · selected failure (or output if none)
     // List names drop the shared prefix (`math::tests::adds` → `adds` — the full name is in the header)
     let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
-    // (stacked, one is none wide; their names are in the slot's line — under `ground` a title row each)
+    // (stacked, one is none wide; their names are in the slot's line)
     let (list, detail) = members.map(|(_, m)| m).unwrap_or_else(|| {
         let l = tests_list_w(r, w);
         let rect = |x, w| crate::split::Rect { x, y: body, w, h: rows };
         (rect(x0, l), rect(x0 + l + 1, w.saturating_sub(l + 1)))
     });
     let side = list.w > 0 && detail.w > 0;
-    let titled = ui.edge == crate::theme::Edge::Ground && side;
-    let head = usize::from(titled);
     let left_w = list.w;
     let right_x = left_w + 1;
     let right_w = w.saturating_sub(right_x + 1);
@@ -3356,7 +3200,7 @@ fn draw_test_panel(
         true => (x0 + right_x + 1, right_w.saturating_sub(1)),
         false => (x0 + PAD, w.saturating_sub(2 * PAD)),
     };
-    let list_rows = rows.saturating_sub(head);
+    let list_rows = rows;
     editor.screen.test_panel.set(Some((y0, last, list_rows)));
     // Keep the selection visible from where the list is (`C-e`/`C-y` move it); while running, the latest visible
     let first = if r.state == RunState::Running {
@@ -3366,22 +3210,15 @@ fn draw_test_panel(
     };
     r.list_top.set(first);
     if list.w > 0 {
-        editor
-            .screen
-            .lists
-            .borrow_mut()
-            .push((crate::pane::GroupKind::Tests, (body + head, list_rows, first)));
+        editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Tests, (body, list_rows, first)));
     }
-    // (under `ground` the member with the keys says so in its title)
-    let title =
-        |keys: bool| if keys { Style { bold: true, ..strong } } else { Style { bold: true, ..faint } };
     // (the line between them lit while either has the keys — it edges both, as a code pane's divider)
     let lit = ui.lit == Some(Region::Slot);
     // Right column: the detail — the failure picked's message, else the output (drawn once the rows are laid)
     let top = output_top(editor, crate::sizes::Slot::Test, list_rows);
     let bar = thumb(list_rows, top).filter(|_| detail.w > 0);
     if detail.w > 0 {
-        editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + head, text.0, list_rows)));
+        editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body, text.0, list_rows)));
     }
     for i in 0..rows {
         let y = (body + i) as u16;
@@ -3390,51 +3227,13 @@ fn draw_test_panel(
         queue!(out, Spaces(w))?;
         if side {
             queue!(out, MoveTo((x0 + left_w) as u16, y))?;
-            leaf_line(out, ui, card, faint, lit)?;
-        }
-        if titled && i == 0 {
-            // Column title
-            if list.w > 0 {
-                apply(out, title(list_keys))?;
-                queue!(out, MoveTo((x0 + PAD) as u16, y), Print("TESTS"))?;
-            }
-            if detail.w == 0 {
-                continue;
-            }
-            queue!(out, MoveTo(text.0 as u16, y))?;
-            apply(out, title(detail_keys))?;
-            match selected {
-                Some(c) => {
-                    queue!(out, Print("FAILURE"))?;
-                    let h = (fails.len() > 1)
-                        .then(|| {
-                            format!(
-                                "]x next  [x prev   {}/{}",
-                                fails.iter().position(|&f| f == r.selected).unwrap_or(0) + 1,
-                                fails.len()
-                            )
-                        })
-                        .filter(|h| right_w > h.width() + 30);
-                    // The place keeps its file and line when it has to give way to the hint
-                    if let Some((p, l)) = &c.at {
-                        let room = right_w.saturating_sub(10 + h.as_ref().map_or(0, |h| h.width() + 3));
-                        apply(out, faint)?;
-                        queue!(out, Print("  "), Print(fit_left(&format!("{}:{}", rel(p), l + 1), room)))?;
-                    }
-                    if let Some(h) = h {
-                        apply(out, faint)?;
-                        queue!(out, MoveTo((x0 + w - h.width() - 2) as u16, y), Print(h))?;
-                    }
-                }
-                None => queue!(out, Print("OUTPUT"))?,
-            }
-            continue;
+            leaf_line(out, ui, card, lit)?;
         }
         // List
         if list.w > 0
-            && let Some(c) = r.cases.get(first + i - head)
+            && let Some(c) = r.cases.get(first + i)
         {
-            let idx = first + i - head;
+            let idx = first + i;
             // (a failure picked; with the list's keys whatever row it's on)
             let is_sel = (selected.is_some() || list_keys) && idx == r.selected;
             let row_bg = if is_sel { selected_row(ui, editor, card) } else { card };
@@ -3464,14 +3263,14 @@ fn draw_test_panel(
                 Print(" ")
             )?;
         }
-        if bar.as_ref().is_some_and(|b| b.contains(&(i - head))) {
+        if bar.as_ref().is_some_and(|b| b.contains(&i)) {
             apply(out, faint)?;
-            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
+            queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(THUMB))?;
         }
     }
     // Right: the detail (stacked, the slot's width)
     if detail.w > 0 {
-        let at = (text.0, body + head, text.1, list_rows);
+        let at = (text.0, body, text.1, list_rows);
         draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at, None)?;
     }
     Ok(())
@@ -3538,9 +3337,9 @@ fn draw_panes(
         Some(crate::sizes::Border::Divider(id)) => ps.iter().find(|p| p.0 == id).map(|p| p.1.x + p.1.w),
         _ => None,
     };
-    // (D2, under `ui.edge = "lines"`: the rows of a divider that edge the pane with the keys lit, as every surface's
-    // lines are — the others the faint wash)
-    let keys_here = ui.edge == crate::theme::Edge::Lines && ui.lit == Some(Region::Code);
+    // (D2: the rows of a divider that edge the pane with the keys lit, as every surface's lines are — the others the
+    // faint wash)
+    let keys_here = ui.lit == Some(Region::Code);
     let focused = ps.iter().find(|p| p.6).map(|p| p.1).filter(|_| keys_here);
     let edges = |x: usize, y: usize| {
         focused.is_some_and(|f| (f.x == x + 1 || f.x + f.w == x) && (f.y..f.y + f.h).contains(&y))
@@ -3754,8 +3553,6 @@ struct Ui {
     participants: [Option<crossterm::style::Color>; crate::session::COLOURS],
     /// Lines between regions — header rules, gutters of themes without surfaces (`ui.window`, else faint).
     window: Option<crossterm::style::Color>,
-    /// How surfaces meet (`ui.edge`): one thin line, or the half-cell ground.
-    edge: crate::theme::Edge,
     /// The docked surface with the keys — its lines lit (`edge_style`); none while something floating has them.
     lit: Option<Region>,
     /// Key hints' keys: the dark wash (`ui.virtual.strong`), else the hint's own colour.
@@ -3765,9 +3562,6 @@ struct Ui {
     sign: [Style; 5],
     /// Set while drawing the focused pane: the cursor line's diagnostics all fit at its end (no card needed).
     cursor_diags_shown: std::cell::Cell<bool>,
-    /// The cards' half-block edges drawn this frame — seated on what's under them as the frame is read for
-    /// the terminal (`Screen.edges` → `screen::Screen::present`; shared by a pane's copy)
-    edges: std::rc::Rc<std::cell::RefCell<Vec<crate::screen::Edge>>>,
 }
 
 impl Ui {
@@ -3816,7 +3610,6 @@ impl Ui {
             accent: Style { fg: accent_color(t), ..Style::default() },
             participants: std::array::from_fn(|i| get(&format!("ui.participant.{}", i + 1)).fg),
             window: t.try_get("ui.window").and_then(|s| s.fg).or(base.patch(get("ui.linenr")).fg),
-            edge: t.edge,
             lit: Region::with_keys(editor),
             hint_key: t.try_get("ui.virtual.strong").and_then(|s| s.fg),
             virt: base.patch(get("ui.virtual")),
@@ -3827,7 +3620,6 @@ impl Ui {
             sign: ["", "error", "warning", "info", "hint"]
                 .map(|k| Style { fg: get(k).fg, ..Style::default() }),
             cursor_diags_shown: std::cell::Cell::new(false),
-            edges: Default::default(),
             base,
             selection,
             cursor,
@@ -4251,8 +4043,7 @@ fn draw(
         && !lay.code_hidden()
         && !editor.welcome()
     {
-        let avoid: Vec<Rect4> =
-            [note_rect, offer_rect].into_iter().flatten().map(|r| kept_apart(ui, r)).collect();
+        let avoid: Vec<Rect4> = [note_rect, offer_rect].into_iter().flatten().map(kept_apart).collect();
         follow_rect = draw_follow_card(c, editor, ui, lay, &avoid, out)?;
     }
     if let (Some(lines), Some(at)) = (&editor.popup, text_cursor) {
@@ -4276,8 +4067,7 @@ fn draw(
     let line = |y0: usize, y1: usize| (0, y0, lay.edit_w, y1 + 1 - y0);
     let cursor_row = text_cursor.map(|(_, y)| line(y as usize, y as usize));
     let change = editor.screen.review_change.get().map(|(a, b)| line(a, b));
-    let cards =
-        [note_rect, follow_rect, offer_rect, ask_rect].into_iter().flatten().map(|r| kept_apart(ui, r));
+    let cards = [note_rect, follow_rect, offer_rect, ask_rect].into_iter().flatten().map(kept_apart);
     let taken: Vec<Rect4> = cards.chain([cursor_row, change].into_iter().flatten()).collect();
     let toast_folded = !draw_toasts(editor, ui, lay, &taken, out)?;
     if let Some(card) = offer {
@@ -4312,11 +4102,6 @@ fn draw(
     if let Some(p) = &editor.pointing {
         draw_point_labels(p, ui, out)?;
     }
-    // Every card's edges sit on what's drawn under them — no strip of ground between a card and the code,
-    // a panel or a wash it floats over
-    // (seated as the frame is read for the terminal — `Screen::present`)
-    *editor.screen.edges.borrow_mut() = std::mem::take(&mut *ui.edges.borrow_mut());
-
     // One cursor on screen, where the keys go (`Editor::cursor_in`) — a view mode's is painted on its rows
     use crate::chrome::CursorIn;
     let (pos, shape) = match editor.cursor_in() {
@@ -4348,13 +4133,10 @@ fn draw(
     out.flush()
 }
 
-/// A card's rect as another card keeps out of it: under `ui.edge = "lines"` a row and two cells wider all round —
-/// two cards never touch (D3: one placed beside another steps a row down, two cells in, never onto its edge).
-fn kept_apart(ui: &Ui, (x, y, w, h): Rect4) -> Rect4 {
-    match ui.edge {
-        crate::theme::Edge::Lines => (x.saturating_sub(2), y.saturating_sub(1), w + 4, h + 2),
-        crate::theme::Edge::Ground => (x, y, w, h),
-    }
+/// A card's rect as another card keeps out of it: a row and two cells wider all round — two cards never touch (D3:
+/// one placed beside another steps a row down, two cells in, never onto its edge).
+fn kept_apart((x, y, w, h): Rect4) -> Rect4 {
+    (x.saturating_sub(2), y.saturating_sub(1), w + 4, h + 2)
 }
 
 /// Draw the text area and return the primary cursor's screen position.
@@ -5929,19 +5711,14 @@ fn draw_scrollbar(
             s => ui.base.patch(ui.sign[s as usize]),
         };
         apply(out, st)?;
-        queue!(out, Print(thumb_glyph(ui)))?;
+        queue!(out, Print(THUMB))?;
     }
     Ok(())
 }
 
-/// A scroll thumb's (or mark's) glyph: under `ui.edge = "lines"` a quarter block against the text's side, clear of
-/// a line beside it (a half block there read as a lump on the line — friction 92); under `"ground"` the half block.
-fn thumb_glyph(ui: &Ui) -> &'static str {
-    match ui.edge {
-        crate::theme::Edge::Lines => "▎",
-        crate::theme::Edge::Ground => "▐",
-    }
-}
+/// A scroll thumb's (or mark's) glyph: a quarter block against the text's side, clear of a line beside it (a half
+/// block there read as a lump on the line — friction 92).
+const THUMB: &str = "▎";
 
 /// Blend two colors (truecolor only — None for named colors).
 fn blend(
@@ -6809,9 +6586,7 @@ fn draw_picker(
 ) -> io::Result<(u16, u16)> {
     let b = PickerBox::new(lay, p);
     let t = &editor.theme;
-    let card = card_style(ui, editor, "ui.popup");
-    let card = if framed(ui) { on_ground(ui, card) } else { card };
-    let pad = card_padding(ui, card);
+    let card = on_ground(ui, card_style(ui, editor, "ui.popup"));
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
     let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
@@ -6915,7 +6690,6 @@ fn draw_picker(
         v => v,
     });
     let (left_w, right_w) = (lw + 2, if b.preview_w > 0 { b.preview_w + 2 } else { 0 });
-    let edge = Style { fg: card.bg, bg: ui.base.bg, ..Style::default() };
     // The ground under it, left of the chat: its margins, and what's behind kept from leaking through
     if !b.compact {
         apply(out, ui.base)?;
@@ -6935,22 +6709,14 @@ fn draw_picker(
         let last = row + 1 == rows;
         // ── Left card
         if row == 0 || last {
-            if framed(ui) {
-                apply(out, card)?;
-                queue!(out, Spaces(left_w))?;
-            } else if pad == 1 {
-                ui.edges.borrow_mut().push(crate::screen::Edge { x: b.x, y: y as usize, width: left_w });
-                apply(out, edge)?;
-                queue!(out, Print((if row == 0 { "▄" } else { "▀" }).repeat(left_w)))?;
-            } else {
-                apply(out, faint)?;
-                queue!(out, Print("─".repeat(left_w)))?;
-            }
+            // (the frame's lines, drawn over it)
+            apply(out, card)?;
+            queue!(out, Spaces(left_w))?;
         } else if row == 1 && p.keys {
             // Nothing is typed in a list whose letters are keys: no `›` — that its letters are keys, and what a
             // digit does, faint (the digits fold first)
             let n = p.items().len().min(9);
-            let right = if framed(ui) { format!("{count} ") } else { format!("{}  {count} ", p.title) };
+            let right = format!("{count} ");
             let room = (lw + 2).saturating_sub(3 + right.width() + 2);
             let say = match p.kind {
                 crate::granted::KIND => crate::granted::SAID.to_string(),
@@ -6971,7 +6737,7 @@ fn draw_picker(
             // Input row: › query ……… title · count
             apply(out, Style { fg: ui.accent.fg, bold: true, ..card })?;
             queue!(out, Print(" › "))?;
-            let (q, right) = picker_input(p, lw, &count, framed(ui));
+            let (q, right) = picker_input(p, lw, &count);
             apply(out, strong)?;
             queue!(out, Print(&q))?;
             apply(out, card)?;
@@ -7040,18 +6806,8 @@ fn draw_picker(
             apply(out, ui.base)?;
             queue!(out, Print(" "))?;
             if row == 0 || last {
-                if framed(ui) {
-                    apply(out, card)?;
-                    queue!(out, Spaces(right_w))?;
-                } else if pad == 1 {
-                    let x = b.x + left_w + 1;
-                    ui.edges.borrow_mut().push(crate::screen::Edge { x, y: y as usize, width: right_w });
-                    apply(out, edge)?;
-                    queue!(out, Print((if row == 0 { "▄" } else { "▀" }).repeat(right_w)))?;
-                } else {
-                    apply(out, faint)?;
-                    queue!(out, Print("─".repeat(right_w)))?;
-                }
+                apply(out, card)?;
+                queue!(out, Spaces(right_w))?;
             } else if row == 1 {
                 // Title: folder dimmed, file name crisp
                 let (dir, file) = match preview_title.rfind('/') {
@@ -7105,22 +6861,19 @@ fn draw_picker(
     // Framed (D3): one frame round the list and its preview — a group, its name the picker's title, the two meeting
     // on one line in the gap between them (outside the cards, in its margins: the selected row's bar keeps its
     // edge; with no margins, over the cards' outer cells)
-    if framed(ui) {
-        let end = b.x + left_w + if right_w > 0 { 1 + right_w } else { 0 };
-        let (fx, fr) = if b.x > 0 && end < lay.edit_w { (b.x - 1, end) } else { (b.x, end - 1) };
-        let splits: Vec<usize> = (right_w > 0).then_some(b.x + left_w).into_iter().collect();
-        let name = pane_names(ui, editor, card, &[&p.title], 0);
-        draw_frame(out, ui, card, (fx, b.y, fr + 1 - fx, rows), &name, &[], &splits, true)?;
-    }
-    let (q, _) = picker_input(p, lw, &count, framed(ui));
+    let end = b.x + left_w + if right_w > 0 { 1 + right_w } else { 0 };
+    let (fx, fr) = if b.x > 0 && end < lay.edit_w { (b.x - 1, end) } else { (b.x, end - 1) };
+    let splits: Vec<usize> = (right_w > 0).then_some(b.x + left_w).into_iter().collect();
+    let name = pane_names(ui, editor, card, &[&p.title], 0);
+    draw_frame(out, ui, card, (fx, b.y, fr + 1 - fx, rows), &name, &[], &splits, true)?;
+    let (q, _) = picker_input(p, lw, &count);
     Ok(((b.x + 3 + q.width()) as u16, (b.y + 1) as u16))
 }
 
-/// The picker's input row after ` › `, in `lw - 1` cells: the query, and right of it the title and the count.
-/// What's typed must show: the query comes first, then the count, and the title gets what's left, cut with
-/// `…` (a long folder name in the title used to leave the query a single `…`). When everything fits, the
-/// title keeps two blanks from the query.
-fn picker_input(p: &Picker, lw: usize, count: &str, named: bool) -> (String, String) {
+/// The picker's input row after ` › `, in `lw - 1` cells: the query, and right of it the count (the title is the
+/// frame's name). What's typed must show: the query comes first, then the count, and a note about the query gets
+/// what's left, cut with `…`.
+fn picker_input(p: &Picker, lw: usize, count: &str) -> (String, String) {
     let tail = format!("  {count} ");
     let q = fit_left(&p.query, lw.saturating_sub(tail.width() + 3));
     // A word about the query — an unfinished pattern — said quietly in the title's place: the reason, and
@@ -7131,9 +6884,8 @@ fn picker_input(p: &Picker, lw: usize, count: &str, named: bool) -> (String, Str
             .into_iter()
             .find(|t| t.width() <= room)
             .unwrap_or_else(|| fit_ellipsis(why, room)),
-        // (its frame says it: `named`)
-        None if named => String::new(),
-        None => fit_ellipsis(&p.title, room),
+        // (its frame says it)
+        None => String::new(),
     };
     let right = fit_ellipsis(&format!("{title}{tail}"), lw.saturating_sub(q.width() + 1));
     (q, right)
@@ -8343,7 +8095,7 @@ fn draw_completion(
     let selected = selected_row(ui, editor, card);
     let dim = Style { fg: ui.virt.fg, ..card };
     let matched = Style { bold: true, ..Style { fg: ui.accent.fg, ..Style::default() } };
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let n = c.shown.len();
     let rows = n.min(ROWS).min(lay.text_rows.saturating_sub(2 * pad));
     if rows == 0 {
@@ -8366,7 +8118,7 @@ fn draw_completion(
     let h = rows + 2 * pad;
     let below = cy as usize + 1 + h <= bottom;
     let y0 = if below { cy as usize + 1 } else { (cy as usize).saturating_sub(h).max(top) };
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
+    card_edge(out, card, x0, y0, width)?;
     let thumb = scroll_thumb(rows, n, first);
     for row in 0..rows {
         let i = first + row;
@@ -8409,13 +8161,13 @@ fn draw_completion(
         queue!(out, Spaces(width.saturating_sub(used + 1)))?;
         if scroll && thumb.contains(&row) {
             apply(out, Style { fg: ui.linenr.fg, ..card })?;
-            queue!(out, Print(thumb_glyph(ui)))?;
+            queue!(out, Print(THUMB))?;
         } else {
             apply(out, card)?;
             queue!(out, Print(" "))?;
         }
     }
-    card_edge(out, ui, card, x0, y0 + pad + rows, width, pad, false)?;
+    card_edge(out, card, x0, y0 + pad + rows, width)?;
     // Selected item's docs: one cell right of the list (left if no room), top-aligned with the list
     if let Some((_, lines)) = c.docs.as_ref().filter(|(_, l)| !l.is_empty()) {
         const MIN: usize = 24;
@@ -8475,7 +8227,7 @@ fn draw_signature(
         return Ok(());
     }
     let card = card_style(ui, editor, "ui.popup");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let lang = editor.doc().syntax.as_ref().map(|s| s.lang.name.clone());
     let label = sig.label.replace(['\n', '\t'], " ");
     // Signature → (char, style) cells, overlaying emphasis on the current param span only
@@ -8526,7 +8278,7 @@ fn draw_signature(
     };
     let width = inner + 4;
     let x0 = (cx as usize).saturating_sub(2).min(lay.edit_w.saturating_sub(width));
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
+    card_edge(out, card, x0, y0, width)?;
     // Signature row
     let y = y0 + pad;
     queue!(out, MoveTo(x0 as u16, y as u16))?;
@@ -8579,7 +8331,7 @@ fn draw_signature(
         apply(out, card)?;
         queue!(out, Spaces(inner - used + 2))?;
     }
-    card_edge(out, ui, card, x0, y + 1 + doc_rows, width, pad, false)
+    card_edge(out, card, x0, y + 1 + doc_rows, width)
 }
 
 /// Welcome screen (no file): spaced-out name · one-line intro · first-step keys · recent files (number keys).
@@ -8784,7 +8536,7 @@ fn draw_toasts(
         return Ok(false);
     }
     let card = card_style(ui, editor, "ui.popup");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let max_inner = (lay.edit_w / 2).clamp(24, 56).min(lay.edit_w.saturating_sub(8));
     let a = editor.toast_alpha();
     let bg = blend(card.bg, ui.tint, a).or(card.bg);
@@ -8857,7 +8609,7 @@ fn draw_toasts(
     let Some(y0) = toast_place((x0, width, h), rows_at, taken) else { return Ok(false) };
     editor.screen.toast_card.set(Some((x0, y0, width, h)));
     let edge_card = Style { bg, ..card };
-    card_edge(out, ui, edge_card, x0, y0, width, pad, true)?;
+    card_edge(out, edge_card, x0, y0, width)?;
     let mut spots = editor.screen.spots.borrow_mut();
     // (a toast's rows: from the one it starts on to the next one's — the `+N earlier` row is none's)
     let mut of = None;
@@ -8884,7 +8636,7 @@ fn draw_toasts(
         apply(out, lit(*style))?;
         queue!(out, Print(" "), Print(text), Spaces(inner - text.width() + 2))?;
     }
-    card_edge(out, ui, edge_card, x0, y0 + pad + rows.len(), width, pad, false)?;
+    card_edge(out, edge_card, x0, y0 + pad + rows.len(), width)?;
     Ok(true)
 }
 
@@ -8934,12 +8686,10 @@ struct OfferCard {
     peeks: Vec<(usize, String, Option<std::time::Instant>, bool, u64)>,
     /// Lines left out for want of room (0: shown whole).
     cut: usize,
-    /// In a frame (D3: `ui.edge = "lines"` and the card has the keys) — its title (`lines[0]`) the frame's name,
-    /// one cell of padding inside.
-    boxed: bool,
     /// Its answers set into the frame's bottom line (they make one row), not rows of their own.
     keys_in_line: bool,
-    /// Stepped aside to a one-row bar while its text is read in its buffer (U8): `lines` = title, how far.
+    /// Stepped aside to a one-row bar while its text is read in its buffer (U8): `lines` = title, how far. Else in
+    /// a frame (D3) — its title (`lines[0]`) the frame's name, one cell of padding inside.
     bar: bool,
 }
 
@@ -9057,7 +8807,7 @@ fn card_badge((here, elsewhere): (usize, usize), title_w: usize, room: usize) ->
 }
 
 impl OfferCard {
-    fn new(editor: &Editor, lay: &Layout, ui: &Ui) -> Option<Self> {
+    fn new(editor: &Editor, lay: &Layout) -> Option<Self> {
         use crate::offer::OfferState;
         let o = editor.offers.first()?;
         if lay.offer_bar.is_none()
@@ -9065,7 +8815,7 @@ impl OfferCard {
         {
             return None;
         }
-        let pad = card_padding(ui, card_style(ui, editor, "ui.popup"));
+        let pad = CARD_PAD;
         let reading = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
         // The widest it can be — its answers and its cut row may take it past `reading`, never past the code
         let widest = lay.edit_w.saturating_sub(6 + usize::from(lay.scrollbar));
@@ -9140,11 +8890,9 @@ impl OfferCard {
                     Some(s) => 1 + card_rows(s, max_inner).len().min(2),
                     None => 0,
                 };
-                // (under `lines` a row of air under it too — `bottom` below)
-                let air = usize::from(framed(ui));
-                let room = lay
-                    .text_rows
-                    .saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows + air);
+                // (and a row of air under it — `bottom` below)
+                let room =
+                    lay.text_rows.saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows + 1);
                 // (the card's rows with the question's lines `skip` left out — their warning and diff rows marked)
                 let build = |skip: &[usize], warn: &mut Vec<usize>, diff: &mut Vec<(usize, char)>| {
                     let mut v = vec![(title.clone(), false)];
@@ -9308,7 +9056,6 @@ impl OfferCard {
                 busy: o.installing(),
                 peeks: Vec::new(),
                 cut: 0,
-                boxed: false,
                 keys_in_line: false,
                 bar: true,
             });
@@ -9330,7 +9077,7 @@ impl OfferCard {
         };
         // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
-        let room = lay.text_rows.saturating_sub(buttons_h + 2 * pad + said.len() + usize::from(framed(ui)));
+        let room = lay.text_rows.saturating_sub(buttons_h + 2 * pad + said.len() + 1);
         let mut cut = 0;
         // (the cut row's forms all fit: the card keeps its width as it says another)
         let mut cut_floor = 0;
@@ -9415,38 +9162,34 @@ impl OfferCard {
             .max(if has_buttons { btn_floor } else { 0 });
         // Framed (D3) while it has the keys: its title the frame's name, its answers in the bottom line when they
         // make one row — a cell of padding each side
-        // (one layout under `lines`, keys or not — only the frame's lines come with them: nothing moves)
-        let boxed = framed(ui);
+        // (one layout, keys or not — only the frame's lines come with them: nothing moves)
         // (its name whole on the frame's top line: `╭─ ` and ` ─╮` round it, a cell more than the title row had)
         let inner = match lines.first() {
-            Some(t) if boxed => inner.max(t.0.width() + badge_w + 2),
-            _ => inner,
+            Some(t) => inner.max(t.0.width() + badge_w + 2),
+            None => inner,
         };
         // (and its answers, when they make one row, whole in its bottom line: `╰─ ` and ` ─╯` round them — as
         // wide as their widest form, so a card read whole doesn't change size; too wide for the code beside, rows)
         let in_line = inner.max(btn_w + 2).max(btn_floor + 2);
-        let keys_in_line = boxed && has_buttons && button_rows.len() == 1 && in_line + 5 <= lay.edit_w;
+        let keys_in_line = has_buttons && button_rows.len() == 1 && in_line + 5 <= lay.edit_w;
         let inner = if keys_in_line { in_line } else { inner };
-        let width = inner + 5 - usize::from(boxed);
-        let (body_rows, inside) = (
-            lines.len() - usize::from(boxed),
-            if has_buttons && !keys_in_line { 1 + button_rows.len() } else { 0 },
-        );
+        let width = inner + 4;
+        let (body_rows, inside) =
+            (lines.len() - 1, if has_buttons && !keys_in_line { 1 + button_rows.len() } else { 0 });
         // Too narrow for it: not drawn (and an install's `y` isn't taken — `offer_key`)
         if width + 1 > lay.edit_w {
             return None;
         }
         let h = body_rows + inside + 2 * pad;
         let top = lay.text_top as usize;
-        // (its bottom edge is the half row of air over what's below — the slot, the status line; under `lines` a row
-        // of air, whether its bottom row is the frame's line or, without the keys, its answers: it never sits on
-        // what's below)
-        let bottom = top + lay.text_rows - usize::from(boxed);
+        // (a row of air over what's below — the slot, the status line — whether its bottom row is the frame's line
+        // or, without the keys, its answers: it never sits on what's below)
+        let bottom = top + lay.text_rows - 1;
         let y = bottom.checked_sub(h)?.max(top);
         let x = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
         // Back cards: one row each above the front card (as room allows, max three — beyond that "1/N" tells) —
-        // under `lines` a row of air between them and its frame (two cards never touch)
-        let room = y.saturating_sub(top + pad + usize::from(boxed));
+        // a row of air between them and its frame (two cards never touch)
+        let room = y.saturating_sub(top + pad + 1);
         let peeks = editor.offers[1..]
             .iter()
             .take(3.min(room))
@@ -9475,7 +9218,7 @@ impl OfferCard {
         }
         for (k, ..) in &peeks {
             let px = x + PEEK_INSET * k;
-            let py = y - k - usize::from(boxed);
+            let py = y - k - 1;
             buttons.push((py, px, px + width - 2 * PEEK_INSET * k, char::from(b'0' + *k as u8)));
         }
         if cut > 0 {
@@ -9505,7 +9248,6 @@ impl OfferCard {
             busy,
             peeks,
             cut,
-            boxed,
             keys_in_line,
             bar: false,
         })
@@ -9513,7 +9255,7 @@ impl OfferCard {
 
     /// Its width: its text, the bar and the padding — framed, the frame's sides and a cell of padding each.
     fn width(&self) -> usize {
-        self.inner + 5 - usize::from(self.boxed)
+        self.inner + 5 - usize::from(!self.bar)
     }
 
     /// Its rows: the edges, the lines inside (framed, the title is the frame's), the answers' rows.
@@ -9522,7 +9264,7 @@ impl OfferCard {
             Some(_) if !self.keys_in_line => 1 + self.button_rows.len(),
             _ => 0,
         };
-        self.lines.len() - usize::from(self.boxed) + inside + 2 * self.pad
+        self.lines.len() - usize::from(!self.bar) + inside + 2 * self.pad
     }
 
     /// Where it sits, back cards included — the notification card keeps out of it.
@@ -9534,9 +9276,9 @@ impl OfferCard {
         (self.x, self.y - back, self.width(), self.rows() + back)
     }
 
-    /// Under `lines`, the row of air between the back cards and the front card's frame (none without back cards).
+    /// The row of air between the back cards and the front card's frame (none without back cards).
     fn air(&self) -> usize {
-        usize::from(self.boxed && !self.peeks.is_empty())
+        usize::from(!self.bar && !self.peeks.is_empty())
     }
 
     /// Its answers as a frame's bottom line has them (`draw_frame`): each key in the accent, what it does after it —
@@ -9572,7 +9314,7 @@ impl OfferCard {
         let surface = card;
         // (framed while it has the keys — on the ground; without them its own surface, the same name and answers
         // where the lines would be)
-        let held = self.boxed && editor.card_has_keys();
+        let held = !self.bar && editor.card_has_keys();
         let card = if held { on_ground(ui, card) } else { card };
         let body = Style { fg: card.fg, bg: card.bg, ..Style::default() };
         let dim = Style { fg: ui.virt.fg.or(card.fg), bg: card.bg, ..Style::default() };
@@ -9598,7 +9340,6 @@ impl OfferCard {
             return self.draw_bar(body, how, bar, strong, key, out);
         }
         let width = self.width();
-        let lines = framed(ui);
         // Back cards first (deeper = narrower, dimmer) — one title row each, the topmost up to the top edge
         let peek_bg = |k: usize| blend(surface.bg, ui.tint, 1.0 - 0.3 * k as f32).or(surface.bg);
         let air = self.air();
@@ -9620,11 +9361,6 @@ impl OfferCard {
                 bg,
                 ..Style::default()
             };
-            if self.pad > 0 && *k == self.peeks.len() && !lines {
-                ui.edges.borrow_mut().push(crate::screen::Edge { x: px, y: py - 1, width: pw });
-                apply(out, Style { fg: peek_bg(*k), bg: ui.base.bg, ..Style::default() })?;
-                queue!(out, MoveTo(px as u16, (py - 1) as u16), Print("▄".repeat(pw)))?;
-            }
             let tail = started.map(|_| format!(" {}", wave(editor))).unwrap_or_default();
             // (its mark at the right end, before the wave)
             let mark_w = if mark.is_some() { 2 } else { 0 };
@@ -9649,36 +9385,20 @@ impl OfferCard {
             apply(out, bar_st)?;
             queue!(out, Print(&tail))?;
         }
-        // Front card's top edge: over the back card's color where there is one (so they look stacked) — under
-        // `lines` a row of its colour (framed: the frame's line, drawn over it)
-        if self.pad > 0 && lines {
-            apply(out, card)?;
-            queue!(out, MoveTo(self.x as u16, self.y as u16), Spaces(width))?;
-        } else if self.pad > 0 {
-            let behind =
-                self.peeks.first().map(|(k, ..)| (self.x + PEEK_INSET * k, width - 2 * PEEK_INSET * k));
-            queue!(out, MoveTo(self.x as u16, self.y as u16))?;
-            for col in 0..width {
-                let under = behind.is_some_and(|(bx, bw)| (bx..bx + bw).contains(&(self.x + col)));
-                let bg = if under { peek_bg(1) } else { ui.base.bg };
-                // (beside the card behind: on what's under it)
-                if !under {
-                    ui.edges.borrow_mut().push(crate::screen::Edge { x: self.x + col, y: self.y, width: 1 });
-                }
-                apply(out, Style { fg: card.bg, bg, ..Style::default() })?;
-                queue!(out, Print("▄"))?;
-            }
+        // Front card's top edge: a row of its colour (the frame's line, drawn over it)
+        if self.pad > 0 {
+            card_edge(out, card, self.x, self.y, width)?;
         }
         // (a diff's lines: what came and went in the diff's colours, its hunks' headers faint)
         let sign =
             |scope: &str| Style { fg: editor.theme.try_get(scope).and_then(|s| s.fg).or(body.fg), ..body };
         let (plus, minus) = (sign("diff.plus"), sign("diff.minus"));
         let mut row = self.y + self.pad;
-        // (its label on its title's row: framed, the frame's top line)
-        spot(self.id, self.x, if self.boxed { self.y } else { row }, width);
+        // (its label on its title's row: the frame's top line)
+        spot(self.id, self.x, self.y, width);
         for (i, (text, faint)) in self.lines.iter().enumerate() {
-            // (framed, its title is the frame's name)
-            if self.boxed && i == 0 {
+            // (its title is the frame's name)
+            if i == 0 {
                 continue;
             }
             // (its title row flashes, brought into sight from a link)
@@ -9686,17 +9406,8 @@ impl OfferCard {
             let (body, dim) = (lit(body), lit(dim));
             queue!(out, MoveTo(self.x as u16, row as u16))?;
             apply(out, body)?;
-            match self.boxed {
-                // (the frame's side, then a cell of padding)
-                true => queue!(out, Print("  "))?,
-                false => {
-                    queue!(out, Print(" "))?;
-                    apply(out, lit(bar))?;
-                    queue!(out, Print(if i == 0 { "▎" } else { " " }))?;
-                    apply(out, body)?;
-                    queue!(out, Print(" "))?;
-                }
-            }
+            // (the frame's side, then a cell of padding)
+            queue!(out, Print("  "))?;
             let badge = if i == 0 { self.badge.as_str() } else { "" };
             let diff = self.diff.iter().find(|d| d.0 == i).map(|d| d.1);
             apply(
@@ -9784,26 +9495,25 @@ impl OfferCard {
                 row += 1;
             }
         }
-        card_edge(out, ui, card, self.x, row, width, self.pad, false)?;
-        if self.boxed {
-            let title = self.lines.first().map_or(String::new(), |l| l.0.clone());
-            let focus = pane_names(ui, editor, card, &[""], 0)[0].1;
-            let name = Style { fg: if self.failed { ui.error.fg } else { focus.fg }, ..focus };
-            let mut named = vec![(title, flashed(ui, editor, &id, name))];
-            // (given to Claude or cited by it this turn: its faint mark after the name)
-            if let Some((m, st)) = ui_mark(ui, editor, &id, body) {
-                named.push((format!(" {m}"), st));
-            }
-            if !self.badge.is_empty() {
-                named.push((format!("  {}", self.badge), dim));
-            }
-            let keys = match self.keys_in_line {
-                true => self.answer_spans(key, body, dim, warning, frame_line(ui, card)),
-                false => Vec::new(),
-            };
-            let answers = keys;
-            draw_frame(out, ui, card, (self.x, self.y, width, self.rows()), &named, &answers, &[], held)?;
+        if self.pad > 0 {
+            card_edge(out, card, self.x, row, width)?;
         }
+        let title = self.lines.first().map_or(String::new(), |l| l.0.clone());
+        let focus = pane_names(ui, editor, card, &[""], 0)[0].1;
+        let name = Style { fg: if self.failed { ui.error.fg } else { focus.fg }, ..focus };
+        let mut named = vec![(title, flashed(ui, editor, &id, name))];
+        // (given to Claude or cited by it this turn: its faint mark after the name)
+        if let Some((m, st)) = ui_mark(ui, editor, &id, body) {
+            named.push((format!(" {m}"), st));
+        }
+        if !self.badge.is_empty() {
+            named.push((format!("  {}", self.badge), dim));
+        }
+        let answers = match self.keys_in_line {
+            true => self.answer_spans(key, body, dim, warning, frame_line(ui, card)),
+            false => Vec::new(),
+        };
+        draw_frame(out, ui, card, (self.x, self.y, width, self.rows()), &named, &answers, &[], held)?;
         Ok(())
     }
 
@@ -9905,7 +9615,7 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
         return Ok(());
     }
     let card = card_style(ui, editor, "ui.popup");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let key_style = Style { fg: ui.accent.fg, bold: true, ..card };
     let dim = Style { fg: ui.virt.fg, ..card };
     let pending: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
@@ -9935,9 +9645,8 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     const DESC: usize = 30;
     let dw =
         entries.iter().zip(&twins).map(|((_, d, _), t)| d.width().min(DESC) + twin_w(t)).max().unwrap_or(0);
-    // (framed, the title is the frame's name: no title row nor the blank one under it)
-    let title_rows = if framed(ui) { 0 } else { 2 };
-    let max_rows = lay.text_rows.saturating_sub(2 * pad + 1 + title_rows).max(1);
+    // (framed, the title is the frame's name: no title row)
+    let max_rows = lay.text_rows.saturating_sub(2 * pad + 1).max(1);
     let Some((cols, dw)) = which_key_columns(entries.len(), kw, dw, max_rows, lay.edit_w) else {
         return Ok(());
     };
@@ -9948,34 +9657,21 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     let rows = entries.len().div_ceil(cols);
     let inner = cols * cell + (cols - 1) * 3;
     let width = inner + 4;
-    let h = rows + title_rows + 2 * pad;
+    let h = rows + 2 * pad;
     if h > lay.text_rows || width >= lay.edit_w {
         return Ok(());
     }
     let x0 = lay.edit_w - width - 1;
     let y0 = lay.text_top as usize + lay.text_rows - h;
-    let card = card_at(ui, editor, "ui.popup", lay, (x0, y0, width, h));
-    let card = if framed(ui) { on_ground(ui, card) } else { card };
+    let card = on_ground(ui, card_style(ui, editor, "ui.popup"));
     let (key_style, dim) = (Style { bg: card.bg, ..key_style }, Style { bg: card.bg, ..dim });
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
-    // Title: pressed keys · mode name (framed: the frame's name)
+    card_edge(out, card, x0, y0, width)?;
+    // Title: pressed keys · mode name — the frame's name
     let y = y0 + pad;
     let head = pending.join(" ");
     let rest = if head == title { String::new() } else { format!("  {title}") };
-    if title_rows > 0 {
-        queue!(out, MoveTo(x0 as u16, y as u16))?;
-        apply(out, card)?;
-        queue!(out, Print("  "))?;
-        apply(out, Style { bold: true, ..card })?;
-        queue!(out, Print(&head))?;
-        apply(out, dim)?;
-        queue!(out, Print(&rest), Spaces((inner + 2).saturating_sub(head.width() + rest.width())))?;
-        queue!(out, MoveTo(x0 as u16, (y + 1) as u16))?;
-        apply(out, card)?;
-        queue!(out, Spaces(width))?;
-    }
     for r in 0..rows {
-        queue!(out, MoveTo(x0 as u16, (y + title_rows + r) as u16))?;
+        queue!(out, MoveTo(x0 as u16, (y + r) as u16))?;
         apply(out, card)?;
         queue!(out, Print("  "))?;
         for c in 0..cols {
@@ -10003,12 +9699,10 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
         }
         queue!(out, Print("  "))?;
     }
-    card_edge(out, ui, card, x0, y + title_rows + rows, width, pad, false)?;
-    if framed(ui) {
-        let mut name = pane_names(ui, editor, card, &[&head], 0);
-        name.push((rest.clone(), dim));
-        draw_frame(out, ui, card, (x0, y0, width, h), &name, &[], &[], true)?;
-    }
+    card_edge(out, card, x0, y + rows, width)?;
+    let mut name = pane_names(ui, editor, card, &[&head], 0);
+    name.push((rest, dim));
+    draw_frame(out, ui, card, (x0, y0, width, h), &name, &[], &[], true)?;
     Ok(())
 }
 
@@ -10042,7 +9736,7 @@ fn draw_ask_stream(
 ) -> io::Result<Option<Rect4>> {
     const ROWS: usize = 6;
     let card = card_style(ui, editor, "ui.popup");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let lang = editor
         .docs
         .iter()
@@ -10089,7 +9783,7 @@ fn draw_ask_stream(
     }
     let (x0, y0) = (lay.edit_w.saturating_sub(inner + 5), lay.text_top as usize + lay.text_rows - h);
     let width = inner + 4;
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
+    card_edge(out, card, x0, y0, width)?;
     // Title: wave · status · instruction ……… elapsed
     let y = y0 + pad;
     let secs = format!("{:>4.1}s", rev.started.elapsed().as_secs_f32());
@@ -10140,7 +9834,7 @@ fn draw_ask_stream(
         apply(out, card)?;
         queue!(out, Spaces(inner + 2 - used))?;
     }
-    card_edge(out, ui, card, x0, y + 1 + body + hint, width, pad, false)?;
+    card_edge(out, card, x0, y + 1 + body + hint, width)?;
     Ok(Some((x0, y0, width, h)))
 }
 
@@ -10187,7 +9881,7 @@ fn draw_follow_card(
         return Ok(None);
     }
     let card = card_style(ui, editor, "ui.popup");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
     let accent = Style { fg: ui.accent.fg, ..card };
@@ -10404,7 +10098,7 @@ fn draw_follow_card(
     if compact {
         editor.screen.chat_mini.set(Some(rect));
     }
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
+    card_edge(out, card, x0, y0, width)?;
     let mut links = editor.screen.chat_links.borrow_mut();
     let mut y = y0 + pad;
     for (row, link) in &rows {
@@ -10419,7 +10113,7 @@ fn draw_follow_card(
         }
         y += 1;
     }
-    card_edge(out, ui, card, x0, y, width, pad, false)?;
+    card_edge(out, card, x0, y, width)?;
     Ok(Some(rect))
 }
 
@@ -10517,10 +10211,8 @@ fn draw_sidebar(
     use crate::chrome::{GAP, HEAD, PAD, PAD_R};
     use crate::markdown::Span;
     use crate::sidebar::Mode as SMode;
-    let t = &editor.theme;
     let card = panel_style(ui, editor);
     let faint = Style { fg: ui.linenr.fg, ..card };
-    let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let selected = selected_row(ui, editor, card);
     let key = Style { bold: true, fg: ui.virt.fg, ..card };
     let dragged = editor.dragging == Some(crate::sizes::Border::Side);
@@ -10530,14 +10222,7 @@ fn draw_sidebar(
     // Unfocused, only the row the editor is on is marked (nothing, on a file outside the list)
     let mark = if editor.session.is_at(At::Side) { Some(sb.selected) } else { sb.here(editor) };
     // Header: the views stacked (the list's only when there is one), the one showing strong; what it's of
-    // at the right
-    let wash = if ui.edge == crate::theme::Edge::Lines { Style { fg: ui.virt.fg, ..card } } else { faint };
-    let tab_style = |m: SMode| if sb.mode == m { strong } else { wash };
-    // (its views are a group stacked: under `lines` named as `pane_names` names them, `·` between)
-    let gap = match ui.edge {
-        crate::theme::Edge::Lines => sp(NAMES_SEP, frame_line(ui, card)),
-        crate::theme::Edge::Ground => sp("  ", card),
-    };
+    // at the right (its views are a group stacked: named as `pane_names` names them, `·` between)
     let side = editor.plugins.as_ref().and_then(|p| p.side.as_ref()).map(|(_, s)| s);
     let has_list = editor.session.qlist.as_ref().is_some_and(|l| !l.items.is_empty());
     let of = match sb.mode {
@@ -10555,20 +10240,10 @@ fn draw_sidebar(
     if let Some(s) = side {
         views.push((s.title.as_str(), SMode::Plugin));
     }
-    let mut head: Vec<Span> = match ui.edge {
-        crate::theme::Edge::Lines => {
-            let names: Vec<&str> = views.iter().map(|v| v.0).collect();
-            let current = views.iter().position(|v| v.1 == sb.mode).unwrap_or(0);
-            pane_names(ui, editor, card, &names, current).into_iter().map(|(t, st)| sp(&t, st)).collect()
-        }
-        crate::theme::Edge::Ground => views
-            .iter()
-            .enumerate()
-            .flat_map(|(i, (name, m))| {
-                (i > 0).then(|| gap.clone()).into_iter().chain([sp(name, tab_style(*m))])
-            })
-            .collect(),
-    };
+    let names: Vec<&str> = views.iter().map(|v| v.0).collect();
+    let current = views.iter().position(|v| v.1 == sb.mode).unwrap_or(0);
+    let mut head: Vec<Span> =
+        pane_names(ui, editor, card, &names, current).into_iter().map(|(t, st)| sp(&t, st)).collect();
     // …only when it fits whole (it's what the tabs already say, in other words)
     let used: usize = head.iter().map(|x| x.text.width()).sum();
     let room = w.saturating_sub(used + 2);
@@ -10768,8 +10443,8 @@ fn draw_sidebar(
     Ok(())
 }
 
-/// The gutter right of a left column panel (the side panel, the review's rail) on row `y`: `gutter`'s cell — under
-/// `ui.edge = "lines"` the line there (`side_line`) — with something beside it unless the panel fills the screen.
+/// The gutter right of a left column panel (the side panel, the review's rail) on row `y` (`chrome::GAP`): the line
+/// there (`meeting_line`) — with something beside it; filling the screen, the panel takes the cell whole.
 fn gutter_cell(
     out: &mut impl Write,
     (ui, editor, lay): (&Ui, &Editor, &Layout),
@@ -10777,41 +10452,31 @@ fn gutter_cell(
     dragged: bool,
     y: usize,
 ) -> io::Result<()> {
-    let beyond = lay.rail_w < lay.width;
-    match ui.edge {
-        crate::theme::Edge::Lines if beyond => {
-            put_gutter(out, meeting_line(ui, slot_rows(editor, lay), Region::Side, "├", dragged, y))
-        }
-        _ => put_gutter(out, gutter(ui, card, dragged, beyond)),
+    match lay.rail_w < lay.width {
+        true => put_gutter(out, meeting_line(ui, slot_rows(editor, lay), Region::Side, "├", dragged, y)),
+        false => put_gutter(out, (" ", card)),
     }
 }
 
-/// The line between two leaves of one group (D3, linked panes): under `ui.edge = "lines"` unfaded, `lit` (the accent)
-/// while either has the keys — it edges both, as a code pane's divider edges the pane with the keys (`draw_panes`);
-/// which one has them its stretch of the slot's line says (step 3b) — else the faint wash; under `"ground"` `faint`
-/// as before.
-fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, faint: Style, lit: bool) -> io::Result<()> {
-    match ui.edge {
-        crate::theme::Edge::Lines if lit => {
-            put_line(out, Style { fg: ui.accent.fg, ..frame_line(ui, card) }, "│")
-        }
-        crate::theme::Edge::Lines => put_line(out, frame_line(ui, card), "│"),
-        crate::theme::Edge::Ground => {
-            apply(out, faint)?;
-            queue!(out, Print("│"))
-        }
+/// The line between two leaves of one group (D3, linked panes): unfaded, `lit` (the accent) while either has the
+/// keys — it edges both, as a code pane's divider edges the pane with the keys (`draw_panes`); which one has them
+/// its stretch of the slot's line says (step 3b) — else the faint wash.
+fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, lit: bool) -> io::Result<()> {
+    match lit {
+        true => put_line(out, Style { fg: ui.accent.fg, ..frame_line(ui, card) }, "│"),
+        false => put_line(out, frame_line(ui, card), "│"),
     }
 }
 
-/// The bottom slot's rows on screen, and its top edge's row — under `ui.edge = "lines"` (where it's asked) its
-/// first, the line its header is in (panes P3 §1) — none while a picker over the editing area covers it.
+/// The bottom slot's rows on screen, and its top edge's row — its first, the line its header is in (panes P3 §1)
+/// — none while a picker over the editing area covers it.
 fn slot_rows(editor: &Editor, lay: &Layout) -> Option<(std::ops::Range<usize>, usize)> {
     let y = lay.slot_y();
     let covered = editor.picker.as_ref().is_some_and(|p| !p.compact);
     (lay.debug_h > 0 && lay.slot_w > 0 && !covered).then(|| (y..y + lay.debug_h, y))
 }
 
-/// Under `ui.edge = "lines"`, where a column panel (`mine`: the side panel, the chat) meets what's beside it on row
+/// Where a column panel (`mine`: the side panel, the chat) meets what's beside it on row
 /// `y` — the code, or the slot on its rows: one `│` in the gutter's whole cell, `join` (`├`, `┤`) where the
 /// slot's top edge meets it. The line of both sides: lit when either has the keys (`edge_style`) — the join with the
 /// slot's edge too; the accent while it's dragged.
@@ -10837,62 +10502,20 @@ fn meeting_line(
     (if rule { join } else { "│" }, style)
 }
 
-/// Whether a theme's panels have a surface of their own (`card`'s background isn't the ground's).
-fn surfaces(ui: &Ui, card: Style) -> bool {
-    card.bg.is_some() && card.bg != ui.base.bg
-}
-
-/// A gutter's cell (`chrome::GAP`, `chrome.rs`) is split down the middle: its left half is what's left of it,
-/// its right half ground — what's right of it starts on the next cell, so every panel's surface starts on a
-/// cell and its padding counts from its visible edge. Right of a panel (this): `▌`, the panel's half in its
-/// surface colour — in the accent while its border is dragged (U1). With nothing beyond it (`beyond` false
-/// — the panel fills the screen) the panel takes the cell whole. A theme whose surfaces are the ground's
-/// colour: a faint `│` (the accent one dragged), nothing against the screen's edge. Left of the chat:
-/// `chat_gutter`.
-fn gutter(ui: &Ui, card: Style, dragged: bool, beyond: bool) -> (&'static str, Style) {
-    let lit = |on: bool| if on { ui.accent.fg } else { ui.window };
-    match (surfaces(ui, card), beyond) {
-        (true, true) => ("▌", Style { fg: if dragged { ui.accent.fg } else { card.bg }, ..ui.base }),
-        (true, false) => (" ", card),
-        (false, true) => ("│", Style { fg: lit(dragged), ..ui.base }),
-        (false, false) => (" ", ui.base),
-    }
-}
-
-/// The chat's gutter on row `y` (`gutter`'s rule from the other side): its left half is what's left of it —
-/// the bottom slot's surface (a panel's, the chat's own colour) on the slot's rows, else the ground beside
-/// the code — its right half ground, the chat's surface from the next cell; that half in the accent while
-/// the chat's border is dragged. The chat filling the screen takes the cell whole.
+/// The chat's gutter on row `y` (`gutter_cell`'s rule from the other side): the line where it meets what's left of
+/// it (`meeting_line`). The chat filling the screen takes the cell whole.
 fn chat_gutter(ui: &Ui, editor: &Editor, lay: &Layout, card: Style, y: usize) -> (&'static str, Style) {
-    let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
     if lay.edit_w == 0 {
-        return gutter(ui, card, dragged, false);
+        return (" ", card);
     }
-    if ui.edge == crate::theme::Edge::Lines {
-        return meeting_line(ui, slot_rows(editor, lay), Region::Chat, "┤", dragged, y);
-    }
-    if !surfaces(ui, card) {
-        return gutter(ui, card, dragged, true);
-    }
-    // (a picker over the editing area covers the slot: the ground there)
-    let slot_y = lay.slot_y();
-    let slot = lay.debug_h > 0
-        && lay.slot_w > 0
-        && (slot_y..slot_y + lay.debug_h).contains(&y)
-        && !editor.picker.as_ref().is_some_and(|p| !p.compact);
-    let right = if dragged { ui.accent.fg } else { ui.base.bg };
-    match (slot, dragged) {
-        (true, _) => ("▌", Style { fg: card.bg, bg: right, ..ui.base }),
-        (false, true) => ("▐", Style { fg: ui.accent.fg, ..ui.base }),
-        (false, false) => (" ", ui.base),
-    }
+    let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
+    meeting_line(ui, slot_rows(editor, lay), Region::Chat, "┤", dragged, y)
 }
 
-/// Draws a gutter's cell (`gutter`) — its half block or line unfaded: that half is the panel's surface, not text
-/// (`Fade` would move it toward the ground, off the panel's colour), and a line is lit or faint by `edge_style`
+/// Draws a gutter's cell (`gutter_cell`, `chat_gutter`) — its line unfaded: a line is lit or faint by `edge_style`
 /// alone, whichever side of it fades.
 fn put_gutter(out: &mut impl Write, (glyph, style): (&str, Style)) -> io::Result<()> {
-    if matches!(glyph, "▌" | "▐" | "│" | "├" | "┤") {
+    if matches!(glyph, "│" | "├" | "┤") {
         let fading = FADING.replace(None);
         let applied = apply(out, style);
         FADING.set(fading);
@@ -14457,42 +14080,14 @@ fn card_style(ui: &Ui, editor: &Editor, key: &str) -> Style {
     )
 }
 
-/// Whether screen rect `r` reaches over a panel — the side panel or the review's rail, the chat, the bottom
-/// slot: surfaces of the cards' own colour.
-fn over_panel(lay: &Layout, r: Rect4) -> bool {
-    let (x, _, w, _) = r;
-    let slot = (lay.slot_x, lay.slot_y(), lay.slot_w, lay.debug_h);
-    (lay.rail_w > 0 && x < lay.rail_w)
-        || (lay.chat_w > 0 && x + w > lay.edit_w)
-        || (lay.debug_h > 0 && overlaps(r, slot))
-}
-
-/// `card_style` for a card at `r`: over a panel, a tone up — halfway to the selected row's — so it stands
-/// apart from the surface under it as it does from the ground.
-fn card_at(ui: &Ui, editor: &Editor, key: &str, lay: &Layout, r: Rect4) -> Style {
-    let card = card_style(ui, editor, key);
-    if !over_panel(lay, r) || card_padding(ui, card) == 0 {
-        return card;
-    }
-    let up = selected_row(ui, editor, card).bg;
-    Style { bg: blend(up, card.bg, 0.5).or(card.bg), ..card }
-}
-
-/// A docked panel's ground (the side panel, the review's rail, the chat, the bottom slot's panels): under
-/// `ui.edge = "lines"` the code's own (`ui.panel` over it) — a line says where it ends; under `"ground"` a surface
-/// of its own colour, the cards' (`card_style`).
+/// A docked panel's ground (the side panel, the review's rail, the chat, the bottom slot's panels): the code's own
+/// (`ui.panel` over it) — a line says where it ends.
 fn panel_style(ui: &Ui, editor: &Editor) -> Style {
-    match ui.edge {
-        crate::theme::Edge::Lines => ui.base.patch(editor.theme.try_get("ui.panel").unwrap_or_default()),
-        crate::theme::Edge::Ground => card_style(ui, editor, "ui.popup"),
-    }
+    ui.base.patch(editor.theme.try_get("ui.panel").unwrap_or_default())
 }
 
-/// For cards (bg differs from the editor), one half-row margin row above and below, else 0 — under
-/// `ui.edge = "lines"` always one row: a frame's line (`draw_frame`), or a row of the card's own colour.
-fn card_padding(ui: &Ui, card: Style) -> usize {
-    usize::from(ui.edge == crate::theme::Edge::Lines || card.bg.is_some() && card.bg != ui.base.bg)
-}
+/// A card's rows above and below its text: one — a frame's line (`draw_frame`), or a row of the card's own colour.
+const CARD_PAD: usize = 1;
 
 /// What a framed thing floats on (D3): the ground, the frame alone setting it apart — a line in a cell of the card's
 /// colour would leave half a cell of it outside the line all round. Its text keeps the card's colours.
@@ -14528,12 +14123,6 @@ const NAMES_SEP: &str = " · ";
 /// Between the slot's tabs and the members of the group in front (step 3b): `check ▲ › places` — `›` inside, as the
 /// path bar's `src › main.rs`; `·` stays between peers.
 const MEMBERS_SEP: &str = " › ";
-
-/// Whether what floats here gets a frame (D3: what takes keys — which-key, a picker, a prompt, a card with the
-/// keys): under `ui.edge = "lines"` only.
-fn framed(ui: &Ui) -> bool {
-    ui.edge == crate::theme::Edge::Lines
-}
 
 /// D3's frame around `(x, y, w, h)`, over a card already drawn there (its first and last rows are its edges, its
 /// first and last columns padding): `╭─ name ─╮` — the name in place of a title row — `│` down both sides,
@@ -14585,32 +14174,11 @@ fn draw_frame(
     out.write_all(&buf)
 }
 
-/// Card top (`▄`) and bottom (`▀`) edges — half blocks paint only half a row so the margin looks thin. Their
-/// outer half is drawn on the ground here and takes what's really under it at the frame's end (`draw` →
-/// `screen::edges_on`) — the code, a cursor line, a wash or a panel.
-#[allow(clippy::too_many_arguments)]
-fn card_edge(
-    out: &mut impl Write,
-    ui: &Ui,
-    card: Style,
-    x: usize,
-    y: usize,
-    width: usize,
-    pad: usize,
-    top: bool,
-) -> io::Result<()> {
-    if pad == 0 {
-        return Ok(());
-    }
-    // (under `lines` no half blocks: a row of the card's colour — a frame's line, drawn over it, or the card's
-    // own air)
-    if ui.edge == crate::theme::Edge::Lines {
-        apply(out, card)?;
-        return queue!(out, MoveTo(x as u16, y as u16), Spaces(width));
-    }
-    ui.edges.borrow_mut().push(crate::screen::Edge { x, y, width });
-    apply(out, Style { fg: card.bg, bg: ui.base.bg, ..Style::default() })?;
-    queue!(out, MoveTo(x as u16, y as u16), Print((if top { "▄" } else { "▀" }).repeat(width)))
+/// A card's top or bottom row (`CARD_PAD`): `width` cells of the card's colour — a frame's line, drawn over it, or
+/// the card's own air.
+fn card_edge(out: &mut impl Write, card: Style, x: usize, y: usize, width: usize) -> io::Result<()> {
+    apply(out, card)?;
+    queue!(out, MoveTo(x as u16, y as u16), Spaces(width))
 }
 
 /// A label with fuzzy-matched chars (`hits` = ascending char indices) in `matched`, up to `room` cells.
@@ -14767,8 +14335,8 @@ fn dim_style(ui: &Ui, editor: &Editor) -> Style {
     Style { fg: ui.virt.fg, ..card_style(ui, editor, "ui.popup") }
 }
 
-/// Doc box: card-like padding, no border, if the theme has a bg color; if bg = the editor's, rounded border.
-/// Width = inner + 4 (padding 1 per side + border/padding 1), height = visible rows + 2. "+N" below if cut.
+/// Doc box: a card — a row of air above and below, a cell each side, no border.
+/// Width = inner + 4 (padding 2 per side), height = visible rows + 2. "+N" on the last row if cut.
 fn draw_doc_box(
     rows: &[Vec<crate::markdown::Span>],
     (x0, y0): (usize, usize),
@@ -14779,22 +14347,13 @@ fn draw_doc_box(
     out: &mut impl Write,
 ) -> io::Result<()> {
     let popup = card_style(ui, editor, "ui.popup");
-    let dim = Style { fg: ui.virt.fg, ..popup };
-    let card = card_padding(ui, popup) == 1;
     let shown = rows.len().min(max_rows);
     let width = inner + 4;
     let more = if rows.len() > shown { format!(" +{} ", rows.len() - shown) } else { String::new() };
-    // Top edge: half-row block for cards, else a rounded border
-    if card {
-        card_edge(out, ui, popup, x0, y0, width, 1, true)?;
-    } else {
-        apply(out, dim)?;
-        queue!(out, MoveTo(x0 as u16, y0 as u16), Print(format!("╭{}╮", "─".repeat(inner + 2))))?;
-    }
-    let side = if card { " " } else { "│" };
+    card_edge(out, popup, x0, y0, width)?;
     for (i, spans) in rows.iter().take(shown).enumerate() {
-        apply(out, dim)?;
-        queue!(out, MoveTo(x0 as u16, (y0 + 1 + i) as u16), Print(side), Print(" "))?;
+        apply(out, popup)?;
+        queue!(out, MoveTo(x0 as u16, (y0 + 1 + i) as u16), Print("  "))?;
         let mut used = 0;
         for sp in spans {
             let text = fit(&sp.text, inner - used);
@@ -14808,27 +14367,16 @@ fn draw_doc_box(
         apply(out, popup)?;
         // Overflowed row count dimmed at the right end of the last row (if there's room)
         let last = i + 1 == shown && !more.is_empty() && inner >= used + more.width();
-        if last && card {
+        if last {
             queue!(out, Spaces(inner - used - more.width() + 1))?;
             apply(out, Style { fg: ui.linenr.fg, ..popup })?;
             queue!(out, Print(more.trim_end()), Print(" "))?;
         } else {
             queue!(out, Spaces(inner - used + 1))?;
         }
-        apply(out, dim)?;
-        queue!(out, Print(side))?;
+        queue!(out, Print(" "))?;
     }
-    let y = y0 + 1 + shown;
-    if card {
-        card_edge(out, ui, popup, x0, y, width, 1, false)
-    } else {
-        apply(out, dim)?;
-        queue!(
-            out,
-            MoveTo(x0 as u16, y as u16),
-            Print(format!("╰{}{more}╯", "─".repeat((inner + 2).saturating_sub(more.width()))))
-        )
-    }
+    card_edge(out, popup, x0, y0 + 1 + shown, width)
 }
 
 /// Whether diagnostic `d` underlines the cell at `pos` (an empty range marks the one cell at its start).
@@ -15491,8 +15039,7 @@ fn draw_prompt(
     let aw =
         if lay.code_hidden() { lay.width } else { lay.edit_w.saturating_sub(usize::from(lay.scrollbar)) };
     let x0 = 1;
-    let card = card_style(ui, editor, "ui.menu");
-    let pad = card_padding(ui, card);
+    let pad = CARD_PAD;
     let cands = completion.map_or(&[][..], |c| &c.cands[..]);
     // (the menu: as many rows as there's room for over the input and its blank row)
     let over = (lay.status_y as usize).saturating_sub(lay.text_top as usize + 2 * pad + 2);
@@ -15517,12 +15064,11 @@ fn draw_prompt(
     let h = rows + usize::from(rows > 0) + 1 + 2 * pad;
     let y0 = (lay.status_y as usize).saturating_sub(h);
     editor.screen.prompt_card.set(Some((x0, y0, width, h)));
-    let card = card_at(ui, editor, "ui.menu", lay, (x0, y0, width, h));
-    let card = if framed(ui) { on_ground(ui, card) } else { card };
+    let card = on_ground(ui, card_style(ui, editor, "ui.menu"));
     let selected = selected_row(ui, editor, card);
     let matched = Style { fg: ui.accent.fg, bold: true, ..Style::default() };
     let dir_fg = t.try_get("ui.text.directory").and_then(|s| s.fg).or(ui.accent.fg);
-    card_edge(out, ui, card, x0, y0, width, pad, true)?;
+    card_edge(out, card, x0, y0, width)?;
     let thumb = scroll_thumb(rows.max(1), cands.len().max(1), first);
     let mut y = y0 + pad;
     for (row, i) in visible.enumerate() {
@@ -15549,11 +15095,11 @@ fn draw_prompt(
             used += 3 + hint_w;
         }
         apply(out, base_st)?;
-        // (framed, the thumb stands inside the frame's side)
-        queue!(out, Spaces(width.saturating_sub(used + 1 + usize::from(framed(ui)))))?;
+        // (the thumb stands inside the frame's side)
+        queue!(out, Spaces(width.saturating_sub(used + 2)))?;
         if cands.len() > rows && thumb.contains(&row) {
             apply(out, Style { fg: ui.linenr.fg, ..card })?;
-            queue!(out, Print(thumb_glyph(ui)))?;
+            queue!(out, Print(THUMB))?;
         } else {
             apply(out, card)?;
             queue!(out, Print(" "))?;
@@ -15588,11 +15134,9 @@ fn draw_prompt(
     }
     apply(out, card)?;
     queue!(out, Spaces(inner.saturating_sub(used) + 2))?;
-    card_edge(out, ui, card, x0, y + 1, width, pad, false)?;
-    if framed(ui) {
-        let name = pane_names(ui, editor, card, &[prompt_name(p)], 0);
-        draw_frame(out, ui, card, (x0, y0, width, h), &name, &[], &[], true)?;
-    }
+    card_edge(out, card, x0, y + 1, width)?;
+    let name = pane_names(ui, editor, card, &[prompt_name(p)], 0);
+    draw_frame(out, ui, card, (x0, y0, width, h), &name, &[], &[], true)?;
     Ok(cursor)
 }
 
@@ -16955,9 +16499,7 @@ mod tests {
     }
 
     /// Cards cost a frame little: with the note card and the follow card up (Claude at work, ~10 frames a
-    /// second), key → frame → what goes to the terminal; and what seating their edges adds to that — the
-    /// same frames presented without them. Both said for `cargo perf`; seating no more than a tenth of the
-    /// frame (it was a second reading of the frame, a quarter of it — 70 µs of 290 at 200×50; now ~5).
+    /// second), key → frame → what goes to the terminal, said for `cargo perf`.
     #[test]
     fn perf_frames_with_cards() {
         if crate::test_results::unoptimized("term::tests::perf_frames_with_cards") {
@@ -16994,14 +16536,9 @@ mod tests {
         render(&mut ed, &mut buf, w, h).unwrap();
         assert!(ed.screen.note_card.get().is_some(), "note card");
         assert!(ed.screen.thought_card.get().is_some(), "follow card");
-        assert!(!ed.screen.edges.borrow().is_empty(), "their edges");
-        let (mut seated, mut bare) = (crate::screen::Screen::new(), crate::screen::Screen::new());
-        let median = |mut v: Vec<Duration>| {
-            v.sort();
-            v[v.len() / 2]
-        };
+        let mut screen = crate::screen::Screen::new();
         let mut run = || {
-            let (mut frames, mut with, mut without) = (Vec::new(), Vec::new(), Vec::new());
+            let mut frames = Vec::new();
             for i in 0..400 {
                 ed.handle_event(crate::event::Event::Key(
                     (if i % 2 == 0 { "j" } else { "k" }).parse().unwrap(),
@@ -17009,40 +16546,18 @@ mod tests {
                 buf.clear();
                 let t = Instant::now();
                 render(&mut ed, &mut buf, w, h).unwrap();
-                let drawn = t.elapsed();
-                let edges = ed.screen.edges.borrow();
-                // (taking turns at going first)
-                let present = |s: &mut crate::screen::Screen, edges: &[crate::screen::Edge]| {
-                    let t = Instant::now();
-                    std::hint::black_box(s.present(&buf, w, h, edges));
-                    t.elapsed()
-                };
-                let (a, b) = if i % 2 == 0 {
-                    let a = present(&mut seated, &edges);
-                    (a, present(&mut bare, &[]))
-                } else {
-                    let b = present(&mut bare, &[]);
-                    (present(&mut seated, &edges), b)
-                };
-                frames.push(drawn + a);
-                with.push(a);
-                without.push(b);
+                std::hint::black_box(screen.present(&buf, w, h));
+                frames.push(t.elapsed());
             }
-            (median(frames), median(with).saturating_sub(median(without)))
+            frames.sort();
+            frames[frames.len() / 2]
         };
-        // (each its best of 3 — the first run in a process also pays the clock ramping up)
-        let (mut frame, mut seating) = (Duration::MAX, Duration::MAX);
-        for _ in 0..3 {
-            let (f, s) = run();
-            (frame, seating) = (frame.min(f), seating.min(s));
-        }
+        // (its best of 3 — the first run in a process also pays the clock ramping up)
+        let frame = (0..3).map(|_| run()).min().unwrap();
         std::fs::remove_dir_all(&dir).ok();
-        let us = |d: Duration| d.as_secs_f64() * 1e6;
-        for (name, d, noise) in [("frame_with_cards_us", frame, 20), ("card_seating_us", seating, 5)] {
-            let line = format!("PERF {name} {:.1} budget=16000 noise={noise}\n", us(d));
-            let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
-        }
-        assert!(seating <= frame / 10, "seating the cards {seating:?} of a {frame:?} frame");
+        let line =
+            format!("PERF frame_with_cards_us {:.1} budget=16000 noise=20\n", frame.as_secs_f64() * 1e6);
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
     }
 
     /// A review's grades cost a frame little: 46 files, each with 20 graded changes of 10 lines (a few high, one
@@ -18998,7 +18513,7 @@ mod tests {
         r.output = [(false, "formatted")].into_iter().collect();
         ed.session.task_run = Some(r);
         let (h, total) = lay(&ed);
-        // (its header in the line over it: one row — `chrome::slot_head`)
+        // (its header in the line over it: one row — `chrome::SLOT_HEAD`)
         assert_eq!(h, 1 + TASK_PANEL_MIN, "one line: a small panel");
         // More output: it grows to show it all
         let more = |ed: &mut Editor, n: usize| {
@@ -19801,7 +19316,7 @@ mod tests {
         render(ed, &mut buf, w, h).unwrap();
         // What goes to the terminal is worked out from the frame too (only what changed) — in the budget
         let mut screen = crate::screen::Screen::new();
-        screen.present(&buf, w, h, &ed.screen.edges.borrow());
+        screen.present(&buf, w, h);
         let mut each = Vec::with_capacity(keys.len());
         for k in keys {
             let t = Instant::now();
@@ -19819,7 +19334,7 @@ mod tests {
                 .min()
                 .unwrap();
             let t = Instant::now();
-            screen.present(&buf, w, h, &ed.screen.edges.borrow());
+            screen.present(&buf, w, h);
             each.push(events + frame + t.elapsed());
         }
         each

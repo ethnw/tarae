@@ -271,10 +271,7 @@ link = "accent"                        # palette entries can point to each other
 - Modifiers: `bold`, `italic`, `underline`, `dim`, `reversed`, `crossed` (a `modifiers = [...]` list works too)
 - Typos in color names and unknown attributes are reported as warnings, not silently ignored
 - tarae-only keys: `ui.accent` (the single accent color), `ui.tint` (the base that faint colors blend into — this is
-  what the transparent variants set instead of a background), `ui.panel` (the docked panels' ground under `lines`;
-  without it, the code's), `ui.virtual.strong` (the dark wash key hints' keys are drawn in) and `ui.edge` — a word,
-  not a style: `"lines"` (the default: one thin line where surfaces meet, the one with the keys in the accent, and a
-  frame with its name on what takes the keys) or `"ground"` (surfaces of their own colour with half a cell of ground
-  between them, cards with half-row edges)
+  what the transparent variants set instead of a background), `ui.panel` (the docked panels' ground; without it, the
+  code's) and `ui.virtual.strong` (the dark wash key hints' keys are drawn in)
 - Built-in themes: `meok`, `hanji`, `meok-transparent`, `hanji-transparent`; `default` picks meok or hanji to match the
   terminal background

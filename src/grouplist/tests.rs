@@ -611,51 +611,6 @@ fn the_names_stand_and_the_details_fold_side_by_side() {
     }
 }
 
-/// Under `ui.edge = "ground"` a stacked group names both members in its header row, as that row names its tabs
-/// (` › places   output`, the open one strong) — no title row; a click on the other opens it.
-#[test]
-fn a_stacked_group_names_both_under_ground() {
-    const N: u16 = 60;
-    let dir = crate::scratch::Scratch::new("group-ground");
-    let a = dir.path().join("a.rs");
-    std::fs::write(&a, "fn a() {}\n".repeat(5)).unwrap();
-    let mut ed = editor(dir.path());
-    crossterm::style::force_color_output(true);
-    ed.theme = crate::theme::load("meok").unwrap();
-    ed.theme.edge = crate::theme::Edge::Ground;
-    print(&mut ed, 3, place(&a, 0, 2, "one"));
-    print(&mut ed, 3, place(&a, 2, 1, "two"));
-    let p = cells(&mut ed, N);
-    let h = p.screen().size().0;
-    let y = (0..h).find(|&y| column(&row(&p, y), " › places   output", 0).is_some());
-    let y = y.unwrap_or_else(|| panic!("both named in the header row:\n{}", p.screen().contents()));
-    let look = |p: &vt100::Parser, name: &str| {
-        let x = column(&row(p, y), name, 0).unwrap() as u16;
-        p.screen().cell(y, x).map(|c| (c.fgcolor(), c.bold())).unwrap()
-    };
-    assert_ne!(look(&p, "places"), look(&p, "output"), "the open one strong");
-    let all = p.screen().contents();
-    assert!(!all.contains("PLACES") && !all.contains("OUTPUT"), "no title row: {all}");
-    assert!(all.contains("a.rs:3") && !all.contains("filler"), "the list open: {all}");
-    // A click on `output`: its keys, open
-    let g = ed.session.group(GroupKind::Task).unwrap();
-    let detail = g.detail_pane().unwrap();
-    let spot = ed.screen.member_names.borrow().iter().find(|s| s.3 == detail).copied().expect("its spot");
-    assert_eq!(spot.0, y as usize);
-    let click = crate::event::Mouse {
-        kind: crate::event::MouseKind::Down,
-        x: spot.1 as u16,
-        y: spot.0 as u16,
-        alt: false,
-    };
-    ed.handle_mouse(click);
-    let p = cells(&mut ed, N);
-    assert_eq!(ed.session.at, At::Slot);
-    assert!(p.screen().contents().contains("filler"), "the output open");
-    let (places, output) = (look(&p, "places"), look(&p, "output"));
-    assert_ne!(places, output, "the strong one moved");
-}
-
 /// The keys that step through the failures, `]x next  [x prev`, are said where they act: in the failure's stretch of
 /// the line beside its place and which of how many (`src/lib.rs:31 1/2`), one piece that folds whole — so they
 /// outlast the panel's keys, which fold first.

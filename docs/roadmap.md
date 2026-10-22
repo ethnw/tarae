@@ -621,7 +621,7 @@ git tab, search, a short Kubernetes one.
   pinned by `builtin_themes_clear_their_contrast_floors`). The 붓 mock (수묵화's 농담: values to the ends, one stroke on the
   surface with the keys) chose the thin line — "pane을 나누는 느낌, zellij처럼" — over the heavy `▌`, and kept the
   range (the ground near-ink, the panels on it). D2 + D3 done (2026-10-21, `89f4ba6f`): `ui.edge` = `lines` (default) ·
-  `ground` — one thin line where docked surfaces meet, lit for the surface with the keys; what takes the keys
+  `ground` (gone 2026-10-22: lines only, `ui.edge` with it) — one thin line where docked surfaces meet, lit for the surface with the keys; what takes the keys
   floats in a frame named in its top line (`╭─ space ─╮`), a card's answer keys in its bottom line, two cards never
   touching; `pane_names` — a group's members in one header with `·`, the one in sight lit (`files · outline · git`,
   `terminal · check · procs`); comments a warm wash apart from the virtual text's cool dim (ΔE ≥ 12, tested).

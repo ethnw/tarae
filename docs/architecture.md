@@ -58,14 +58,12 @@ tarae's look is a pair: **meok** (ink — a dark ink background with a coral acc
 with a vermilion accent). The two built-in themes have exactly the same keys.
 
 - **One accent color** (`ui.accent`), used boldly and sparingly; syntax colors stay calm
-- **Edges and frames** (`ui.edge`, design pass 2) — under `"lines"` (the default) docked surfaces sit on the code's
-  ground and meet on one thin line, lit in the accent for the surface with the keys (`term::edge_style`, one rule for
+- **Edges and frames** (design pass 2) — docked surfaces sit on the code's ground and meet on one thin line, lit in the accent for the surface with the keys (`term::edge_style`, one rule for
   every gutter, header rule, the slot's top edge and the chat's input rule); the slot's header is set into its top
   edge, the line where it meets the code (panes P3, `term::slot_header` → `top_line`); what takes the keys floats in a
   rounded frame named in its top line (`term::draw_frame`, the same `top_line`), a card's answers in its bottom line; notes float as cards of their
-  own colour, and two cards never touch (`kept_apart`). Under `"ground"`: surfaces of their own colour, half a cell of
-  ground between them, cards with half-block edges. The selected row gets an accent bar `▎`; typed characters are
-  accent bold
+  own colour, and two cards never touch (`kept_apart`). The selected row gets an accent bar `▎`; typed characters
+  are accent bold
 - **Two dim levels only** — `ui.virtual` (dim) and `ui.linenr` (faint)
 - **Glyphs** only from the set every common monospace font has (JetBrains Mono, Hack, Menlo, SF Mono):
   `ƒ τ ν π § ◦ # ¶ ● ▲ › ▎ ▐ ▌ ▄ ▀`

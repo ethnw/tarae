@@ -45,7 +45,6 @@
 "ui.window" = "faint"
 "ui.panel" = { fg = "ink", bg = "paper" }
 "ui.virtual.strong" = "wash"
-"ui.edge" = "lines"
 
 "error" = "red"
 "warning" = "amber"

@@ -389,8 +389,6 @@ pub struct Screen {
     /// The in-buffer review's changes: every screen row of one (its header, its lines) and which change — cards
     /// keep off them, a click takes that change in hand.
     pub review_rows: std::cell::RefCell<Vec<(usize, usize)>>,
-    /// The cards' half-block edges this frame — `screen::Screen::present` seats them on what's under them.
-    pub edges: std::cell::RefCell<Vec<crate::screen::Edge>>,
     /// The task panel's: (first, last, rows of output).
     pub task_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
     /// A plugin's panel: (its first screen line, its last, its first row's line, the first row shown).
@@ -2406,8 +2404,8 @@ impl Editor {
         // program that has the mouse always gets its release)
         let wheel = matches!(m.kind, K::ScrollUp | K::ScrollDown);
         if owned || (in_terminal && (m.kind == K::Down || wheel)) {
-            // Its screen starts under the header (`chrome::slot_head`), the padding in from the slot's edge
-            let (head, x0) = (crate::chrome::slot_head(self.theme.edge), s.slot_x + crate::chrome::PAD);
+            // Its screen starts under the header (`chrome::SLOT_HEAD`), the padding in from the slot's edge
+            let (head, x0) = (crate::chrome::SLOT_HEAD, s.slot_x + crate::chrome::PAD);
             let cell = s.terminal_rows.and_then(|(y0, y1)| {
                 let inside = in_terminal && y >= y0 + head && x >= x0;
                 (inside || owned).then(|| {
@@ -5130,10 +5128,10 @@ mod tests {
             b
         };
         let first = frame(&mut ed);
-        let whole = screen.present(&first, 160, 50, &[]).len();
+        let whole = screen.present(&first, 160, 50).len();
         std::thread::sleep(ed.tick_wanted().unwrap());
         let next = frame(&mut ed);
-        let out = String::from_utf8(screen.present(&next, 160, 50, &[]).to_vec()).unwrap();
+        let out = String::from_utf8(screen.present(&next, 160, 50).to_vec()).unwrap();
         let escapes = regex::Regex::new(r"\x1b\[[0-9;:?]*[ -/]*[@-~]").unwrap();
         let text = escapes.replace_all(&out, "");
         assert!(text.chars().any(|c| "▂▃▄▅▆▇".contains(c)), "the wave moved: {text:?}");

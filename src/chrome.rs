@@ -2,16 +2,13 @@
 //! padding, the gutters and the headers uneven on a real screen).
 //!
 //! - **Columns.** The side panel (or the review's rail) and the chat run the whole height, top to the status
-//!   line; between them the code, and under the code the bottom slot. Every panel is a surface
-//!   (`ui.popup`) on the ground (`ui.background`).
-//! - **Gutter.** Half a cell of ground between regions side by side: the gutter's cell, `GAP`, is split down
-//!   the middle — its left half is what's left of it (the side panel's or the review rail's surface, the
-//!   bottom slot's beside the chat, the ground beside the code), its right half ground, and what's right of
-//!   it starts on the next cell. So every panel's surface starts on a cell and its text is `PAD` from where
-//!   the surface shows — the side panel, the slot and the chat alike. Against the screen's edge (a panel
-//!   filling the screen) the panel takes the cell whole — no ground against nothing. A theme whose surfaces
-//!   are the ground's colour gets a faint `│` there instead (the same middle of the cell; nothing at the
-//!   edge). A card edge over a gutter's cell is seated on its left half (`screen::Grid::put`).
+//!   line; between them the code, and under the code the bottom slot. Every panel sits on the ground
+//!   (`ui.panel` over `ui.background`).
+//! - **Gutter.** One thin line between regions side by side, in the gutter's whole cell (`GAP`): `│`, `├`/`┤`
+//!   where the slot's top edge meets it, lit for the surface with the keys (`term::edge_style`). What's right of
+//!   it starts on the next cell, so every panel's text is `PAD` from its line — the side panel, the slot and the
+//!   chat alike. Against the screen's edge (a panel filling the screen) the panel takes the cell whole — no line
+//!   against nothing.
 //! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge.
 //!   The code has none of its own: its sign column is the first cell after the gutter (so a server attaching
 //!   doesn't move the text), its numbers right after — they inset its text already — and its path bar and
@@ -19,7 +16,7 @@
 //! - **Header.** Every panel, and the code under the path bar, opens with a title row and a thin rule
 //!   (`HEAD` rows); their tops line up on the screen's first row. (A screen under `RULE_MIN_ROWS` rows:
 //!   the code's title goes without its rule.) The bottom slot's header is the line where it meets the code
-//!   above it under `ui.edge = "lines"` (panes P3 §1, `slot_head`) — one row, as a frame's top line names it.
+//!   above it (panes P3 §1, `SLOT_HEAD`) — one row, as a frame's top line names it.
 //! - **Focus, quietly.** What has the keys draws its header rule in the accent; everything else keeps
 //!   `FADE` of its text's contrast; the status line's label names where the keys go (`Keys::label`).
 //! - **The bottom slot's tabs.** The slot's title row lists every panel that's there (`Editor::slot_tabs`),
@@ -43,14 +40,9 @@ pub const GAP: usize = 1;
 /// A header: the title row and its rule.
 pub const HEAD: usize = 2;
 
-/// The bottom slot's header rows: under `ui.edge = "lines"` one — the line where the slot meets what's above it
-/// carries its names, details and keys (panes P3 §1); under `"ground"` a title row and its rule (`HEAD`).
-pub fn slot_head(edge: crate::theme::Edge) -> usize {
-    match edge {
-        crate::theme::Edge::Lines => 1,
-        crate::theme::Edge::Ground => HEAD,
-    }
-}
+/// The bottom slot's header rows: one — the line where the slot meets what's above it carries its names, details
+/// and keys (panes P3 §1).
+pub const SLOT_HEAD: usize = 1;
 /// Under this many screen rows the code's path bar goes without its rule (a small pane keeps the row for
 /// code; the panels beside keep theirs).
 pub const RULE_MIN_ROWS: u16 = 16;

@@ -4,8 +4,7 @@
 //! layers over another theme. Bad color names and unknown attributes are not silently dropped — reported
 //! via `Theme::warnings`.
 //! tarae-only UI keys: `ui.accent` (the single accent color), `ui.tint` (base for blending light colors —
-//! transparent variants), `ui.panel` (the docked panels' ground under `ui.edge = "lines"`), `ui.virtual.strong`
-//! (the dark wash: hint keys), `ui.edge` (a word, not a style — `Edge`: `"lines"` or `"ground"`).
+//! transparent variants), `ui.panel` (the docked panels' ground), `ui.virtual.strong` (the dark wash: hint keys).
 //! Four built-ins: `meok` (먹, dark) · `hanji` (한지, light) · `meok-transparent` · `hanji-transparent`
 //! (don't paint the background, the terminal's shows through). `"default"` = meok/hanji to match the terminal
 //! (`set_light` — term.rs asks at startup).
@@ -76,22 +75,9 @@ pub struct Theme {
     /// (the chat's laid-out messages) — a theme file read again under the same name is another.
     pub id: u64,
     styles: HashMap<String, Style>,
-    /// Where surfaces meet (`ui.edge`).
-    pub edge: Edge,
     /// Problems hit while reading (bad color names·unknown attributes) — shown as config warnings.
     pub warnings: Vec<String>,
     captures: CaptureStyles,
-}
-
-/// How docked surfaces meet and floating ones stand apart (`ui.edge`, design pass 2 D2/D3).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Edge {
-    /// One thin line where surfaces meet (`│`, `─`, joins), the docked panels on the ground (`ui.panel`); what
-    /// takes keys floats in a frame with its name.
-    #[default]
-    Lines,
-    /// The half-cell ground between surfaces of their own colour; cards with half-block edges.
-    Ground,
 }
 
 /// `Theme::capture_styles`' table — rebuilt when languages bring new capture names; a copy starts empty.
@@ -273,16 +259,7 @@ fn from_table(name: &str, table: &toml::Table) -> Theme {
     let mut warnings = Vec::new();
     let palette = parse_palette(table.get("palette").and_then(Value::as_table), &mut warnings);
     let mut styles = HashMap::new();
-    let edge = match table.get("ui.edge") {
-        None => Edge::default(),
-        Some(Value::String(s)) if s == "lines" => Edge::Lines,
-        Some(Value::String(s)) if s == "ground" => Edge::Ground,
-        Some(v) => {
-            warnings.push(format!("theme '{name}': \"ui.edge\": {v} — \"lines\" or \"ground\""));
-            Edge::default()
-        }
-    };
-    for (k, v) in table.iter().filter(|(k, _)| !matches!(k.as_str(), "palette" | "ui.edge")) {
+    for (k, v) in table.iter().filter(|(k, _)| k.as_str() != "palette") {
         let mut warn = |what: String| warnings.push(format!("theme '{name}': \"{k}\": {what}"));
         if let Some(st) = parse_style(v, &palette, &mut warn) {
             styles.insert(k.clone(), st);
@@ -290,7 +267,7 @@ fn from_table(name: &str, table: &toml::Table) -> Theme {
     }
     static READ: AtomicU64 = AtomicU64::new(1);
     let id = READ.fetch_add(1, Ordering::Relaxed);
-    Theme { name: name.to_string(), id, styles, edge, warnings, captures: CaptureStyles::default() }
+    Theme { name: name.to_string(), id, styles, warnings, captures: CaptureStyles::default() }
 }
 
 /// Palette — values may be other palette names (`accent = "coral"`, any depth, warns on cycles).
