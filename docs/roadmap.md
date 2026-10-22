@@ -434,7 +434,8 @@ main that has what it waits for, and the user says go:
   paragraph, its view mode normal mode on it (`● normal · chat`), its input a small document in insert mode, a
   run's output kept once (footprint −60 % on 20,000 lines); the document pane one module (`docpane.rs`); the
   terminal's waits for the engine → **P3** panes of their own (the tests panel
-  the first linked group), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  the first linked group; `target/sb/panes-P3-plan.md`, its 12 decisions as recommended, 2026-10-22; step 1: the
+  slot's header in the line where it meets the code, one drawer with a frame's top line, the code a row taller), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 where
   every session reads and writes, shown wherever that file is; C2 an overlap between workspaces said the moment it
   would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C3 workspaces kept close to

@@ -20,8 +20,8 @@
 17
 18
 19
-20   demo  │  pods · default                                            d describe  l logs  esc code
-21 ────────────────────────────────────────────────────────────────────────────────────────────────────
+20
+21 ─ demo ── pods · default ──────────────────────────────────────────── d describe  l logs  esc code ─
 22   NAME    READY  STATUS
 23   web-0   1/1    Running
 24   web-1   1/1    Running
@@ -82,8 +82,8 @@
 17
 18
 19
-20   TTTT  f  TTTT T TTTTTTT                                            D ffffffff  D ffff  DDD ffff
-21 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+20
+21 a TTTT aa TTTT T TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa D ffffffff  D ffff  DDD ffff a
 22   ffff    fffff  ffffff
 23
 24

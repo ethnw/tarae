@@ -18,7 +18,8 @@
 //!   rule start where the numbers do (`SIGNS`).
 //! - **Header.** Every panel, and the code under the path bar, opens with a title row and a thin rule
 //!   (`HEAD` rows); their tops line up on the screen's first row. (A screen under `RULE_MIN_ROWS` rows:
-//!   the code's title goes without its rule.)
+//!   the code's title goes without its rule.) The bottom slot's header is the line where it meets the code
+//!   above it under `ui.edge = "lines"` (panes P3 §1, `slot_head`) — one row, as a frame's top line names it.
 //! - **Focus, quietly.** What has the keys draws its header rule in the accent; everything else keeps
 //!   `FADE` of its text's contrast; the status line's label names where the keys go (`Keys::label`).
 //! - **The bottom slot's tabs.** The slot's title row lists every panel that's there (`Editor::slot_tabs`),
@@ -41,6 +42,15 @@ pub const SIGNS: usize = 1;
 pub const GAP: usize = 1;
 /// A header: the title row and its rule.
 pub const HEAD: usize = 2;
+
+/// The bottom slot's header rows: under `ui.edge = "lines"` one — the line where the slot meets what's above it
+/// carries its names, details and keys (panes P3 §1); under `"ground"` a title row and its rule (`HEAD`).
+pub fn slot_head(edge: crate::theme::Edge) -> usize {
+    match edge {
+        crate::theme::Edge::Lines => 1,
+        crate::theme::Edge::Ground => HEAD,
+    }
+}
 /// Under this many screen rows the code's path bar goes without its rule (a small pane keeps the row for
 /// code; the panels beside keep theirs).
 pub const RULE_MIN_ROWS: u16 = 16;

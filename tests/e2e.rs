@@ -974,7 +974,7 @@ fn task_output_fills_the_list_and_q_walks_it() {
     let mut t = Term::spawn(&sb, &["m.rs"], 130, ROWS);
     t.wait_text("fn main");
     t.command("task check");
-    t.wait_for("the task failed", |s| s.contains("check ▲  │  failed") && s.contains("checking"));
+    t.wait_for("the task failed", |s| s.contains("─ check ▲ ── failed") && s.contains("checking"));
     t.send("]q");
     t.wait_for("the cursor on the place", |s| s.status().contains("2:13"));
     t.wait_text("cannot find value oops");

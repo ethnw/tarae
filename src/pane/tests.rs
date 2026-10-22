@@ -221,6 +221,13 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     let detail = ed.screen.leaves.iter().find(|l| l.0 == g.detail).unwrap().1;
     assert_eq!((list.y, list.h), (detail.y, detail.h), "side by side, one header over both");
     assert_eq!(detail.x, list.x + list.w + 1, "a line between them");
+    let sc = &ed.screen;
+    let slot_y = sc.text_top + sc.body_h - sc.bottom_h;
+    assert_eq!(
+        (list.y, list.y + list.h),
+        (slot_y + 1, slot_y + sc.bottom_h),
+        "from right under the header — the line over them, panes P3 §1 — to the slot's end"
+    );
     // (the list, by a hop from the detail)
     ed.focus_pane(g.detail);
     frame(&mut ed);

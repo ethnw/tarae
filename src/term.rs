@@ -488,9 +488,9 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             crate::sizes::bottom(
                 lay.text_rows + lay.debug_h,
                 editor.sizes.bottom,
-                terminal_panel_h(lay.text_rows + lay.debug_h),
+                terminal_panel_h(lay.text_rows + lay.debug_h, lay.slot_head),
             )
-            .saturating_sub(crate::chrome::HEAD)
+            .saturating_sub(lay.slot_head)
             .max(2) as u16,
             terminal_cols(&lay) as u16,
         ))),
@@ -539,11 +539,11 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     }
     // The terminal is told its panel's size (it redraws for it)
     // (not while another tab has the slot — the program would draw for a size nobody sees)
-    if lay.debug_h > crate::chrome::HEAD
+    if lay.debug_h > lay.slot_head
         && terminal_shown
         && let Some(t) = editor.session.terminal.as_mut()
     {
-        t.resize((lay.debug_h - crate::chrome::HEAD) as u16, terminal_cols(&lay) as u16);
+        t.resize((lay.debug_h - lay.slot_head) as u16, terminal_cols(&lay) as u16);
         // (its view mode read again at the new size)
         crate::view::terminal_resized(editor);
     }
@@ -698,6 +698,8 @@ struct Layout {
     debug_h: usize,
     slot_x: usize,
     slot_w: usize,
+    /// The slot's header rows (`chrome::slot_head`): its body starts this far under `slot_y`.
+    slot_head: usize,
     /// The panel columns' height — the side panel's, the chat's: from the screen's first row to the status
     /// line (the card's bar row aside).
     body_h: usize,
@@ -743,14 +745,11 @@ fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, cr
 /// shows a run with results to list (with none it's the output alone: one pane).
 fn tests_members(editor: &Editor, lay: &Layout) -> Option<(crate::split::Rect, crate::split::Rect)> {
     let r = editor.session.test_run.as_ref().filter(|r| !r.cases.is_empty())?;
-    if editor.slot() != Some(crate::sizes::Slot::Test)
-        || lay.debug_h <= crate::chrome::HEAD
-        || lay.slot_w == 0
-    {
+    if editor.slot() != Some(crate::sizes::Slot::Test) || lay.debug_h <= lay.slot_head || lay.slot_w == 0 {
         return None;
     }
     let left_w = tests_list_w(r, lay.slot_w);
-    let (y, h) = (lay.slot_y() + crate::chrome::HEAD, lay.debug_h - crate::chrome::HEAD);
+    let (y, h) = (lay.slot_y() + lay.slot_head, lay.debug_h - lay.slot_head);
     let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
     let detail =
         crate::split::Rect { x: lay.slot_x + left_w + 1, y, w: lay.slot_w.saturating_sub(left_w + 1), h };
@@ -772,7 +771,16 @@ fn terminal_cols(lay: &Layout) -> usize {
 
 impl Layout {
     fn new(editor: &Editor, w: u16, h: u16) -> Self {
-        let header = editor.config.header || editor.docs.len() > 1;
+        use crate::pane::Shows;
+        use crate::sizes::Slot;
+        // `C-w z`: one pane fills the screen (`sizes::Zoom`)
+        let zoom = editor.zoomed();
+        let zoom_shows = editor.zoomed_shows();
+        // (the slot's header in the line where it meets what's above under `lines` — panes P3 §1: filling the
+        // screen, that line is its first row, no path bar over it)
+        let slot_head = crate::chrome::slot_head(editor.theme.edge);
+        let header = (editor.config.header || editor.docs.len() > 1)
+            && !(zoom_shows == Some(Shows::Slot) && slot_head < crate::chrome::HEAD);
         // (the path bar and its rule over the code — `chrome::HEAD`; a short screen keeps the row for code)
         let text_top = match header {
             true if h >= crate::chrome::RULE_MIN_ROWS => crate::chrome::HEAD as u16,
@@ -784,24 +792,23 @@ impl Layout {
         // A card stepped aside to a bar while its text is read (U8): the row over the status line is its
         let bar = usize::from(editor.offer_bar() && all > 6);
         let total = all - bar;
-        // `C-w z`: one pane fills the screen (`sizes::Zoom`)
-        use crate::pane::Shows;
-        use crate::sizes::Slot;
-        let zoom = editor.zoomed();
-        let zoom_shows = editor.zoomed_shows();
-        // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1)
+        // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1); its header
+        // in the line over it under `lines`: the same body in a row less, the code keeping the row a rule took
         let natural = match editor.slot() {
             _ if zoom_shows.is_some_and(|z| z != Shows::Slot) => 0,
-            Some(Slot::Procs) => procs_panel_h(editor, total),
-            Some(Slot::Terminal) => terminal_panel_h(total),
+            Some(Slot::Procs) => procs_panel_h(editor, total, slot_head),
+            Some(Slot::Terminal) => terminal_panel_h(total, slot_head),
             Some(Slot::Task) => match editor.session.task_run.as_ref() {
                 Some(r) => {
                     let queued = queued_h(editor, crate::queued::Slot::Task);
-                    task_panel_h(r, preflight_of(editor, r).is_some(), queued, total)
+                    task_panel_h(r, preflight_of(editor, r).is_some(), queued, total, slot_head)
                 }
                 None => 0,
             },
-            Some(_) => (total / 3).clamp(8, 15).min(total.saturating_sub(4)),
+            Some(_) => {
+                let h = (total / 3).clamp(8, 15) - (crate::chrome::HEAD - slot_head);
+                h.min(total.saturating_sub(4))
+            }
             None => 0,
         };
         let debug_h = match zoom_shows {
@@ -902,6 +909,7 @@ impl Layout {
             debug_h,
             slot_x: slot.map_or(rail_w, |r| r.x),
             slot_w: slot.map_or(edit_w - rail_w, |r| r.w),
+            slot_head,
             body_h: text_top as usize + total,
             status_y: text_top + all as u16,
             offer_bar: (bar == 1).then_some(text_top + total as u16),
@@ -1093,11 +1101,12 @@ fn draw_debug_panel(
         _ if d.request == "attach" => &[("space G p", "pause"), ("space G t", "detach")],
         _ => &[("space G p", "pause"), ("space G t", "stop")],
     };
-    let body = slot_header(out, editor, ui, lay, card, &details, hints)?;
     // ── Three columns: variables 45% · stack 25% · output the rest (each a column of its own padding)
-    let rows = lay.debug_h.saturating_sub(crate::chrome::HEAD);
     let cw = [w * 45 / 100, w * 25 / 100];
     let cols = [(0, cw[0]), (cw[0] + 1, cw[1]), (cw[0] + cw[1] + 2, w.saturating_sub(cw[0] + cw[1] + 2))];
+    let splits: Vec<usize> = cols[1..].iter().map(|&(x, _)| x0 + x - 1).collect();
+    let body = slot_header(out, editor, ui, lay, card, &details, hints, &splits)?;
+    let rows = lay.debug_h.saturating_sub(lay.slot_head);
     let var_scope = color("variable").or(ui.base.fg);
     let root = editor.root();
     let fn_color = color("function");
@@ -1108,9 +1117,6 @@ fn draw_debug_panel(
         queue!(out, Spaces(w))?;
         for (c, &(x, cw)) in cols.iter().enumerate() {
             if c > 0 {
-                if r == 0 {
-                    slot_join(out, ui, lay, card, x0 + x - 1)?;
-                }
                 queue!(out, MoveTo((x0 + x - 1) as u16, y))?;
                 leaf_line(out, ui, card, faint)?;
             }
@@ -1371,13 +1377,22 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
 }
 
 /// The bottom slot's header (`chrome.rs`): its tabs — every panel it has (`Editor::slot_tabs`), the one in
-/// front strong, each with its badge — then, after a faint `│`, what the one in front says (`details`) and
-/// its keys at the right; the rule under them, the accent while the slot has the keys. Tabs are clicked
-/// (`Screen.slot_tabs`) or `tab` in its view mode. Returns the first row of the panel's body.
+/// front strong, each with its badge — then what the one in front says (`details`) and its keys at the right.
+/// Tabs are clicked (`Screen.slot_tabs`) or `tab` in its view mode. Returns the first row of the panel's body.
+///
+/// Under `ui.edge = "lines"` it's the line where the slot meets the code above it (panes P3 §1, `top_line` — the
+/// floating frame's top line's drawer): lit while the slot has the keys, `┬` where a line between its leaves starts
+/// below (`splits`, absolute columns), the code keeping the row a rule took:
+///
+/// ```text
+/// ─ terminal · check ▲ · tests ● ── sh ───────────────────────────────────────────── C-\ type  space T hide ─
+/// ```
+///
+/// Under `"ground"` a row of its own, the details after a faint `│`, and the rule under it:
 ///
 /// ```text
 ///   terminal   check ▲   tests ●  │  sh                                                C-\ type  space T hide
-///   ──────────────────────────────────────────────────────────────────────────────────────────────────
+///   ──────────────────────────────────────────────────────────────────────────────────────────────
 /// ```
 #[allow(clippy::too_many_arguments)]
 fn slot_header(
@@ -1388,6 +1403,7 @@ fn slot_header(
     card: Style,
     details: &[(String, Style)],
     hints: &[(&str, &str)],
+    splits: &[usize],
 ) -> io::Result<usize> {
     use crate::chrome::{HEAD, PAD, PAD_R};
     let (x0, y0, w) = (lay.slot_x, lay.slot_y(), lay.slot_w);
@@ -1397,7 +1413,9 @@ fn slot_header(
         card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let front = editor.slot();
     let tabs = editor.slot_tabs();
-    let room = w.saturating_sub(PAD + PAD_R);
+    let lines = ui.edge == crate::theme::Edge::Lines;
+    // (the line's own cells: its lead `─ `, a blank and a `─` after the names — `top_line`)
+    let room = w.saturating_sub(if lines { TOP_LINE_OWN } else { PAD + PAD_R });
     // As wide as they come; too wide, the ones behind shorten first, then the one in front
     let badge_w = |t: &crate::chrome::Tab| badge_glyph(t.badge, editor, ui).map_or(0, |(g, _)| 1 + g.width());
     let labels = |behind: usize, ahead: usize| -> Vec<String> {
@@ -1413,32 +1431,57 @@ fn slot_header(
         .map(|(b, a)| labels(b, a))
         .find(|ls| width(ls) <= room)
         .unwrap_or_else(|| labels(1, 8));
-    queue!(out, MoveTo(x0 as u16, y0 as u16))?;
-    apply(out, card)?;
-    queue!(out, Spaces(PAD))?;
-    let mut used = PAD;
-    let mut spots = editor.screen.slot_tabs.borrow_mut();
-    // (a group laid as tabs: its header names them all as a frame's top line would — `pane_names`' `·` between,
-    // under `lines`; the one in front lit, the others dim)
-    for (i, (t, label)) in tabs.iter().zip(&shown).enumerate() {
-        if i > 0 {
-            match ui.edge {
-                crate::theme::Edge::Lines => put_line(out, frame_line(ui, card), NAMES_SEP)?,
-                crate::theme::Edge::Ground => {
-                    apply(out, card)?;
-                    queue!(out, Spaces(3))?;
-                }
-            }
-            used += 3;
-        }
-        let start = x0 + used;
-        // (a run's tab flashes, brought into sight from a link to it)
+    // (a run's tab flashes, brought into sight from a link to it)
+    let lit = |t: &crate::chrome::Tab, s: Style| {
         let run = match t.slot {
             crate::sizes::Slot::Task => editor.session.task_run.as_ref().map(|r| r.trace.id()),
             crate::sizes::Slot::Test => editor.session.test_run.as_ref().map(|r| r.trace.id()),
             _ => None,
         };
-        let lit = |s: Style| run.map_or(s, |n| flashed(ui, editor, &format!("run#{n}"), s));
+        run.map_or(s, |n| flashed(ui, editor, &format!("run#{n}"), s))
+    };
+    let mut spots = editor.screen.slot_tabs.borrow_mut();
+    if lines {
+        // The names as a frame's top line has them (`pane_names`' `·` between), each tab its label and badge
+        let mut names = Vec::new();
+        let mut owner = Vec::new();
+        for (i, (t, label)) in tabs.iter().zip(&shown).enumerate() {
+            if i > 0 {
+                names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
+                owner.push(None);
+            }
+            names.push((label.clone(), lit(t, if Some(t.slot) == front { strong } else { dim })));
+            owner.push(Some(t.slot));
+            if let Some((g, fg)) = badge_glyph(t.badge, editor, ui) {
+                names.push((format!(" {g}"), lit(t, Style { fg, ..card })));
+                owner.push(Some(t.slot));
+            }
+        }
+        let key = Style { bold: true, ..dim };
+        let head = TopLine { names: &names, details, keys: hints, key, faint, plain: false };
+        let line = edge_style(ui, card, Region::Slot);
+        let cols = top_line(out, line, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
+        // (a tab's spot from its label's first cell to its badge's last)
+        for (slot, (a, b)) in owner.iter().zip(cols).filter_map(|(o, c)| o.map(|s| (s, c))) {
+            match spots.last_mut() {
+                Some(last) if last.3 == slot => last.2 = b,
+                _ => spots.push((y0, a, b, slot)),
+            }
+        }
+        return Ok(y0 + 1);
+    }
+    queue!(out, MoveTo(x0 as u16, y0 as u16))?;
+    apply(out, card)?;
+    queue!(out, Spaces(PAD))?;
+    let mut used = PAD;
+    for (i, (t, label)) in tabs.iter().zip(&shown).enumerate() {
+        if i > 0 {
+            apply(out, card)?;
+            queue!(out, Spaces(3))?;
+            used += 3;
+        }
+        let start = x0 + used;
+        let lit = |s: Style| lit(t, s);
         apply(out, lit(if Some(t.slot) == front { strong } else { dim }))?;
         queue!(out, Print(label))?;
         used += label.width();
@@ -1449,41 +1492,224 @@ fn slot_header(
         }
         spots.push((y0, start, x0 + used, t.slot));
     }
-    // What the one in front says, set apart from the tabs by a faint `│` — as much as there's room for, the
-    // keys keeping theirs
-    let mut gap = true;
-    for (s, st) in details.iter().filter(|(s, _)| !s.trim().is_empty()) {
-        // (the first after the bar, without the blanks it brought to stand apart from the one before)
-        let s = if gap { s.trim_start() } else { s.as_str() };
-        let lead = if gap { 5 } else { 0 };
-        let left = w.saturating_sub(used + lead + PAD_R + 2);
-        if left < 4 {
+    // What the one in front says, set apart from the tabs by a faint `│` — as much as there's room for, folded
+    // as on the line (`fold_details`), the keys keeping theirs
+    let shown = fold_details(details, w.saturating_sub(used + 5 + PAD_R + 2), false);
+    if !shown.is_empty() {
+        apply(out, card)?;
+        queue!(out, Spaces(2))?;
+        apply(out, Style { fg: ui.window, ..card })?;
+        queue!(out, Print("│"))?;
+        apply(out, card)?;
+        queue!(out, Spaces(2))?;
+        used += 5;
+    }
+    for (s, st) in &shown {
+        apply(out, *st)?;
+        queue!(out, Print(s))?;
+        used += s.width();
+    }
+    panel_hints(out, hints, used, w, card, dim, faint)?;
+    header_rule(out, ui, card, (x0, y0 + 1, w), Region::Slot)?;
+    Ok(y0 + HEAD)
+}
+
+/// A top line's own cells besides its ends (`top_line`): the lead's `─ `, the blank after the names and one `─`.
+const TOP_LINE_OWN: usize = 4;
+
+/// What a top line says (`top_line`): the names (spans, `NAMES_SEP` among them), what the one in front says, its keys
+/// — `key` and `faint` their look, as a bottom panel's keys have always been.
+struct TopLine<'a> {
+    names: &'a [(String, Style)],
+    details: &'a [(String, Style)],
+    keys: &'a [(&'a str, &'a str)],
+    key: Style,
+    faint: Style,
+    /// The names unfaded, as a line is (a frame's: what floats is never the faded side).
+    plain: bool,
+}
+
+/// The details' least room on a top line: under it they go whole, the keys before them.
+const DETAILS_MIN: usize = 8;
+
+/// What a header says (`details`), folded into `room` cells: in pieces — a span with leading blanks starts one, the
+/// rest go with it (a count's mark and its number), counts in a row one piece — that go whole from the last, least
+/// important first (the time, then the counts); only a piece of words is cut (`fit_ellipsis`), never a number or a
+/// time half shown (counters and timers keep their width). The first without its leading blanks; `one_phrase` (a top
+/// line): the others a blank apart, as text runs on a line.
+fn fold_details(details: &[(String, Style)], room: usize, one_phrase: bool) -> Vec<(String, Style)> {
+    use std::ops::Range;
+    let spans: Vec<(String, Style)> = details
+        .iter()
+        .filter(|(s, _)| !s.trim().is_empty())
+        .enumerate()
+        .map(|(i, (s, st))| match s.trim_start() {
+            t if i == 0 => (t.to_string(), *st),
+            t if one_phrase && t.len() < s.len() => (format!(" {t}"), *st),
+            _ => (s.clone(), *st),
+        })
+        .collect();
+    let mut pieces: Vec<Range<usize>> = Vec::new();
+    for (i, (s, _)) in spans.iter().enumerate() {
+        match pieces.last_mut() {
+            Some(p) if !s.starts_with(' ') => p.end = i + 1,
+            _ => pieces.push(i..i + 1),
+        }
+    }
+    // (a count: a mark, then its number — the counts in a row go together: `● 1` never says all passed without `▲ 1`)
+    let count = |p: &Range<usize>| {
+        let n = spans[p.end - 1].0.trim();
+        p.len() >= 2 && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+    };
+    let mut units: Vec<(Range<usize>, bool)> = Vec::new();
+    for p in pieces {
+        let c = count(&p);
+        match units.last_mut() {
+            Some((u, true)) if c => u.end = p.end,
+            _ => units.push((p, c)),
+        }
+    }
+    let width = |r: &Range<usize>| spans[r.clone()].iter().map(|(s, _)| s.width()).sum::<usize>();
+    let words =
+        |r: &Range<usize>| !spans[r.clone()].iter().any(|(s, _)| s.chars().any(|c| c.is_ascii_digit()));
+    let (mut keep, mut used) = (units.len(), units.iter().map(|(r, _)| width(r)).sum::<usize>());
+    while used > room && keep > 0 {
+        let r = &units[keep - 1].0;
+        let before = used - width(r);
+        // (words: cut where they run out, a few cells at least)
+        if words(r) && room.saturating_sub(before) >= 4 {
+            break;
+        }
+        (used, keep) = (before, keep - 1);
+    }
+    let mut shown = Vec::new();
+    let mut left = room;
+    for (s, st) in units[..keep].iter().flat_map(|(r, _)| &spans[r.clone()]) {
+        if s.width() > left && left < 4 {
             break;
         }
         let s = fit_ellipsis(s, left);
-        if gap {
-            apply(out, card)?;
-            queue!(out, Spaces(2))?;
-            apply(out, Style { fg: ui.window, ..card })?;
-            queue!(out, Print("│"))?;
-            apply(out, card)?;
-            queue!(out, Spaces(2))?;
-        }
-        apply(out, *st)?;
-        queue!(out, Print(&s))?;
-        used += lead + s.width();
-        gap = false;
+        left -= s.width();
+        shown.push((s, *st));
     }
-    panel_hints(out, hints, used, w, card, dim, faint)?;
-    match ui.edge {
-        // (its rule is the slot's top edge: across it whole, meeting the lines beside it — `side_line`, `chat_gutter`)
-        crate::theme::Edge::Lines => {
-            queue!(out, MoveTo(x0 as u16, (y0 + 1) as u16))?;
-            put_line(out, edge_style(ui, card, Region::Slot), &"─".repeat(w))?;
-        }
-        crate::theme::Edge::Ground => header_rule(out, ui, card, (x0, y0 + 1, w), Region::Slot)?,
+    shown
+}
+
+/// The `─` a top line keeps between its text and its keys at least.
+const KEYS_AFTER: usize = 4;
+
+/// One top line (panes P3 §1.3) — where a surface meets what's above it (the slot's header) or a frame's edge
+/// (`draw_frame`): `{l}─ <names> ── <details> ───…─── <keys> ─{r}` across `w` cells from `(x, y)`, its lines in
+/// `line`, unfaded. Folds, least important first: the keys (whole pairs, from the last), then the details (whole
+/// pieces from the last, words cut — `fold_details` — down to `DETAILS_MIN`, else gone), the names last (cut where
+/// they run out); the line itself always stands. `join` where a line below starts (`splits`, absolute columns) —
+/// only in the line's run of `─`, never under text: the details end short of the first past the names and the keys
+/// start past the last (pairs fold). Not `drawn`: the same text in place, blanks where the lines would be (a card
+/// without the keys).
+/// Returns each name span's columns (`a..b`), for the mouse.
+#[allow(clippy::too_many_arguments)]
+fn top_line(
+    out: &mut impl Write,
+    line: Style,
+    card: Style,
+    (x, y, w): (usize, usize, usize),
+    (l, r, join): (&str, &str, &str),
+    splits: &[usize],
+    drawn: bool,
+    head: &TopLine,
+) -> io::Result<Vec<(usize, usize)>> {
+    let ends = l.width() + r.width();
+    if w < ends + TOP_LINE_OWN {
+        return Ok(Vec::new());
     }
-    Ok(y0 + HEAD)
+    let put = |out: &mut Vec<u8>, st: Style, text: &str| match drawn {
+        true => put_line(out, st, text),
+        false => {
+            apply(out, st)?;
+            let blank = |c: char| if "╭╮╰╯─│┬┴".contains(c) { ' ' } else { c };
+            queue!(out, Print(text.chars().map(blank).collect::<String>()))
+        }
+    };
+    let mut buf = Vec::new();
+    queue!(buf, MoveTo(x as u16, y as u16))?;
+    let said = !head.names.is_empty() || head.details.iter().any(|(s, _)| !s.trim().is_empty());
+    put(&mut buf, line, &format!("{l}─{}", if said { " " } else { "" }))?;
+    let mut col = l.width() + 1 + usize::from(said);
+    // (what's left for the text: the line's own cells and its ends kept)
+    let room = |col: usize| w.saturating_sub(col + 2 + r.width());
+    let mut cols = Vec::new();
+    for (text, st) in head.names {
+        let t = match room(col) {
+            0 => String::new(),
+            n => fit_ellipsis(text, n),
+        };
+        // (a `·` between names is the line's wash, unfaded)
+        match head.plain || text.as_str() == NAMES_SEP {
+            true => put(&mut buf, *st, &t)?,
+            false => apply_put(&mut buf, *st, &t)?,
+        }
+        cols.push((x + col, x + col + t.width()));
+        col += t.width();
+    }
+    // The lines down from it past the names (`splits`, from `x`): no text over one — the details end short of the
+    // first, the keys start past the last, each a blank and a `─` from its `join` (one under a name stays unjoined:
+    // the names fold last)
+    let downs: Vec<usize> = splits.iter().filter_map(|&s| s.checked_sub(x)).filter(|&s| s > col).collect();
+    let lead = if head.names.is_empty() { 2 } else { 4 };
+    let short_of = downs.iter().min().map_or(usize::MAX, |&s| s.saturating_sub(col + lead + 2));
+    let past = downs.iter().max().map_or(0, |&s| s + 2);
+    // What the one in front says, after ` ── `: as much as there's room for, the first without its leading blanks
+    let details = match room(col) >= 4 + DETAILS_MIN && short_of >= DETAILS_MIN {
+        true => fold_details(head.details, (room(col) - 4).min(short_of), true),
+        false => Vec::new(),
+    };
+    if !details.is_empty() {
+        put(&mut buf, line, if head.names.is_empty() { "─ " } else { " ── " })?;
+        col += lead;
+        for (s, st) in &details {
+            apply_put(&mut buf, *st, s)?;
+            col += s.width();
+        }
+    }
+    // The keys at the right end: as many whole pairs as fit, from the first — a run of the line (`KEYS_AFTER`)
+    // before them, so it reads as a line still
+    let pair = |(k, v): &(&str, &str)| k.width() + 1 + v.width();
+    let mut keys_w = 0;
+    let n = head
+        .keys
+        .iter()
+        .take_while(|p| {
+            let more = if keys_w == 0 { pair(p) + 3 } else { pair(p) + 2 };
+            let fits = keys_w + more + KEYS_AFTER - 1 <= room(col) && w - r.width() >= keys_w + more + past;
+            keys_w += if fits { more } else { 0 };
+            fits
+        })
+        .count();
+    if said {
+        put(&mut buf, line, " ")?;
+        col += 1;
+    }
+    let fill_end = w - r.width() - keys_w;
+    let fill: String = (col..fill_end).map(|c| if splits.contains(&(x + c)) { join } else { "─" }).collect();
+    put(&mut buf, line, &fill)?;
+    for (i, (k, v)) in head.keys[..n].iter().enumerate() {
+        apply_put(&mut buf, card, if i == 0 { " " } else { "  " })?;
+        apply_put(&mut buf, head.key, k)?;
+        apply_put(&mut buf, head.faint, &format!(" {v}"))?;
+    }
+    if n > 0 {
+        apply_put(&mut buf, card, " ")?;
+        put(&mut buf, line, "─")?;
+    }
+    put(&mut buf, line, r)?;
+    out.write_all(&buf)?;
+    Ok(cols)
+}
+
+/// `text` in `style`, as any text is (faded where its region fades).
+fn apply_put(out: &mut impl Write, style: Style, text: &str) -> io::Result<()> {
+    apply(out, style)?;
+    queue!(out, Print(text))
 }
 
 /// Rest of a bottom panel header (`used` cells drawn of `w`): key hints at the right end if they fit.
@@ -1621,30 +1847,30 @@ fn preflight_row(
     out
 }
 
-/// The fewest rows the task panel takes (its header — title and rule — and two of output).
-const TASK_PANEL_MIN: usize = crate::chrome::HEAD + 2;
+/// The fewest rows of output the task panel shows (under its header, `head` rows — `chrome::slot_head`).
+const TASK_PANEL_MIN: usize = 2;
 
 /// The task panel's height (U2): its output whole — the header, the lines, the rows of what waits for it
-/// (`queued`), the sandbox's row — at least `TASK_PANEL_MIN`, at most half the editing area (and 4 rows of
-/// code always). It never shrinks while the run is up (`Run.tall`, which a rerun of the same task starts
+/// (`queued`), the sandbox's row — at least `TASK_PANEL_MIN` rows of output, at most half the editing area (and 4
+/// rows of code always). It never shrinks while the run is up (`Run.tall`, which a rerun of the same task starts
 /// from). (A size you set will win over this — U1.)
-fn task_panel_h(r: &crate::task::Run, steps: bool, queued: usize, total: usize) -> usize {
+fn task_panel_h(r: &crate::task::Run, steps: bool, queued: usize, total: usize, head: usize) -> usize {
     let running = matches!(r.state, crate::task::State::Running);
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some();
-    let want =
-        crate::chrome::HEAD + usize::from(steps) + r.output.len().max(1) + queued + usize::from(sandbox);
+    let want = head + usize::from(steps) + r.output.len().max(1) + queued + usize::from(sandbox);
     let cap = (total / 2).min(total.saturating_sub(4));
-    let h = want.max(TASK_PANEL_MIN).max(r.tall.get()).min(cap);
+    let h = want.max(head + TASK_PANEL_MIN).max(r.tall.get()).min(cap);
     r.tall.set(r.tall.get().max(h));
     h
 }
 
 /// The terminal panel's height for `total` rows of editing area — more than the other panels (a shell wants
-/// room), at most 24.
-fn terminal_panel_h(total: usize) -> usize {
+/// room), at most 24 — a row less with its header in the line over it (`head`, `chrome::slot_head`): the shell's
+/// rows the same.
+fn terminal_panel_h(total: usize, head: usize) -> usize {
     // Never more than leaves 4 rows of code; too little room for a header and a row → none
-    let h = (total * 2 / 5).clamp(8, 24).min(total.saturating_sub(4));
-    if h <= crate::chrome::HEAD { 0 } else { h }
+    let h = ((total * 2 / 5).clamp(8, 24) - (crate::chrome::HEAD - head)).min(total.saturating_sub(4));
+    if h <= head { 0 } else { h }
 }
 
 /// A terminal color as the outer terminal's own (its palette for the 256 indexed ones), None = the panel's.
@@ -1721,8 +1947,8 @@ fn draw_terminal_panel(
     {
         hints.insert(0, ("alt+drag", "select"));
     }
-    let body = slot_header(out, editor, ui, lay, card, &head, &hints)?;
-    let rows = lay.debug_h.saturating_sub(crate::chrome::HEAD);
+    let body = slot_header(out, editor, ui, lay, card, &head, &hints, &[])?;
+    let rows = lay.debug_h.saturating_sub(lay.slot_head);
     let cols = terminal_cols(lay);
     let sel = t.selected();
     // (the primary selection's color — the plain one barely shows on a card)
@@ -1886,7 +2112,7 @@ fn draw_task_panel(
     hints.splice(0..0, to_out.iter().map(|(k, d)| (k.as_str(), *d)));
     summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Task));
     let y0 = lay.slot_y();
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints)?;
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[])?;
     // A preflight's steps: the row under the header
     let top = body - y0 + usize::from(steps.is_some());
     if let Some(p) = steps {
@@ -2107,10 +2333,10 @@ fn draw_plugin_panel<W: Write>(
     let mut hints: Vec<(&str, &str)> = keys.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect();
     let focus = editor.plugin_panel_focused();
     hints.push(if focus { ("esc", "code") } else { ("click", "keys") });
-    let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints)?;
+    let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints, &[])?;
     // The table, and the status line under it
     let header = !panel.columns.is_empty();
-    let body = lay.debug_h.saturating_sub(crate::chrome::HEAD + 1 + header as usize);
+    let body = lay.debug_h.saturating_sub(lay.slot_head + 1 + header as usize);
     let n = panel.rows.len();
     // The selected row in sight
     let mut scroll = st.scroll.get().min(n.saturating_sub(body));
@@ -2172,12 +2398,12 @@ fn draw_plugin_panel<W: Write>(
 
 /// `:procs`' panel height: its header and column names, its rows, the self-checks under them — half the
 /// editing area at most, and never shorter while it's open (rows coming and going don't move the code).
-fn procs_panel_h(editor: &Editor, total: usize) -> usize {
+fn procs_panel_h(editor: &Editor, total: usize, head: usize) -> usize {
     let p = &editor.procs;
-    let want = crate::chrome::HEAD + 1 + p.rows.len().max(1) + 1 + p.checks.len().clamp(1, 4);
+    let want = head + 1 + p.rows.len().max(1) + 1 + p.checks.len().clamp(1, 4);
     let cap = (total / 2).min(total.saturating_sub(4));
     let tall = p.panel.as_ref().map_or(0, |s| s.tall.get());
-    let h = want.max(8).max(tall).min(cap);
+    let h = want.max(8 - (crate::chrome::HEAD - head)).max(tall).min(cap);
     if let Some(s) = p.panel.as_ref() {
         s.tall.set(tall.max(h));
     }
@@ -2248,7 +2474,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     {
         summary.pop();
     }
-    slot_header(out, editor, ui, lay, card, &summary, &hints)?;
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[])?;
     // The columns: FOR takes what's left; narrow, the resident column goes first, then the pid, then the time
     let foot = p.rows.iter().any(|r| r.footprint.is_some());
     // (a row with nothing to say for what it's for — what a server started — runs its name on into that column;
@@ -2319,10 +2545,10 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     if res {
         head.push(col("RESIDENT", 9, true, faint));
     }
-    let head_y = y0 + crate::chrome::HEAD;
+    let head_y = body;
     line(out, head_y, &head, card, false)?;
     // The rows and the checks under them: the rows first, the checks what's left (one at least)
-    let room = lay.debug_h.saturating_sub(crate::chrome::HEAD + 1);
+    let room = lay.debug_h.saturating_sub(body - y0 + 1);
     let n = p.rows.len();
     let checks_want = 1 + p.checks.len().clamp(1, 4);
     let list = n.max(1).min(room.saturating_sub(checks_want).max(room.min(4)));
@@ -2578,12 +2804,15 @@ fn draw_test_panel(
             &[("space x l", "again"), ("space x o", "output"), ("space x c", "close"), ("space x d", "debug")]
         }
     });
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints)?;
+    // (where the list and the detail meet, the line down from the header's)
+    let splits: Vec<usize> =
+        tests_members(editor, lay).map(|(list, _)| list.x + list.w).into_iter().collect();
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits)?;
 
     // The sandbox's line, when it blocked something: the bottom row, under the rest — and over it, what waits
     // for the pane, a row each (`queued.rs`)
     let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output);
-    let inner = lay.debug_h.saturating_sub(crate::chrome::HEAD + usize::from(sandbox.is_some()));
+    let inner = lay.debug_h.saturating_sub(body - lay.slot_y() + usize::from(sandbox.is_some()));
     let below = inner.saturating_sub(2).min(queued_h(editor, crate::queued::Slot::Tests));
     let rows = inner - below;
     // (for the mouse: the panel from its tabs to its last row)
@@ -2659,7 +2888,6 @@ fn draw_test_panel(
     let top = output_top(editor, crate::sizes::Slot::Test, list_rows);
     let bar = thumb(list_rows, top);
     editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + 1, x0 + right_x + 1, list_rows)));
-    slot_join(out, ui, lay, card, x0 + left_w)?;
     for i in 0..rows {
         let y = (body + i) as u16;
         queue!(out, MoveTo(x0 as u16, y))?;
@@ -7131,7 +7359,8 @@ fn draw_statusline(
         left.push(Seg { text: "  unsent ".into(), style: accent, keep: 225 });
         left.push(Seg { text: fit_ellipsis(&text, 24), style: dim, keep: 225 });
     }
-    if !lay.header {
+    // (no path bar: the file here — but where the slot fills the screen, its line the first row)
+    if !lay.header && lay.zoom_shows != Some(crate::pane::Shows::Slot) {
         let modified = if doc.is_modified() { " ●" } else { "" };
         left.push(Seg {
             text: format!("  {}", doc.display_name(&editor.session.root)),
@@ -9940,16 +10169,6 @@ fn gutter_cell(
     }
 }
 
-/// Where two leaves of the slot's panel meet (the tests' list and failure, the debugger's columns), under
-/// `ui.edge = "lines"` the line down from its top edge: `┬` at column `x` of that edge, in its colour.
-fn slot_join(out: &mut impl Write, ui: &Ui, lay: &Layout, card: Style, x: usize) -> io::Result<()> {
-    if ui.edge == crate::theme::Edge::Lines {
-        queue!(out, MoveTo(x as u16, (lay.slot_y() + 1) as u16))?;
-        put_line(out, edge_style(ui, card, Region::Slot), "┬")?;
-    }
-    Ok(())
-}
-
 /// The line between two leaves of one group (D3, linked panes): under `ui.edge = "lines"` the faint wash, unfaded —
 /// one line can't say which side has the keys; under `"ground"` `faint` as before.
 fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, faint: Style) -> io::Result<()> {
@@ -9962,12 +10181,12 @@ fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, faint: Style) -> io::Re
     }
 }
 
-/// The bottom slot's rows on screen, and its top edge's (its header rule's) row — none while a picker over the
-/// editing area covers it.
+/// The bottom slot's rows on screen, and its top edge's row — under `ui.edge = "lines"` (where it's asked) its
+/// first, the line its header is in (panes P3 §1) — none while a picker over the editing area covers it.
 fn slot_rows(editor: &Editor, lay: &Layout) -> Option<(std::ops::Range<usize>, usize)> {
     let y = lay.slot_y();
     let covered = editor.picker.as_ref().is_some_and(|p| !p.compact);
-    (lay.debug_h > 0 && lay.slot_w > 0 && !covered).then(|| (y..y + lay.debug_h, y + 1))
+    (lay.debug_h > 0 && lay.slot_w > 0 && !covered).then(|| (y..y + lay.debug_h, y))
 }
 
 /// Under `ui.edge = "lines"`, where a column panel (`mine`: the side panel, the chat) meets what's beside it on row
@@ -13694,52 +13913,20 @@ fn draw_frame(
     // (not `drawn`: the same name and keys where they'd be, no line — a card that hasn't the keys keeps its place
     // and size, only its lines come and go with them)
     let line = frame_line(ui, card);
-    let put_line = |out: &mut Vec<u8>, st: Style, text: &str| match drawn {
-        true => put_line(out, st, text),
-        false => {
-            apply(out, st)?;
-            queue!(
-                out,
-                Print(text.chars().map(|c| if "╭╮╰╯─│┬┴".contains(c) { ' ' } else { c }).collect::<String>())
-            )
-        }
+    // Its top and bottom lines are top lines (`top_line`, the slot's header's drawer): the spans set in after `─ `
+    let across = |out: &mut Vec<u8>, yy: usize, ends: (&str, &str, &str), spans: &[(String, Style)]| {
+        let head = TopLine { names: spans, details: &[], keys: &[], key: card, faint: card, plain: true };
+        top_line(out, line, card, (x, yy, w), ends, splits, drawn, &head).map(|_| ())
     };
-    // A line across from `x` to the corner, the spans set in after `─ ` (cut to what's left of it); `join`
-    // where a split meets it
-    let across =
-        |out: &mut Vec<u8>, yy: usize, (l, r, join): (&str, &str, &str), spans: &[(String, Style)]| {
-            queue!(out, MoveTo(x as u16, yy as u16))?;
-            put_line(out, line, &format!("{l}─"))?;
-            let mut col = 2;
-            if !spans.is_empty() {
-                put_line(out, line, " ")?;
-                col += 1;
-                let mut room = w.saturating_sub(6);
-                for (text, st) in spans {
-                    if room == 0 {
-                        break;
-                    }
-                    let t = fit_ellipsis(text, room);
-                    put_line(out, *st, &t)?;
-                    (col, room) = (col + t.width(), room - t.width());
-                }
-                put_line(out, line, " ")?;
-                col += 1;
-            }
-            let mut rest = String::new();
-            while col < w - 1 {
-                rest.push_str(if splits.contains(&(x + col)) { join } else { "─" });
-                col += 1;
-            }
-            rest.push_str(r);
-            put_line(out, line, &rest)
-        };
     let mut buf = Vec::new();
     across(&mut buf, y, ("╭", "╮", "┬"), name)?;
     for yy in y + 1..y + h - 1 {
         for xx in [x, x + w - 1].into_iter().chain(splits.iter().copied()) {
             queue!(buf, MoveTo(xx as u16, yy as u16))?;
-            put_line(&mut buf, line, "│")?;
+            match drawn {
+                true => put_line(&mut buf, line, "│")?,
+                false => apply_put(&mut buf, line, " ")?,
+            }
         }
     }
     across(&mut buf, y + h - 1, ("╰", "╯", "┴"), keys)?;
@@ -18150,14 +18337,15 @@ mod tests {
         r.output = [(false, "formatted")].into_iter().collect();
         ed.session.task_run = Some(r);
         let (h, total) = lay(&ed);
-        assert_eq!(h, TASK_PANEL_MIN, "one line: a small panel");
+        // (its header in the line over it: one row — `chrome::slot_head`)
+        assert_eq!(h, 1 + TASK_PANEL_MIN, "one line: a small panel");
         // More output: it grows to show it all
         let more = |ed: &mut Editor, n: usize| {
             ed.session.task_run.as_mut().unwrap().output =
                 (0..n).map(|i| (false, format!("line {i}"))).collect();
         };
         more(&mut ed, 9);
-        assert_eq!(lay(&ed).0, crate::chrome::HEAD + 9, "the header (title, rule) and nine lines");
+        assert_eq!(lay(&ed).0, 1 + 9, "the header (the line over it) and nine lines");
         more(&mut ed, 400);
         assert_eq!(lay(&ed).0, total / 2, "half the editing area at most");
         // Never shrinking while the run is up (a resize may cut it, the code keeps its rows)
@@ -18167,7 +18355,7 @@ mod tests {
         ed.task_start(task("cargo fmt"));
         assert_eq!(lay(&ed).0, total / 2, "the same task again: as tall as it was");
         ed.task_start(task("cargo build"));
-        assert_eq!(lay(&ed).0, TASK_PANEL_MIN, "another task: from the bottom");
+        assert_eq!(lay(&ed).0, 1 + TASK_PANEL_MIN, "another task: from the bottom");
         ed.session.task_run = None;
         assert_eq!(lay(&ed).0, 0, "no panel without a run");
     }

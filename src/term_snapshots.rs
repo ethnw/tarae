@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 use serde_json::json;
 
-use super::{Ui, card_style, render};
+use super::{TopLine, Ui, card_style, render, top_line};
 use crate::config::Config;
 use crate::document::DocId;
 use crate::editor::Editor;
@@ -5674,10 +5674,10 @@ fn test_panel_says_when_no_test_ran() {
     let text = p.screen().contents();
     let (y0, _, _) = s.ed.screen.test_panel.get().expect("the panel is drawn");
     let rows: Vec<&str> = text.lines().skip(y0).collect();
-    assert!(rows[0].contains("tests ▲") && rows[0].contains("orphan::forgotten  no tests"), "{text}");
-    assert!(rows[1].trim().chars().all(|c| c == '─'), "the header's rule: {text}");
-    assert!(rows[2].contains("no test ran — nothing matched it"), "{text}");
-    assert!(rows[3..].iter().any(|r| r.contains("test result: ok. 0 passed")), "the output under it: {text}");
+    // (the header in the line where the slot meets the code: its first row)
+    assert!(rows[0].contains("─ tests ▲ ── orphan::forgotten no tests ─"), "{text}");
+    assert!(rows[1].contains("no test ran — nothing matched it"), "{text}");
+    assert!(rows[2..].iter().any(|r| r.contains("test result: ok. 0 passed")), "the output under it: {text}");
 }
 
 /// The terminal panel under the code with a program's colored output, the keys in it.
@@ -5699,9 +5699,10 @@ fn snapshot_terminal_panel() {
         })
     });
     s.check("terminal_panel");
-    // A drag over its first line (the screen row under the slot's tabs and rule; its text starts at the
-    // padding, two columns in): selected on the selection's color, copied on release
-    let first = s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::HEAD;
+    // A drag over its first line (the screen row under the slot's header — the line over it; its text starts at
+    // the padding, two columns in): selected on the selection's color, copied on release
+    let first =
+        s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::slot_head(s.ed.theme.edge);
     let y = first as u16;
     let mouse = |s: &mut Shot, kind, x| {
         s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
@@ -6201,33 +6202,37 @@ fn the_edges_light_with_the_keys() {
         };
         let side: Vec<_> = (0..end).map(|y| at(y, gx)).collect();
         let chat: Vec<_> = (0..end).map(|y| at(y, cx)).collect();
-        let rule: Vec<_> = (slot_x..cx).map(|x| at(slot_y + 1, x)).collect();
-        (side, chat, rule, p.screen().cell(0, 0).unwrap().contents().to_string())
+        // (the slot's top edge is the line its header is in: its line's cells — the text set in it aside)
+        let line = |x: usize| "─┬".contains(p.screen().cell(slot_y as u16, x as u16).unwrap().contents());
+        let rule: Vec<_> = (slot_x..cx).filter(|&x| line(x)).map(|x| at(slot_y, x)).collect();
+        let ends = [slot_x, cx - 1].map(|x| at(slot_y, x).0);
+        (side, chat, rule, p.screen().cell(0, 0).unwrap().contents().to_string(), ends)
     };
     let glyphs = |v: &[(String, bool)]| v.iter().map(|c| c.0.as_str()).collect::<String>();
     let lit = |v: &[(String, bool)], rows: std::ops::Range<usize>| rows.into_iter().all(|y| v[y].1);
     let dark = |v: &[(String, bool)], rows: std::ops::Range<usize>| rows.into_iter().all(|y| !v[y].1);
-    let (side, chat, rule, corner) = lines(&mut s);
-    let joined = |j: &str| format!("{}{j}{}", "│".repeat(slot_y + 1), "│".repeat(end - slot_y - 2));
+    let (side, chat, rule, corner, ends) = lines(&mut s);
+    let joined = |j: &str| format!("{}{j}{}", "│".repeat(slot_y), "│".repeat(end - slot_y - 1));
     assert_eq!(glyphs(&side), joined("├"), "the side panel's line, joined where the slot's edge meets it");
     assert_eq!(glyphs(&chat), joined("┤"), "the chat's");
-    assert_eq!(glyphs(&rule), "─".repeat(cx - slot_x), "the slot's top edge, across it whole");
+    assert_eq!(ends, ["─", "─"], "the slot's top edge, across it whole");
+    assert!(rule.len() > 8, "its line runs on between its text: {rule:?}");
     assert!(corner.trim().is_empty() || corner != "│", "no line at the screen's edge");
     // The code has the keys: its lines lit beside it (and their joins with the slot's edge stay the slot's)
-    assert!(lit(&side, 0..slot_y) && dark(&side, slot_y + 2..end), "the code's: {side:?}");
+    assert!(lit(&side, 0..slot_y) && dark(&side, slot_y..end), "the code's: {side:?}");
     assert!(lit(&chat, 0..slot_y) && dark(&chat, slot_y..end), "the code's, the chat's side");
     assert!(rule.iter().all(|c| !c.1), "the slot's edge without the keys");
     // A hop to the side panel: its line whole, nothing else
     s.keys("<C-w>e");
-    let (side, chat, rule, _) = lines(&mut s);
+    let (side, chat, rule, ..) = lines(&mut s);
     assert!(lit(&side, 0..end) && dark(&chat, 0..end) && rule.iter().all(|c| !c.1), "the side panel's");
     // …to the chat
     s.keys("<esc> l");
-    let (side, chat, rule, _) = lines(&mut s);
+    let (side, chat, rule, ..) = lines(&mut s);
     assert!(dark(&side, 0..end) && lit(&chat, 0..end) && rule.iter().all(|c| !c.1), "the chat's");
     // …to the slot: its top edge and the lines beside its rows, joins too
     s.keys("<esc><C-w>j");
-    let (side, chat, rule, _) = lines(&mut s);
+    let (side, chat, rule, ..) = lines(&mut s);
     assert!(rule.iter().all(|c| c.1), "the slot's top edge");
     assert!(dark(&side, 0..slot_y) && lit(&side, slot_y..end), "beside the slot: {side:?}");
     assert!(dark(&chat, 0..slot_y) && lit(&chat, slot_y..end), "the chat's line beside the slot");
@@ -6244,6 +6249,76 @@ fn the_edges_light_with_the_keys() {
         let c = p.screen().cell(y as u16, gx as u16).unwrap();
         assert!(!"│├┤".contains(c.contents()) || c.contents().is_empty(), "row {y}: {:?}", c.contents());
     }
+}
+
+/// panes P3 §1: under `lines` the slot's header is the line where it meets the code — its names, details and keys set
+/// in it, its body on the next row, the code keeping the row a rule took (under `ground` today's title row and rule);
+/// a press on the line beside its tabs drags the slot's height, one on a tab brings that tab in front.
+#[test]
+fn the_slots_header_is_the_line_where_it_meets_the_code() {
+    let (w, h) = (120u16, 30u16);
+    let mut s = Shot::new(w, h);
+    let cwd = s.in_project();
+    s.file("src/demo.rs", DEMO_RS);
+    s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
+    s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.toasts.clear();
+    let at = |s: &mut Shot| {
+        let rows: Vec<String> = cells(&s.frame(), w, h).screen().rows(0, w).collect();
+        let sc = &s.ed.screen;
+        (rows, sc.text_top + sc.body_h - sc.bottom_h, sc.bottom_h)
+    };
+    let (rows, y, slot_h) = at(&mut s);
+    let line = rows[y].trim_end();
+    assert!(line.starts_with("─ check ● ── ok ") && line.ends_with(" ─"), "the header in the line: {line:?}");
+    assert!(line.contains("────") && line.contains("C-w j scroll"), "its run of line, its keys: {line:?}");
+    assert!(rows[y + 1].contains("all good"), "its body right under it: {:?}", rows[y + 1]);
+    assert!(!rows[y - 1].contains('─'), "no rule of its own over it: {:?}", rows[y - 1]);
+    // A press on the line beside the tabs: the slot's height; on its tab: the tab
+    let tab = s.ed.screen.slot_tabs.borrow()[0];
+    let spot: String = rows[y].chars().skip(tab.1).take(tab.2 - tab.1).collect();
+    assert_eq!((tab.0, spot.as_str()), (y, "check ●"), "its label and badge");
+    assert_eq!(s.ed.border_at(w as usize / 2, y), Some(crate::sizes::Border::Bottom));
+    assert_eq!(s.ed.border_at(tab.1, y), None, "a tab is clicked, not dragged");
+    // Filling the screen (`C-w z`): its line the first row, no path bar and rule over it
+    s.keys("<C-w>j<C-w>z");
+    let (zoomed, zy, _) = at(&mut s);
+    assert!(zy == 0 && zoomed[0].starts_with("─ check ● ── ok "), "{:?}", &zoomed[..2]);
+    s.keys("<C-w>z<C-w>k");
+    // Under `ground`: the title row and its rule — the same body a row lower, the code a row shorter
+    s.ed.theme.edge = crate::theme::Edge::Ground;
+    let (ground, gy, ground_h) = at(&mut s);
+    assert_eq!((gy + 1, ground_h), (y, slot_h + 1), "the row the rule took");
+    assert!(ground[gy].trim_start().starts_with("check "), "{:?}", ground[gy]);
+    assert!(ground[gy + 1].trim().chars().all(|c| c == '─'), "its rule: {:?}", ground[gy + 1]);
+    assert_eq!(ground[gy + 2], rows[y + 1], "the same body");
+}
+
+/// panes P3 §1.4: a top line says the same wherever it's drawn — the slot's header and a frame's top line are one
+/// drawer (`top_line`), only their ends differ; `┬` where a line starts below, only in its run of `─`.
+#[test]
+fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
+    let s = Shot::new(80, 10);
+    let ui = Ui::new(&s.ed);
+    let card = ui.base;
+    let names = [("tests".to_string(), card), (" ▲".to_string(), card)];
+    let details = [("all tests".to_string(), card), ("   ● 1".to_string(), card)];
+    let head = TopLine {
+        names: &names,
+        details: &details,
+        keys: &[("tab", "failure"), ("q", "close")],
+        key: card,
+        faint: card,
+        plain: false,
+    };
+    let mut out = Vec::new();
+    // (the split under the details' text gets no join; the one in the line's run does)
+    top_line(&mut out, card, card, (0, 0, 60), ("", "", "┬"), &[4, 30], true, &head).unwrap();
+    top_line(&mut out, card, card, (0, 1, 62), ("╭", "╮", "┬"), &[5, 31], true, &head).unwrap();
+    let p = cells(&out, 80, 10);
+    let rows: Vec<String> = p.screen().rows(0, 80).take(2).collect();
+    assert_eq!(rows[0], "─ tests ▲ ── all tests ● 1 ───┬────── tab failure  q close ─");
+    assert_eq!(rows[1], format!("╭{}╮", rows[0]), "the same spans in a frame");
 }
 
 /// D3: what takes the keys floats in a frame with its name set into the top line — a card with the keys (its
@@ -6591,7 +6666,8 @@ fn panels_start_their_text_the_same_distance_in(edge_value: crate::theme::Edge) 
         let text = (edge.div_ceil(2)..w as usize)
             .find(|&x| {
                 let t = p.screen().cell(y as u16, x as u16).unwrap().contents();
-                !t.trim().is_empty() && t != "▌" && t != "▐"
+                // (the slot's header is in its line under `lines`: its text set in after `─ `)
+                !t.trim().is_empty() && t != "▌" && t != "▐" && t != "─"
             })
             .expect("text");
         2 * text - edge
@@ -6614,6 +6690,78 @@ fn panels_start_their_text_the_same_distance_in(edge_value: crate::theme::Edge) 
     let c = p.screen().cell(last as u16, chat as u16).unwrap();
     let gutter = if lines { "│" } else { " " };
     assert_eq!((c.contents(), c.bgcolor()), (gutter, ground), "the chat's gutter beside the picker");
+}
+
+/// Under `lines` a slot's header is the line its leaves' lines start from: where one goes down, a `┬` — the
+/// details (the debugger's program, state and reason; the tests' summary) end short of it and the keys start past
+/// it, never a `│` starting under a letter. They fold whole pieces, the time, then the counts (together: never `● 1`
+/// without its `▲ 1`); only words are cut, never a number half shown (no digit before a `…`).
+#[test]
+fn a_slot_headers_lines_down_start_at_a_join() {
+    use crate::dap::{Dap, State};
+    use crate::test_results::{Case, Status};
+    let h = 24u16;
+    let header = |s: &mut Shot, w: u16, what: &str| -> String {
+        let p = cells(&s.frame(), w, h);
+        let sc = &s.ed.screen;
+        let y = (sc.text_top + sc.body_h - sc.bottom_h) as u16;
+        let at = |y: u16, x: u16| p.screen().cell(y, x).unwrap().contents().to_string();
+        let row = |y: u16| (0..w).map(|x| at(y, x)).collect::<String>();
+        let downs: Vec<u16> = (1..w - 1).filter(|&x| at(y + 1, x) == "│" && at(y + 2, x) == "│").collect();
+        assert!(!downs.is_empty(), "{what} at {w}: lines down\n{}\n{}", row(y), row(y + 1));
+        let line: Vec<char> = row(y).chars().collect();
+        let half = line.windows(2).any(|p| p[0].is_ascii_digit() && p[1] == '…');
+        assert!(!half, "{what} at {w}: a number cut\n{}", row(y));
+        for x in downs {
+            let join = at(y, x);
+            assert!(
+                ["┬", "├", "┤", "┼"].contains(&join.as_str()),
+                "{what} at {w}: column {x}\n{}\n{}",
+                row(y),
+                row(y + 1)
+            );
+        }
+        row(y)
+    };
+    // (80: the tests' list ~34 wide, its summary longer than the room before the split — folded, the `┬` kept;
+    // every width from 104 down to 64, so the room ends inside each piece once — the time's first)
+    for w in [140u16].into_iter().chain((64..=104).rev()) {
+        let mut s = Shot::new(w, h);
+        s.ed.theme.edge = crate::theme::Edge::Lines;
+        s.file("src/demo.rs", DEMO_RS);
+        let reason = "breakpoint hit in a function with a long name".to_string();
+        s.ed.dap =
+            Some(Dap::placeholder(State::Stopped { reason }, "a-program-with-a-rather-long-name".into()));
+        let line = header(&mut s, w, "the debugger");
+        assert!(
+            line.contains("debug") && line.contains("F5 continue"),
+            "its name and first key stay: {line}"
+        );
+        s.ed.dap = None;
+        let case = |name: &str, status| Case {
+            name: name.into(),
+            status,
+            secs: Some(0.02),
+            message: Vec::new(),
+            at: None,
+        };
+        // (the demo's names: the list at its usual width, ~34)
+        let cases = vec![
+            case("tests::length_sums_the_knots", Status::Passed),
+            case("tests::a_tied_knot_lengthens_it", Status::Failed),
+        ];
+        let mut run = crate::testing::TestRun::finished("all tests", cases, Vec::new());
+        run.target.cwd = std::env::current_dir().unwrap();
+        run.took = Some(Duration::from_millis(648));
+        s.ed.session.test_run = Some(run);
+        let line = header(&mut s, w, "the tests");
+        assert!(line.contains("tests ▲ ── all tests"), "its details stay, cut if need be: {line}");
+        assert_eq!(line.contains("● 1"), line.contains("▲ 1"), "the counts fold together: {line}");
+        if w >= 80 {
+            let counts = line.contains("all tests ● 1 ▲ 1 ─") || line.contains("all tests ● 1 ▲ 1 648ms ─");
+            assert!(counts, "the counts stay, the time whole or folded: {line}");
+        }
+    }
 }
 
 /// The gutters at their edges: the code's sign column is the first cell after the side panel's gutter; a
@@ -6862,7 +7010,7 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
     };
     let (row, ..) = tabs(&mut s);
     assert!(
-        row.trim_start().starts_with("terminal · check ") && row.chars().any(|c| "▂▃▄▅▆▇".contains(c)),
+        row.trim_start().starts_with("─ terminal · check ") && row.chars().any(|c| "▂▃▄▅▆▇".contains(c)),
         "{row}"
     );
     assert_eq!((s.ed.slot(), typing(&s.ed)), (Some(Slot::Terminal), true), "the terminal keeps it all");

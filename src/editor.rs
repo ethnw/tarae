@@ -2377,8 +2377,8 @@ impl Editor {
         // program that has the mouse always gets its release)
         let wheel = matches!(m.kind, K::ScrollUp | K::ScrollDown);
         if owned || (in_terminal && (m.kind == K::Down || wheel)) {
-            // Its screen starts under the header (`chrome::HEAD`), the padding in from the slot's edge
-            let (head, x0) = (crate::chrome::HEAD, s.slot_x + crate::chrome::PAD);
+            // Its screen starts under the header (`chrome::slot_head`), the padding in from the slot's edge
+            let (head, x0) = (crate::chrome::slot_head(self.theme.edge), s.slot_x + crate::chrome::PAD);
             let cell = s.terminal_rows.and_then(|(y0, y1)| {
                 let inside = in_terminal && y >= y0 + head && x >= x0;
                 (inside || owned).then(|| {
@@ -12750,15 +12750,15 @@ mod tests {
         ed.session.task_run = Some(run);
         ed.session.leave(crate::session::At::Side);
         draw(&mut ed, 140);
-        assert_eq!(ed.screen.bottom_h, 4, "its own: a small one (its title, rule, two rows)");
+        assert_eq!(ed.screen.bottom_h, 3, "its own: a small one (its header in the line over it, two rows)");
         feed(&mut ed, "<C-w>+<C-w>+");
         draw(&mut ed, 140);
-        assert_eq!((ed.sizes.bottom, ed.screen.bottom_h), (Some(8), 8));
+        assert_eq!((ed.sizes.bottom, ed.screen.bottom_h), (Some(7), 7));
         // C-w =: all automatic again
         feed(&mut ed, "<C-w>=");
         draw(&mut ed, 140);
         assert_eq!(ed.sizes, crate::sizes::Sizes::default());
-        assert_eq!((ed.screen.bottom_h, ed.screen.side_w), (4, side));
+        assert_eq!((ed.screen.bottom_h, ed.screen.side_w), (3, side));
         std::fs::remove_dir_all(&dir).ok();
     }
 

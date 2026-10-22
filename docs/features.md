@@ -133,7 +133,11 @@ configs carry over as they are.
   moves with you. A theme can keep the older look — surfaces of their own colour with half a cell of ground between
   them — with `"ui.edge" = "ground"` ([themes](configuration.md#custom-themes)). A group of panels shown one at
   a time names them all in its header — the side panel's `files · outline · git`, the bottom panel's `terminal ·
-  tests · task` — the one in sight lit; `tab` / `S-tab` go to the next
+  tests · task` — the one in sight lit; `tab` / `S-tab` go to the next. The bottom panel's header is the line where
+  it meets the code — `─ tests ▲ ── all tests ● 1 ▲ 1 648ms ────── tab failure  q close ─`, as a frame names itself in its
+  top line: its panels, what the one in front says, its keys at the right (they fold first when narrow); the code
+  keeps the row a separate rule took. A click on a name brings that panel in front; a press anywhere else on the line
+  drags its height. Under `"ground"` it's a row of its own with its rule under it
 - **Frames** — what takes your keys floats in a rounded frame with its name in the top line: which-key (`╭─ space
   ─╮`), a picker (its title; the list and the preview meet on one line), a prompt (`command`, `search`), and a card
   of Claude's while it has the keys — its question as the name, its answers set into the bottom line, `╰─ y Run · n

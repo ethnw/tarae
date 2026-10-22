@@ -94,6 +94,25 @@ fn an_insert_sequence_under_way_goes_with_the_message() {
     assert_eq!(input(&ed).0, "recalled!");
 }
 
+/// A paste as the terminal hands it in (`Event::Paste`) while an `[insert]` sequence waits: its `j` goes in first,
+/// the pasted text after it (`hej` + `X` → `hejX`, never `heXj`), and the sequence is over — a `k` next is typed.
+#[test]
+fn a_paste_breaks_off_an_insert_sequence_under_way() {
+    let (config, w) = crate::config::parse("[keys.insert]\nj = { k = \"normal_mode\" }\n");
+    assert!(w.is_empty(), "{w:?}");
+    let mut ed = Editor::new(config);
+    ed.session.chat = Some(crate::chat::Chat::new());
+    ed.session.at = crate::session::At::Chat;
+    feed(&mut ed, "hej");
+    assert_eq!(ed.pending_display(), "j");
+    ed.handle_event(crate::event::Event::Paste("X".into()));
+    assert_eq!(input(&ed), ("hejX".to_string(), 4));
+    assert_eq!(ed.pending_display(), "", "nothing left waiting");
+    feed(&mut ed, "k");
+    assert_eq!(input(&ed).0, "hejXk", "a k after it is text");
+    assert_eq!(ed.keys_to().region.name(), "chat", "still the input's keys");
+}
+
 /// A `C-`/`A-` key nothing binds is said with where `esc` goes from here: the code while there's nothing to
 /// read, normal mode on the conversation once there is (as the input's hint says it).
 #[test]

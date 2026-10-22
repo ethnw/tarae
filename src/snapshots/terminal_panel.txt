@@ -11,12 +11,12 @@
 08   7     let mut counts = HashMap::new();                                                           ▎
 09   8     for word in text.split_whitespace() {                                                      ▎
 10   9     │   *counts.entry(word).or_insert(0) += 1;                                                 ▎
-11  10     }
-12  11     counts
+11  10     }                                                                                          ▎
+12  11     counts                                                                                     ▎
 13  12 }
 14  13
-15   terminal  │  sh                                                                        C-\ view
-16 ────────────────────────────────────────────────────────────────────────────────────────────────────
+15  14 fn main() {
+16 ─ terminal ── sh ──────────────────────────────────────────────────────────────────────── C-\ view ─
 17   $ cargo test
 18   running 3 tests
 19   test words ... ok
@@ -61,12 +61,12 @@
 08   f                                                                                                f
 09   f                                                                                                f
 10   f                                                                                                f
-11  ff
-12  ff
+11  ff                                                                                                f
+12  ff                                                                                                f
 13  ff
 14  ff
-15   TTTTTTTT  f  dd                                                                        DDD ffff
-16 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+15  ff
+16 a TTTTTTTT aa dd aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa DDD ffff a
 17   B
 18
 19

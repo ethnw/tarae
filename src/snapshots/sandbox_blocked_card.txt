@@ -14,18 +14,18 @@
 11  10     }
 12  11     counts
 13  12 }
-14  13                              ╭─ Open the sandbox a little? ───────────────────────────────────╮
-15  14 fn main() {                  │ Let Claude's commands write in                                 │
-16  15     let text = "the quick bro│ /private/tmp/tarae-shot-blocked/npm-cache and everything in it │
-17  16     let counts = word_counts(│                                                                │
-18  17     println!("{} distinct wor│ npm was writing …/_cacache/index-v5 in it, in `npm test` —     │
-19  18 }                            │ which runs again now with it open, whichever you choose.       │
-20                                  │ Claude hears how it ended with your next message. s lasts      │
-21                                  │ until this session ends, A until :granted takes it back.       │
-22                                  ╰─ y Once · a This chat · s This session · A Always here · n No ─╯
-23
-24   npm test ▲  │  failed   2.4s                                                    space m c close
-25 ────────────────────────────────────────────────────────────────────────────────────────────────────
+14  13
+15  14 fn main() {                  ╭─ Open the sandbox a little? ───────────────────────────────────╮
+16  15     let text = "the quick bro│ Let Claude's commands write in                                 │
+17  16     let counts = word_counts(│ /private/tmp/tarae-shot-blocked/npm-cache and everything in it │
+18  17     println!("{} distinct wor│                                                                │
+19  18 }                            │ npm was writing …/_cacache/index-v5 in it, in `npm test` —     │
+20                                  │ which runs again now with it open, whichever you choose.       │
+21                                  │ Claude hears how it ended with your next message. s lasts      │
+22                                  │ until this session ends, A until :granted takes it back.       │
+23                                  ╰─ y Once · a This chat · s This session · A Always here · n No ─╯
+24
+25 ─ npm test ▲ ── failed 2.4s ────────────────────────────────────────────────────── space m c close ─
 26   npm ERR! code EPERM
 27   npm ERR! syscall open
 28   ▲ sandbox blocked writing /private/tmp/tarae-shot-blocked/npm-cache/_cacach…   space m s open it
@@ -76,18 +76,18 @@
 11  ff
 12  ff
 13  ff
-14  ff                              ff TTTT TTT TTTTTTT T TTTTTTT ffffffffffffffffffffffffffffffffffff
-15  ff                              f                                                                f
+14  ff
+15  ff                              ff TTTT TTT TTTTTTT T TTTTTTT ffffffffffffffffffffffffffffffffffff
 16  ff                gggg ggggg gggf                                                                f
 17  ff                              f                                                                f
-18  ff              ggg gggggggg gggf ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd ddddd d     f
-19  ff                              f ddddd dddd ddddd ddd dddd dd ddddd ddddddddd ddd ddddddd       f
-20                                  f dddddd ddddd ddd dd ddddd dddd dddd dddd dddddddd d ddddd      f
-21                                  f ddddd dddd ddddddd ddddd d ddddd dddddddd ddddd dd ddddd       f
-22                                  ff A      f A dddd dddd f A dddd ddddddd f A dddddd dddd f A dd ff
-23
-24   TTT TTTT e  f  eeeeee   dddd                                                    DDDDD D D fffff
-25 ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+18  ff              ggg gggggggg gggf                                                                f
+19  ff                              f ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd ddddd d     f
+20                                  f ddddd dddd ddddd ddd dddd dd ddddd ddddddddd ddd ddddddd       f
+21                                  f dddddd ddddd ddd dd ddddd dddd dddd dddd dddddddd d ddddd      f
+22                                  f ddddd dddd ddddddd ddddd d ddddd dddddddd ddddd dd ddddd       f
+23                                  ff A      f A dddd dddd f A dddd ddddddd f A dddddd dddd f A dd ff
+24
+25 f TTT TTTT e ff eeeeee dddd ffffffffffffffffffffffffffffffffffffffffffffffffffffff DDDDD D D fffff f
 26   fff ffff ffff fffff
 27   fff ffff fffffff ffff
 28   w wwwwwww wwwwwww wwwwwww wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww   FFFFF F F ffff ff

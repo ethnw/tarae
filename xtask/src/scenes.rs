@@ -272,6 +272,52 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", "\x17", "j", "@1", "/", "left", "\r", "n", "@1"],
     },
+    // (panes P3: the tests group under the code while the code has the keys — where the two meet)
+    Scene {
+        name: "panes-tests-code",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "x", "f", "@90?right: 8", "@1"],
+    },
+    // (two tabs in the slot — the task's, the tests' in front — between the side panel and the chat: the joins on the
+    // meeting line. The task first: a task started gives a finished test run's panel over)
+    Scene {
+        name: "panes-task-tabs",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?generated 2 warnings",
+            "@1",
+            " ",
+            "x",
+            "f",
+            "@90?right: 8",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            " ",
+            "l",
+            "@1",
+            "\x1b",
+            "@1",
+        ],
+    },
+    // (a floating frame over the tests group — which-key's top line beside the slot's)
+    Scene {
+        name: "panes-float",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", " ", "@1"],
+    },
     // (Claude's answers first, each its own key — a read `a` this chat, a host through `also` `s` this session, a
     // read `A` always — then the list, the hand on its last row (`G`: at 24 rows the defaults fill it), the `a`. The
     // code zoomed first (`space w z`): at 80 the chat beside it would cut the cards and fold the list's stamps. The
@@ -1683,9 +1729,15 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
                     .into(),
             ),
         ],
-        "output-tests" => vec![
+        "output-tests" | "panes-tests-code" | "panes-float" => vec![
             ("src/main.rs", format!("{MAIN_RS}{MAIN_TESTS}")),
             (".cargo/config.toml", "[build]\nbuild-dir = \"target/build\"\n".into()),
+        ],
+        "panes-task-tabs" => vec![
+            ("src/main.rs", format!("{MAIN_RS}{MAIN_TESTS}")),
+            (".cargo/config.toml", "[build]\nbuild-dir = \"target/build\"\n".into()),
+            (".tarae.toml", "[task.check]\ncmd = \"sh check.sh\"\n".into()),
+            ("check.sh", CHECK_SH.into()),
         ],
         _ => Vec::new(),
     }
