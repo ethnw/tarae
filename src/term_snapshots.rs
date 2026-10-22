@@ -1075,6 +1075,88 @@ fn frictions37_frames() {
     }
 }
 
+/// frictions38's screens, for their screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, 80×24 and
+/// 160×40, named by `TARAE_FRAMES_WHICH` — `before` when this function is run on main's tree,
+/// `target/sb/frictions38/shots.sh`): `bring` the bring card back after its quick preflight failed 12 tests; `toast`
+/// that preflight's end. Written from what both trees have (the marker's words as text), so it runs on either.
+#[test]
+fn frictions38_frames() {
+    let Some(_) = std::env::var_os("TARAE_FRAMES_DIR") else { return };
+    let which = std::env::var("TARAE_FRAMES_WHICH").unwrap_or_else(|_| "after".into());
+    let failed = [
+        "term_snapshots::snapshot_statusline_widths",
+        "worktree::tests::a_new_sessions_bring_card_runs_the_projects_quick_set",
+        "sim::quotes::quotes_go_with_the_message_once",
+        "codereview::tests::a_mark_waiting_for_its_base_isnt_put_on_a_text_changed_meanwhile",
+        "chat::tests::a_message_written_after_claude_ended_waits_for_why_it_ended",
+        "edittool::tests::a_whole_rewrite_is_one_text_change_never_a_delete",
+        "offer::tests::a_weighty_card_answers_only_once_drawn_and_settled",
+        "preflight::tests::the_end_says_which_set_ran",
+        "rebase::tests::a_stop_says_where_it_is",
+        "sandbox::tests::a_run_writes_only_its_own_run_folder",
+        "session::tests::a_call_silent_too_long_marks_its_session",
+        "tools::tests::failures_past_the_first_ten_come_by_name",
+    ];
+    let mut lines: Vec<String> = vec!["running 2746 tests".into()];
+    lines.extend(failed.iter().map(|t| format!("test {t} ... FAILED")));
+    lines.extend([
+        "failures:".to_string(),
+        format!("---- {} stdout ----", failed[0]),
+        format!("thread '{}' panicked at src/term_snapshots.rs:212:9:", failed[0]),
+        "statusline_wide.txt differs (TARAE_BLESS=1 takes it)".into(),
+    ]);
+    for (w, h) in [(80, 24), (160, 40)] {
+        let shot = || {
+            let mut s = Shot::new(w, h);
+            s.ed.offer_popups = true;
+            s.file("src/demo.rs", DEMO_RS);
+            s
+        };
+        // bring: the card back after the quick preflight its `p` ran failed
+        let m = crate::rebase::Moved {
+            root: PathBuf::from("/stand-in/design2"),
+            name: "design2".into(),
+            branch: "design2".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 1,
+        };
+        let mut s = shot();
+        s.ed.push_offer(
+            m.failed_card("quick preflight", Some(("quick preflight · test".into(), lines.clone()))),
+        );
+        s.frames_both(&format!("bring-{which}-{w}"));
+        // toast: that preflight's end, as `preflight_done` says it
+        let step = |name: &str, full: bool| crate::preflight::Step {
+            name: name.into(),
+            cmd: "true".into(),
+            note: None,
+            from: ".tarae.toml".into(),
+            full,
+        };
+        let all = [step("fmt", false), step("test", false), step("perf", true)];
+        let mut p = crate::preflight::Preflight::new(1, &all, crate::preflight::Set::Quick, "k3y".into());
+        for (i, code) in [0, 101].into_iter().enumerate() {
+            p.line(&format!("::tarae-preflight:: k3y start {i}"));
+            p.line(&format!("::tarae-preflight:: k3y end {i} {code}"));
+        }
+        p.finish();
+        p.took = Some(Duration::from_secs(252));
+        let output: crate::runout::Output = ["── fmt ──".to_string(), "── test ──".into()]
+            .into_iter()
+            .chain(lines.iter().cloned())
+            .map(|l| (false, l))
+            .collect();
+        let mut s = shot();
+        s.ed.set_error(p.said(0, &output));
+        let fresh = Instant::now().checked_sub(Duration::from_millis(500)).unwrap();
+        for t in &mut s.ed.toasts {
+            (t.at, t.shown) = (fresh, true);
+        }
+        s.frames_both(&format!("toast-{which}-{w}"));
+    }
+}
+
 /// frictions29 #25: a rebase's resolved card, Claude saying the commit's message no longer holds — `m` among its
 /// answers, the line saying what it does.
 #[test]

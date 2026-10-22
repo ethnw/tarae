@@ -120,12 +120,19 @@ impl Moved {
     pub fn failed_card(&self, title: &str, failed: Option<(String, Vec<String>)>) -> Offer {
         let (base, them) = (&self.base, if self.ahead == 1 { "it" } else { "them" });
         let first = failed.as_ref().and_then(|(_, lines)| crate::preflight::failed_test(lines));
-        let risk = match (first, failed.is_some()) {
+        let mut risk = match (first, failed.is_some()) {
             (Some((test, Some(why))), _) => format!("The {title} failed: {test}\n    {why}"),
             (Some((test, None)), _) => format!("The {title} failed: {test}"),
             (None, true) => format!("The {title} failed — v shows its output."),
             (None, false) => format!("The {title} failed — the task panel says why."),
         };
+        // (every other test that failed too, by name — frictions29 93: one known flake named alone read as the
+        // only failure; `v` lists them)
+        let also = failed.as_ref().and_then(|(_, lines)| crate::preflight::also_failed(lines));
+        if let Some((n, others)) = also.filter(|(n, _)| *n > 1) {
+            let others = crate::preflight::tests_named(&others, crate::preflight::NAMES_ROOM);
+            risk.push_str(&format!("\n    {n} failed in all — also {others}"));
+        }
         // (`p` runs it again: its answer says so)
         let q = format!(
             "{} on {base}'s tip now. Bring {them} into {base} anyway?\n\n{risk}",
@@ -1793,6 +1800,38 @@ mod tests {
         );
         assert_eq!(message_written(&text), "Fix the gate\n\n# Why\n#123 asked for it\n; kept too\n");
         assert_eq!(message_written("No cut line\n\n"), "No cut line\n");
+    }
+
+    /// frictions29 93: a preflight that failed more than one test names them all on the bring card, as many as
+    /// fit, the rest `+N more` — not the first alone, which read as the only failure.
+    #[test]
+    fn the_bring_card_after_a_failed_preflight_names_every_failing_test() {
+        let m = Moved {
+            root: PathBuf::from("/stand-in/feat"),
+            name: "feat".into(),
+            branch: "feat".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 1,
+        };
+        let mut out = vec!["running 40 tests".to_string()];
+        out.extend((0..30).map(|i| format!("test tests::flaky_{i:02} ... FAILED")));
+        out.extend(["failures:".into(), "---- tests::flaky_00 stdout ----".into()]);
+        out.extend(["thread 'tests::flaky_00' panicked at src/a.rs:1:1:".into(), "boom".into()]);
+        let o = m.failed_card("quick preflight", Some(("quick preflight · test".into(), out)));
+        let last = o.question.lines().last().unwrap();
+        assert!(
+            o.question.contains(
+                "The quick preflight failed: tests::flaky_00\n    panicked at src/a.rs:1:1: boom\n"
+            )
+        );
+        assert!(last.starts_with("    30 failed in all — also tests::flaky_01, tests::flaky_02, "), "{last}");
+        assert!(last.ends_with(" more") && !last.contains("flaky_29"), "{last}");
+        assert_eq!(o.warnings, vec![2..5], "the whole risk in the warning colour");
+        // One failure: as before
+        let one = vec!["test a ... FAILED".to_string()];
+        let o = m.failed_card("quick preflight", Some(("t".into(), one)));
+        assert!(o.question.ends_with("The quick preflight failed: a"), "{}", o.question);
     }
 
     #[test]

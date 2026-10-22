@@ -126,7 +126,7 @@ pub fn under_way(l: &crate::session::Session) -> bool {
 pub fn on_event(ed: &mut Editor, e: Ev) {
     let was = under_way(&ed.session);
     match e {
-        Ev::Started => ed.session.compacted.since = Some(std::time::Instant::now()),
+        Ev::Started => ed.session.compacted.since = Some(crate::clock::now()),
         Ev::Ended => ed.session.compacted.since = None,
         Ev::Boundary(k) => {
             ed.session.compacted.since = None;

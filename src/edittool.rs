@@ -1,6 +1,7 @@
 //! The `edit` tool (toolcalls, 2026-10-13): Claude's edits made by tarae — Claude Code's Edit fields
 //! (`file_path`, `old_string`, `new_string`, `replace_all`), several files and replacements in one call, a new
-//! file (an empty `old_string` where there's none), moves and deletes. Worked out on a worker against what the
+//! file (an empty `old_string` where there's none), a file's whole text (`whole: true` — rewritten, never deleted
+//! first), moves and deletes. Worked out on a worker against what the
 //! user sees (an open buffer's text, unsaved edits and all; else the disk), every item first: one change set
 //! that lands as `rename`'s and `replace`'s do (`refactor::land` — the card, the in-buffer review, or written
 //! unseen under review at the end), or nothing, with one error naming each item that failed — the closest
@@ -92,7 +93,8 @@ pub fn schema() -> Value {
                             "new_string": { "type": "string", "description": "What it becomes" },
                             "replace_all": { "type": "boolean", "description": "Every match of old_string (default false)" },
                             "move_to": { "type": "string", "description": "Move the file here instead (no old_string)" },
-                            "delete": { "type": "boolean", "description": "Delete the file instead (no old_string)" }
+                            "delete": { "type": "boolean", "description": "Delete the file instead (no old_string)" },
+                            "whole": { "type": "boolean", "description": "new_string is the file's whole new text (no old_string)" }
                         },
                         "required": ["file_path"]
                     }
@@ -115,15 +117,34 @@ const AMBIGUOUS_LINES: usize = 10;
 /// One item of a call.
 #[derive(Clone, Debug, PartialEq)]
 enum Item {
-    Replace { file: String, old: String, new: String, all: bool },
-    Move { file: String, to: String },
-    Delete { file: String },
+    Replace {
+        file: String,
+        old: String,
+        new: String,
+        all: bool,
+    },
+    /// The file's whole text `new` (`whole: true`): rewritten as one change, made where there's none — never a
+    /// delete first (frictions38: a commit message rewritten cost a delete card each time).
+    Whole {
+        file: String,
+        new: String,
+    },
+    Move {
+        file: String,
+        to: String,
+    },
+    Delete {
+        file: String,
+    },
 }
 
 impl Item {
     fn file(&self) -> &str {
         match self {
-            Item::Replace { file, .. } | Item::Move { file, .. } | Item::Delete { file } => file,
+            Item::Replace { file, .. }
+            | Item::Whole { file, .. }
+            | Item::Move { file, .. }
+            | Item::Delete { file } => file,
         }
     }
 }
@@ -150,6 +171,14 @@ fn item(i: usize, e: &Value) -> Result<Item, String> {
         .to_string();
     let delete = e["delete"].as_bool() == Some(true);
     let to = s("move_to").map(str::trim).filter(|t| !t.is_empty());
+    if e["whole"].as_bool() == Some(true) {
+        return match (delete, to, s("old_string").is_none_or(str::is_empty), s("new_string")) {
+            (false, None, true, Some(new)) => Ok(Item::Whole { file, new: new.to_string() }),
+            _ => Err(format!(
+                "edits[{i}] ({file}): whole: true takes new_string alone — the file's whole new text"
+            )),
+        };
+    }
     let text = !e["old_string"].is_null() || !e["new_string"].is_null();
     match (delete, to, text) {
         (true, None, false) => Ok(Item::Delete { file }),
@@ -387,7 +416,8 @@ fn apply(
                 Some(t) if old.is_empty() && t.is_empty() => s.now = Some(new.clone()),
                 Some(_) if old.is_empty() => {
                     return Err(format!(
-                        "old_string is empty, but {rel} is there and isn't empty — give the text to replace"
+                        "old_string is empty, but {rel} is there and isn't empty — give the text to replace, or \
+                         whole: true for its whole new text"
                     ));
                 }
                 Some(t) => {
@@ -400,6 +430,19 @@ fn apply(
                     return Ok(());
                 }
             }
+            s.places += 1;
+            Ok(())
+        }
+        // (its text whole, as a replace's: reviewed as one change of the file, made where there's none)
+        Item::Whole { new, .. } => {
+            let s = &mut states[at].1;
+            if let Some(why) = gone(s) {
+                return Err(why);
+            }
+            if s.now.as_deref() == Some(new.as_str()) {
+                return Err(format!("new_string is {rel}'s text already"));
+            }
+            s.now = Some(new.clone());
             s.places += 1;
             Ok(())
         }

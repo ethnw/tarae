@@ -1551,13 +1551,18 @@ impl crate::editor::Editor {
         // (one holding a call isn't merged into another by its title — the other's call would be lost; nor is a
         // plugin's ask — the other's request would be: one asking the same joins its card, `plugin_ask`; nor a
         // repository's commands — a submodule's card would take its parent's place: one each, `git_trust_check`;
-        // nor a repository's trust — another checkout's: its parts join it by checkout, `trust_offer`)
+        // nor a repository's trust — another checkout's: its parts join it by checkout, `trust_offer`; nor an
+        // instruction file's — two sessions' CLAUDE.md share a title: one a session and file, `instructions::push_card`)
         // (a host's card is joined by `hosts::asked` itself — by its host, never by its title)
         let own = o.asker().is_some()
             || o.host().is_some()
             || matches!(
                 o.what,
-                What::PluginAsk { .. } | What::GitTrust(_) | What::RepoTrust { .. } | What::Shuttle
+                What::PluginAsk { .. }
+                    | What::GitTrust(_)
+                    | What::RepoTrust { .. }
+                    | What::Shuttle
+                    | What::Instructions(_)
             );
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
             // Replaced whole — what it says with what it does — and it settles again before `y` counts
@@ -2277,8 +2282,14 @@ impl crate::editor::Editor {
         // (cut to fit, a card with an output: its text, then that output's first failure — not all of it: `y` waits
         // until this is read to its end; once it is, `v` is the whole output, `Act::Output`)
         if let Some((title, lines)) = self.offers.first().and_then(|o| o.output.as_ref()) {
+            // (the tests that failed by name first, at most `FAILURE_SHOWN` of them — frictions29 93)
+            let listed = crate::preflight::failed_listed(lines);
+            let every = match listed.is_empty() {
+                false => format!("\n── the tests that failed ──\n{}\n", listed.join("\n")),
+                true => String::new(),
+            };
             let more = format!(
-                "\n── {title}: its first failure — v again shows all {} ──\n{}",
+                "{every}\n── {title}: its first failure — v again shows all {} ──\n{}",
                 crate::nav::count(lines.len(), "line"),
                 crate::preflight::failure_block(lines).join("\n")
             );

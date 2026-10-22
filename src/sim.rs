@@ -607,29 +607,45 @@ impl Sim {
         site
     }
 
-    /// The run fails: its choices written for a replay, the trace's end and how to replay it said.
+    /// The run fails: its choices written for a replay and what it says beside them (`.reason` — a filtered
+    /// run's output can lose the panic, frictions38), the trace's end and how to replay it said.
     fn fail_now(&mut self, why: String) -> ! {
         let file = self.choices_file();
+        let reason = file.with_extension("reason");
         let body: String = self.choices.made.iter().map(|c| format!("{c}\n")).collect();
-        let kept = match self.choices.given.is_some() {
+        let replayed = self.choices.given.is_some();
+        let kept = match replayed {
             true => Ok(()),
             false => {
                 std::fs::create_dir_all(file.parent().unwrap()).and_then(|_| std::fs::write(&file, body))
             }
         };
-        let replay = match kept {
-            Ok(()) => format!("replay: TARAE_SIM_REPLAY={} cargo test {}", file.display(), self.name),
+        let replay = match &kept {
+            Ok(()) => format!(
+                "replay: TARAE_SIM_REPLAY={} cargo test {} · why: {}",
+                file.display(),
+                self.name,
+                reason.display()
+            ),
             Err(e) => format!("(its choices not written: {e})"),
         };
         let from = self.trace.len().saturating_sub(TRACE_SHOWN);
         let trace: String =
             self.trace[from..].iter().enumerate().map(|(i, l)| format!("{:>5} {l}\n", from + i)).collect();
-        panic!(
+        let said = format!(
             "simulation {} ({}) failed after {} steps: {why}\n{trace}{replay}",
             self.name,
             self.choices.from,
             self.trace.len()
         );
+        // (a replay's own failure isn't written over the first run's: its file holds that run's reason)
+        if !replayed
+            && kept.is_ok()
+            && let Err(e) = std::fs::write(&reason, format!("{said}\n"))
+        {
+            panic!("{said}\n(its reason not written: {e})");
+        }
+        panic!("{said}");
     }
 
     fn choices_file(&self) -> PathBuf {
@@ -882,6 +898,7 @@ mod tests {
     fn an_end_check_fails_the_run_with_its_replay_and_a_replay_keeps_its_file() {
         let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sim/end_check-3.choices");
         std::fs::remove_file(&file).ok();
+        std::fs::remove_file(file.with_extension("reason")).ok();
         let fail = |choices: Choices, check: Box<dyn FnOnce() -> Result<(), String>>| {
             let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut sim = Sim::new("end_check", choices, LIMIT);
@@ -898,6 +915,10 @@ mod tests {
             "{said}"
         );
         assert!(said.contains(&replay) && file.exists(), "{said}");
+        // (frictions38: the reason beside the choices, named on the replay line — a filtered run can't lose it)
+        let reason = file.with_extension("reason");
+        assert!(said.ends_with(&format!("· why: {}", reason.display())), "{said}");
+        assert_eq!(std::fs::read_to_string(&reason).unwrap(), format!("{said}\n"));
         // (a line no replay reads: gone if the file were written again)
         let kept = std::fs::read_to_string(&file).unwrap() + "# kept\n";
         std::fs::write(&file, &kept).unwrap();
@@ -905,6 +926,10 @@ mod tests {
         assert!(said.contains("failed after 3 steps: the end's check panicked: the end's panic"), "{said}");
         assert!(said.contains(&replay), "names the file it replayed: {said}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), kept, "the replayed file as it was");
+        assert!(
+            std::fs::read_to_string(&reason).unwrap().contains("the end's own"),
+            "the first run's reason kept"
+        );
     }
 
     /// Second review 5 (the reviewer's note on threads the loop starts): one the loop lets go that ends a

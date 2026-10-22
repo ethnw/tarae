@@ -9633,7 +9633,7 @@ fn draw_follow_card(
     let secs = match gaze.and_then(|g| g.step) {
         Some((k, n)) if replaying && back > 0 => format!("‹{back} {k}/{n}"),
         Some((k, n)) if replaying || !c.busy() => format!("{k}/{n}"),
-        _ => format!("{:>4.1}s", c.started.elapsed().as_secs_f32()),
+        _ => format!("{:>4.1}s", crate::clock::since(c.started).as_secs_f32()),
     };
     let sp = |text: &str, style: Style| Span { text: text.into(), style };
     // The title, in both forms (글타래 P6: the stop that headed the card is the turn's knot `●` now): who and how it
@@ -11998,7 +11998,7 @@ fn draw_chat(
                     } else {
                         "writing"
                     },
-                    c.started.elapsed().as_secs_f32()
+                    crate::clock::since(c.started).as_secs_f32()
                 ),
                 dim,
             ),

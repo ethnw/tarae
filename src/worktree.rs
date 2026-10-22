@@ -4379,6 +4379,87 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// frictions38 (the review's finding 1): the bring card back after a preflight that failed 50 tests, cut to fit
+    /// — its `v` lists them a line each before the first one's block, `FAILURE_SHOWN` at most and the rest counted
+    /// (its `y` waits until that view is read to its end: never hundreds of names).
+    #[test]
+    fn a_cut_bring_cards_view_lists_the_failed_tests_capped() {
+        let mut ed = Editor::new(Config::default());
+        ed.offer_popups = true;
+        let m = crate::rebase::Moved {
+            root: PathBuf::from("/stand-in/feat"),
+            name: "feat".into(),
+            branch: "feat".into(),
+            base: "main".into(),
+            moved: 0,
+            ahead: 2,
+        };
+        let mut output: Vec<String> = vec!["running 60 tests".into()];
+        output.extend((0..50).map(|i| format!("test tests::t{i:02} ... FAILED")));
+        output.extend(
+            [
+                "failures:",
+                "---- tests::t00 stdout ----",
+                "thread 'tests::t00' panicked at src/a.rs:1:1:",
+                "boom",
+            ]
+            .map(String::from),
+        );
+        ed.push_offer(m.failed_card("quick preflight", Some(("quick preflight · test".into(), output))));
+        let mut out = Vec::new();
+        crate::term::render(&mut ed, &mut out, 112, 10).unwrap();
+        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        crate::term::render(&mut ed, &mut out, 112, 10).unwrap();
+        assert!(!ed.offer_seen_whole(), "cut at 10 rows");
+        feed(&mut ed, "v");
+        let text = ed.doc().text.to_string();
+        let (_, after) = text.split_once("── the tests that failed ──\n").unwrap_or_else(|| panic!("{text}"));
+        let listed: Vec<&str> = after.lines().take_while(|l| !l.is_empty()).collect();
+        let mut want: Vec<String> =
+            (0..crate::preflight::FAILURE_SHOWN).map(|i| format!("tests::t{i:02}")).collect();
+        want.push(format!("+{} more — v again shows the whole output", 50 - crate::preflight::FAILURE_SHOWN));
+        assert_eq!(listed, want);
+        let block = "── quick preflight · test: its first failure — v again shows all 55 lines ──\n---- tests::t00 stdout";
+        assert!(text.contains(block), "the first one's block after: {text}");
+    }
+
+    /// frictions38 (simseeds' handoff): two sessions' changes to their CLAUDE.md, both asked for the main checkout
+    /// from the session in front — two cards, one a session and file, though they share a title; neither takes the
+    /// other's place.
+    #[test]
+    fn two_sessions_carry_out_cards_stay_apart_though_their_titles_match() {
+        let (repo, dir) = place("instructions-two-sessions");
+        std::fs::write(repo.join(".gitignore"), "target/\nCLAUDE.md\n").unwrap();
+        git_in(&repo, &["commit", "-qam", "ignore the instructions"]);
+        std::fs::write(repo.join("CLAUDE.md"), "rule\n").unwrap();
+        let mut ed = editor(&repo, &dir);
+        let a = new_session(&mut ed, "a");
+        let b = new_session(&mut ed, "b");
+        std::fs::write(a.join("CLAUDE.md"), "rule\nfrom a\n").unwrap();
+        std::fs::write(b.join("CLAUDE.md"), "rule\nfrom b\n").unwrap();
+        let roots = |ed: &Editor| -> Vec<PathBuf> {
+            let mut r: Vec<PathBuf> = (ed.offers.iter())
+                .filter_map(|o| match &o.what {
+                    crate::offer::What::Instructions(x) if x.out.is_some() => Some(x.root.clone()),
+                    _ => None,
+                })
+                .collect();
+            r.sort();
+            r
+        };
+        crate::instructions::carry_out(&mut ed, a.clone());
+        settle_until(&mut ed, |ed| roots(ed).len() == 1);
+        crate::instructions::carry_out(&mut ed, b.clone());
+        settle_until(&mut ed, |ed| roots(ed).len() == 2);
+        let mut want = vec![a.clone(), b.clone()];
+        want.sort();
+        assert_eq!(roots(&ed), want, "a's card kept beside b's");
+        let titles: Vec<&str> = ed.offers.iter().map(|o| o.title.as_str()).collect();
+        assert_eq!(titles[0], titles[1], "the same title: {titles:?}");
+        drop(ed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// simseeds (`sim::instructions` seed 6): a change of the main checkout's the session left out (`n`) isn't the
     /// session's own — its carry-out takes in only what the session wrote, never the main checkout's line out.
     #[test]

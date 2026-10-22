@@ -155,6 +155,57 @@ fn a_new_file_is_an_empty_old_string_where_none_is() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// frictions38: `whole: true` rewrites a file's text as one change of it — a text change, never a delete and a
+/// create; where there's none it makes it; it takes new_string alone, and the same text is said.
+#[test]
+fn a_whole_rewrite_is_one_text_change_never_a_delete() {
+    let dir = project("whole", &[("msg.txt", "Old subject\n\nold body\n"), ("Cargo.toml", "[package]\n")]);
+    let k = known(&dir);
+    let r = run(&k, json!([{"file_path": "msg.txt", "whole": true, "new_string": "New subject\n"}])).unwrap();
+    let f = change(&r, "msg.txt");
+    assert_eq!(
+        (f.op.clone(), f.before.to_string(), f.after.to_string(), f.places),
+        (Op::Text, "Old subject\n\nold body\n".into(), "New subject\n".into(), 1)
+    );
+    // (an empty old_string is the same as none; a later item sees the text it left)
+    let then = json!([
+        {"file_path": "msg.txt", "whole": true, "old_string": "", "new_string": "a\nb\n"},
+        {"file_path": "msg.txt", "old_string": "b", "new_string": "c"},
+    ]);
+    assert_eq!(change(&run(&k, then).unwrap(), "msg.txt").after.to_string(), "a\nc\n");
+    let new = run(&k, json!([{"file_path": "plan.md", "whole": true, "new_string": "# plan\n"}])).unwrap();
+    assert_eq!(change(&new, "plan.md").op, Op::Create);
+    // (a protected name: a text change as a replace's is, its review warning — not refused as a delete is)
+    let p =
+        run(&k, json!([{"file_path": "Cargo.toml", "whole": true, "new_string": "[workspace]\n"}])).unwrap();
+    assert!(change(&p, "Cargo.toml").protected && change(&p, "Cargo.toml").op == Op::Text);
+    let with_old = json!([{"file_path": "msg.txt", "whole": true, "old_string": "Old", "new_string": "x"}]);
+    assert!(run(&k, with_old).unwrap_err().contains("whole: true takes new_string alone"));
+    let same = json!([{"file_path": "msg.txt", "whole": true, "new_string": "Old subject\n\nold body\n"}]);
+    assert!(run(&k, same).unwrap_err().contains("new_string is msg.txt's text already"));
+    // (the empty old_string's error points at it)
+    let over = json!([{"file_path": "msg.txt", "old_string": "", "new_string": "y\n"}]);
+    assert!(run(&k, over).unwrap_err().contains("or whole: true for its whole new text"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// frictions38: under review at the end, a file rewritten whole goes in unseen as any text change — no card (a
+/// delete first would have been one), the answer saying it written.
+#[test]
+fn under_review_at_the_end_a_whole_rewrite_asks_no_card() {
+    let dir = project("whole-at-end", &[("msg.txt", "first draft\n")]);
+    let mut ed = chat_for(&dir, &dir.join("stdin.log"));
+    ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
+    let args = json!({"edits": [{"file_path": "msg.txt", "whole": true, "new_string": "second draft\n"}]});
+    call(&mut ed, Call::test(43), &args).unwrap();
+    pump(&mut ed, "the answer", |_| answered(43).is_some());
+    assert!(change_card(&ed).is_none(), "no card");
+    assert_eq!(std::fs::read_to_string(dir.join("msg.txt")).unwrap(), "second draft\n");
+    let a = answered(43).unwrap().unwrap();
+    assert!(a.contains("written: msg.txt (1)"), "{a}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A move or delete only of the project's own plain files — never a name Claude's runs can't write (a build
 /// script, at either end of a move, through a link too), a file named like a key, anything outside the project,
 /// a link, or a buffer with the user's unsaved edits; a move never over a file. (Nothing is written here: the

@@ -408,8 +408,18 @@ impl Preflight {
     pub fn said(&self, places: usize, output: &crate::runout::Output) -> String {
         let mut out = format!("{}: {}", self.title, self.summary());
         if !self.passed() {
-            if let Some(f) = self.step_text("", None, output).ok().and_then(|(_, l)| failure(&l)) {
-                out.push_str(&format!(" — {f}"));
+            if let Some(l) = self.step_text("", None, output).ok().map(|(_, l)| l) {
+                // (every other test that failed, by name — frictions29 93: only the first was said, and a
+                // known flake's name read as the only failure; the count before the first one's why — a toast is
+                // cut at its third row)
+                match (failure(&l), also_failed(&l).filter(|(n, _)| *n > 1)) {
+                    (Some(f), Some((n, others))) => out.push_str(&format!(
+                        " — {n} tests failed: {f} — also {}",
+                        tests_named(&others, NAMES_ROOM)
+                    )),
+                    (Some(f), None) => out.push_str(&format!(" — {f}")),
+                    (None, _) => {}
+                }
             }
             if places > 0 {
                 out.push_str(" — ]q goes to the first");
@@ -461,18 +471,112 @@ pub fn failed_test(lines: &[String]) -> Option<(String, Option<String>)> {
     Some((test, why))
 }
 
+/// The test a line names as failed: cargo test's `test x ... FAILED` (with `block`, its `---- x stdout ----` too),
+/// Go's `--- FAIL: TestX (0.00s)`.
+fn named_failed(l: &str, block: bool) -> Option<String> {
+    let l = l.trim();
+    l.strip_prefix("test ")
+        .and_then(|r| r.strip_suffix(" ... FAILED"))
+        .or_else(|| {
+            block.then(|| l.strip_prefix("---- ").and_then(|r| r.strip_suffix(" stdout ----"))).flatten()
+        })
+        .or_else(|| l.strip_prefix("--- FAIL: ").map(|r| r.split(' ').next().unwrap_or(r)))
+        .map(str::to_string)
+}
+
+/// Every test that failed in `lines`, in the order they're named, each once (frictions29 93). A block's `---- x
+/// stdout ----` only when no line said a test failed (`--show-output` prints the passed ones' blocks too). Only the
+/// leaves: Go fails a parent whenever a subtest of it fails (`TestA` beside `TestA/sub`) — one failure, not two.
+pub fn failed_tests(lines: &[String]) -> Vec<String> {
+    let mut tests: Vec<String> = Vec::new();
+    for t in lines.iter().filter_map(|l| named_failed(l, false)) {
+        if !tests.contains(&t) {
+            tests.push(t);
+        }
+    }
+    if tests.is_empty() {
+        tests.extend(first_failed(lines).map(|(t, _)| t));
+    }
+    let parent = |t: &String, all: &[String]| all.iter().any(|o| o.starts_with(&format!("{t}/")));
+    let all = tests.clone();
+    tests.retain(|t| !parent(t, &all));
+    tests
+}
+
+/// How many tests failed in `lines` and the ones besides `failure`'s (named apart from it — never by place in
+/// `failed_tests`, which reads the lines another way). None: no test named.
+pub fn also_failed(lines: &[String]) -> Option<(usize, Vec<String>)> {
+    let (first, _) = first_failed(lines)?;
+    let others: Vec<String> = failed_tests(lines).into_iter().filter(|t| *t != first).collect();
+    Some((others.len() + 1, others))
+}
+
+/// What a cut bring card's `v` lists before the first failure's block: every test that failed, a line each, at
+/// most `FAILURE_SHOWN` of them, the rest `+N more` (its `y` waits until the view is read to its end). Empty when
+/// one failed or none is named.
+pub fn failed_listed(lines: &[String]) -> Vec<String> {
+    let tests = failed_tests(lines);
+    if tests.len() < 2 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = tests.iter().take(FAILURE_SHOWN).cloned().collect();
+    if tests.len() > FAILURE_SHOWN {
+        out.push(format!("+{} more — v again shows the whole output", tests.len() - FAILURE_SHOWN));
+    }
+    out
+}
+
+/// About this many characters of test names on a toast's or a card's line (`tests_named`).
+pub const NAMES_ROOM: usize = 100;
+
+/// A test's name past this many characters loses its leading modules (`short_name`).
+const NAME_SHOWN: usize = 48;
+
+/// `t` as a list names it: past `NAME_SHOWN` characters its leading `mod::` parts go (`…::` says so) — the end
+/// is what tells tests apart, and a name longer than a card's line breaks mid-word (frictions38's shots).
+fn short_name(t: &str) -> String {
+    let mut s = t;
+    while s.chars().count() > NAME_SHOWN
+        && let Some((_, rest)) = s.split_once("::")
+    {
+        s = rest;
+    }
+    match s.len() < t.len() {
+        true => format!("…::{s}"),
+        false => s.to_string(),
+    }
+}
+
+/// `tests` by name (`short_name`), `, ` between, as many as fit in `room` characters (one at least), the rest
+/// `+N more`.
+pub fn tests_named(tests: &[String], room: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    for t in tests.iter().map(|t| short_name(t)) {
+        if shown > 0 && out.chars().count() + 2 + t.chars().count() > room {
+            break;
+        }
+        if shown > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&t);
+        shown += 1;
+    }
+    if shown < tests.len() {
+        out.push_str(&format!(" +{} more", tests.len() - shown));
+    }
+    out
+}
+
 /// The first test that failed in `lines` (`failure`) and its block: the line naming it (its own `---- x stdout
 /// ----` when there is one — cargo lists the failures after every test's line), then its lines up to the next.
 fn first_failed(lines: &[String]) -> Option<(String, &[String])> {
-    let named = |l: &str| {
-        let l = l.trim();
-        l.strip_prefix("test ")
-            .and_then(|r| r.strip_suffix(" ... FAILED"))
-            .or_else(|| l.strip_prefix("---- ").and_then(|r| r.strip_suffix(" stdout ----")))
-            .or_else(|| l.strip_prefix("--- FAIL: ").map(|r| r.split(' ').next().unwrap_or(r)))
-            .map(str::to_string)
-    };
-    let test = lines.iter().find_map(|l| named(l))?;
+    let named = |l: &str| named_failed(l, true);
+    let mut test = lines.iter().find_map(|l| named(l))?;
+    // (Go: a parent's subtest that failed, its leaf — the parent's line says nothing of why)
+    while let Some(sub) = lines.iter().filter_map(|l| named(l)).find(|n| n.starts_with(&format!("{test}/"))) {
+        test = sub;
+    }
     let block = format!("---- {test} stdout ----");
     let from = lines
         .iter()
@@ -485,7 +589,7 @@ fn first_failed(lines: &[String]) -> Option<(String, &[String])> {
 }
 
 /// At most this many lines of the first failure's block on a cut card's view (`failure_block`).
-const FAILURE_SHOWN: usize = 20;
+pub const FAILURE_SHOWN: usize = 20;
 
 /// What a cut bring card's `v` shows of a failed step's `lines` (the review of frictions34 42: its `y` waits until
 /// that view is read to its end, and the whole of a `cargo test` is thousands of lines): the first failure's block,
@@ -1126,6 +1230,16 @@ mod tests {
             ran(Set::Quick, &all, &[0, 1]).said(0, &output),
             "quick preflight: 1 of 2 passed — test failed · 1m 02s — a: panicked at x.rs:1:2: no"
         );
+        // (frictions29 93: every other test that failed, by name, the rest `+N more`)
+        let many: crate::runout::Output =
+            ["── fmt ──", "── test ──", "test a ... FAILED", "test b ... FAILED", "test c ... FAILED"]
+                .map(|l| (false, l))
+                .into_iter()
+                .collect();
+        assert_eq!(
+            ran(Set::Quick, &all, &[0, 1]).said(0, &many),
+            "quick preflight: 1 of 2 passed — test failed · 1m 02s — 3 tests failed: a — also b, c"
+        );
     }
 
     /// frictions34 42: the first test that failed is named with the first line of why — cargo test's (its own
@@ -1175,6 +1289,48 @@ mod tests {
         assert_eq!(failure_block(&long).len(), FAILURE_SHOWN);
         let none = lines("a\nb\nc");
         assert_eq!(failure_block(&none), none);
+    }
+
+    /// frictions29 93: every test that failed, in the order named, once each (cargo's `test x ... FAILED` and its
+    /// block, Go's `--- FAIL`); named as many as fit, the rest `+N more`.
+    #[test]
+    fn every_failing_test_is_listed_and_named_as_room_allows() {
+        let lines = |s: &str| s.lines().map(String::from).collect::<Vec<_>>();
+        let cargo = lines(
+            "test b ... FAILED\ntest a ... FAILED\ntest c ... ok\nfailures:\n---- a stdout ----\n---- b stdout ----\n\
+             successes:\n---- c stdout ----\n",
+        );
+        assert_eq!(failed_tests(&cargo), ["b", "a"]);
+        assert_eq!(failed_tests(&lines("---- only stdout ----\nx")), ["only"]);
+        // (Go: a subtest's failure fails its parent too — one failure, the leaf, named with its why)
+        let go = lines(
+            "--- FAIL: TestA (0.00s)\n    --- FAIL: TestA/sub (0.00s)\n        a_test.go:3: no\n\
+             --- FAIL: TestB (0.01s)\n",
+        );
+        assert_eq!(failed_tests(&go), ["TestA/sub", "TestB"]);
+        assert_eq!(failure(&go).as_deref(), Some("TestA/sub: a_test.go:3: no"));
+        assert_eq!(also_failed(&go), Some((2, vec!["TestB".to_string()])));
+        assert!(failed_tests(&lines("error: x")).is_empty());
+        assert_eq!(also_failed(&lines("error: x")), None);
+        // (the ones besides `failure`'s by name, wherever it was found: here a block ahead of the FAILED lines)
+        let block_first = lines("---- b stdout ----\npanicked\ntest a ... FAILED\ntest b ... FAILED\n");
+        assert_eq!(failure(&block_first).as_deref(), Some("b"));
+        assert_eq!(also_failed(&block_first), Some((2, vec!["a".to_string()])));
+        // (a cut card's `v`: a line each, `FAILURE_SHOWN` at most, the rest counted; one failure: none)
+        let many: Vec<String> = (0..50).map(|i| format!("test t{i} ... FAILED")).collect();
+        let listed = failed_listed(&many);
+        assert_eq!((listed.len(), listed[0].as_str()), (FAILURE_SHOWN + 1, "t0"));
+        assert_eq!(listed[FAILURE_SHOWN], "+30 more — v again shows the whole output");
+        assert!(failed_listed(&many[..1]).is_empty());
+        let names: Vec<String> = ["aaaa", "bbbb", "cccc", "dddd"].map(String::from).to_vec();
+        assert_eq!(tests_named(&names, 100), "aaaa, bbbb, cccc, dddd");
+        assert_eq!(tests_named(&names, 10), "aaaa, bbbb +2 more");
+        assert_eq!(tests_named(&names, 1), "aaaa +3 more", "one at least");
+        // (a long name loses its leading modules, never its end)
+        let long = ["worktree::tests::a_new_sessions_bring_card_runs_the_projects_quick_set".to_string()];
+        assert_eq!(tests_named(&long, 100), "…::a_new_sessions_bring_card_runs_the_projects_quick_set");
+        let mid = ["crate::sim::quotes::quotes_go_with_the_message_once_x".to_string()];
+        assert_eq!(tests_named(&mid, 100), "…::sim::quotes::quotes_go_with_the_message_once_x");
     }
 
     /// Whatever a step prints, its lines are read without a panic — a marker naming no step, one past the last,

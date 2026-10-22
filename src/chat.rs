@@ -821,7 +821,7 @@ impl Chat {
             msgs: Vec::new(),
             input: Default::default(),
             state: State::Idle,
-            started: Instant::now(),
+            started: crate::clock::now(),
             scroll: 0,
             proc: None,
             generation: 0,
@@ -1927,8 +1927,8 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
             if c.state == State::Idle {
                 return;
             }
-            let secs = c.started.elapsed().as_secs_f32();
-            let (calls, took) = (c.calls.len(), c.started.elapsed());
+            let took = crate::clock::since(c.started);
+            let (secs, calls) = (took.as_secs_f32(), c.calls.len());
             // (the user stopped it: what its runs left going is offered to stop — `tools::left_running`)
             let stopped = c.stopping;
             c.state = State::Idle;
@@ -2598,7 +2598,7 @@ fn submit_as(
     c.msgs.push(msg);
     c.scroll = 0;
     c.state = State::Thinking;
-    c.started = Instant::now();
+    c.started = crate::clock::now();
     crate::reads::not_sent(ed, &withheld);
     crate::uistate::watch::turn(ed, "started", 0, None);
     true
