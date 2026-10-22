@@ -807,6 +807,8 @@ pub struct Editor {
     pub dragging: Option<crate::sizes::Border>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
     pub picker_click: Option<(u64, usize, std::time::Instant)>,
+    /// The last click on the git tab's or the review rail's row (which list, row, when) — `clicked_again`.
+    pub list_click: Option<(&'static str, usize, std::time::Instant)>,
     /// The front card has the keys, given with `C-q` from wherever they were (#24) — the chat's draft, insert
     /// mode, a review stay as they were; an answer or Esc gives them back.
     pub card_keys: bool,
@@ -1076,6 +1078,7 @@ impl Editor {
             }),
             dragging: None,
             picker_click: None,
+            list_click: None,
             card_keys: false,
             screen_sends: Vec::new(),
             frames: 0,
@@ -1250,10 +1253,87 @@ impl Editor {
         self.open_as(path, Opener::Claude)
     }
 
-    /// `open` for a code review's file: one not open yet is `review_only` — no grammar or server offered for
-    /// it until the user takes it up (frictions25 R7).
-    pub fn open_for_review(&mut self, path: &Path) -> Result<()> {
-        self.open_as(path, Opener::Review)
+    /// `open` for the git tab's or the review rail's look at a file — one not open yet `review_only`: no grammar or
+    /// server offered for it until the user takes it up (frictions25 R7) — in the session's one preview slot:
+    /// one open already is only shown (a buffer of its own stays one), else it takes the place of the preview shown
+    /// before, so passing over files doesn't grow the buffer list (`Document::preview`). A preview edited, under
+    /// Claude's review, or with a review's viewed mark waiting for its base (it lands on that buffer) isn't closed:
+    /// it's a buffer of its own from then on.
+    ///
+    /// The one it replaces keeps its place in the jump lists (`park_jumps`: `C-o` back to it opens it again, as the
+    /// preview); one another pane shows isn't closed — it's that pane's, a buffer of its own from then on, said.
+    pub fn open_preview(&mut self, path: &Path) -> Result<()> {
+        self.open_preview_as(path, false)
+    }
+
+    /// `open_preview` for `C-o`/`C-i` travelling to a preview the next one took the place of: no jump recorded (it
+    /// would cut the list's forward branch — `goto_jump` sets the pane's document itself).
+    pub(crate) fn open_preview_travel(&mut self, path: &Path) -> Result<()> {
+        self.open_preview_as(path, true)
+    }
+
+    fn open_preview_as(&mut self, path: &Path, travel: bool) -> Result<()> {
+        let before = self.buffers().into_iter().map(|i| &self.docs[i]).find(|d| d.preview).map(|d| d.id);
+        let was: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
+        self.open_as(path, Opener::Review)?;
+        let id = self.doc().id;
+        // (the spot left behind a jump now, while its buffer is still there to mark — as any switch of file)
+        if !travel {
+            self.track_doc_switch();
+        }
+        // (one open already: only shown)
+        if was.contains(&id) {
+            return Ok(());
+        }
+        self.doc_mut().preview = true;
+        let Some(old) = before else { return Ok(()) };
+        let reviewed = self.session.review.as_ref().is_some_and(|r| r.doc_id == old);
+        let waited = |d: &Document| {
+            let r = self.session.code_review.as_ref();
+            d.path.as_deref().is_some_and(|p| r.is_some_and(|r| r.waits(p)))
+        };
+        // (another pane shows it: that pane's — the focused one's document is the new preview by now)
+        let focus = self.session.focus;
+        let shown = self.session.views.iter().find(|v| v.doc == old && v.id != focus).map(|v| v.id);
+        match self.docs.iter().find(|d| d.id == old) {
+            Some(d) if shown.is_some() => {
+                let name = d.display_name_short();
+                self.preview_keep(old);
+                let pane = shown.unwrap_or_default();
+                self.set_status(format!("{name} stays open, a buffer of its own — pane#{pane} shows it"));
+            }
+            Some(d) if d.is_modified() || reviewed || waited(d) => self.preview_keep(old),
+            Some(_) => {
+                self.park_jumps(old);
+                self.close_doc_as(old, true);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Preview `id` becomes a buffer of its own (upright, kept, restored).
+    pub fn preview_keep(&mut self, id: DocId) {
+        if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
+            d.preview = false;
+        }
+    }
+
+    /// Every event: a preview edited is a buffer of its own — moving, searching, `esc code` into it keep it one.
+    fn previews_sync(&mut self) {
+        for d in self.docs.iter_mut().filter(|d| d.preview && d.is_modified()) {
+            d.preview = false;
+        }
+    }
+
+    /// A click on row `row` of list `what` (the git tab's, the review rail's): whether it's the same row again within
+    /// `DOUBLE_CLICK` — a double-click.
+    fn clicked_again(&mut self, what: &'static str, row: usize) -> bool {
+        let again = self
+            .list_click
+            .is_some_and(|(w, r, at)| (w, r) == (what, row) && crate::clock::since(at) < DOUBLE_CLICK);
+        self.list_click = (!again).then(|| (what, row, crate::clock::now()));
+        again
     }
 
     fn open_as(&mut self, path: &Path, by: Opener) -> Result<()> {
@@ -1262,6 +1342,10 @@ impl Editor {
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path.as_path())) {
             self.current = i;
             self.session_keeps(self.docs[i].id);
+            // (opened by you — `enter` on its row, `space f`, a jump: a preview is yours from now on)
+            if by == Opener::You {
+                self.docs[i].preview = false;
+            }
             return Ok(());
         }
         let id = self.alloc_id();
@@ -1409,6 +1493,11 @@ impl Editor {
     /// Closes a document (without asking) — notifies servers; panes showing it switch to another document
     /// (the front session's buffer after it, else the one before; none left: a blank one).
     pub fn close_doc(&mut self, gone: DocId) {
+        self.close_doc_as(gone, false)
+    }
+
+    /// `close_doc`; `parked`: a preview the next one replaced — its jumps stay where they are (`park_jumps`).
+    fn close_doc_as(&mut self, gone: DocId, parked: bool) {
         let Some(i) = self.docs.iter().position(|d| d.id == gone) else { return };
         self.plugin_closing(gone);
         self.lsp_did_close(gone);
@@ -1435,7 +1524,9 @@ impl Editor {
             if v.doc == gone {
                 v.show(now);
             }
-            v.jumps.remove_doc(gone);
+            if !parked {
+                v.jumps.remove_doc(gone);
+            }
             v.last_doc = v.last_doc.filter(|&d| d != gone);
         }
         // A review of a change to it, in any session, ends with it — Claude is told its buffer went (#149: one
@@ -2098,6 +2189,8 @@ impl Editor {
         self.git_schedule();
         self.blame_schedule();
         self.sidebar_sync();
+        self.git_inline_sync();
+        self.previews_sync();
         self.sessions_sync();
         crate::restart::sync(self);
         self.picker_filter();
@@ -2201,9 +2294,9 @@ impl Editor {
         // A file under review (a turn's, a branch's) took the keys when the turn ended — a paste in normal mode
         // there was meant for the chat (#31: it landed in the file as an unsaved edit). It goes to the chat.
         // (In insert mode it's typed there on purpose.)
-        let reviewing = self.session.code_review.is_some()
-            && self.doc().review_base.is_some()
-            && self.mode != Mode::Insert;
+        // (the git tab's inline base isn't a review's: a file it shows isn't under review)
+        let reviewing =
+            self.session.code_review.is_some() && self.doc().own_base() && self.mode != Mode::Insert;
         if reviewing && let Some(c) = self.session.chat.as_mut() {
             let text: String = text.chars().filter(|&c| c == '\n' || !c.is_control()).collect();
             c.input.insert_str(&text);
@@ -2409,8 +2502,16 @@ impl Editor {
             if let Some(i) = mark {
                 return crate::codereview::mark_clicked(self, i);
             }
+            // (a click shows it in the preview slot; a double-click keeps it, as `enter`)
             if let Some(&(_, i)) = s.review_rail.borrow().iter().find(|r| r.0 == y) {
-                return crate::codereview::show(self, i, false);
+                // (the buffer that show opened — none for a binary row: never whatever was in front)
+                let shown = crate::codereview::show(self, i, false);
+                if self.clicked_again("rail", i)
+                    && let Some(id) = shown
+                {
+                    self.preview_keep(id);
+                }
+                return;
             }
         }
         // The bottom slot's columns: under the code, between the side panel and the chat
@@ -2574,6 +2675,23 @@ impl Editor {
             // (with the keys, as `C-e`/`C-y`: the selection, what they act on, follows into sight; without them it
             // marks where the code is and comes back there by itself — the wheel only looks)
             match m.kind {
+                // (the git tab's file row: a click selects it and shows the file in the preview slot, the tab taking
+                // the keys — as moving onto it; a double-click opens it, as `enter`)
+                K::Down
+                    if let Some(r) = row
+                        && let Some(rel) = crate::sidebar::git_file_at(sb, r) =>
+                {
+                    if self.clicked_again("git", r) {
+                        self.sidebar_activate(r);
+                    } else {
+                        if let Some(sb) = self.session.sidebar.as_mut() {
+                            sb.selected = r;
+                        }
+                        self.session.leave(At::Chat);
+                        self.session.at = At::Side;
+                        self.git_show_file(&rel.0, rel.1);
+                    }
+                }
                 K::Down => {
                     if let Some(r) = row {
                         self.sidebar_activate(r);
@@ -3433,7 +3551,7 @@ impl Editor {
                 Some(c) => self.picker_action(Action::Goto { path: c.path, line: c.line, col: 0 }),
                 None => Err(anyhow::anyhow!("that file isn't among the changed ones any more")),
             },
-            Action::Jump { index, .. } => {
+            Action::Jump { index, .. } | Action::JumpParked { index, .. } => {
                 self.jump_to_entry(index);
                 Ok(())
             }
@@ -4604,6 +4722,20 @@ mod tests {
                 Key::plain(Code::Char(c))
             };
             ed.handle_key(key);
+        }
+    }
+
+    /// `feed`, each key an event: what runs after every event (the syncs) runs after each.
+    fn feed_events(ed: &mut Editor, keys: &str) {
+        let mut chars = keys.chars();
+        while let Some(c) = chars.next() {
+            let key = if c == '<' {
+                let name: String = chars.by_ref().take_while(|&c| c != '>').collect();
+                name.parse().unwrap()
+            } else {
+                Key::plain(Code::Char(c))
+            };
+            ed.handle_event(Event::Key(key));
         }
     }
 
@@ -13726,6 +13858,588 @@ mod tests {
         settle_until(&mut ed, |_| std::fs::read_to_string(&file).unwrap_or_default().contains("FOUR"));
         feed(&mut ed, "?");
         assert!(ed.popup.is_some(), "every key, as a card");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Panes P3 step 5: the git tab's selection drives the code — `j` onto a changed file shows it at its first
+    /// change, its removed lines rows of their own (against the index) while the tab has the keys; onto another,
+    /// that one's, the first's gone; `esc code`: the rows gone, the gutter the index's again, its changes kept.
+    #[test]
+    fn the_git_tabs_file_shows_its_changes_inline_while_the_tab_has_the_keys() {
+        use crate::codeview::Changes;
+        let repo = git_repo("inline", &[("a.txt", "one\ntwo\nthree\n"), ("b.txt", "x\ny\nz\nw\n")]);
+        std::fs::write(repo.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "x\ny\nz\nW\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let selected = |ed: &Editor| {
+            let s = ed.session.sidebar.as_ref().unwrap();
+            s.lines().get(s.selected).map(|l| l.target.clone())
+        };
+        let file = |rel: &str| crate::sidebar::Target::Change {
+            rel: rel.into(),
+            staged: false,
+            untracked: false,
+            file: true,
+        };
+        assert_eq!(selected(&ed), Some(file("a.txt")), "on the first file");
+        let shown = |ed: &Editor, name: &str| {
+            ed.doc().path.as_deref() == Some(repo.join(name).as_path())
+                && ed.doc().inline.is_some()
+                && ed.doc().git_version == ed.doc().version()
+        };
+        // `j`: the next file in the code, its change selected, what it removed a row of its own above it
+        feed_events(&mut ed, "j");
+        assert_eq!(selected(&ed), Some(file("b.txt")));
+        settle_until(&mut ed, |ed| shown(ed, "b.txt") && ed.cursor_line() == 3);
+        assert!(ed.session.is_at(crate::session::At::Side), "the tab keeps the keys");
+        let d = ed.doc();
+        assert_eq!(Changes::of(d), Changes::Base, "drawn as `:diff` draws it");
+        assert_eq!(Changes::Base.removed(d, 0, 3), vec![(3, "w".to_string(), Some(3))]);
+        assert!(d.review_base.as_ref().is_some_and(|b| *b == "x\ny\nz\nw\n"), "the index's text");
+        let b = d.id;
+        let screen = |ed: &mut Editor| {
+            let mut bytes = Vec::new();
+            crate::term::render(ed, &mut bytes, 160, 24).unwrap();
+            let mut parser = vt100::Parser::new(24, 160, 0);
+            parser.process(&bytes);
+            parser.screen().contents()
+        };
+        let s = screen(&mut ed);
+        assert!(s.contains("b.txt  against index"), "the path bar says what it's against: {s}");
+        let rows: Vec<&str> =
+            s.lines().filter(|l| l.contains("│")).map(|l| l.rsplit('│').next().unwrap()).collect();
+        let at = rows
+            .iter()
+            .position(|l| l.trim_end().ends_with("−w"))
+            .unwrap_or_else(|| panic!("the removed line, a row: {s}"));
+        assert!(rows[at + 1].trim_end().ends_with("4▎W"), "above the line that replaced it: {s}");
+        // `l`: its changes listed under it — against the index, not said to be a review's
+        feed_events(&mut ed, "l");
+        settle_until(&mut ed, |ed| {
+            let s = ed.session.sidebar.as_ref().unwrap();
+            s.lines().iter().any(|l| matches!(l.target, crate::sidebar::Target::Hunk { .. }))
+        });
+        feed_events(&mut ed, "h");
+        // `k`: the first one, the second's rows gone
+        feed_events(&mut ed, "k");
+        settle_until(&mut ed, |ed| shown(ed, "a.txt") && ed.cursor_line() == 1);
+        // (b.txt kept by `l` — opened to its hunks, as `enter`: its own buffer, not the preview a.txt replaces)
+        let d = ed.docs.iter().find(|d| d.id == b).unwrap();
+        assert!(d.inline.is_none() && d.review_base.is_none() && !d.preview, "only the file in the code");
+        assert_eq!(Changes::of(d), Changes::Index);
+        assert!(ed.doc().preview, "a.txt the preview");
+        // `esc code`: the rows gone, the gutter back to the index, its change still there
+        feed_events(&mut ed, "<esc>");
+        assert!(ed.session.is_at(crate::session::At::Code));
+        let d = ed.doc();
+        assert!(d.inline.is_none() && d.review_base.is_none(), "gone with the keys");
+        assert_eq!(Changes::of(d), Changes::Index);
+        assert_eq!(d.git_hunks.len(), 1, "the index's change in the gutter");
+        let s = screen(&mut ed);
+        assert!(!s.contains("against index") && s.contains("a.txt"), "{s}");
+        // Back in the tab: inline again, at once (the file in the code is among its changes)
+        feed_events(&mut ed, " g");
+        assert!(ed.doc().inline.is_some(), "the tab has the keys again");
+        // `q`: the tab closed, the code its own
+        feed_events(&mut ed, "q");
+        assert!(ed.session.sidebar.is_none() && ed.doc().inline.is_none());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Panes P3 step 5: a buffer under `:diff` keeps what you asked for — the git tab's selection on it shows it
+    /// against that, and leaving the tab ends nothing of it; a staged hunk makes the inline base the new index.
+    #[test]
+    fn the_git_tab_leaves_a_diffs_base_and_follows_the_index() {
+        let repo = git_repo("inline-diff", &[("a.txt", "one\ntwo\nthree\n"), ("b.txt", "x\ny\nz\n")]);
+        std::fs::write(repo.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "X\ny\nZ\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        ed.open(&repo.join("a.txt")).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        feed(&mut ed, ":diff HEAD<ret>");
+        settle_until(&mut ed, |ed| ed.doc().diff_of.is_some());
+        let a = ed.doc().id;
+        feed(&mut ed, " g");
+        settle_until(&mut ed, |ed| {
+            ed.session.git_status.is_some() && ed.session.sidebar.as_ref().unwrap().aim.is_none()
+        });
+        let d = ed.doc();
+        assert!(
+            d.id == a && d.inline.is_none() && d.diff_of.as_deref() == Some("HEAD"),
+            "`:diff`'s, untouched"
+        );
+        // `j` onto b.txt and `<esc>`: a.txt's diff still there
+        feed_events(&mut ed, "j");
+        settle_until(&mut ed, |ed| ed.doc().inline.is_some() && ed.doc().git_version == ed.doc().version());
+        assert_eq!(ed.doc().git_hunks.len(), 2);
+        // Its first change staged (the tab's `s` on a hunk's row): the index read again, the inline base follows
+        let before = ed.doc().inline.clone();
+        assert_eq!(ed.cursor_line(), 0, "landed on its first change");
+        ed.git_stage_hunk();
+        settle_until(&mut ed, |ed| {
+            let d = ed.doc();
+            d.git_hunks.len() == 1 && d.git_version == d.version() && d.inline.is_some() && d.inline != before
+        });
+        assert!(ed.doc().review_base.as_ref().is_some_and(|b| *b == "X\ny\nz\n"), "the new index");
+        // `:diff` there from the tab: what you asked for takes the base over, and the tab leaves it
+        feed_events(&mut ed, ":diff HEAD<ret>");
+        settle_until(&mut ed, |ed| ed.doc().diff_of.is_some());
+        assert!(ed.doc().inline.is_none() && ed.doc().own_base(), "`:diff`'s now");
+        let b = ed.doc().id;
+        feed_events(&mut ed, "<esc>");
+        let d = ed.docs.iter().find(|d| d.id == b).unwrap();
+        assert!(d.review_base.as_ref().is_some_and(|b| *b == "x\ny\nz\n"), "HEAD's, kept");
+        let d = ed.docs.iter().find(|d| d.id == a).unwrap();
+        assert!(
+            d.review_base.is_some() && d.diff_of.as_deref() == Some("HEAD"),
+            "leaving the tab ends none of it"
+        );
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Panes P3 step 5: a review started while the git tab shows a file inline takes the base over — HEAD's, not
+    /// the index's the tab drew (its first file is the one in the code: it must load its base, not land at once).
+    #[test]
+    fn a_review_takes_the_base_over_from_the_git_tab() {
+        let dir = git_repo("inline-review", &[("a.txt", "one\ntwo\n")]);
+        std::fs::write(dir.join("a.txt"), "one\nTWO\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap()
+        };
+        git(&["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "ONE\nTWO\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.git_auto = true;
+        ed.open(&dir.join("a.txt")).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.doc().inline.is_some());
+        assert!(ed.doc().review_base.as_ref().is_some_and(|b| *b == "one\nTWO\n"), "the index's");
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().own_base());
+        assert!(ed.doc().review_base.as_ref().is_some_and(|b| *b == "one\ntwo\n"), "HEAD's, the review's");
+        assert!(ed.doc().inline.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Panes P3 step 5: the tab's other file rows show what they can — a deleted file nothing (no buffer, no error),
+    /// an untracked one plain with nothing to land on, a staged row its file without moving the cursor to the
+    /// changes the index doesn't have yet (those are the Changes row's).
+    #[test]
+    fn the_git_tabs_deleted_untracked_and_staged_rows_show_what_they_can() {
+        let repo = git_repo("inline-rows", &[("a.txt", "one\ntwo\nthree\n"), ("d.txt", "gone\n")]);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap()
+        };
+        std::fs::write(repo.join("a.txt"), "ONE\ntwo\nthree\n").unwrap();
+        git(&["add", "a.txt"]);
+        std::fs::write(repo.join("a.txt"), "ONE\ntwo\nTHREE\n").unwrap();
+        std::fs::remove_file(repo.join("d.txt")).unwrap();
+        std::fs::write(repo.join("n.txt"), "new\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        // (onto the row for `rel` in its section, by `j` from the row above it)
+        let onto = |ed: &mut Editor, rel: &str, staged: bool| {
+            let s = ed.session.sidebar.as_mut().unwrap();
+            let at = s.lines().iter().position(|l| {
+                matches!(&l.target, crate::sidebar::Target::Change { rel: r, staged: st, file: true, .. }
+                    if r == rel && *st == staged)
+            });
+            s.selected = at.expect(rel) - 1;
+            feed_events(ed, "j");
+        };
+        let (docs, first) = (ed.docs.len(), ed.doc().id);
+        onto(&mut ed, "d.txt", false);
+        assert!(ed.docs.len() == docs && ed.doc().id == first, "a deleted file: nothing opened");
+        assert!(!ed.toasts.iter().any(|t| t.kind == ToastKind::Error), "nor an error");
+        onto(&mut ed, "n.txt", false);
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("n.txt").as_path()), "an untracked one, shown");
+        let s = ed.session.sidebar.as_ref().unwrap();
+        assert!(s.land.is_none() && ed.doc().inline.is_none(), "nothing to land on, nothing inline");
+        onto(&mut ed, "a.txt", true);
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("a.txt").as_path()));
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some() && ed.doc().git_version == ed.doc().version());
+        assert_eq!(ed.doc().git_hunks.len(), 1, "its unstaged change");
+        assert_eq!(ed.cursor_line(), 0, "the staged row doesn't land on it");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The reviewer (step 5): in a code review with the git tab in front, a paste while the tab shows a file that
+    /// isn't the review's inline stays out of the chat — that file isn't under review.
+    #[test]
+    fn a_paste_over_the_git_tabs_inline_file_in_a_review_stays_out_of_the_chat() {
+        let dir = git_repo("paste-inline", &[("a.txt", "one\n"), ("b.txt", "x\n")]);
+        std::fs::write(dir.join("a.txt"), "ONE\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.git_auto = true;
+        crate::chat::open(&mut ed);
+        ed.session.leave(At::Chat);
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().own_base());
+        // (b.txt changed after the review took its files: not the review's)
+        std::fs::write(dir.join("b.txt"), "X\n").unwrap();
+        ed.open(&dir.join("b.txt")).unwrap();
+        settle_until(&mut ed, |ed| ed.doc().git_base.is_some());
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.doc().inline.is_some());
+        ed.handle_paste("for the file".into());
+        let c = ed.session.chat.as_ref().unwrap();
+        assert!(c.input.is_empty() && !ed.session.is_at(At::Chat), "{:?}", c.input);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reviewer (step 5): `r` in the git tab says it reads until the status lands — one job, one step.
+    #[test]
+    fn r_in_the_git_tab_says_it_reads_until_the_status_lands() {
+        let repo = git_repo("refresh", &[("a.txt", "one\n")]);
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let said = |ed: &Editor| ed.toasts.iter().any(|t| t.text.contains("reading git's status"));
+        let before = ed.session.git_status.as_ref().unwrap().generation;
+        feed_events(&mut ed, "r");
+        assert!(said(&ed), "said while it reads");
+        settle_until(&mut ed, |ed| ed.session.git_status.as_ref().is_some_and(|s| s.generation > before));
+        assert!(!said(&ed), "gone once it landed");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The reviewer (step 5): where a view's marks come from — Claude's edit shown over the git tab's inline diff, a
+    /// review's or `:diff`'s base over both.
+    #[test]
+    fn a_shown_edit_ranks_over_the_git_tabs_inline_diff_not_over_a_review() {
+        use crate::codeview::Changes;
+        let mut ed = editor("a\nb\n");
+        let d = ed.doc_mut();
+        let index = std::sync::Arc::new("a\nB\n".to_string());
+        d.git_base = Some(index.clone());
+        d.set_inline_base(Some(index));
+        assert_eq!(Changes::of(d), Changes::Base, "the tab's, alone");
+        let h = crate::replay::Hunk { lines: 1..2, removed: vec!["B".into()], added: vec!["b".into()] };
+        d.shown = Some(vec![h]);
+        assert_eq!(Changes::of(d), Changes::Shown, "Claude's edit over the tab's diff");
+        d.set_review_base(Some(ropey::Rope::from_str("x\n")));
+        assert_eq!(Changes::of(d), Changes::Base, "a review's or `:diff`'s over it");
+    }
+
+    /// A frame at 160×24 as the terminal shows it — its cells' attributes too (an italic name).
+    fn frame_cells(ed: &mut Editor) -> vt100::Parser {
+        let mut bytes = Vec::new();
+        crate::term::render(ed, &mut bytes, 160, 24).unwrap();
+        let mut parser = vt100::Parser::new(24, 160, 0);
+        parser.process(&bytes);
+        parser
+    }
+
+    /// Whether `name`'s first letter on row `y` of the frame is drawn in italic (None: not on that row).
+    fn italic_on(p: &vt100::Parser, y: u16, name: &str, nth: usize) -> Option<bool> {
+        let row = p.screen().rows(0, 160).nth(y as usize)?;
+        let at = row.match_indices(name).nth(nth)?.0;
+        let x = row[..at].chars().count() as u16;
+        Some(p.screen().cell(y, x)?.italic())
+    }
+
+    /// The user's decision (2026-10-22): the files the git tab passes over go in one preview slot, as VS Code's —
+    /// passing three leaves one preview and no other buffer, its name in italic; `esc code` into it and a move keep
+    /// it a preview; an edit makes it a buffer of its own, and so does `enter` on its row (upright in the tabs).
+    #[test]
+    fn files_passed_over_in_the_git_tab_share_one_preview() {
+        let repo = git_repo("preview", &[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+        for f in ["a", "b", "c"] {
+            std::fs::write(repo.join(format!("{f}.txt")), format!("{}\n", f.to_uppercase())).unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let files = |ed: &Editor| -> Vec<(String, bool)> {
+            let name =
+                |d: &crate::document::Document| d.path.as_ref()?.file_name()?.to_str().map(str::to_string);
+            ed.buffers().into_iter().filter_map(|i| Some((name(&ed.docs[i])?, ed.docs[i].preview))).collect()
+        };
+        // b, c, b, a: one preview, the last
+        feed_events(&mut ed, "jjkk");
+        assert_eq!(files(&ed), [("a.txt".to_string(), true)], "one preview, no other buffer");
+        let p = frame_cells(&mut ed);
+        assert_eq!(italic_on(&p, 0, "a.txt", 0), Some(true), "its name in italic in the path bar");
+        // `esc code` into it, a move: still a preview
+        feed_events(&mut ed, "<esc>w");
+        assert!(ed.doc().preview, "looking at it keeps it a preview");
+        // An edit: a buffer of its own
+        feed_events(&mut ed, "ix<esc>");
+        assert!(!ed.doc().preview, "edited: its own");
+        // Back in the tab, onto b: a preview beside it, a.txt kept and upright, b in italic in the tabs
+        feed_events(&mut ed, " gj");
+        assert_eq!(files(&ed), [("a.txt".to_string(), false), ("b.txt".to_string(), true)]);
+        let p = frame_cells(&mut ed);
+        assert_eq!(italic_on(&p, 0, "a.txt", 0), Some(false), "the kept one upright in the tabs");
+        assert_eq!(italic_on(&p, 0, "b.txt", 1), Some(true), "the preview in italic in the tabs");
+        // `enter` on its row: its own
+        feed_events(&mut ed, "<ret>");
+        assert!(!ed.doc().preview && ed.doc().path.as_deref() == Some(repo.join("b.txt").as_path()));
+        let p = frame_cells(&mut ed);
+        assert_eq!(italic_on(&p, 0, "b.txt", 0), Some(false), "upright once it's yours");
+        // (b's hunk row, then c: the third a preview, the two kept stay)
+        feed_events(&mut ed, "jj");
+        let names: Vec<(String, bool)> = files(&ed);
+        assert_eq!(names.iter().filter(|f| f.1).count(), 1, "{names:?}");
+        assert!(names.contains(&("c.txt".to_string(), true)) && names.len() == 3, "{names:?}");
+        // `space b`: the preview last, said so
+        feed_events(&mut ed, " b");
+        let p = ed.picker.as_ref().expect("space b");
+        let last = p.items().last().unwrap();
+        assert!(last.label.ends_with("c.txt") && last.hint == "preview", "{:?}", last.label);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// …and with the mouse: a click on a file's row shows it as the preview, the tab taking the keys; the same row
+    /// again soon after — a double-click — makes it a buffer of its own.
+    #[test]
+    fn a_click_previews_a_git_tab_file_and_a_double_click_keeps_it() {
+        use crate::event::{Mouse, MouseKind};
+        let repo = git_repo("preview-click", &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        std::fs::write(repo.join("b.txt"), "B\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed_events(&mut ed, " g<esc>");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let p = frame_cells(&mut ed);
+        let y = p.screen().rows(0, 160).position(|r| r.contains("b.txt")).expect("its row") as u16;
+        let click = |ed: &mut Editor| {
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }))
+        };
+        click(&mut ed);
+        assert!(
+            ed.doc().preview && ed.session.is_at(At::Side),
+            "shown as the preview, the tab with the keys"
+        );
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("b.txt").as_path()));
+        click(&mut ed);
+        assert!(!ed.doc().preview, "a double-click: its own");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The review rail the same: the files the review shows (`m`: viewed, the next) share one preview; `enter` on a
+    /// row keeps that file; a double-click on a row too.
+    #[test]
+    fn files_the_review_shows_share_one_preview_until_one_is_kept() {
+        use crate::event::{Mouse, MouseKind};
+        let dir = git_repo("preview-rail", &[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+        for f in ["a", "b", "c"] {
+            std::fs::write(dir.join(format!("{f}.txt")), format!("{}\n", f.to_uppercase())).unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.git_auto = true;
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().own_base());
+        ed.session.at = At::Rail;
+        let shown = |ed: &Editor| {
+            ed.buffers()
+                .into_iter()
+                .filter(|&i| ed.docs[i].path.is_some())
+                .map(|i| ed.docs[i].preview)
+                .collect::<Vec<_>>()
+        };
+        // (each file's diff there before its `m`: a mark made before it waits on that buffer, which is kept then)
+        for _ in 0..3 {
+            settle_until(&mut ed, |ed| ed.doc().own_base() && ed.doc().git_version == ed.doc().version());
+            feed_events(&mut ed, "m");
+        }
+        assert_eq!(shown(&ed), [true], "three files shown, one buffer: the preview");
+        feed_events(&mut ed, "<ret>");
+        assert_eq!(shown(&ed), [false], "enter: its own");
+        // A click on another row: the preview beside it; the same row again: kept
+        ed.session.at = At::Rail;
+        let p = frame_cells(&mut ed);
+        let kept = ed.doc().path.clone().unwrap();
+        let other = ["a.txt", "b.txt", "c.txt"].into_iter().find(|f| dir.join(f) != kept).unwrap();
+        let y = p.screen().rows(0, 160).position(|r| r.contains(other)).expect("its row") as u16;
+        let click = |ed: &mut Editor| {
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }))
+        };
+        click(&mut ed);
+        assert_eq!(shown(&ed), [false, true], "a click: the preview");
+        click(&mut ed);
+        assert_eq!(shown(&ed), [false, false], "a double-click: kept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The user (2026-10-22): the rail's `j`/`k` preview, as the git tab's moves — moving onto a file shows it, the
+    /// rail keeping the keys (a binary row's buffer too). The reviewer: `enter` on a binary row keeps nothing — its
+    /// buffer comes from a worker, the review's own — never the preview that was in front meanwhile.
+    #[test]
+    fn the_rails_moves_preview_and_enter_on_a_binary_row_keeps_nothing_else() {
+        let dir = git_repo("preview-rail-jk", &[("a.txt", "a\n"), ("b.bin", "\0a"), ("c.txt", "c\n")]);
+        std::fs::write(dir.join("a.txt"), "A\n").unwrap();
+        std::fs::write(dir.join("b.bin"), "\0b").unwrap();
+        std::fs::write(dir.join("c.txt"), "C\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = dir.clone();
+        ed.git_auto = true;
+        crate::codereview::start_in(&mut ed, dir.clone(), None);
+        settle_until(&mut ed, |ed| ed.session.code_review.is_some() && ed.doc().own_base());
+        assert_eq!(ed.doc().path.as_deref(), Some(dir.join("a.txt").as_path()), "on its first file");
+        crate::codereview::rail_focus(&mut ed);
+        assert!(ed.session.is_at(At::Rail));
+        let binary = |ed: &Editor| ed.doc().title.as_deref() == Some("b.bin · binary");
+        let on = |ed: &Editor, f: &str| ed.doc().path.as_deref() == Some(dir.join(f).as_path());
+        // `j` onto the binary row: its buffer in front once read, the rail keeping the keys
+        feed_events(&mut ed, "j");
+        settle_until(&mut ed, binary);
+        assert!(ed.session.is_at(At::Rail), "the rail keeps the keys");
+        // `j` onto c.txt: the preview, a.txt's place taken
+        feed_events(&mut ed, "j");
+        assert!(on(&ed, "c.txt") && ed.doc().preview && ed.session.is_at(At::Rail));
+        assert!(
+            !ed.docs.iter().any(|d| d.path.as_deref() == Some(dir.join("a.txt").as_path())),
+            "one preview"
+        );
+        // `k` back onto the binary row, `enter` before its buffer comes: c.txt, in front meanwhile, stays a preview
+        feed_events(&mut ed, "k<ret>");
+        assert!(on(&ed, "c.txt") && ed.doc().preview, "not kept: the binary row's enter keeps nothing");
+        settle_until(&mut ed, binary);
+        let c = ed.docs.iter().find(|d| d.path.as_deref() == Some(dir.join("c.txt").as_path())).unwrap();
+        assert!(c.preview, "still the preview once the binary's buffer came");
+        // A double-click on the binary row keeps nothing either: c.txt again in front, then the row clicked twice
+        crate::codereview::rail_focus(&mut ed);
+        feed_events(&mut ed, "j");
+        assert!(on(&ed, "c.txt") && ed.doc().preview);
+        // (its row where the rail drew it — the buffer tabs name `b.bin · binary` too)
+        frame_cells(&mut ed);
+        let r = ed.session.code_review.as_ref().unwrap();
+        let b = r.files.iter().position(|f| f.rel == "b.bin").unwrap();
+        let y = ed.screen.review_rail.borrow().iter().find(|r| r.1 == b).expect("its row").0 as u16;
+        for _ in 0..2 {
+            use crate::event::{Mouse, MouseKind};
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }));
+        }
+        assert!(ed.toasts.iter().any(|t| t.step == Some("review-binary")), "the click reached the row: read");
+        assert!(on(&ed, "c.txt") && ed.doc().preview, "a double-click on the binary row keeps nothing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The user (2026-10-22): `space j` lists a replaced preview's jumps too, by its path, as `C-o` reaches them —
+    /// picking one opens it again as the preview.
+    #[test]
+    fn the_jump_picker_lists_a_replaced_previews_jumps_and_opens_one_as_the_preview() {
+        let repo = git_repo("preview-jump-picker", &[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+        for f in ["a", "b", "c"] {
+            std::fs::write(repo.join(format!("{f}.txt")), format!("{}\n", f.to_uppercase())).unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        // b, then c: b's buffer closed, its jump parked
+        feed_events(&mut ed, "jj<esc>");
+        assert!(!ed.docs.iter().any(|d| d.path.as_deref() == Some(repo.join("b.txt").as_path())));
+        feed_events(&mut ed, " j");
+        let p = ed.picker.as_ref().expect("space j");
+        let b = p.items().iter().find(|i| i.label.starts_with("b.txt:")).expect("b.txt listed");
+        assert!(matches!(b.action, crate::picker::Action::JumpParked { .. }), "by its path: {:?}", b.label);
+        assert_eq!(b.hint, "B", "its line's text as it was parked");
+        feed_events(&mut ed, "b.txt<ret>");
+        assert!(ed.picker.is_none());
+        assert_eq!(ed.doc().path.as_deref(), Some(repo.join("b.txt").as_path()), "picked: b.txt again");
+        assert!(ed.doc().preview, "as the preview");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The reviewer (step 5): a replaced preview's spots are its session's — a jump in another session (its prune)
+    /// leaves them, and the marks under the first session's jumps into open files too; back there `C-o` walks them.
+    /// A `C-o` that can't go says so.
+    #[test]
+    fn a_sessions_parked_jumps_outlive_another_sessions_jumps() {
+        let repo = git_repo("preview-sessions", &[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+        for f in ["a", "b", "c"] {
+            std::fs::write(repo.join(format!("{f}.txt")), format!("{}\n", f.to_uppercase())).unwrap();
+        }
+        let other = crate::scratch::Scratch::new("preview-sessions-b");
+        let other = std::fs::canonicalize(&other).unwrap();
+        std::fs::write(other.join("x.txt"), "x\ny\n").unwrap();
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        ed.open(&repo.join("a.txt")).unwrap();
+        let on = |ed: &Editor, f: &str| ed.doc().path.as_deref() == Some(repo.join(f).as_path());
+        // In the first session: from a.txt, the tab passes b and c — b replaced, parked
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        feed_events(&mut ed, "jj<esc>");
+        assert!(on(&ed, "c.txt") && ed.session.jumps_parked.len() == 1);
+        let first = ed.session.id;
+        // Another session: a file, a jump there (its list pruned)
+        let id = ed.session_add(other.clone());
+        assert!(ed.session_switch(id));
+        ed.open(&other.join("x.txt")).unwrap();
+        feed_events(&mut ed, "jgg");
+        ed.push_jump();
+        // Back: `C-o` to b, as the preview, then to a.txt where it was
+        assert!(ed.session_switch(first));
+        feed_events(&mut ed, "<C-o>");
+        assert!(on(&ed, "b.txt") && ed.doc().preview, "b.txt again: its parked spot kept");
+        feed_events(&mut ed, "<C-o>");
+        assert!(on(&ed, "a.txt"), "a.txt: its mark kept through the other session's jumps");
+        // A jump whose file is gone with nothing kept of it: said, not silent
+        feed_events(&mut ed, " gjj<esc>");
+        ed.session.jumps_parked.clear();
+        ed.status = None;
+        feed_events(&mut ed, "<C-o>");
+        let said = ed.toasts.iter().any(|t| t.text.contains("was closed"));
+        assert!(said, "{:?}", ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The reviewer (step 5): a preview replaced keeps its place in the jump lists — `C-o` walks back through the files
+    /// the git tab showed, each opened again as the preview, `C-i` forward again; one another pane shows isn't
+    /// closed when the next comes — it's that pane's, a buffer of its own, said.
+    #[test]
+    fn a_replaced_preview_keeps_its_jumps_and_one_another_pane_shows_stays() {
+        let repo = git_repo("preview-jumps", &[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+        for f in ["a", "b", "c"] {
+            std::fs::write(repo.join(format!("{f}.txt")), format!("{}\n", f.to_uppercase())).unwrap();
+        }
+        let mut ed = editor("");
+        ed.session.root = repo.clone();
+        ed.git_auto = true;
+        feed_events(&mut ed, " g");
+        settle_until(&mut ed, |ed| ed.session.git_status.is_some());
+        let on = |ed: &Editor, f: &str| ed.doc().path.as_deref() == Some(repo.join(f).as_path());
+        let open = |ed: &Editor| ed.docs.iter().filter(|d| d.path.is_some()).count();
+        // b, then c: b's buffer closed, its place in the jump list kept
+        feed_events(&mut ed, "jj<esc>");
+        assert!(on(&ed, "c.txt") && ed.doc().preview && open(&ed) == 1);
+        feed_events(&mut ed, "<C-o>");
+        assert!(on(&ed, "b.txt") && ed.doc().preview, "C-o: b.txt again, as the preview");
+        assert_eq!(open(&ed), 1, "c.txt's place taken in turn");
+        ed.jump_forward(1);
+        assert!(on(&ed, "c.txt") && ed.doc().preview, "C-i: c.txt again");
+        // Another pane shows c.txt: the tab moving on leaves it open, its own, said
+        feed_events(&mut ed, "<C-w>v");
+        feed_events(&mut ed, " gk");
+        assert!(on(&ed, "b.txt") && ed.doc().preview);
+        let c = ed.docs.iter().find(|d| d.path.as_deref() == Some(repo.join("c.txt").as_path()));
+        assert!(c.is_some_and(|d| !d.preview), "c.txt stays, a buffer of its own");
+        let c = c.unwrap().id;
+        assert!(ed.session.views.iter().any(|v| v.doc == c && v.id != ed.session.focus), "the other pane's");
+        let said = ed.toasts.iter().any(|t| t.text.contains("c.txt stays open") && t.text.contains("pane#"));
+        assert!(said, "{:?}", ed.toasts.iter().map(|t| &t.text).collect::<Vec<_>>());
         std::fs::remove_dir_all(&repo).ok();
     }
 

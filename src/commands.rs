@@ -2323,12 +2323,12 @@ fn workspace_symbol_picker(cx: &mut Context) {
 }
 
 fn buffer_picker(cx: &mut Context) {
-    // (the front session's)
-    let items = cx
-        .editor
-        .buffers()
+    // (the front session's — the preview last, said so: `Document::preview`)
+    let mut docs: Vec<&crate::document::Document> =
+        cx.editor.buffers().into_iter().map(|i| &cx.editor.docs[i]).collect();
+    crate::sorting::by_key(&mut docs, |d| d.preview);
+    let items = docs
         .into_iter()
-        .map(|i| &cx.editor.docs[i])
         .map(|d| crate::picker::Item {
             label: format!(
                 "{}{}",
@@ -2336,7 +2336,7 @@ fn buffer_picker(cx: &mut Context) {
                 if d.is_modified() { " [+]" } else { "" }
             ),
             action: crate::picker::Action::Buffer(d.id),
-            hint: String::new(),
+            hint: if d.preview { "preview".into() } else { String::new() },
             glyph: None,
         })
         .collect();

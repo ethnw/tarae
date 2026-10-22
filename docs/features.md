@@ -369,7 +369,18 @@ configs carry over as they are.
   ([screenshot](screenshots/ux-git.png))
 - **Git** `space g` — the side panel's git tab, with the keys, like lazygit beside your code: what's staged and what
   isn't, each a tree of files with status letters in the gutter's colors and `+a −r`, the branch and how far it is
-  from its upstream (`main ↑1`); it catches up as soon as Claude edits a file or a command it ran ends. Enter (or `l`) on a changed file opens it to its **hunks and merge conflicts**, one
+  from its upstream (`main ↑1`); it catches up as soon as Claude edits a file or a command it ran ends. Moving onto
+  a file (or a click on it) shows it in the editor, at its first change, as a **preview**: one slot the next file you
+  pass over takes, so the buffer list doesn't grow — its name in italic in the path bar and the buffer tabs, last in
+  `space b` with a faint `preview`. It becomes a buffer of its own when you edit it, press `enter` on its row or
+  double-click it; moving, searching or `esc` into it leave it a preview, and closing the tab leaves it as it is.
+  The review's rail the same: `j`/`k` onto a file show it as the preview, the rail keeping the keys; `enter` or a
+  double-click keeps one. `C-o` goes back through the files shown so, each opened again as the preview; a preview
+  another pane shows stays open when the next comes (a buffer of its own then, said). A preview isn't
+  reopened at the next start (`:restart` keeps it, a preview still). While the tab has the keys, the file in the editor shows its
+  changes against the index **inline** — the removed lines rows of their own on the red wash, the changed ones on the
+  green, the path bar saying `against index` — and once the keys leave the tab the gutter is the index's again. A
+  file under `:diff` or in a review keeps that base: the tab never touches it. Enter (or `l`) on a changed file opens it to its **hunks and merge conflicts**, one
   row each (where it starts, `+a −r`); moving onto one shows it in the editor. On a hunk `s` stages it and `d` puts
   the index's lines back (an undoable edit); on a conflict `o` / `t` / `a` keep ours / theirs / both. On files,
   folders, or a whole section: `s` / `u` stage / unstage — `S` / `U` stage / unstage everything from any row —, `d` discards (press it twice — an open file's old text is
@@ -377,7 +388,7 @@ configs carry over as they are.
   the message is written in a buffer (`:w` commits it, `:q` cancels), `A` amends; `p` pulls (fast-forward only),
   `P` pushes (setting the upstream the first time), `f` fetches — none ever waits on a password prompt. `B`
   switches branch, `L` is the log (each commit's diff as the preview), `z` stashes, `Z` takes it back, `b` flips
-  blame, `?` lists every key. From the code, `space g` lands on the row for what's under the cursor, and the next
+  blame, `r` reads the status again, `?` lists every key. From the code, `space g` lands on the row for what's under the cursor, and the next
   key acts there: `space g s` stages the hunk you're in, `space g t` keeps theirs — then the code has the keys again.
   Moving is yours from the first key: `k` and `g` reach a section's header (`Changes`, `Staged`) even while the
   file's hunks are still being read, and `s` there stages the whole section.

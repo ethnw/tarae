@@ -358,7 +358,9 @@ impl Editor {
         }
         root.insert("seq".into(), json!(seq));
         if let Some(cwd) = folder.as_deref() {
-            let files: Vec<&str> = self.docs.iter().filter_map(|d| d.path.as_ref()?.to_str()).collect();
+            // (never a preview: the tab's or the rail's look at a file, not one you opened)
+            let files: Vec<&str> =
+                self.docs.iter().filter(|d| !d.preview).filter_map(|d| d.path.as_ref()?.to_str()).collect();
             let folders = root.entry("folders").or_insert_with(|| json!({}));
             if let Some(map) = folders.as_object_mut() {
                 if !files.is_empty() {
@@ -446,6 +448,24 @@ mod tests {
         // An earlier build's mark of the same line: its FNV key, a number
         let old = State::from_json(json!({ "looked": { "/proj": [12387807294418380025u64, "zz"] } }));
         assert!(old.looked(root).is_empty(), "an old mark is no look");
+    }
+
+    /// The user's decision (2026-10-22): a preview (the git tab's or the rail's look at a file) is never restored.
+    #[test]
+    fn a_preview_is_never_restored() {
+        let scratch = crate::scratch::Scratch::new("restore-preview");
+        let dir = std::fs::canonicalize(&scratch).unwrap();
+        for f in ["kept.txt", "looked.txt"] {
+            std::fs::write(dir.join(f), "x\n").unwrap();
+        }
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = dir.clone();
+        ed.open(&dir.join("kept.txt")).unwrap();
+        ed.open_preview(&dir.join("looked.txt")).unwrap();
+        assert!(ed.doc().preview);
+        ed.restore_record();
+        let (files, _) = ed.restore.files(&dir).expect("recorded");
+        assert_eq!(files, [dir.join("kept.txt")], "the preview left out");
     }
 
     /// Wave 3, gap 1: the notes of a session behind (a review's drafts too) were saved only for the front's

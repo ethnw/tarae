@@ -439,7 +439,8 @@ main that has what it waits for, and the user says go:
   (`3b00bb04`): groups as one model; step 3 (`66a80e78`): the task's places and a preflight's steps as linked groups, the
   one output scrolled to the place's line or the step's heading; step 3b (`41aa64ec`): a group's members
   named in the line over their own columns, the one with the keys lit, side by side or stacked when narrow; step 4
-  (under way): `:procs` as a group, its detail what the selected process is), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  (`4ede51f9`): `:procs` as a group, its detail what the selected process is; step 5 (under way): the git tab's
+  selection drives the code, a file's changes inline against the index while the tab has the keys), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 an overlap between workspaces said the moment it
   would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the merged view — everyone works in their own workspace and tarae shows the merge, each change in its

@@ -139,6 +139,8 @@ pub struct CodeReview {
     /// The buffer of the binary file shown last (`show_binary`) — that file is in hand while it's in front
     /// (`in_hand`).
     binary_shown: Option<BinaryView>,
+    /// The file shown last (`show_at`): a binary file's read that lands after another file was shown is dropped.
+    shows: Option<usize>,
     /// A turn's review: how many other files differ from HEAD (changed before the turn, or by you) and the
     /// key that reviews them all (`space v v`) — the rail says so under its head (frictions 13: a turn's
     /// review read as the whole change).
@@ -207,6 +209,7 @@ impl CodeReview {
             occurrences: Default::default(),
             rules: Default::default(),
             binary_shown: None,
+            shows: None,
             beyond: None,
             moved: Default::default(),
             drawn: Default::default(),
@@ -1620,7 +1623,7 @@ impl CodeReview {
     }
 
     /// Whether the file at `path` has a mark waiting for its base.
-    fn waits(&self, path: &Path) -> bool {
+    pub(crate) fn waits(&self, path: &Path) -> bool {
         self.pending.iter().any(|(p, _)| p == path)
     }
 
@@ -2395,6 +2398,7 @@ fn open_at(
         occurrences: Default::default(),
         rules: crate::risk::Rules::of(&ed.config),
         binary_shown: None,
+        shows: None,
         beyond: None,
         moved,
         drawn: Default::default(),
@@ -2429,7 +2433,7 @@ fn open_at(
             }
             held_go(ed, card, &left);
         }
-        None => show(ed, first, false),
+        None => _ = show(ed, first, false),
     }
     // (the session's last reviewer run: what changed since it read, for the rail's `read … at` row)
     crate::reviewer::since_sync(ed);
@@ -3786,15 +3790,19 @@ fn end(ed: &mut Editor) {
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-/// Opens file `i` of the review with its base; `at_end` = land on its last change (walking back).
-pub fn show(ed: &mut Editor, i: usize, at_end: bool) {
-    show_at(ed, i, if at_end { Land::Last } else { Land::First });
+/// Opens file `i` of the review with its base; `at_end` = land on its last change (walking back). The buffer it
+/// opened — None for a binary file (its buffer comes from a worker, the review's own) or one that can't be opened:
+/// what `enter` keeps is this, never whatever is in front.
+pub fn show(ed: &mut Editor, i: usize, at_end: bool) -> Option<DocId> {
+    show_at(ed, i, if at_end { Land::Last } else { Land::First })
 }
 
 /// `show`, landing on `at`.
-fn show_at(ed: &mut Editor, i: usize, at: Land) {
-    let Some(r) = &ed.session.code_review else { return };
-    let Some(f) = r.files.get(i).cloned() else { return };
+fn show_at(ed: &mut Editor, i: usize, at: Land) -> Option<DocId> {
+    let r = ed.session.code_review.as_mut()?;
+    r.shows = Some(i);
+    let r = &*r;
+    let f = r.files.get(i).cloned()?;
     let from = match &r.base {
         Base::Turn { at, .. } => From::Text(
             ed.session
@@ -3808,7 +3816,8 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
     };
     // A binary file has no lines: a buffer says what it is — its size and blob, its bytes (`show_binary`)
     if f.binary {
-        return show_binary(ed, i, f);
+        show_binary(ed, i, f);
+        return None;
     }
     ed.push_jump();
     let id = if f.gone {
@@ -3822,9 +3831,11 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
             None => ed.open_virtual(&title, ""),
         }
     } else {
-        // (one not open yet: no grammar or server offered for it while the review reads it — R7)
-        if let Err(e) = ed.open_for_review(&f.path) {
-            return ed.set_error(format!("{e:#}"));
+        // (one not open yet: no grammar or server offered for it while the review reads it — R7; in the session's
+        // preview slot, the next file shown taking its place — `enter` on its row keeps it)
+        if let Err(e) = ed.open_preview(&f.path) {
+            ed.set_error(format!("{e:#}"));
+            return None;
         }
         ed.doc().id
     };
@@ -3835,10 +3846,12 @@ fn show_at(ed: &mut Editor, i: usize, at: Land) {
         r.land = Some((id, at));
     }
     // Seen before in this review: its base is there already — land now (the diff keeps itself current)
-    if ed.docs.iter().any(|d| d.id == id && d.review_base.is_some() && d.diff_of.is_none()) {
-        return land(ed);
+    if ed.docs.iter().any(|d| d.id == id && d.own_base() && d.diff_of.is_none()) {
+        land(ed);
+        return Some(id);
     }
     load_base(ed, id, from, f);
+    Some(id)
 }
 
 /// The buffer of a binary file of the review (`show_binary`): what it is — its size and blob (what its grade's
@@ -3948,8 +3961,8 @@ fn show_binary(ed: &mut Editor, i: usize, f: File) {
         BinaryRead { blob, why, bytes, was, mode }
     };
     ed.step(jobs, "review-binary", what, work, move |ed, read| {
-        // (the same review, still open)
-        if ed.session.code_review.as_ref().is_none_or(|r| r.started != started) {
+        // (the same review, still open — and no other file shown since: a read landing late doesn't take the front)
+        if ed.session.code_review.as_ref().is_none_or(|r| r.started != started || r.shows != Some(i)) {
             return;
         }
         binary_open(ed, i, &f, read);
@@ -3997,7 +4010,8 @@ fn binary_open(ed: &mut Editor, i: usize, f: &File, read: BinaryRead) {
     if let Some(r) = ed.session.code_review.as_mut() {
         r.binary_shown = Some(BinaryView { file: i, doc, version, head, keys, said, stale });
     }
-    ed.session.leave(At::Rail);
+    // (where the keys are stays as the show left it: the rail's `j` onto a binary row keeps them, its `enter` gave
+    // them to the code already)
     if stale {
         ed.set_warning(format!(
             "{} isn't what the review graded — changed since it opened: a new review (space v v) grades it again",
@@ -4755,21 +4769,30 @@ pub fn rail_key(ed: &mut Editor, key: Key) -> bool {
     let at = order.iter().position(|&i| i == r.selected).unwrap_or(0);
     let pick = |k: usize| order.get(k.min(order.len().saturating_sub(1))).copied();
     if let Some(m) = crate::key::list_move(key, rows) {
-        // (`C-e`/`C-y`: the rail's view — its rows, folders too — the file in hand staying unless it would leave
-        // it, then the nearest file in sight)
-        if let crate::key::ListMove::Scroll(by) = m {
-            r.scroll_keeping(by);
-            return true;
+        let before = r.selected;
+        match m {
+            // (`C-e`/`C-y`: the rail's view — its rows, folders too — the file in hand staying unless it would
+            // leave it, then the nearest file in sight)
+            crate::key::ListMove::Scroll(by) => r.scroll_keeping(by),
+            m => r.selected = pick(m.from(at, order.len())).unwrap_or(r.selected),
         }
-        r.selected = pick(m.from(at, order.len())).unwrap_or(r.selected);
+        // (onto another file: shown in the code as the preview, the rail keeping the keys — as the git tab's moves;
+        // `enter` or a double-click keeps it)
+        let now = r.selected;
+        if now != before {
+            show(ed, now, false);
+        }
         return true;
     }
     match (key.code, key.ctrl) {
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
+        // (opened: a buffer of its own, not the preview the review's walk shows)
         (Code::Enter | Code::Char('l') | Code::Right, false) => {
             let i = r.selected;
             ed.session.at = At::Code;
-            show(ed, i, false);
+            if let Some(id) = show(ed, i, false) {
+                ed.preview_keep(id);
+            }
         }
         // (as every list panel's `q`: it closes — the review ends, asked first when files are unviewed)
         (Code::Char('q'), false) => close_asked(ed),
@@ -5469,6 +5492,33 @@ mod tests {
         ed.goto_line(10);
         feed(&mut ed, "<space>vh");
         assert_eq!(left(&ed), 0, "{}", status(&ed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A binary file's read that lands after another file was shown doesn't take the front (seen with the preview
+    /// slot: a file shown again reloads its base, and the late binary buffer came in front of it).
+    #[test]
+    fn a_binary_read_landing_after_another_file_was_shown_stays_out_of_sight() {
+        let files = [("a.txt", "a\n", "a2\n"), ("b.bin", "\0a", "\0b"), ("c.txt", "c\n", "c2\n")];
+        let (mut ed, dir) = reviewing("binary-late", &files);
+        show(&mut ed, 1, false);
+        show(&mut ed, 2, false);
+        let c = dir.join("c.txt");
+        settle_until(&mut ed, |ed| {
+            landed(ed)
+                && !ed.toasts.iter().any(|t| t.step == Some("review-binary"))
+                && ed.doc().path.as_ref() == Some(&c)
+        });
+        // (and stays: nothing else comes)
+        while let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(300)).into_iter().next()
+        {
+            ed.handle_event(ev);
+        }
+        assert_eq!(ed.doc().path.as_ref(), Some(&c), "c.txt in front, not b.bin's buffer");
+        assert!(
+            !ed.docs.iter().any(|d| d.title.as_deref() == Some("b.bin · binary")),
+            "no binary buffer made"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6695,10 +6745,12 @@ mod tests {
         ed.session.code_review.as_ref().map_or(0, |r| r.high_unseen(ed).len())
     }
 
-    /// `rel`'s document closed — the file no longer open.
+    /// `rel`'s document closed — the file no longer open (closed here, or by the preview slot already: the next
+    /// file the review showed took its place).
     fn closed(ed: &mut Editor, dir: &Path, rel: &str) {
-        let id = ed.docs.iter().find(|d| d.path.as_deref() == Some(&dir.join(rel))).map(|d| d.id).unwrap();
-        ed.close_doc(id);
+        if let Some(id) = ed.docs.iter().find(|d| d.path.as_deref() == Some(&dir.join(rel))).map(|d| d.id) {
+            ed.close_doc(id);
+        }
         assert!(ed.docs.iter().all(|d| d.path.as_deref() != Some(&dir.join(rel))), "{rel} still open");
     }
 

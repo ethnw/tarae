@@ -259,8 +259,7 @@ impl Editor {
         // In a code review the base is the review's (codereview.rs), not the index — also before it lands
         let reviewed =
             move |ed: &Editor| ed.session.code_review.as_ref().is_some_and(|r| r.docs.contains(&id));
-        let Some(path) =
-            self.docs.iter().find(|d| d.id == id && d.review_base.is_none()).and_then(|d| d.path.clone())
+        let Some(path) = self.docs.iter().find(|d| d.id == id && !d.own_base()).and_then(|d| d.path.clone())
         else {
             return;
         };
@@ -283,7 +282,8 @@ impl Editor {
                 if reviewed(ed) {
                     return;
                 }
-                if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id && d.review_base.is_none())
+                // (the git tab's inline diff follows the index: made again from this base — `git_inline_sync`)
+                if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id && !d.own_base())
                     && d.git_base.as_deref() != base.as_deref()
                 {
                     d.git_base = base;

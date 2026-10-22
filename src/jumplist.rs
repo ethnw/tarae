@@ -15,6 +15,17 @@ pub struct Jump {
     pub mark: u64,
 }
 
+/// A preview the next one took the place of (`Editor::open_preview`): the spots the jump lists hold in it, kept by its
+/// path — `C-o` back to one opens the file again, as the preview, and its entries point at that buffer
+/// (`Session::jumps_parked`, `unpark`).
+#[derive(Clone, Debug)]
+pub struct Parked {
+    pub path: std::path::PathBuf,
+    pub marks: Vec<(u64, crate::selection::Selection)>,
+    /// Each mark's line and that line's text as it was parked — what `space j` lists for it (`jumplist_picker`).
+    pub lines: Vec<(u64, usize, String)>,
+}
+
 /// `current` = where `C-o` steps back from; `len` means "past the newest entry" (not travelling).
 #[derive(Clone, Debug, Default)]
 pub struct JumpList {
@@ -68,6 +79,16 @@ impl JumpList {
         self.jumps.iter()
     }
 
+    /// Entries of `old` become `new`'s, each at the mark `to` gives it — one it gives none goes (as `remove_doc`).
+    pub fn rebind(&mut self, old: DocId, new: DocId, mut to: impl FnMut(u64) -> Option<u64>) {
+        for j in self.jumps.iter_mut().filter(|j| j.doc == old) {
+            if let Some(mark) = to(j.mark) {
+                *j = Jump { doc: new, mark };
+            }
+        }
+        self.remove_doc(old);
+    }
+
     /// A closed document's entries go; the current point stays on the same entry.
     pub fn remove_doc(&mut self, doc: DocId) {
         let before = self.jumps.iter().take(self.current).filter(|j| j.doc == doc).count();
@@ -110,10 +131,64 @@ impl Editor {
         self.prune_marks();
     }
 
-    /// Documents keep only the marks some pane's list (or a note) still points at.
+    /// Preview `id`, about to be closed for the next one: its spots the jump lists hold, kept by its path.
+    pub(crate) fn park_jumps(&mut self, id: DocId) {
+        let Some(d) = self.docs.iter().find(|d| d.id == id) else { return };
+        let Some(path) = d.path.clone() else { return };
+        let mut marks: Vec<(u64, crate::selection::Selection)> = Vec::new();
+        let mut lines = Vec::new();
+        for j in self.session.views.iter().flat_map(|v| v.jumps.iter()).filter(|j| j.doc == id) {
+            if !marks.iter().any(|m| m.0 == j.mark)
+                && let Some(sel) = d.mark(j.mark)
+            {
+                let line = d.text.byte_to_line(sel.primary().cursor(&d.text));
+                let text: String = d.text.line(line).chars().take(200).collect();
+                lines.push((j.mark, line, text.trim().to_string()));
+                marks.push((j.mark, sel));
+            }
+        }
+        if !marks.is_empty() {
+            self.session.jumps_parked.insert(id, Parked { path, marks, lines });
+        }
+    }
+
+    /// Jump `j` into a preview closed since (`park_jumps`): its file opened again, as the preview, and every entry
+    /// of it pointing at that buffer — the jump as it is now. None: nothing kept of it, or the file is gone (its
+    /// entries go, said).
+    fn unpark(&mut self, j: Jump) -> Option<Jump> {
+        let p = self.session.jumps_parked.remove(&j.doc)?;
+        if let Err(e) = self.open_preview_travel(&p.path) {
+            for v in self.session.views.iter_mut() {
+                v.jumps.remove_doc(j.doc);
+            }
+            self.set_status(format!("that jump's file can't be opened again: {e:#}"));
+            return None;
+        }
+        let new = self.doc().id;
+        let d = self.doc_mut();
+        let map: Vec<(u64, u64)> = p.marks.into_iter().map(|(m, sel)| (m, d.add_mark(sel))).collect();
+        let to = |m: u64| map.iter().find(|x| x.0 == m).map(|x| x.1);
+        for v in self.session.views.iter_mut() {
+            v.jumps.rebind(j.doc, new, to);
+        }
+        let mark = to(j.mark);
+        if mark.is_none() {
+            self.set_status("that jump's spot wasn't kept — its file is open again, as the preview");
+        }
+        Some(Jump { doc: new, mark: mark? })
+    }
+
+    /// Documents keep only the marks some pane's list (or a note) still points at — every session's panes: a
+    /// session behind keeps its jumps (a jump in the one in front pruned them, and `C-o` there went nowhere).
     fn prune_marks(&mut self) {
-        let mut live: std::collections::HashSet<Jump> =
-            self.session.views.iter().flat_map(|v| v.jumps.iter().copied()).collect();
+        let mut live: std::collections::HashSet<Jump> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .flat_map(|l| l.views.iter().flat_map(|v| v.jumps.iter().copied()))
+            .collect();
+        // (a parked preview's spots, while one of this session's lists still names it — each session its own)
+        let front: Vec<DocId> =
+            self.session.views.iter().flat_map(|v| v.jumps.iter().map(|j| j.doc)).collect();
+        self.session.jumps_parked.retain(|id, _| front.contains(id));
         // Notes sit on marks too
         live.extend(crate::notes::marks(self).into_iter().map(|(doc, mark)| Jump { doc, mark }));
         // …and the list's items
@@ -168,9 +243,26 @@ impl Editor {
 
     fn goto_jump(&mut self, i: usize) {
         let Some(j) = self.focused_jumps().and_then(|l| l.go(i)) else { return };
-        let Some(di) = self.docs.iter().position(|d| d.id == j.doc) else { return };
-        let Some(sel) = self.docs[di].mark(j.mark) else { return };
         let old = self.doc().id;
+        // (into a preview the next one took the place of: opened again, as the preview)
+        // (one that can't go says so: a jump that does nothing in silence looks like a broken key)
+        let j = match self.docs.iter().any(|d| d.id == j.doc) {
+            true => j,
+            false if !self.session.jumps_parked.contains_key(&j.doc) => {
+                for v in self.session.views.iter_mut() {
+                    v.jumps.remove_doc(j.doc);
+                }
+                return self.set_status("that jump's file was closed — its jumps went with it");
+            }
+            false => match self.unpark(j) {
+                Some(j) => j,
+                None => return,
+            },
+        };
+        let Some(di) = self.docs.iter().position(|d| d.id == j.doc) else { return };
+        let Some(sel) = self.docs[di].mark(j.mark) else {
+            return self.set_status("that jump's spot isn't kept any more");
+        };
         self.current = di;
         self.doc_mut().set_selection(sel);
         // Switching documents here is travel, not a new jump
@@ -190,7 +282,8 @@ impl Editor {
         self.goto_jump(i);
     }
 
-    /// `space j` — this pane's jumps, newest first: `file:line` and the line's text.
+    /// `space j` — this pane's jumps, newest first: `file:line` and the line's text — a preview's the next one took
+    /// the place of too, by its path as it was parked (`C-o` reaches them; picking one opens it again as the preview).
     pub fn jumplist_picker(&mut self) {
         let Some(list) = self.focused_jumps().cloned() else { return };
         let items: Vec<crate::picker::Item> = list
@@ -198,6 +291,19 @@ impl Editor {
             .enumerate()
             .rev()
             .filter_map(|(index, j)| {
+                if let Some(p) = self.session.jumps_parked.get(&j.doc) {
+                    let (_, line, text) = p.lines.iter().find(|l| l.0 == j.mark)?;
+                    return Some(crate::picker::Item {
+                        label: format!("{}:{}", self.shown(&p.path).display(), line + 1),
+                        action: crate::picker::Action::JumpParked {
+                            index,
+                            path: p.path.clone(),
+                            line: *line,
+                        },
+                        hint: text.clone(),
+                        glyph: None,
+                    });
+                }
                 let doc = self.docs.iter().find(|d| d.id == j.doc)?;
                 let sel = doc.mark(j.mark)?;
                 let line = doc.text.byte_to_line(sel.primary().cursor(&doc.text));

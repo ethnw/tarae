@@ -4844,7 +4844,7 @@ fn review_rail_with_80_files_scrolls_and_keeps_its_counts() {
         for at_ in [order.len() - 1, 41] {
             let i = order[at_];
             match keys {
-                false => crate::codereview::show(&mut s.ed, i, false),
+                false => _ = crate::codereview::show(&mut s.ed, i, false),
                 true if at_ == order.len() - 1 => s.keys("G"),
                 true => {
                     s.keys("gg");

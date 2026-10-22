@@ -37,6 +37,13 @@ pub enum Action {
         doc: DocId,
         line: usize,
     },
+    /// …one in a preview the next one took the place of (`jumplist::Parked`): `path` at `line`, as it was parked —
+    /// picked, it's opened again as the preview (`Editor::jump_to_entry`).
+    JumpParked {
+        index: usize,
+        path: PathBuf,
+        line: usize,
+    },
     /// File `n` of the pending replace-across-files plan (replace.rs).
     ReplaceFile(usize),
     /// A folder of the file picker's tree (relative to its root) — Enter / → opens it.
@@ -1123,6 +1130,7 @@ impl Action {
                 | Action::Buffer(_)
                 | Action::ChangedFile(_)
                 | Action::Jump { .. }
+                | Action::JumpParked { .. }
         )
     }
 
@@ -1138,7 +1146,9 @@ impl Action {
     pub fn preview_target(&self) -> Option<(&Path, Option<usize>)> {
         match self {
             Action::Open(p) => Some((p, None)),
-            Action::Goto { path, line, .. } | Action::Note { path, line, .. } => Some((path, Some(*line))),
+            Action::Goto { path, line, .. }
+            | Action::Note { path, line, .. }
+            | Action::JumpParked { path, line, .. } => Some((path, Some(*line))),
             Action::Buffer(_)
             | Action::Jump { .. }
             | Action::ReplaceFile(_)

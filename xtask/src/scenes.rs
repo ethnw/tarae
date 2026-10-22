@@ -923,6 +923,36 @@ const SCENES: &[Scene] = &[
             "@1", " ", "T", "@3", "\x1c", "@1", "\x1b", "@1", ":procs", "\r", "@2", "G", "@1", "\t", "@1",
         ],
     },
+    // (panes P3 step 5: the git tab with a changed file picked — `thread.rs`, its changes inline in the code while
+    // the tab has the keys)
+    Scene {
+        name: "group-git-file",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "g", "@?thread.rs", "@1", "j", "@1", "k", "@2"],
+    },
+    // (the review's rail the same: `space v v`, the rail given the keys, `j` onto the next file — shown as the
+    // preview, the rail keeping the keys)
+    Scene {
+        name: "group-rail-preview",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "v", "v", "@?2 files", "@2", " ", "e", "@1", "j", "@2"],
+    },
+    // (…and `enter` on its row: a buffer of its own — upright in the tabs, its hunks under it)
+    Scene {
+        name: "group-git-kept",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "g", "@?thread.rs", "@1", "j", "@1", "k", "@2", "\r", "@2"],
+    },
+    // (…and `esc`: the code has the keys, the index's gutter back)
+    Scene {
+        name: "group-git-code",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "g", "@?thread.rs", "@1", "j", "@1", "k", "@2", "\x1b", "@1"],
+    },
     // (H1, Helix's picker keys: the file picker's hints, then `C-v` — the file opened beside, in a split — and `C-t`,
     // the preview put away)
     Scene {

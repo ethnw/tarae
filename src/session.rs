@@ -80,6 +80,9 @@ pub struct Session {
     /// The code's panes (the focused one's scroll is its document's top/left — synced every event), the other
     /// surfaces' panes (`pane.rs`), and the split tree that holds them all.
     pub views: Vec<View>,
+    /// Previews the next one took the place of, while one of these panes' jump lists still names them: their
+    /// spots by path (`jumplist::Parked`, `Editor::unpark`) — the session's, as its jump lists are.
+    pub jumps_parked: std::collections::HashMap<DocId, crate::jumplist::Parked>,
     pub panes: Vec<crate::pane::Pane>,
     pub split: crate::split::Split,
     /// The linked groups, one a kind (`pane::Group`): the tests' from the start — the list and the detail, laid out in
@@ -361,6 +364,7 @@ impl Session {
             branch: None,
             base: None,
             views: Vec::new(),
+            jumps_parked: Default::default(),
             panes,
             split,
             focus: view,

@@ -53,7 +53,9 @@ impl Shows {
 }
 
 /// What a linked group lists (§2.1–2.2): one model for every master–detail surface. The tests', the task's, the
-/// preflight's and `:procs`' are built (in the slot); the git tab's and the review's move onto it in P3's step 5.
+/// preflight's and `:procs`' are built (in the slot). The git tab and the review's rail drive the code as `Detail::Code`
+/// says (step 5: `Editor::git_inline_sync`, `codereview::show`) from the side column, outside `Session.groups` — they
+/// join it when a group can be docked (step 6), the side column a place like the slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GroupKind {
     Tests,

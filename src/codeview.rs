@@ -156,11 +156,13 @@ pub enum Changes {
 }
 
 impl Changes {
-    /// Where `doc`'s marks come from: a review base over a shown edit over the index.
+    /// Where `doc`'s marks come from: a review's or `:diff`'s base over a shown edit over the git tab's inline
+    /// diff (its base the index's) over the index.
     pub fn of(doc: &Document) -> Changes {
         match (&doc.review_base, &doc.shown) {
-            (Some(_), _) => Changes::Base,
-            (None, Some(_)) => Changes::Shown,
+            (Some(_), _) if doc.own_base() => Changes::Base,
+            (_, Some(_)) => Changes::Shown,
+            (Some(_), None) => Changes::Base,
             (None, None) => Changes::Index,
         }
     }

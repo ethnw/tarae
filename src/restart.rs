@@ -1095,7 +1095,10 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         .map(|d| {
             let sel = d.selection();
             let ranges: Vec<[usize; 2]> = sel.ranges().iter().map(|r| [r.anchor, r.head]).collect();
-            json!({ "path": d.path, "sel": ranges, "primary": sel.primary_index(), "top": d.top, "left": d.left })
+            // (a preview comes back one — `:restart` carries the session as it was; restore, the next start's
+            // reopening, never brings one back)
+            let (top, left, preview) = (d.top, d.left, d.preview);
+            json!({ "path": d.path, "sel": ranges, "primary": sel.primary_index(), "top": top, "left": left, "preview": preview })
         })
         .collect();
     // (the focused pane shows the current document at its scroll — `sync_focus_view`, which a session
@@ -1323,6 +1326,7 @@ fn restore_session(ed: &mut Editor, v: &Value, behind: bool, back: &mut Back) {
         }
         ids.push(opened.map(|()| {
             let doc = ed.doc_mut();
+            doc.preview = d["preview"].as_bool().unwrap_or(false);
             // (a big file still loading gets its spot from the restore file when its text is in)
             if !doc.loading {
                 let ranges: Vec<Range> = d["sel"]
@@ -2971,6 +2975,10 @@ mod tests {
         let r = ed.session.code_review.as_ref().unwrap();
         assert_eq!((&r.base, r.files.len()), (&Base::Head, 2), "in front: the uncommitted changes");
         assert_eq!(ed.doc().path.as_deref(), Some(front.join("g.txt").as_path()), "on the file it was on");
+        assert!(
+            ed.doc().preview,
+            "the review's file shown, a preview still (`:restart` carries it as it was)"
+        );
         let l = session_at(&ed, &back);
         let r = l.code_review.as_ref().unwrap();
         assert_eq!(r.base, Base::Branch { name: "main".into(), commit: merge_base }, "behind: since main");
@@ -3426,7 +3434,7 @@ mod tests {
             |ed: &Editor| session_at(ed, &back).code_review.as_ref().is_some_and(|r| !r.docs.is_empty());
         ed.with_session(id, |ed| crate::codereview::start_turn(ed, 0));
         settle_until(&mut ed, reviewing);
-        ed.with_session(id, |ed| crate::codereview::show(ed, 1, false));
+        ed.with_session(id, |ed| _ = crate::codereview::show(ed, 1, false));
         // A third turn under way, cut by the restart: c.md changed since it began
         ed.session_by_id(id).unwrap().checkpoints.turn = vec![crate::checkpoint::Touched {
             path: back.join("c.md"),

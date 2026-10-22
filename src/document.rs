@@ -299,6 +299,10 @@ pub struct Document {
     pub git_hunks: Vec<crate::git::Hunk>,
     /// In a code review: the base being compared against, for showing removed lines (`codereview.rs`).
     pub review_base: Option<ropey::Rope>,
+    /// The git tab's inline diff (`Editor::git_inline_sync`): `review_base` is the index's text, made from this
+    /// `git_base` — set while the tab has the keys and ended by the tab alone. A review's or `:diff`'s base takes
+    /// it over (`set_review_base` clears it): the tab never touches a base it didn't set.
+    pub inline: Option<std::sync::Arc<String>>,
     /// The file's indent unit, for (version, tab width) — `commands::indent_unit`.
     pub indent_unit: std::cell::Cell<Option<(u64, usize, crate::indent::Unit)>>,
     /// `:diff` — what it's compared with (diffview.rs; `review_base` holds that text).
@@ -342,6 +346,11 @@ pub struct Document {
     /// server offered for it until then — while the review is up only an edit takes it up (frictions25 R7: an
     /// install card for a `.sh` the review opened came up mid-review).
     pub review_only: bool,
+    /// The session's preview (`Editor::open_preview`, as VS Code's): a file the git tab or the review rail passed
+    /// over, shown in one slot the next one replaces — drawn in italic (path bar, buffer tabs, `space b`), never
+    /// restored. A buffer of its own once edited, opened (`open`: `enter` on its row, a double-click) —
+    /// `Editor::preview_keep`.
+    pub preview: bool,
     /// Its grammar's offer held back while `claudes_only` or `review_only` (`load_language`): the language —
     /// offered when the user takes it up (`edits::taken_up`).
     pub grammar_held: Option<&'static crate::syntax::LangSpec>,
@@ -369,11 +378,23 @@ impl Document {
     /// The code review's or `:diff`'s base — set or ended here only, so its parse goes with it.
     pub fn set_review_base(&mut self, base: Option<ropey::Rope>) {
         self.review_base = base;
+        self.inline = None;
         self.base_seq += 1;
         self.base_parsing = false;
         if let Some(old) = self.base_syntax.take() {
             crate::event::drop_later(old);
         }
+    }
+
+    /// The git tab's inline diff against `index` (its `git_base`) — or, None, ended (`Editor::git_inline_sync`).
+    pub fn set_inline_base(&mut self, index: Option<std::sync::Arc<String>>) {
+        self.set_review_base(index.as_deref().map(|t| ropey::Rope::from_str(t)));
+        self.inline = index;
+    }
+
+    /// A review's or `:diff`'s base — not the git tab's inline one, which shows the index's own changes.
+    pub fn own_base(&self) -> bool {
+        self.review_base.is_some() && self.inline.is_none()
     }
 
     /// The view starts at `line`, from its first row.
@@ -419,6 +440,7 @@ impl Document {
             git_base: None,
             git_hunks: Vec::new(),
             review_base: None,
+            inline: None,
             base_syntax: None,
             base_seq: 0,
             base_parsing: false,
@@ -442,6 +464,7 @@ impl Document {
             aside: false,
             claudes_only: false,
             review_only: false,
+            preview: false,
             grammar_held: None,
             shown: None,
             writing: None,

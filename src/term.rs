@@ -6765,9 +6765,12 @@ fn draw_picker(
     // Preview target
     let target = p.current().map(|i| i.action.clone());
     let preview_title = match &target {
-        Some(Action::Open(path) | Action::Goto { path, .. } | Action::Note { path, .. }) => {
-            rel_path(editor, path)
-        }
+        Some(
+            Action::Open(path)
+            | Action::Goto { path, .. }
+            | Action::Note { path, .. }
+            | Action::JumpParked { path, .. },
+        ) => rel_path(editor, path),
         Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => editor
             .docs
             .iter()
@@ -7451,7 +7454,9 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         left.push(Seg { text: d.clone(), style: dim, keep });
         left.push(sep(keep));
     }
-    left.push(Seg { text: doc.display_name_short(), style: strong, keep: 250 });
+    // (a preview — the git tab's or the rail's look, the next one taking its place: in italic, not settled yet)
+    let named = |s: Style, d: &crate::document::Document| Style { italic: s.italic || d.preview, ..s };
+    left.push(Seg { text: doc.display_name_short(), style: named(strong, doc), keep: 250 });
     if doc.loading {
         left.push(Seg { text: " …".into(), style: dim, keep: 240 });
     } else if doc.is_modified() {
@@ -7479,10 +7484,11 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
             left.push(Seg { text: " · wide".into(), style: faint, keep: 242 });
         }
     }
-    // `:diff`: what it's compared with
-    if let Some(of) = &doc.diff_of {
+    // `:diff`: what it's compared with — the git tab's inline diff, the index (panes P3 step 5)
+    let against = doc.diff_of.clone().or_else(|| doc.inline.as_ref().map(|_| "index".to_string()));
+    if let Some(of) = against {
         left.push(Seg { text: "  against ".into(), style: dim, keep: 244 });
-        left.push(Seg { text: of.clone(), style: ui.base.patch(ui.accent), keep: 244 });
+        left.push(Seg { text: of, style: ui.base.patch(ui.accent), keep: 244 });
     }
     if doc.disk_conflict {
         let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
@@ -7520,10 +7526,12 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
             let mark = if d.is_modified() { " ●" } else { "" };
             let keep = if current { 90 } else { 10 };
             right.push(Seg {
-                text: format!("{}{mark}  ", d.display_name_short()),
-                style: if current { strong } else { dim },
+                text: format!("{}{mark}", d.display_name_short()),
+                style: named(if current { strong } else { dim }, d),
                 keep,
             });
+            // (the gap upright: an italic name's slant stops at its last letter)
+            right.push(Seg { text: "  ".into(), style: ui.base, keep });
         }
     }
     // (the buffers' list ends in its own two blanks — the padding on the right)

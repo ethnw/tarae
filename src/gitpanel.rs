@@ -645,6 +645,72 @@ impl Editor {
         self.popup = Some(crate::markdown::render(md, &self.theme, None));
     }
 
+    /// Every event: the git tab's inline diff (panes P3 step 5) — while the tab has the keys, the code's file, when
+    /// it's among the tab's changes, shows them against the index as `:diff` draws them (the removed lines rows of
+    /// their own, the changed ones washed); the keys gone from the tab, the gutter is the index's again. Only a
+    /// buffer with no other base: a review's file or one under `:diff` keeps that, and the tab ends only its own.
+    pub fn git_inline_sync(&mut self) {
+        let tab = self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git)
+            && self.session.is_at(crate::session::At::Side);
+        let doc = self.doc();
+        let changed = |st: &Status| {
+            let rel = doc.path.as_deref().and_then(|p| p.strip_prefix(&st.top).ok());
+            rel.is_some_and(|rel| st.unstaged.iter().any(|e| e.letter != '?' && Path::new(&e.rel) == rel))
+        };
+        let wanted = (tab
+            && !doc.own_base()
+            && doc.git_base.is_some()
+            && self.session.git_status.as_ref().is_some_and(changed))
+        .then_some(doc.id);
+        for d in self.docs.iter_mut() {
+            if Some(d.id) == wanted {
+                // (its index read again — a hunk staged: the inline base follows)
+                if !d
+                    .inline
+                    .as_ref()
+                    .zip(d.git_base.as_ref())
+                    .is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, b))
+                {
+                    d.set_inline_base(d.git_base.clone());
+                }
+            } else if d.inline.is_some() {
+                d.set_inline_base(None);
+            }
+        }
+        // A file the tab's selection moved onto: its first change selected and centred once its diff is there
+        let Some(id) = self.session.sidebar.as_ref().and_then(|s| s.land) else { return };
+        let d = self.doc();
+        let (here, first) = (tab && d.id == id, d.git_hunks.first().cloned());
+        if here && (d.git_base.is_none() || d.loading || d.git_version != d.version()) {
+            return;
+        }
+        if let Some(s) = self.session.sidebar.as_mut() {
+            s.land = None;
+        }
+        if here && let Some(h) = first {
+            self.select_hunk(&h);
+            self.align_view(crate::viewalign::Place::Center);
+        }
+    }
+
+    /// The git tab's selection on file `rel`: shown in the code, the tab keeping the keys — in the session's preview
+    /// slot (`open_preview`; `enter` on its row makes it a buffer of its own) — at its first change once its diff is there (`land`: a changed file
+    /// the index has, `git_inline_sync`). A deleted one has nothing to show: its row says `D`.
+    pub(crate) fn git_show_file(&mut self, rel: &str, land: bool) {
+        let Some(top) = self.session.git_status.as_ref().map(|s| s.top.clone()) else { return };
+        let path = top.join(rel);
+        if !path.is_file() {
+            return;
+        }
+        if let Err(e) = self.open_preview(&path) {
+            return self.set_error(format!("{e:#}"));
+        }
+        let id = self.doc().id;
+        if let Some(s) = self.session.sidebar.as_mut() {
+            s.land = land.then_some(id);
+        }
+    }
+
     /// Something changed files outside the editor's own saves — Claude's edit, write or command, a turn's
     /// end (#29): the git tab, when it's shown, reads the status again.
     pub fn git_tab_follow(&mut self) {
@@ -656,36 +722,52 @@ impl Editor {
     /// Read the status again (worker) — the panel follows. Only the latest read lands (a slow one started
     /// before a stage doesn't undo what the panel shows).
     pub fn git_refresh(&mut self) {
+        let (cwd, base, read) = self.git_read();
+        self.events.jobs().spawn(move || {
+            let result = status(&cwd, base).map(Status::with_rows);
+            move |ed: &mut Editor| ed.git_read_landed(read, result)
+        });
+    }
+
+    /// `r` in the git tab: `git_refresh`, said while it reads (a status that didn't change shows nothing new).
+    pub fn git_refresh_said(&mut self) {
+        let (cwd, base, read) = self.git_read();
+        let jobs = self.events.jobs();
+        let work = move || status(&cwd, base).map(Status::with_rows);
+        self.step(jobs, "git-status", "reading git's status", work, move |ed, r| ed.git_read_landed(read, r));
+    }
+
+    /// A status read starting: where it reads, the session's base, and its number (only the latest lands).
+    fn git_read(&mut self) -> (PathBuf, Option<String>, u64) {
         let cwd = self.git_cwd();
         self.session.git_reads += 1;
-        let read = self.session.git_reads;
         // (a session's base, as bring takes it — in its own checkout only)
         let base = (cwd == self.session.root && self.session.id != 0)
             .then(|| self.session.base.clone().or_else(|| self.start_branch()))
             .flatten();
-        self.events.jobs().spawn(move || {
-            let result = status(&cwd, base).map(Status::with_rows);
-            move |ed: &mut Editor| {
-                if read != ed.session.git_reads {
-                    return;
+        (cwd, base, self.session.git_reads)
+    }
+
+    /// What status read `read` found — dropped when a later one started.
+    fn git_read_landed(&mut self, read: u64, result: Result<Status, String>) {
+        if read != self.session.git_reads {
+            return;
+        }
+        match result {
+            Ok(mut st) => {
+                st.generation = read;
+                for r in &st.asks {
+                    self.git_trust_check(r);
                 }
-                match result {
-                    Ok(mut st) => {
-                        st.generation = read;
-                        for r in &st.asks {
-                            ed.git_trust_check(r);
-                        }
-                        ed.session.git_status = Some(st);
-                    }
-                    Err(e) => {
-                        ed.session.git_status = None;
-                        if ed.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
-                            ed.set_warning(format!("git: {e}"));
-                        }
-                    }
+                self.session.git_status = Some(st);
+            }
+            Err(e) => {
+                self.session.git_status = None;
+                if self.session.sidebar.as_ref().is_some_and(|s| s.mode == crate::sidebar::Mode::Git) {
+                    self.set_warning(format!("git: {e}"));
                 }
             }
-        });
+        }
     }
 
     /// Queue work in the repository (on a worker, one at a time — two `git add`s at once fight over the

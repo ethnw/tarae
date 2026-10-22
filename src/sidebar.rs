@@ -116,6 +116,9 @@ pub struct Sidebar {
     pub from_code: bool,
     /// A plugin tab's rows folded (by their ids).
     pub folded: HashSet<String>,
+    /// The git tab's selection moved onto a changed file, shown in the code: its first change selected once its
+    /// diff is there (`Editor::git_inline_sync`).
+    pub land: Option<crate::document::DocId>,
 }
 
 impl Sidebar {
@@ -161,6 +164,7 @@ impl Sidebar {
             aim: None,
             from_code: false,
             folded: HashSet::new(),
+            land: None,
         }
     }
 
@@ -365,6 +369,18 @@ impl Sidebar {
     }
 }
 
+/// Row `row` of the git tab, when it's a file: its path and whether it lands on its first change (a Changes row
+/// of a file the index has — `Editor::git_show_file`).
+pub fn git_file_at(s: &Sidebar, row: usize) -> Option<(String, bool)> {
+    if s.mode != Mode::Git {
+        return None;
+    }
+    match s.lines().get(row)?.target.clone() {
+        Target::Change { rel, file: true, staged, untracked } => Some((rel, !staged && !untracked)),
+        _ => None,
+    }
+}
+
 /// The row of the file `current` in the git tab's rows (among the changes first).
 fn git_here(rows: &[Line], top: &std::path::Path, current: Option<&std::path::Path>) -> Option<usize> {
     let rel = current?.strip_prefix(top).ok()?.to_string_lossy().into_owned();
@@ -393,7 +409,7 @@ fn detail_rows(
     };
     let mut out: Vec<(usize, Line)> = Vec::new();
     // In a review its hunks are against the review's base, not the index — `s`/`d` would act on those
-    if doc.review_base.is_some() {
+    if doc.own_base() {
         let note = "in the review";
         out.push((0, Line { kind: Kind::Note, ..row(note.into(), None, String::new(), Target::None) }));
     } else if doc.git_version == doc.version() {
@@ -1094,7 +1110,8 @@ fn git_key(ed: &mut Editor, key: Key, at: Option<Line>) -> bool {
         ('P', ..) => ed.git_push_pull(true),
         ('p', ..) => ed.git_push_pull(false),
         ('f', ..) => ed.git_fetch(),
-        ('r', ..) => ed.git_refresh(),
+        // (said while it reads: a status that didn't change shows nothing new)
+        ('r', ..) => ed.git_refresh_said(),
         ('B', ..) => ed.git_branch_picker(),
         ('L', ..) => ed.git_log_picker(),
         ('z', ..) => ed.git_stash(false),
@@ -1256,13 +1273,19 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Char('q'), false) => ed.session.sidebar = None,
         _ => ed.key_unused(key, "the side panel", "esc code"),
     }
-    // Moving onto a hunk or conflict shows it in the code
+    // Moving onto a hunk or conflict shows it in the code — onto a file, that file (its changes inline while the
+    // tab has the keys, `git_inline_sync`)
     if let Some(s) = ed.session.sidebar.as_ref().filter(|s| s.mode == Mode::Git && Some(s.selected) != before)
         && ed.session.is_at(At::Side)
         && let Some(t) = s.lines().get(s.selected).map(|l| l.target.clone())
-        && matches!(t, Target::Hunk { .. } | Target::Conflict { .. })
     {
-        ed.git_reveal(&t);
+        match t {
+            Target::Hunk { .. } | Target::Conflict { .. } => _ = ed.git_reveal(&t),
+            Target::Change { rel, file: true, staged, untracked } => {
+                ed.git_show_file(&rel, !staged && !untracked)
+            }
+            _ => {}
+        }
     }
     true
 }
