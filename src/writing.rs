@@ -394,6 +394,14 @@ pub fn on_delta(ed: &mut Editor, d: Delta) {
     sync(ed);
 }
 
+/// The first and last lines of `from..to` in `whole`: the last is its last byte's (`to - 1`, a byte that may sit
+/// inside a character — a region ending in `—` — so the newlines before it are counted as bytes, never by
+/// slicing the text there; a `'\n'` is one byte and never inside another character).
+fn lines_of(whole: &str, from: usize, to: usize) -> (usize, usize) {
+    let line = |b: usize| whole.as_bytes()[..b].iter().filter(|&&c| c == b'\n').count();
+    (line(from), line(to.saturating_sub(1).max(from)))
+}
+
 /// Where item `i` of `call` goes, worked out on a worker: its file in the project (not one named like a key
 /// Claude can't read), its text as the user has it, `old` in it once.
 fn look(ed: &mut Editor, call: String, i: usize, tool: Tool, file: String, old: String) {
@@ -419,8 +427,7 @@ fn look(ed: &mut Editor, call: String, i: usize, tool: Tool, file: String, old: 
                 Tool::Write => (0, whole.len()),
                 _ => crate::edittool::one_place(&whole, &old)?,
             };
-            let line = |b: usize| whole[..b].matches('\n').count();
-            let lines = (line(from), line(to.saturating_sub(1).max(from)));
+            let lines = lines_of(&whole, from, to);
             Some(Found { path, from, to, seen, bound: None, held: String::new(), lines, protected })
         })();
         move |ed: &mut Editor| {

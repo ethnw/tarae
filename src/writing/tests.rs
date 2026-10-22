@@ -1247,3 +1247,48 @@ fn the_motion_setting_holds_still_what_moves() {
     crate::typed::execute(&mut ed, "set editor.motion none").unwrap();
     assert_eq!(ed.motion(), crate::motion::Motion::None, "an explicit none stays");
 }
+
+/// A region's lines are counted on bytes: its last byte (`to - 1`) sits inside the character a region ends with
+/// when that one is wider than a byte (`—` is three) — slicing the text there panicked the worker, and the release
+/// build's abort took tarae down with it (2026-10-22).
+#[test]
+fn a_regions_lines_count_bytes_never_slice_inside_a_character() {
+    let text = "fn main() {\n    let a = 1; // one —\n}\n";
+    let end = text.find('—').unwrap() + '—'.len_utf8();
+    assert_eq!(lines_of(text, text.find("let").unwrap(), end), (1, 1), "a region ending in `—`");
+    assert_eq!(lines_of(text, 0, text.len()), (0, 2), "the whole text, its last byte the last newline");
+    assert_eq!(lines_of(text, 5, 5), (0, 0), "an empty region: its start");
+}
+
+/// The same through the stream: an edit whose `old_string` ends in `—` is placed (its worker answers), not lost.
+#[test]
+fn an_edit_ending_in_a_wide_character_is_placed() {
+    let dir = crate::scratch::Scratch::new("writing-wide-end");
+    let text = "fn main() {\n    let a = 1; // one —\n}\n";
+    std::fs::write(dir.join("a.rs"), text).unwrap();
+    let mut ed = Editor::new(Config::default());
+    ed.session.root = dir.to_path_buf();
+    ed.config.llm.command = "sh".into();
+    ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    ed.open(&dir.join("a.rs")).unwrap();
+    let mut c = crate::chat::Chat::new();
+    let _ = crate::chat::stand_in(&mut c);
+    c.state = State::Thinking;
+    c.follow.on = true;
+    let g = c.generation();
+    ed.session.chat = Some(c);
+    ed.wet_ink = true;
+    let s = |t: &str| serde_json::to_string(t).unwrap();
+    let input = format!(
+        r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#,
+        s("let a = 1; // one —"),
+        s("let a = 1; // one — two")
+    );
+    let mut w = Writer::new("t1", Tool::Edit);
+    w.send(&mut ed, g, &input, &[30], false);
+    settle(&mut ed, |ed| shown(ed.doc()).is_some());
+    assert_eq!(
+        shown(ed.doc()).map(|s| s.blocks.iter().map(|b| (b.first, b.last)).collect::<Vec<_>>()),
+        Some(vec![(1, 1)])
+    );
+}
