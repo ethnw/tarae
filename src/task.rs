@@ -288,6 +288,12 @@ pub struct Run {
     /// The places its output pointed at (each once, at most `PLACES_KEPT`) — Claude's report and the jump
     /// to the first error read these; the user's list gets them only from a run that feeds it (#28).
     pub places: Vec<Item>,
+    /// Where each of `places` was printed, index for index (`place`) — its line followed through every trim.
+    origins: Vec<Origin>,
+    /// The task's list (panes P3 §2.2, `GroupKind::Task`): the place selected — its index in `places`, so it stays
+    /// on its place as the list grows — and the list's first row in sight (as last drawn).
+    pub picked: usize,
+    pub list_top: std::cell::Cell<usize>,
     /// Its places went to the user's list too (a check or a build — #28); the report says where they are.
     pub feeds: bool,
     /// An install's (`install.rs`): what goes on once it ends.
@@ -378,6 +384,40 @@ impl Run {
         self.scroll = (at < max).then_some(at);
     }
 
+    /// Place `it`, found on the line printed last (`step`: in a preflight's step of that index) — kept once (the same
+    /// place twice isn't two) and counted, up to `PLACES_KEPT`. False: it was there already, or there's no room.
+    pub fn place(&mut self, it: Item, step: Option<usize>) -> bool {
+        let seen = |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
+        if self.places.iter().any(seen) || self.places.len() >= PLACES_KEPT {
+            return false;
+        }
+        match it.severity {
+            1 => self.found.0 += 1,
+            2 => self.found.1 += 1,
+            _ => {}
+        }
+        self.places.push(it);
+        self.origins.push(Origin { line: self.output.len().checked_sub(1), step });
+        true
+    }
+
+    /// Where place `i` was printed (`places`'s index).
+    pub fn origin(&self, i: usize) -> Origin {
+        self.origins.get(i).copied().unwrap_or_default()
+    }
+
+    /// The task's list's rows: `places`' indices, the errors first, then the warnings, then the rest — each as found.
+    pub fn place_rows(&self) -> Vec<usize> {
+        let rank = |s: u8| match s {
+            1 => 0,
+            2 => 1,
+            _ => 2,
+        };
+        let mut rows: Vec<usize> = (0..self.places.len()).collect();
+        crate::sorting::by_key(&mut rows, |&i| rank(self.places[i].severity));
+        rows
+    }
+
     /// A line of output; `step`: it begins a step of its own (a preflight's heading) — the one before is
     /// trimmed first.
     pub fn push_line(&mut self, err: bool, line: String, step: bool) {
@@ -400,12 +440,14 @@ impl Run {
                     let at = self.section + STEP_HEAD;
                     self.output.insert(at, false, "");
                     self.trims.push(Trim::Insert(at));
+                    self.origins_after(&Trim::Insert(at));
                     (at, 0)
                 }
             };
             let from = marker + 1;
             self.output.drain(from..from + excess);
             self.trims.push(Trim::Drain(from, from + excess));
+            self.origins_after(&Trim::Drain(from, from + excess));
             self.cut = Some((marker, before + excess));
             let said = format!("… {} lines not kept …", before + excess);
             self.output.set(marker, &said);
@@ -417,11 +459,35 @@ impl Run {
             let k = n - OUTPUT_KEPT;
             self.output.drain(..k);
             self.trims.push(Trim::Drain(0, k));
+            self.origins_after(&Trim::Drain(0, k));
             self.section = self.section.saturating_sub(k);
             self.cut = self.cut.and_then(|(m, d)| (m >= k).then_some((m - k, d)));
             self.scroll = self.scroll.map(|t| t.saturating_sub(k));
         }
     }
+}
+
+impl Run {
+    /// Its places' lines after trim `t`: moved with what stays, gone with what went (`Origin.line` None).
+    fn origins_after(&mut self, t: &Trim) {
+        for o in &mut self.origins {
+            o.line = o.line.and_then(|l| match *t {
+                Trim::Insert(at) if l >= at => Some(l + 1),
+                Trim::Drain(from, to) if l >= to => Some(l - (to - from)),
+                Trim::Drain(from, _) if l >= from => None,
+                _ => Some(l),
+            });
+        }
+    }
+}
+
+/// Where a run's place was printed (`Run::place`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Origin {
+    /// Its line in the run's output, as kept now — None: cut (`Run::keep`), or printed before any line.
+    pub line: Option<usize>,
+    /// A preflight's: the step it was printed in (`Preflight.steps`' index).
+    pub step: Option<usize>,
 }
 
 /// What a run did to its output's lines (`Run::keep`, `TestRun::keep`), in order: counted from its start, held only
@@ -504,6 +570,9 @@ impl Run {
             generation: 0,
             found: (0, 0),
             places: Vec::new(),
+            origins: Vec::new(),
+            picked: 0,
+            list_top: Default::default(),
             feeds: true,
             after: None,
             install: false,
@@ -943,7 +1012,7 @@ impl Editor {
                 };
                 // (a preflight's markers move its steps on, and aren't shown — `preflight.rs`)
                 let mut preflight = ed.session.preflight.as_mut().filter(|p| p.generation == generation);
-                let mut places = Vec::new();
+                let mut fed = Vec::new();
                 r.last_output = Instant::now();
                 for (line, found, hit) in lines {
                     // (a wait's line is the run's state — the panel says it — not output)
@@ -963,26 +1032,19 @@ impl Editor {
                     if let Some(line) = shown {
                         r.push_line(err, line, step);
                     }
-                    places.extend(found.filter(|_| !install));
+                    // Counted once — the run's own, for its report and its list (with the line that printed it, and
+                    // a preflight's step); the user's list only from a run that feeds it (#28)
+                    let in_step = preflight.as_deref().and_then(|p| p.running());
+                    if let Some(it) = found.filter(|_| !install)
+                        && r.place(it.clone(), in_step)
+                        && feeds
+                    {
+                        fed.push(it);
+                    }
                 }
                 r.keep(TRIM_SLACK);
-                for it in places {
-                    let Some(r) = ed.session.task_run.as_mut() else { break };
-                    // Counted once (the same place twice isn't two) — the run's own, for its report; the
-                    // user's list only from a run that feeds it (#28)
-                    let seen = |p: &Item| p.path == it.path && p.line == it.line && p.message == it.message;
-                    if r.places.iter().any(seen) || r.places.len() >= PLACES_KEPT {
-                        continue;
-                    }
-                    match it.severity {
-                        1 => r.found.0 += 1,
-                        2 => r.found.1 += 1,
-                        _ => {}
-                    }
-                    r.places.push(it.clone());
-                    if feeds {
-                        ed.qlist_push(it);
-                    }
+                for it in fed {
+                    ed.qlist_push(it);
                 }
             };
             tx.send(crate::event::Event::Job(Box::new(apply))).is_ok()
@@ -1094,6 +1156,9 @@ impl Editor {
             generation,
             found: (0, 0),
             places: Vec::new(),
+            origins: Vec::new(),
+            picked: 0,
+            list_top: Default::default(),
             feeds,
             after,
             install,

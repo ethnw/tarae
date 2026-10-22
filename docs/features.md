@@ -239,6 +239,15 @@ configs carry over as they are.
     under one header, one `q` closing both. `C-w h`/`l` or `tab`/`S-tab` go between them; on the list `j`/`k` (and
     every list's moves) pick a test — the failure beside it follows — and `enter` goes to its place in the code; its
     title is lit while it has the keys.
+  - **A task's places and a preflight's steps are lists too** — a run that pointed at two places or more lists them
+    beside its output (`▲ src/main.rs:31  mismatched types`, the errors first, each as found); a preflight of two
+    steps or more lists its steps (`● fmt 6ms`, `▲ test`, `◦` not run yet, the wave on the one running). The same
+    keys as the tests' list: a place picked puts the output at the line that printed it, on the cursor line's band
+    (`tab` lands the keys there); a step picked, its heading at the top. `enter` goes to the place in the code — on
+    a step, its first place, else its output from its heading. On the steps' list `o` opens the step's whole output
+    in a buffer; `o` on the output selects the step in view in the list. The list grows as the run prints, the
+    selection staying on its place. A place whose line the panel no longer keeps says `cut`. One place, or one
+    step, is the output alone, as before.
   - **The output is a document** — a run panel's output (the task's, a preflight's, the tests' failure picked, else
     their output) is a read-only document, and with the keys on it (`C-w j`, a click — the cursor on that row) it's
     the code's normal mode on that document: every move, selection, search and count — `j` `k` `w` `x` `v` `/` `n`
@@ -249,7 +258,8 @@ configs carry over as they are.
     after`), `G` catches up. `enter` on a selection quotes it to Claude (`<quoted from="task"` … `"preflight"`,
     `"test"` with the test's name); with nothing selected, your run waiting behind Claude's runs now (the status line
     says `enter run now`), else the chat's input. `tab` / `S-tab` the slot's other panels, `K` where Claude's
-    command ran, `o` a preflight step's whole output, `esc` (a selection collapses first) to the code, `q` closes the
+    command ran, `o` a preflight step's whole output (beside the steps' list, the step in view selected there), `esc`
+    (a selection collapses first) to the code, `q` closes the
     panel once its run has ended. `C-w`, `:` and `space` are the editor's, as from every panel; `]x` / `[x` (the
     detail follows the failure), `]q` / `[q`, the palette and the chat act on the editor. The wheel over it scrolls
     it without taking the keys. `[keys.run]` lays your keys over normal mode's there. Claude's conversation is one

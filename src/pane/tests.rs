@@ -275,7 +275,7 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
         frame(ed);
     };
-    let (y0, _, first) = ed.screen.tests_list.get().unwrap();
+    let (y0, _, first) = ed.screen.list(crate::pane::GroupKind::Tests).unwrap();
     let list = ed.screen.leaves.iter().find(|l| l.0 == g.list).unwrap().1;
     ed.session.at = At::Code;
     click(&mut ed, list.x + 3, y0 + 1 - first);

@@ -263,11 +263,12 @@ side git · 4 rows · in hand git:src/term.rs
     Panes P2b: a floating pane with the keys — a card (held, or taking its answers), the picker, a prompt,
     which-key — is `at` itself (`At::Float(pane id)`), the docked pane it rose over `Session.under`, the keys' again
     once it goes (`Editor::float_sync`, every key and event); a linked group's list (panes P3 §2.1, `Session.groups` —
-    the tests' today) is `At::List(pane id)`, `keys.region` `list:<kind>` (`list:tests`, `grouplist::key`), its
-    detail the slot's output document (`At::Slot`, P2c).
+    the tests', the task's places, a preflight's steps) is `At::List(pane id)`, `keys.region` `list:<kind>`
+    (`list:tests`, `list:task`, `list:preflight`, `grouplist::key`), its detail the slot's output document (`At::Slot`,
+    P2c).
   - `panes` (per session, panes P2b): every leaf of its tree in the tree's order — `{id: pane#N, shows:
     code:src/a.rs | side | rail | slot | chat, rect, at}` (rects the front's, as the last frame laid them out), the
-    members of a group after its host while it lays them out (`list:tests`, `detail:tests` — the host's keys the
+    members of a group after its host while it lays them out (`list:tests`, `detail:tests`, `list:task` … — the host's keys the
     detail's), then the floating ones up (`card#N`, `picker`, `prompt`, `which-key`, `float: true`); `at` is true on
     exactly the one with the keys.
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).

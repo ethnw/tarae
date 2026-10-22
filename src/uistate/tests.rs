@@ -557,6 +557,35 @@ const SCENES: &[Scene] = &[
         frame(ed);
         feed(ed, &["<C-w>"]);
     }),
+    // (P3 §2.2: the task's places, a preflight's steps — `list:task`, `list:preflight`)
+    ("list:task, the task's places", |ed| {
+        task_panel(ed);
+        let r = ed.session.task_run.as_mut().unwrap();
+        for n in 0..2 {
+            r.push_line(true, format!("a.rs:{n}: error: e"), false);
+            let path = std::path::PathBuf::from("a.rs");
+            let it =
+                crate::quickfix::Item { path, line: n, col: 0, message: "e".into(), severity: 1, mark: None };
+            r.place(it, None);
+        }
+        frame(ed);
+        ed.list_focus(crate::pane::GroupKind::Task);
+    }),
+    ("list:preflight, a preflight's steps", |ed| {
+        task_panel(ed);
+        let step = |n: &str| crate::preflight::Step {
+            name: n.into(),
+            cmd: String::new(),
+            note: None,
+            from: String::new(),
+            full: false,
+        };
+        let steps = [step("fmt"), step("test")];
+        let p = crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full, "k".into());
+        ed.session.preflight = Some(p);
+        frame(ed);
+        ed.list_focus(crate::pane::GroupKind::Preflight);
+    }),
     ("a card over the task panel's output", |ed| {
         task_panel(ed);
         ed.bottom_take_keys();

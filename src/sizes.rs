@@ -689,6 +689,7 @@ impl crate::editor::Editor {
     /// code's; `C-w z` ends once what it filled the screen with doesn't have them.
     pub fn focus_sync(&mut self) {
         self.slot_sync();
+        self.groups_sync();
         let s = &self.session;
         let there = match s.docked() {
             At::Code | At::Float(_) => true,

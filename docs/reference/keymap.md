@@ -532,7 +532,9 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 | Code review rail | click on `↑ N more` / `↓ N more`, wheel | Scroll the files |
 | Code review | `space v q` | End it — asked on a card while files aren't viewed |
 | Task panel | click on a preflight step | Its output; wheel, `C-u` `C-d` scroll |
-| Task panel | `o` | A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output &lt;step>`) |
+| Task panel | `o` | A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output &lt;step>`); beside the steps' list, the step in view selected there |
+| A task's places, a preflight's steps (beside the output) | `j` `k` and every list's moves · `enter` · `tab` `S-tab` · `q` | Pick one — the output follows: the place's line, the step's heading at the top · the place in the code (a step's first place, else its output from its heading) · the output and back · close once the run has ended |
+| A preflight's steps | `o` | The step picked, its whole output in a buffer |
 | Task panel | `K` | Where Claude's command in it ran, and why — its sandbox, the card it ran from, its warnings |
 | The chat | click on a command's row end (`ok · sandbox ▲1`) | Why it ran there — its sandbox, the card it ran from, Claude's reason, its warnings |
 | The chat | `C-u` `C-d`, `PageUp` `PageDown`, `↑` `↓`, wheel | Scroll the conversation — half the rows in sight, a page, a row; `C-u` and the arrows from an empty input (with text `C-u` clears to the cursor) |

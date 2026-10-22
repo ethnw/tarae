@@ -274,7 +274,15 @@ impl Screen {
     pub fn rows_of(&self, doc: DocId) -> impl Iterator<Item = &(usize, usize, usize, usize)> {
         self.panes.iter().zip(&self.pane_docs).filter(move |(_, d)| **d == doc).flat_map(|(p, _)| p.3.iter())
     }
+
+    /// Kind `kind`'s list as the last frame drew it (`lists`).
+    pub fn list(&self, kind: crate::pane::GroupKind) -> Option<(usize, usize, usize)> {
+        self.lists.borrow().iter().find(|l| l.0 == kind).map(|l| l.1)
+    }
 }
+
+/// A list as drawn (`Screen.lists`): its first row's screen row, the rows it has, the first of its rows in sight.
+pub type ListDrawn = (usize, usize, usize);
 
 /// Screen layout of the last frame (term.rs fills it on every draw).
 #[derive(Clone, Debug, Default)]
@@ -370,9 +378,9 @@ pub struct Screen {
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
-    /// The tests' list, as drawn beside its detail: its first row's screen row, the rows it has, the first result
-    /// in sight — a click picks a row, its keys move by its rows.
-    pub tests_list: std::cell::Cell<Option<(usize, usize, usize)>>,
+    /// A linked group's list, as drawn beside its detail (`pane::Group`), by kind: its first row's screen row, the
+    /// rows it has, the first of its rows in sight — a click picks a row, its keys move by its rows.
+    pub lists: std::cell::RefCell<Vec<(crate::pane::GroupKind, ListDrawn)>>,
     /// The in-buffer review's change in hand: its first and last screen rows.
     pub review_change: std::cell::Cell<Option<(usize, usize)>>,
     /// The in-buffer review's changes: every screen row of one (its header, its lines) and which change — cards
@@ -1589,10 +1597,10 @@ impl Editor {
         }
     }
 
-    /// The tests' result at screen cell (x, y), as the list was last drawn (its pane in `Screen.leaves`).
-    fn tests_list_row(&self, x: usize, y: usize) -> Option<usize> {
-        let (y0, rows, first) = self.screen.tests_list.get()?;
-        let id = self.session.group(crate::pane::GroupKind::Tests)?.list;
+    /// The row of kind `kind`'s list at screen cell (x, y), as the list was last drawn (its pane in `Screen.leaves`).
+    fn list_row(&self, kind: crate::pane::GroupKind, x: usize, y: usize) -> Option<usize> {
+        let (y0, rows, first) = self.screen.list(kind)?;
+        let id = self.session.group(kind)?.list;
         let list = self.screen.leaves.iter().find(|l| l.0 == id)?.1;
         ((list.x..list.x + list.w).contains(&x) && (y0..y0 + rows).contains(&y)).then(|| first + y - y0)
     }
@@ -2456,14 +2464,8 @@ impl Editor {
                 }
                 K::Down => match at {
                     Some((r, c)) => crate::rundoc::click(self, crate::sizes::Slot::Test, r, c),
-                    None if let Some(i) = self.tests_list_row(x, y) => {
-                        self.tests_list_focus();
-                        if let Some(r) = self.session.test_run.as_mut().filter(|r| i < r.cases.len()) {
-                            if r.selected != i {
-                                r.scroll = None;
-                            }
-                            r.selected = i;
-                        }
+                    None if let Some(i) = self.list_row(crate::pane::GroupKind::Tests, x, y) => {
+                        crate::grouplist::click(self, crate::pane::GroupKind::Tests, i)
                     }
                     None => self.bottom_take_keys(),
                 },
@@ -2482,7 +2484,10 @@ impl Editor {
                 s.task_steps.borrow().iter().find(|c| c.0 == y && (c.1..c.2).contains(&x)).map(|c| c.3);
             let step = chip.and_then(|k| Some(self.session.preflight.as_ref()?.steps.get(k)?.name.clone()));
             let at = run_row(crate::sizes::Slot::Task);
+            // (a row of its list — its places, a preflight's steps — laid out beside the output)
+            let listed = self.slot_group().and_then(|g| Some((g.kind, self.list_row(g.kind, x, y)?)));
             match m.kind {
+                K::Down if let Some((kind, i)) = listed => crate::grouplist::click(self, kind, i),
                 K::ScrollDown | K::ScrollUp => {
                     crate::rundoc::wheel(self, crate::sizes::Slot::Task, m.kind == K::ScrollUp)
                 }

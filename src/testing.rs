@@ -534,32 +534,6 @@ impl Editor {
         }
     }
 
-    /// The slot shows the tests' linked group: a run with results to list, in front — its list and its detail two
-    /// panes (`pane::Group`, `Session.groups`).
-    pub fn tests_grouped(&self) -> bool {
-        self.slot() == Some(crate::sizes::Slot::Test)
-            && self.session.test_run.as_ref().is_some_and(|r| !r.cases.is_empty())
-    }
-
-    /// The tests' list has the keys (normal mode, the group in sight).
-    pub fn tests_list_focused(&self) -> bool {
-        self.list_focused().is_some_and(|g| g.kind == crate::pane::GroupKind::Tests)
-    }
-
-    /// The keys to the tests' list (`C-w h` from its detail, `S-tab`, a click on its rows): the slot showing the
-    /// tests, its detail's document without them.
-    pub fn tests_list_focus(&mut self) {
-        if self.session.test_run.as_ref().is_none_or(|r| r.cases.is_empty()) {
-            return self.set_status("no results to list yet — the output is all the panel has");
-        }
-        let Some(g) = self.session.group(crate::pane::GroupKind::Tests) else { return };
-        self.session.slot_front = Some(crate::sizes::Slot::Test);
-        self.procs_unfocus();
-        self.plugin_panel_unfocus();
-        self.session.at = At::List(g.list);
-        crate::rundoc::sync(self);
-    }
-
     /// `enter` on the tests' list: the selected test's place in the code — the code gets the keys (as the side
     /// panel's files do); one with no place says so.
     pub(crate) fn tests_list_open(&mut self) {

@@ -4,7 +4,9 @@
 //! `u`, `esc`, `q`, `tab`, `enter`, a search), the wheel over its rows, frames at two sizes, time passing. After
 //! every step: the document is the run's lines, line for line — nothing a key typed or deleted stays; never left
 //! swapped in; while it has the keys its cursor is in its rows and the run's scroll is its top, and a print never
-//! moves what's in sight; after a frame, the rows drawn are the document's.
+//! moves what's in sight; after a frame, the rows drawn are the document's. Now and then a place is printed (panes
+//! P3 §2.2: two or more lay the task's list out beside the output, its keys among the rest): every place's line is
+//! the one that printed it through every trim, else it's cut — and a frame's list says `cut` on that row only.
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
@@ -13,6 +15,7 @@ use super::{Choices, Sim};
 use crate::editor::Editor;
 use crate::event::{Mouse, MouseKind};
 use crate::key::Key;
+use crate::pane::GroupKind;
 use crate::sizes::Slot;
 
 const SEEDS: &[u64] = &[0, 1, 2];
@@ -83,8 +86,8 @@ fn in_sight(ed: &Editor, upto: Option<usize>) -> Option<(Sight, usize)> {
 fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
     world.framed.set(None);
     let c = &mut sim.choices;
-    // (by arm: the run prints 4, a key 6, the wheel 2, a frame 2, another run 1, time passing 1, a burst 1)
-    match c.weighted(&[4, 6, 2, 2, 1, 1, 1]) {
+    // (by arm: the run prints 4, a key 6, the wheel 2, a frame 2, another run 1, time passing 1, a burst 1, a place 3)
+    match c.weighted(&[4, 6, 2, 2, 1, 1, 1, 3]) {
         0 => {
             let Some(r) = ed.session.task_run.as_mut() else { return "(no run)".into() };
             let lines = *c.pick(&[1, 3, 12]);
@@ -126,6 +129,9 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
                 "i",
                 "ox",
                 "<C-w>k",
+                "<C-w>j<S-tab>",
+                "<C-w>j<S-tab>j",
+                "<S-tab>k",
             ]);
             let mut chars = keys.chars();
             while let Some(ch) = chars.next() {
@@ -166,6 +172,27 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
             sim.wait(Duration::from_millis(ms));
             "time passes".into()
         }
+        7 => {
+            // (a place, on a line of its own: `place <n>`, n its line too — what the check finds it by)
+            let Some(r) = ed.session.task_run.as_mut() else { return "(no run)".into() };
+            world.printed.set(world.printed.get() + 1);
+            let n = world.printed.get();
+            let empty = r.output.is_empty();
+            r.push_line(true, format!("place {n}"), false);
+            let path = std::env::temp_dir().join("tarae-sim-place.rs");
+            let it = crate::quickfix::Item {
+                path,
+                line: n,
+                col: 0,
+                message: format!("place {n}"),
+                severity: 1 + (n % 2) as u8,
+                mark: None,
+            };
+            r.place(it, None);
+            *world.before.borrow_mut() = in_sight(ed, None).filter(|_| !empty);
+            ed.focus_sync();
+            format!("the run prints place {n}")
+        }
         _ => {
             // (past what a step keeps: the run trims its output, a marker line saying what went)
             let Some(r) = ed.session.task_run.as_mut() else { return "(no run)".into() };
@@ -199,6 +226,7 @@ fn held(ed: &Editor, world: &World) -> Result<(), String> {
     if d.text != want.as_str() {
         return Err(format!("the output's {} lines aren't the run's {}", d.text.len_lines(), r.output.len()));
     }
+    places(ed, r, world)?;
     if let Some((before, lines)) = world.before.borrow_mut().take()
         && let Some((now, _)) = in_sight(ed, Some(lines))
         && before != now
@@ -237,6 +265,43 @@ fn held(ed: &Editor, world: &World) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every place's line is the one that printed it (`place <n>`), followed through the trims, else cut — and after a
+/// frame, the list's rows say `cut` on the cut ones only.
+fn places(ed: &Editor, r: &crate::task::Run, world: &World) -> Result<(), String> {
+    for (i, p) in r.places.iter().enumerate() {
+        let Some(l) = r.origin(i).line else { continue };
+        let shown = r.output.line(l).map(|s| s.to_string()).unwrap_or_default();
+        if shown != p.message {
+            return Err(format!("{}'s line {l} says {shown:?}", p.message));
+        }
+    }
+    let (Some(h), Some((frame, w, fh))) = (world.framed.get(), ed.last_frame.as_ref()) else { return Ok(()) };
+    let (Some((y, rows, first)), Some(g)) =
+        (ed.screen.list(GroupKind::Task), ed.session.group(GroupKind::Task))
+    else {
+        return Ok(());
+    };
+    let Some(list) = ed.screen.leaves.iter().find(|l| l.0 == g.list).map(|l| l.1).filter(|_| *fh == h) else {
+        return Ok(());
+    };
+    let screen = crate::screen::text(frame, *w, *fh).unwrap_or_default();
+    let order = r.place_rows();
+    for (i, row) in screen.lines().skip(y).take(rows).enumerate() {
+        let Some(&k) = order.get(first + i) else { break };
+        let drawn: String = row.chars().skip(list.x).take(list.w).collect();
+        let cut = r.origin(k).line.is_none();
+        if drawn.trim_end().ends_with("cut") != cut || !drawn.contains(&format!(":{}", k_line(r, k))) {
+            return Err(format!("the list's row {i} for {} (cut: {cut}): {drawn:?}", r.places[k].message));
+        }
+    }
+    Ok(())
+}
+
+/// Place `k`'s line as its row names it (1-based).
+fn k_line(r: &crate::task::Run, k: usize) -> usize {
+    r.places[k].line + 1
 }
 
 fn print(ed: &Editor) -> String {

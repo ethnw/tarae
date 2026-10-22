@@ -2,8 +2,10 @@
 //! (`key::list_move`, the list's measures — its selection drives the detail beside it), `enter` is the kind's act,
 //! `tab`/`S-tab` the next/previous member (then the slot's next tab — `slot_step`), `q` the group's one close (a
 //! run's only once it has ended — `Editor::slot_close`), `esc` back to the code; `space`, `:` and `C-w` are the
-//! editor's, anything else is said. The kind supplies its rows, its `enter`, the link and its words; the tests' is
-//! built (`testing.rs`), the other kinds come with P3's steps 3–5 (until then none is laid out, so none takes keys).
+//! editor's, anything else is said. The kind supplies its rows, its `enter`, the link and its words: the tests'
+//! (`testing.rs`), the task's places and a preflight's steps (§2.2: the one output document beside them, scrolled to
+//! the place's line or the step's heading); `:procs`, git and the review come with P3's steps 4–5 (until then none
+//! is laid out, so none takes keys).
 
 use crate::editor::Editor;
 use crate::key::{Code, Key, ListMove};
@@ -46,29 +48,128 @@ struct List {
 
 impl List {
     fn of(ed: &Editor, kind: GroupKind) -> Option<Self> {
+        let rows = ed.screen.list(kind).map_or(0, |l| l.1);
         match kind {
             GroupKind::Tests => {
                 let r = ed.session.test_run.as_ref()?;
-                let rows = ed.screen.tests_list.get().map_or(0, |l| l.1);
                 Some(List { n: r.cases.len(), selected: r.selected, top: r.list_top.get(), rows })
+            }
+            GroupKind::Task => {
+                let r = ed.session.task_run.as_ref()?;
+                let order = r.place_rows();
+                let selected = order.iter().position(|&i| i == r.picked).unwrap_or(0);
+                Some(List { n: order.len(), selected, top: r.list_top.get(), rows })
+            }
+            GroupKind::Preflight => {
+                let p = preflight(ed)?;
+                Some(List { n: p.steps.len(), selected: p.selected, top: p.list_top.get(), rows })
             }
             _ => None,
         }
     }
 
-    /// The selection moved: kept, and the link — the detail follows (the tests': the failure picked, its own
-    /// scroll again).
+    /// The selection moved to row `selected`: kept, and the link — the detail follows (the tests': the failure
+    /// picked, its own scroll again; the task's: the output at the place's line; a preflight's: at the step's
+    /// heading).
     fn set(ed: &mut Editor, kind: GroupKind, selected: usize, top: usize) {
-        if kind == GroupKind::Tests
-            && let Some(r) = ed.session.test_run.as_mut()
-        {
-            r.list_top.set(top);
-            if r.selected != selected {
-                r.scroll = None;
+        match kind {
+            GroupKind::Tests => {
+                let Some(r) = ed.session.test_run.as_mut() else { return };
+                r.list_top.set(top);
+                if r.selected != selected {
+                    r.scroll = None;
+                }
+                r.selected = selected;
             }
-            r.selected = selected;
+            GroupKind::Task => {
+                let Some(r) = ed.session.task_run.as_mut() else { return };
+                r.list_top.set(top);
+                // (by identity: the place, whatever row the list's growing puts it on)
+                let Some(&i) = r.place_rows().get(selected) else { return };
+                if r.picked != i {
+                    r.picked = i;
+                    link(ed, kind);
+                }
+            }
+            GroupKind::Preflight => {
+                let Some(p) = ed.session.preflight.as_mut() else { return };
+                p.list_top.set(top);
+                if p.selected != selected && selected < p.steps.len() {
+                    p.selected = selected;
+                    link(ed, kind);
+                }
+            }
+            _ => {}
         }
     }
+}
+
+/// The preflight whose run the task panel shows.
+pub fn preflight(ed: &Editor) -> Option<&crate::preflight::Preflight> {
+    let r = ed.session.task_run.as_ref()?;
+    ed.session.preflight.as_ref().filter(|p| p.generation == r.generation())
+}
+
+/// Kind `kind` has something to list beside its detail (else its host shows the detail alone, one pane): the tests'
+/// results; the task's places, two or more; a preflight's steps, two or more.
+pub fn listed(ed: &Editor, kind: GroupKind) -> bool {
+    match kind {
+        GroupKind::Tests => ed.session.test_run.as_ref().is_some_and(|r| !r.cases.is_empty()),
+        GroupKind::Task => {
+            preflight(ed).is_none() && ed.session.task_run.as_ref().is_some_and(|r| r.places.len() > 1)
+        }
+        GroupKind::Preflight => preflight(ed).is_some_and(|p| p.steps.len() > 1),
+        _ => false,
+    }
+}
+
+/// The link (§2.1): the detail shows what the list's selection is — the task's output with the place's line in
+/// sight and selected, a preflight's from the step's heading at the top. Nothing slow: the document is there.
+fn link(ed: &mut Editor, kind: GroupKind) {
+    match kind {
+        GroupKind::Task => {
+            let Some(r) = ed.session.task_run.as_ref() else { return };
+            match r.origin(r.picked).line {
+                Some(line) => crate::rundoc::show_line(ed, line, false),
+                None => ed.set_status("that place's line was cut from the output — enter goes to the place"),
+            }
+        }
+        GroupKind::Preflight => {
+            let Some((p, r)) = preflight(ed).zip(ed.session.task_run.as_ref()) else { return };
+            match p.heading_at(p.selected, &r.output) {
+                Some(at) => crate::rundoc::show_line(ed, at, true),
+                None => ed.set_status(format!("{} hasn't printed anything yet", p.steps[p.selected].name)),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A press on row `row` of kind `kind`'s list: the keys its, that row selected.
+pub fn click(ed: &mut Editor, kind: GroupKind, row: usize) {
+    ed.list_focus(kind);
+    if let Some(list) = List::of(ed, kind).filter(|l| row < l.n) {
+        List::set(ed, kind, row, list.top);
+    }
+}
+
+/// `o` on a preflight's output beside its steps: the step in view (the cursor's) selected in the list, the keys
+/// there — false when the panel isn't a preflight's group.
+pub fn step_in_view(ed: &mut Editor) -> bool {
+    if !ed.session.groups.iter().any(|g| g.kind == GroupKind::Preflight && ed.group_laid(g)) {
+        return false;
+    }
+    let at = crate::rundoc::cursor_line(ed, Slot::Task);
+    let k = preflight(ed).zip(ed.session.task_run.as_ref()).and_then(|(p, r)| p.step_at(at?, &r.output));
+    let Some(k) = k else {
+        ed.set_status("no step has printed anything yet");
+        return true;
+    };
+    ed.list_focus(GroupKind::Preflight);
+    if let Some(p) = ed.session.preflight.as_mut() {
+        p.selected = k;
+    }
+    true
 }
 
 impl Editor {
@@ -76,11 +177,29 @@ impl Editor {
     /// results); with nothing to list its host shows the detail alone, one pane.
     pub fn group_laid(&self, g: &Group) -> bool {
         match g.kind {
-            GroupKind::Tests => {
-                self.tests_grouped() && self.session.leaf(crate::pane::Shows::Slot) == Some(g.host)
+            GroupKind::Tests | GroupKind::Task | GroupKind::Preflight => {
+                g.kind.slot().is_some_and(|s| self.slot() == Some(s))
+                    && listed(self, g.kind)
+                    && self.session.leaf(crate::pane::Shows::Slot) == Some(g.host)
             }
             _ => false,
         }
+    }
+
+    /// Every event: the task's and the preflight's groups, made in the slot's leaf once a run of theirs is there
+    /// (the tests' is the session's from its start) — their ids from `next_pane`, kept on a new run.
+    pub fn groups_sync(&mut self) {
+        let Some(r) = self.session.task_run.as_ref() else { return };
+        let kind = match self.session.preflight.as_ref().is_some_and(|p| p.generation == r.generation()) {
+            true => GroupKind::Preflight,
+            false => GroupKind::Task,
+        };
+        if self.session.group(kind).is_some() {
+            return;
+        }
+        let Some(host) = self.session.leaf(crate::pane::Shows::Slot) else { return };
+        self.session.groups.push(Group::new(kind, host, self.next_pane));
+        self.next_pane += Group::ids(kind);
     }
 
     /// The group the slot lays out now, its panel in front.
@@ -97,10 +216,21 @@ impl Editor {
 
     /// The keys to kind `kind`'s list (`C-w h` from its detail, `S-tab`, a click on its rows).
     pub fn list_focus(&mut self, kind: GroupKind) {
-        match kind {
-            GroupKind::Tests => self.tests_list_focus(),
-            _ => self.set_status(format!("{} isn't a list of its own yet", kind.what())),
+        let why = match kind {
+            GroupKind::Tests => "no results to list yet — the output is all the panel has",
+            GroupKind::Task => "fewer than two places to list — the output is all the panel has",
+            GroupKind::Preflight => "one step — the output is all the panel has",
+            _ => return self.set_status(format!("{} isn't a list of its own yet", kind.what())),
+        };
+        if !listed(self, kind) {
+            return self.set_status(why);
         }
+        let Some(g) = self.session.group(kind) else { return };
+        self.session.slot_front = kind.slot();
+        self.procs_unfocus();
+        self.plugin_panel_unfocus();
+        self.session.at = At::List(g.list);
+        crate::rundoc::sync(self);
     }
 
     /// The keys to kind `kind`'s detail — in the slot, the slot's view mode on it.
@@ -125,10 +255,7 @@ impl Editor {
 
 /// Whether kind `kind`'s list was drawn in the last frame.
 pub fn drawn(ed: &Editor, kind: GroupKind) -> bool {
-    match kind {
-        GroupKind::Tests => ed.screen.tests_list.get().is_some(),
-        _ => false,
-    }
+    ed.screen.list(kind).is_some()
 }
 
 /// `q` on a group: its one close — the slot's panel (a run's once it has ended), the side panel's git tab, the
@@ -145,12 +272,47 @@ pub fn close(ed: &mut Editor, kind: GroupKind) {
     }
 }
 
-/// `enter` on a group's list: the kind's act.
+/// `enter` on a group's list: the kind's act — the test's place, the task's place, a preflight step's first place
+/// (else its heading, the output with the keys there).
 fn open(ed: &mut Editor, kind: GroupKind) {
-    if kind == GroupKind::Tests {
-        ed.tests_list_open();
+    let place = match kind {
+        GroupKind::Tests => return ed.tests_list_open(),
+        GroupKind::Task => ed.session.task_run.as_ref().and_then(|r| r.places.get(r.picked)).cloned(),
+        GroupKind::Preflight => {
+            let Some((p, r)) = preflight(ed).zip(ed.session.task_run.as_ref()) else { return };
+            let first = (0..r.places.len()).find(|&i| r.origin(i).step == Some(p.selected));
+            match first {
+                Some(i) => r.places.get(i).cloned(),
+                None => {
+                    let name = p.steps[p.selected].name.clone();
+                    return crate::rundoc::step(ed, &name);
+                }
+            }
+        }
+        _ => return,
+    };
+    let Some(it) = place else { return };
+    ed.session.at = At::Code;
+    if let Err(e) = ed.open_at(&it.path, it.line, it.col) {
+        ed.set_error(format!("{e:#}"));
     }
 }
+
+/// `o` on a group's list: a preflight's selected step's output whole, in a buffer of its own (`:preflight-output`).
+fn output(ed: &mut Editor, kind: GroupKind) -> bool {
+    let Some(name) =
+        preflight(ed).filter(|_| kind == GroupKind::Preflight).map(|p| p.steps[p.selected].name.clone())
+    else {
+        return false;
+    };
+    if let Err(e) = ed.preflight_output(&name) {
+        ed.set_status(e);
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests;
 
 /// A key while a group's list has the keys (the module's doc) — false when it isn't one of its.
 pub fn key(ed: &mut Editor, key: Key) -> bool {
@@ -176,6 +338,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
         (Code::Esc, ..) => ed.session.at = At::Code,
         (Code::Char('q'), false, false) => close(ed, g.kind),
         (Code::Enter, false, false) => open(ed, g.kind),
+        (Code::Char('o'), false, false) if output(ed, g.kind) => {}
         (Code::Tab, false, false) => ed.slot_step(1),
         (Code::BackTab, false, false) => ed.slot_step(-1),
         _ => ed.key_unused(key, g.kind.what(), "esc code"),

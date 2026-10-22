@@ -435,7 +435,9 @@ main that has what it waits for, and the user says go:
   run's output kept once (footprint −60 % on 20,000 lines); the document pane one module (`docpane.rs`); the
   terminal's waits for the engine → **P3** panes of their own (the tests panel
   the first linked group; its 12 decisions taken 2026-10-22; step 1 (`3d7ca662`): the
-  slot's header in the line where it meets the code, one drawer with a frame's top line, the code a row taller), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  slot's header in the line where it meets the code, one drawer with a frame's top line, the code a row taller; step 2
+  (`3b00bb04`): groups as one model; step 3: the task's places and a preflight's steps as linked groups, the one output
+  scrolled to the place's line or the step's heading), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 where
   every session reads and writes, shown wherever that file is; C2 an overlap between workspaces said the moment it
   would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the merged view — everyone works in their own workspace and tarae shows the merge, each change in its

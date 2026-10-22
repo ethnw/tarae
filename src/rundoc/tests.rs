@@ -358,9 +358,10 @@ fn tab_goes_round_the_slot_from_procs_too() {
     assert!(!said(&ed).contains("isn't"), "never unused: {}", said(&ed));
 }
 
-/// A click on a preflight step's chip: the output's keys, from that step's heading at the top, the cursor on it.
+/// A click on a preflight step's row in its steps' list (panes P3 §2.2): the list's keys, the output from that
+/// step's heading at the top, the cursor on it — `tab` gives the output the keys there.
 #[test]
-fn a_step_chip_shows_its_heading_at_the_top() {
+fn a_step_row_shows_its_heading_at_the_top() {
     let mut ed = task(0);
     let r = ed.session.task_run.as_mut().unwrap();
     for name in ["fmt", "test", "clippy"] {
@@ -384,14 +385,18 @@ fn a_step_chip_shows_its_heading_at_the_top() {
     ed.session.preflight = Some(p);
     frame(&mut ed);
     feed(&mut ed, "<C-w>j");
-    let (y, x, _, _) =
-        *ed.screen.task_steps.borrow().iter().find(|c| c.3 == 1).expect("the test step's chip");
+    let (y, _, first) = ed.screen.list(crate::pane::GroupKind::Preflight).expect("the steps' list");
     ed.handle_mouse(crate::event::Mouse {
         kind: crate::event::MouseKind::Down,
-        x: x as u16,
-        y: y as u16,
+        x: 3,
+        y: (y + 1 - first) as u16,
         alt: false,
     });
+    frame(&mut ed);
+    assert_eq!(region(&ed), "list:preflight");
+    let d = output(&ed, Slot::Task);
+    assert_eq!(d.text.line(d.top).to_string().trim_end(), "── test ──", "the link: its heading at the top");
+    feed(&mut ed, "<tab>");
     frame(&mut ed);
     assert_eq!(region(&ed), "output:preflight");
     let d = output(&ed, Slot::Task);

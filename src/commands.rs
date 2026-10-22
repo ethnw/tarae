@@ -2452,8 +2452,12 @@ fn view_take(cx: &mut Context) {
 fn run_where(cx: &mut Context) {
     crate::rundoc::run_where(cx.editor);
 }
-/// A run panel's `o` (`[run]`): a preflight step's whole output in a buffer (`:preflight-output`).
+/// A run panel's `o` (`[run]`): a preflight step's whole output in a buffer (`:preflight-output`) — beside its
+/// steps' list, the step in view selected there instead (its `o` the buffer).
 fn preflight_output(cx: &mut Context) {
+    if crate::grouplist::step_in_view(cx.editor) {
+        return;
+    }
     if let Err(e) = cx.editor.preflight_output("") {
         cx.editor.set_status(e);
     }

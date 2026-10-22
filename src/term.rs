@@ -495,7 +495,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             terminal_cols(&lay) as u16,
         ))),
         test_panel: Default::default(),
-        tests_list: Default::default(),
+        lists: Default::default(),
         run_rows: Default::default(),
         run_cols: Default::default(),
         review_change: Default::default(),
@@ -758,8 +758,11 @@ fn group_members(
     if !editor.group_laid(g) || lay.debug_h <= lay.slot_head || lay.slot_w == 0 {
         return None;
     }
+    use crate::pane::GroupKind;
     let left_w = match g.kind {
-        crate::pane::GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, lay.slot_w),
+        GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, lay.slot_w),
+        GroupKind::Task => places_list_w(editor, editor.session.task_run.as_ref()?, lay.slot_w),
+        GroupKind::Preflight => steps_list_w(crate::grouplist::preflight(editor)?, lay.slot_w),
         _ => return None,
     };
     let (y, h) = (lay.slot_y() + lay.slot_head, lay.debug_h - lay.slot_head);
@@ -775,6 +778,34 @@ fn tests_list_w(r: &crate::testing::TestRun, w: usize) -> usize {
     let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
     let name_w = short.iter().map(|n| n.width()).max().unwrap_or(10);
     (name_w + 14).clamp(26, (w * 45 / 100).max(26)).min(w.saturating_sub(20))
+}
+
+/// The least a task's or a preflight's list is wide: the header's details over it (`failed ▲ 2  28ms`) stay whole
+/// left of its `┬` where the slot is wide enough.
+const RUN_LIST_MIN: usize = 36;
+
+/// A task's places' list's width in a slot `w` wide: a row's `▲ path:line  message` as long as the longest place's
+/// path wants it, a message's start beside it — within 45 % of it, as the tests' (the output keeps 20).
+fn places_list_w(editor: &Editor, r: &crate::task::Run, w: usize) -> usize {
+    let at_w = r.places.iter().map(|p| place_at(editor, p).width()).max().unwrap_or(10);
+    run_list_w(at_w + 4 + 24, w)
+}
+
+/// A run's list `want` wide in a slot `w` wide: `RUN_LIST_MIN` at least, within 45 % of it, the output 20 at least.
+fn run_list_w(want: usize, w: usize) -> usize {
+    let most = (w * 45 / 100).max(24);
+    want.max(RUN_LIST_MIN).min(most).min(w.saturating_sub(20))
+}
+
+/// A place as its list row names it: its path from the session's root, its line (`src/main.rs:31`).
+fn place_at(editor: &Editor, p: &crate::quickfix::Item) -> String {
+    format!("{}:{}", editor.shown(&p.path).display(), p.line + 1)
+}
+
+/// A preflight's steps' list's width in a slot `w` wide: its names, their marks and times (`run_list_w`).
+fn steps_list_w(p: &crate::preflight::Preflight, w: usize) -> usize {
+    let name_w = p.steps.iter().map(|s| s.name.width()).max().unwrap_or(6);
+    run_list_w(name_w + 14, w)
 }
 
 /// The columns a terminal in the slot gets: its width inside the padding.
@@ -814,7 +845,10 @@ impl Layout {
             Some(Slot::Task) => match editor.session.task_run.as_ref() {
                 Some(r) => {
                     let queued = queued_h(editor, crate::queued::Slot::Task);
-                    task_panel_h(r, preflight_of(editor, r).is_some(), queued, total, slot_head)
+                    // (a row over the output: a preflight's steps, or its group's titles)
+                    let over = preflight_of(editor, r).is_some()
+                        || crate::grouplist::listed(editor, crate::pane::GroupKind::Task);
+                    task_panel_h(r, over, queued, total, slot_head)
                 }
                 None => 0,
             },
@@ -1264,12 +1298,16 @@ fn draw_debug_panel(
 /// in, uxaudit D6) — first in its header's hints, before the commands that work from anywhere.
 fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
     let zoom = if editor.zoomed().is_some() { "back" } else { "full screen" };
-    // (the tests' list, a pane of its group: its own keys — `tab` to the detail beside it)
-    if editor.tests_list_focused() {
-        let picked = editor.session.test_run.as_ref().is_some_and(|r| r.picked().is_some());
-        let closes = editor.q_closes(crate::sizes::Slot::Test);
+    // (a group's list, a pane of its own: its own keys — `tab` to the detail beside it; a preflight's `o` its step's
+    // output whole)
+    if let Some(g) = editor.list_focused() {
+        use crate::pane::GroupKind;
+        let picked = g.kind == GroupKind::Tests
+            && editor.session.test_run.as_ref().is_some_and(|r| r.picked().is_some());
+        let closes = g.kind.slot().is_some_and(|s| editor.q_closes(s));
         return [
             Some(("enter", "go to it")),
+            (g.kind == GroupKind::Preflight).then_some(("o", "buffer")),
             Some(("tab", if picked { "failure" } else { "output" })),
             Some(("esc", "code")),
             closes.then_some(("q", "close")),
@@ -1348,6 +1386,7 @@ fn draw_output(
     slot: crate::sizes::Slot,
     top: usize,
     (x, y, w, rows): (usize, usize, usize, usize),
+    band: Option<usize>,
 ) -> io::Result<()> {
     let Some(doc) = editor.session.outputs.doc(slot) else { return Ok(()) };
     let keys = crate::rundoc::has_keys(editor) == Some(slot);
@@ -1367,7 +1406,8 @@ fn draw_output(
         text_cols: w,
         ..lay.clone()
     };
-    let shows = Shows::output(keys, if keys { doc.left } else { 0 });
+    // (`band`: a line on the cursor line's band — what its group's list selected, while the list has the keys)
+    let shows = Shows { cursorline: band, ..Shows::output(keys, if keys { doc.left } else { 0 }) };
     let hits = editor.session.outputs.get(slot).and_then(|o| o.hits()).filter(|_| keys);
     let src = Source { hits, ..Source::of(doc) };
     draw_text(editor, &src, top, &shows, &view, &ui.on(card), &pl, out)?;
@@ -1801,10 +1841,7 @@ fn preflight_row(
     colors: (Option<Color>, Option<Color>, Option<Color>),
 ) -> Vec<(String, Style, Option<usize>)> {
     use crate::preflight::State;
-    let (good, bad, warn) = colors;
-    let faint = Style { fg: ui.linenr.fg, ..card };
     let dim = Style { fg: ui.virt.fg, ..card };
-    let accent = Style { fg: ui.accent.fg, ..card };
     let cells = |timed: bool| -> Vec<(String, Style, Option<usize>)> {
         let mut out = Vec::new();
         for (k, s) in p.steps.iter().enumerate() {
@@ -1815,13 +1852,7 @@ fn preflight_row(
                 Some(d) if timed => format!(" {}", crate::preflight::long_duration(d)),
                 _ => String::new(),
             };
-            let (glyph, gs, name) = match s.state {
-                State::Waiting => ("◦".to_string(), faint, faint),
-                State::Running => (wave(editor), accent, Style { bold: true, ..card }),
-                State::Passed if s.note.is_some() => ("●".into(), Style { fg: warn, ..card }, card),
-                State::Passed => ("●".into(), Style { fg: good, ..card }, card),
-                State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
-            };
+            let (glyph, gs, name) = step_mark(editor, s, card, ui, colors);
             out.push((format!("{glyph} "), gs, Some(k)));
             out.push((s.name.clone(), name, Some(k)));
             let t = match s.state {
@@ -1858,6 +1889,27 @@ fn preflight_row(
         }
     }
     out
+}
+
+/// A preflight step's mark, its colour and its name's style: passed `●` in the plus colour (a note's pass in
+/// warning), failed `▲` in the error colour and bold, the one running the wave in the accent, the ones to come `◦`
+/// faint.
+fn step_mark(
+    editor: &Editor,
+    s: &crate::preflight::StepRun,
+    card: Style,
+    ui: &Ui,
+    (good, bad, warn): (Option<Color>, Option<Color>, Option<Color>),
+) -> (String, Style, Style) {
+    use crate::preflight::State;
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    match s.state {
+        State::Waiting => ("◦".to_string(), faint, faint),
+        State::Running => (wave(editor), Style { fg: ui.accent.fg, ..card }, Style { bold: true, ..card }),
+        State::Passed if s.note.is_some() => ("●".into(), Style { fg: warn, ..card }, card),
+        State::Passed => ("●".into(), Style { fg: good, ..card }, card),
+        State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
+    }
 }
 
 /// The fewest rows of output the task panel shows (under its header, `head` rows — `chrome::slot_head`).
@@ -2108,27 +2160,36 @@ fn draw_task_panel(
     if r.by_claude || steps.is_some() {
         hints.retain(|h| h.0 != "space m m");
     }
-    if steps.is_some() {
-        hints.insert(0, ("o", "output"));
+    // (its group laid out — the places or the steps beside the output, panes P3 §2.2: the line between them down
+    // from the header's; a preflight's `o` on the output selects the step in view there)
+    let group = editor.slot_group().filter(|g| g.kind.slot() == Some(crate::sizes::Slot::Task));
+    let members = group.as_ref().and_then(|g| Some((*g, group_members(editor, lay, g)?)));
+    // (the output's own keys — not while its group's list has them: the list's are said)
+    let listing = group.is_some_and(|g| editor.session.is_at(At::List(g.list)));
+    let o = steps.is_some() && !listing;
+    if o {
+        hints.insert(0, ("o", if members.is_some() { "step" } else { "output" }));
     }
     // (where Claude's command ran, and why — cardburden 4b)
-    if r.ran.is_some() {
+    let k = r.ran.is_some() && !listing;
+    if k {
         hints.insert(0, ("K", "where it ran"));
     }
     // (its view mode's pairs first, its own keys after their way out — before `q close` and the zoom, which fold
     // first)
     let slot_keys = slot_hints(editor);
-    let own = usize::from(steps.is_some()) + usize::from(r.ran.is_some());
+    let own = usize::from(o) + usize::from(k);
     let after_out = slot_keys.iter().position(|(_, d)| *d == "code").map_or(0, |i| i + 1);
     let (to_out, rest) = slot_keys.split_at(after_out);
     hints.splice(own..own, rest.iter().map(|(k, d)| (k.as_str(), *d)));
     hints.splice(0..0, to_out.iter().map(|(k, d)| (k.as_str(), *d)));
     summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Task));
     let y0 = lay.slot_y();
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[])?;
-    // A preflight's steps: the row under the header
-    let top = body - y0 + usize::from(steps.is_some());
-    if let Some(p) = steps {
+    let splits: Vec<usize> = members.iter().map(|(_, (list, _))| list.x + list.w).collect();
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits)?;
+    // A preflight's steps: the row under the header (beside the output, its list's rows instead)
+    let top = body - y0 + usize::from(steps.is_some() && members.is_none());
+    if let Some(p) = steps.filter(|_| members.is_none()) {
         queue!(out, MoveTo(x0 as u16, body as u16))?;
         apply(out, card)?;
         queue!(out, Spaces(w), MoveTo((x0 + PAD) as u16, body as u16))?;
@@ -2163,6 +2224,10 @@ fn draw_task_panel(
             faint,
         )?;
     }
+    if let Some((g, (list, _))) = members {
+        let at = (y0 + top, rows, y0 + top - 1 + rows + below);
+        return draw_task_group(r, editor, ui, lay, out, g, list.w, at);
+    }
     // Its output, a document (`rundoc.rs`): its end, unless scrolled back — its own top while it has the keys; the
     // wheel's thumb when it doesn't fit
     editor.screen.task_panel.set(Some((y0, y0 + top - 1 + rows + below, rows)));
@@ -2176,7 +2241,7 @@ fn draw_task_panel(
         queue!(out, Spaces(w))?;
     }
     let at = (x0 + PAD, y0 + top, w.saturating_sub(2 * PAD), rows);
-    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at)?;
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at, None)?;
     for i in (0..rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
         apply(out, faint)?;
         queue!(
@@ -2184,6 +2249,135 @@ fn draw_task_panel(
             MoveTo((x0 + w).saturating_sub(1) as u16, (y0 + top + i) as u16),
             Print(thumb_glyph(ui))
         )?;
+    }
+    Ok(())
+}
+
+/// The task panel's group laid out (panes P3 §2.2), `rows` rows from screen row `y` (its last row, the panel's,
+/// `last`): its list `list_w` wide — the task's places (`▲ src/main.rs:31  mismatched types`, the errors first; one
+/// whose line was cut says so) or a preflight's steps (`● fmt 6ms`, the one running with the wave) — a line, then
+/// the output, each under its title (lit with the keys), as the tests' group draws its two. While the list has the
+/// keys its selection is on the cursor line's band in the output (the link).
+#[allow(clippy::too_many_arguments)]
+fn draw_task_group(
+    r: &crate::task::Run,
+    editor: &Editor,
+    ui: &Ui,
+    lay: &Layout,
+    out: &mut impl Write,
+    g: crate::pane::Group,
+    list_w: usize,
+    (y, rows, last): (usize, usize, usize),
+) -> io::Result<()> {
+    use crate::chrome::PAD;
+    use crate::pane::GroupKind;
+    let t = &editor.theme;
+    let card = panel_style(ui, editor);
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
+    let color = |k: &str| t.try_get(k).and_then(|s| s.fg);
+    let (good, bad, warn) = (color("diff.plus"), ui.error.fg, color("warning"));
+    let (x0, w) = (lay.slot_x, lay.slot_w);
+    let right_x = list_w + 1;
+    let right_w = w.saturating_sub(right_x + 1);
+    let list_rows = rows.saturating_sub(1);
+    let steps = crate::grouplist::preflight(editor).filter(|_| g.kind == GroupKind::Preflight);
+    let order = if steps.is_some() { Vec::new() } else { r.place_rows() };
+    let (n, sel) = match steps {
+        Some(p) => (p.steps.len(), p.selected),
+        None => (order.len(), order.iter().position(|&i| i == r.picked).unwrap_or(0)),
+    };
+    let list_top = steps.map_or(&r.list_top, |p| &p.list_top);
+    // (the selection kept in sight from where the list is — `C-e`/`C-y` move it)
+    let first = list_top.get().min(sel).max((sel + 1).saturating_sub(list_rows)).min(n.saturating_sub(1));
+    list_top.set(first);
+    editor.screen.task_panel.set(Some((lay.slot_y(), last, list_rows)));
+    editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y + 1, x0 + right_x + 1, list_rows)));
+    editor.screen.lists.borrow_mut().push((g.kind, (y + 1, list_rows, first)));
+    let list_keys = editor.session.is_at(At::List(g.list));
+    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Task);
+    let title = |keys: bool| Style { bold: true, ..if keys { strong } else { faint } };
+    // (the link, while the list has the keys: the place's line, the step's heading)
+    let band = match steps {
+        Some(p) => p.heading_at(p.selected, &r.output),
+        None => r.origin(r.picked).line,
+    }
+    .filter(|_| list_keys);
+    let start = output_top(editor, crate::sizes::Slot::Task, list_rows);
+    let lines = r.output.len();
+    let bar = (lines > list_rows).then(|| scroll_thumb(list_rows, lines, start));
+    for i in 0..rows {
+        let yy = (y + i) as u16;
+        queue!(out, MoveTo(x0 as u16, yy))?;
+        apply(out, card)?;
+        queue!(out, Spaces(w), MoveTo((x0 + list_w) as u16, yy))?;
+        leaf_line(out, ui, card, faint)?;
+        if i == 0 {
+            apply(out, title(list_keys))?;
+            let name = if steps.is_some() { "STEPS" } else { "PLACES" };
+            queue!(out, MoveTo((x0 + PAD) as u16, yy), Print(name))?;
+            apply(out, title(detail_keys))?;
+            queue!(out, MoveTo((x0 + right_x + 1) as u16, yy), Print("OUTPUT"))?;
+            continue;
+        }
+        let idx = first + i - 1;
+        if idx >= n {
+            continue;
+        }
+        let is_sel = list_keys && idx == sel;
+        let row_bg = if is_sel { selected_row(ui, editor, card) } else { card };
+        queue!(out, MoveTo(x0 as u16, yy))?;
+        apply(out, if is_sel { Style { fg: ui.accent.fg, ..row_bg } } else { row_bg })?;
+        queue!(out, Print(if is_sel { "▎" } else { " " }))?;
+        // (the mark, the name and what's right-aligned after it: a step's time, a cut place's word)
+        let (mark, mark_st, name, name_st, rest, right) = match steps {
+            Some(p) => {
+                use crate::preflight::State;
+                let s = &p.steps[idx];
+                let (glyph, gs, ns) = step_mark(editor, s, card, ui, (good, bad, warn));
+                let took = match s.state {
+                    State::Running => s.started.map(crate::clock::since),
+                    _ => s.took,
+                };
+                let time = took.map(crate::preflight::long_duration).unwrap_or_default();
+                (glyph, gs, s.name.clone(), ns, String::new(), time)
+            }
+            None => {
+                let p = &r.places[order[idx]];
+                let (glyph, c) = match p.severity {
+                    1 => ("▲", bad),
+                    2 => ("▲", warn),
+                    _ => ("◦", faint.fg),
+                };
+                let cut = if r.origin(order[idx]).line.is_none() { "cut" } else { "" };
+                let at = place_at(editor, p);
+                (glyph.to_string(), Style { fg: c, ..card }, at, card, p.message.clone(), cut.to_string())
+            }
+        };
+        apply(out, Style { bg: row_bg.bg, ..mark_st })?;
+        queue!(out, Print(format!(" {mark} ")))?;
+        let room = list_w.saturating_sub(4 + 1 + if right.is_empty() { 0 } else { right.width() + 2 });
+        let name = fit_left(&name, room);
+        apply(out, Style { bg: row_bg.bg, bold: is_sel || name_st.bold, ..name_st })?;
+        queue!(out, Print(&name))?;
+        let left = room.saturating_sub(name.width() + 2);
+        let rest = if left >= 6 { fit_ellipsis(&rest, left) } else { String::new() };
+        if !rest.is_empty() {
+            apply(out, Style { fg: dim.fg, ..row_bg })?;
+            queue!(out, Print("  "), Print(&rest))?;
+        }
+        // (to the line: what's right-aligned, a cell before it)
+        let used = 4 + name.width() + if rest.is_empty() { 0 } else { 2 + rest.width() };
+        apply(out, Style { fg: faint.fg, ..row_bg })?;
+        let pad = list_w.saturating_sub(used + right.width() + 1);
+        queue!(out, Spaces(pad), Print(&right), Print(" "))?;
+    }
+    let at = (x0 + right_x + 1, y + 1, right_w.saturating_sub(1), list_rows);
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at, band)?;
+    for i in (0..list_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
+        apply(out, faint)?;
+        queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, (y + 1 + i) as u16), Print(thumb_glyph(ui)))?;
     }
     Ok(())
 }
@@ -2866,7 +3060,7 @@ fn draw_test_panel(
             }
         }
         let at = (x0 + PAD, body + note, w.saturating_sub(2 * PAD), out_rows);
-        draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, start, at)?;
+        draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, start, at, None)?;
         for i in (0..out_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
             let y = (body + note + i) as u16;
             apply(out, faint)?;
@@ -2890,7 +3084,7 @@ fn draw_test_panel(
         r.list_top.get().min(r.selected).max((r.selected + 1).saturating_sub(list_rows))
     };
     r.list_top.set(first);
-    editor.screen.tests_list.set(Some((body + 1, list_rows, first)));
+    editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Tests, (body + 1, list_rows, first)));
     // (the member with the keys says so in its title — one header over both, the names lit as the frame's are)
     let list_keys = tests_group(editor).is_some_and(|g| editor.session.is_at(At::List(g.list)));
     let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Test);
@@ -2982,7 +3176,7 @@ fn draw_test_panel(
     }
     // Right: the detail, under its title
     let at = (x0 + right_x + 1, body + 1, right_w.saturating_sub(1), list_rows);
-    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at)?;
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at, None)?;
     Ok(())
 }
 
@@ -3375,7 +3569,9 @@ impl Region {
             Keys::Code | Keys::Change => Some(Region::Code),
             Keys::Side(_) | Keys::Review => Some(Region::Side),
             k if k.chat() => Some(Region::Chat),
-            Keys::Slot(_) | Keys::Program | Keys::View(_) | Keys::Output(_) => Some(Region::Slot),
+            Keys::Slot(_) | Keys::List(_) | Keys::Program | Keys::View(_) | Keys::Output(_) => {
+                Some(Region::Slot)
+            }
             Keys::Picker | Keys::Card | Keys::Point | Keys::Chat => None,
         }
     }
@@ -3704,7 +3900,7 @@ fn draw(
         let session = &editor.session;
         // (its panels' view modes and documents have the keys too — the terminal's, the runs')
         let viewed = matches!(keys, Keys::View(crate::view::Surface::Terminal) | Keys::Output(_));
-        let _fade = Fade::unless(matches!(keys, Keys::Slot(_) | Keys::Program) || viewed, ui);
+        let _fade = Fade::unless(matches!(keys, Keys::Slot(_) | Keys::List(_) | Keys::Program) || viewed, ui);
         let slot = editor.slot();
         let plugin = editor.plugins.as_ref().and_then(|p| p.panel.as_ref());
         if slot == Some(Slot::Procs) {

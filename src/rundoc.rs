@@ -172,6 +172,9 @@ pub struct Output {
     keyed: bool,
     /// Its lines when the keys came, or `G` caught up — more since: what came waits below (`came`).
     seen: usize,
+    /// Its cursor was put on a line by a group's list (`show_line`, the link) since the keys were last here: where
+    /// they land, line 0 too (a fresh document's cursor there is no place).
+    placed: bool,
 }
 
 impl std::ops::Deref for Output {
@@ -551,9 +554,12 @@ fn follow(ed: &mut Editor, slot: Slot) {
                 Some(o) => {
                     // (its search stays the pane's; the keys land on it again, as they came)
                     crate::event::drop_later(o.pane.replace(doc));
-                    (o.made, o.keyed) = (m, false);
+                    (o.made, o.keyed, o.placed) = (m, false, false);
                 }
-                None => *place = Some(Output { pane: Pane::new(doc), made: m, keyed: false, seen: 0 }),
+                None => {
+                    *place =
+                        Some(Output { pane: Pane::new(doc), made: m, keyed: false, seen: 0, placed: false })
+                }
             }
         }
     }
@@ -603,14 +609,17 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
         return;
     }
     o.seen = o.lines();
+    let placed = std::mem::take(&mut o.placed);
     let (top, failure) = (shown.unwrap_or(0), o.failure());
     let d = o.doc_mut();
     let last = mv::last_line(&d.text);
     let top = top.min(last);
     d.set_top(top);
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
-    if (top..top + rows).contains(&line) && line > 0 {
-        return in_sight(ed, slot);
+    // (in sight — a step's heading the link put at the top too: the rows as they were, the margin kept from the
+    // next move on; on line 0 only where the link put it — a fresh document's cursor is there by default)
+    if (top..top + rows).contains(&line) && (line > 0 || placed) {
+        return sight(ed, slot, 0);
     }
     let line = match () {
         _ if failure => top,
@@ -625,8 +634,13 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
 
 /// The cursor's line in sight, the scrolloff margin kept (one line a row: nothing wraps), and its column.
 fn in_sight(ed: &mut Editor, slot: Slot) {
+    sight(ed, slot, ed.config.scrolloff);
+}
+
+/// `in_sight` with a margin of `so` lines.
+fn sight(ed: &mut Editor, slot: Slot, so: usize) {
     let size = viewport(ed, slot);
-    let (so, tab) = (ed.config.scrolloff, ed.config.tab_width);
+    let tab = ed.config.tab_width;
     let Some(o) = ed.session.outputs.get_mut(slot) else { return };
     o.size = Some(size);
     let Some(d) = o.doc_in_mut() else { return };
@@ -913,16 +927,35 @@ pub fn step(ed: &mut Editor, name: &str) {
     let at = ed.session.task_run.as_ref().and_then(|r| r.output.iter().position(|l| l.1 == heading));
     let Some(at) = at else { return ed.set_status("that step hasn't printed anything yet") };
     ed.bottom_take_keys();
+    show_line(ed, at, true);
+}
+
+/// The task panel's document at its line `at`, the cursor there — at the top (`top`: a step's heading, as `zt` puts
+/// it), else with the scrolloff margin above it (a place's line, what printed it before it in sight) — and the
+/// panel scrolled there. Where the keys are doesn't change: a group's list keeps them (the link, `grouplist.rs`).
+pub fn show_line(ed: &mut Editor, at: usize, top: bool) {
     let rows = rows(ed, Slot::Task);
-    let Some(d) = ed.session.outputs.get_mut(Slot::Task).and_then(|o| o.doc_in_mut()) else { return };
-    let at = at.min(mv::last_line(&d.text));
+    let so = ed.config.scrolloff.min((rows - 1) / 2);
+    let Some(o) = ed.session.outputs.get_mut(Slot::Task) else { return };
+    // (for the keys coming — with them here already, it's where they are)
+    o.placed = !o.keyed;
+    let Some(d) = o.doc_in_mut() else { return };
+    let last = mv::last_line(&d.text);
+    let at = at.min(last);
     d.set_selection(Selection::point(mv::line_start(&d.text, at)));
-    // (its heading at the top, as `zt` puts it — the next move keeps the scrolloff margin)
-    let top = at.min((mv::last_line(&d.text) + 1).saturating_sub(rows));
+    // (the next move keeps the scrolloff margin)
+    let want = if top { at } else { at.saturating_sub(so) };
+    let top = want.min((last + 1).saturating_sub(rows));
     d.set_top(top);
     if let Some(r) = ed.session.task_run.as_mut() {
         r.scroll_to(top, rows);
     }
+}
+
+/// The line of `slot`'s document its cursor is on.
+pub fn cursor_line(ed: &Editor, slot: Slot) -> Option<usize> {
+    let d = ed.session.outputs.doc(slot)?;
+    Some(mv::line_of(&d.text, d.selection().primary().cursor(&d.text)))
 }
 
 /// The state's `view` while an output has the keys: what it's of, the cursor's line, selections, whether more came

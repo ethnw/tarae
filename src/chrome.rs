@@ -133,6 +133,9 @@ pub enum Keys {
     View(crate::view::Surface),
     /// A run panel's output, normal mode on its document (`rundoc.rs`) — the status line says its mode and name.
     Output(crate::rundoc::Run),
+    /// A linked group's list in the slot (`grouplist.rs`) — named as its header names it: a preflight's steps
+    /// `preflight`, not the task panel's word.
+    List(crate::pane::GroupKind),
 }
 
 impl Keys {
@@ -163,6 +166,14 @@ impl Keys {
             Keys::Output(crate::rundoc::Run::Task) => "TASK",
             Keys::Output(crate::rundoc::Run::Preflight) => "PREFLIGHT",
             Keys::Output(crate::rundoc::Run::Tests) => "TESTS",
+            Keys::List(k) => match k {
+                crate::pane::GroupKind::Tests => "TESTS",
+                crate::pane::GroupKind::Task => "TASK",
+                crate::pane::GroupKind::Preflight => "PREFLIGHT",
+                crate::pane::GroupKind::Procs => "PROCS",
+                crate::pane::GroupKind::Git => "GIT",
+                crate::pane::GroupKind::Review => "REVIEW",
+            },
         })
     }
 
@@ -253,7 +264,7 @@ impl Editor {
             R::Side(m) => Keys::Side(m),
             R::Slot(s) => Keys::Slot(s),
             R::List(k) => match (k.slot(), k) {
-                (Some(s), _) => Keys::Slot(s),
+                (Some(_), _) => Keys::List(k),
                 (None, crate::pane::GroupKind::Git) => Keys::Side(crate::sidebar::Mode::Git),
                 (None, _) => Keys::Review,
             },

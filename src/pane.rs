@@ -52,8 +52,8 @@ impl Shows {
     }
 }
 
-/// What a linked group lists (§2.1–2.2): one model for every master–detail surface. The tests' is built (in the
-/// slot); the task's, the preflight's, `:procs`', the git tab's and the review's move onto it in P3's steps 3–5.
+/// What a linked group lists (§2.1–2.2): one model for every master–detail surface. The tests', the task's and the
+/// preflight's are built (in the slot); `:procs`', the git tab's and the review's move onto it in P3's steps 4–5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GroupKind {
     Tests,

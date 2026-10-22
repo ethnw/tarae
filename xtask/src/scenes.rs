@@ -207,7 +207,7 @@ const SCENES: &[Scene] = &[
             ":",
             "task check",
             "\r",
-            "@20?generated 2 warnings",
+            "@20?2 warnings",
             "@1",
             "\x17",
             "j",
@@ -293,7 +293,7 @@ const SCENES: &[Scene] = &[
             ":",
             "task check",
             "\r",
-            "@20?generated 2 warnings",
+            "@20?2 warnings",
             "@1",
             " ",
             "x",
@@ -308,6 +308,55 @@ const SCENES: &[Scene] = &[
             "l",
             "@1",
             "\x1b",
+            "@1",
+        ],
+    },
+    // (panes P3 step 3: a task's places beside its output — the second selected, its line in sight)
+    Scene {
+        name: "panes-task-places",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?2 warnings",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "j",
+            "@1",
+        ],
+    },
+    // (…and a preflight's steps beside its output — the failed one selected, its heading at the top)
+    Scene {
+        name: "panes-preflight-steps",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "preflight",
+            "\r",
+            "@30?test result",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "j",
+            "j",
             "@1",
         ],
     },
@@ -1703,7 +1752,7 @@ echo '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s'
 /// never cargo's shared one).
 fn run_files(scene: &str) -> Vec<(&'static str, String)> {
     match scene {
-        "output-task" => vec![
+        "output-task" | "panes-task-places" => vec![
             (".tarae.toml", "[task.check]\ncmd = \"sh check.sh\"\n".into()),
             ("check.sh", CHECK_SH.into()),
         ],
@@ -1715,7 +1764,7 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
                 "i=0\nwhile [ $i -lt 300 ]; do echo \"knot $i tied\"; i=$((i+1)); sleep 0.2; done\n".into(),
             ),
         ],
-        "output-preflight" => vec![
+        "output-preflight" | "panes-preflight-steps" => vec![
             (
                 ".tarae.toml",
                 "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"sh fmt.sh\" },\n  { name = \"clippy\", cmd = \"sh check.sh\" },\n  { name = \"test\", cmd = \"sh test.sh\" },\n]\n"

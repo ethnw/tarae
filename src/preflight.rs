@@ -218,6 +218,10 @@ pub struct Preflight {
     /// Its run's output, kept once it failed — `:preflight-output` reads it after another run took the task
     /// panel (frictions34 42). (A clone of the run's: its text shared until the run's goes.)
     pub kept: crate::runout::Output,
+    /// Its list (panes P3 §2.2, `GroupKind::Preflight`): the step selected, and the first row in sight (as last
+    /// drawn).
+    pub selected: usize,
+    pub list_top: std::cell::Cell<usize>,
 }
 
 impl Preflight {
@@ -245,7 +249,26 @@ impl Preflight {
             left_out,
             key,
             kept: Default::default(),
+            selected: 0,
+            list_top: Default::default(),
         }
+    }
+
+    /// The step running now.
+    pub fn running(&self) -> Option<usize> {
+        self.steps.iter().position(|s| s.state == State::Running)
+    }
+
+    /// Step `k`'s heading in `output` — None: it hasn't printed one (or it's gone from what's kept).
+    pub fn heading_at(&self, k: usize, output: &crate::runout::Output) -> Option<usize> {
+        let head = format!("── {} ──", self.steps.get(k)?.name);
+        output.position(|l| l == head)
+    }
+
+    /// The step whose output line `at` of `output` is: the last started whose heading is at or above it.
+    pub fn step_at(&self, at: usize, output: &crate::runout::Output) -> Option<usize> {
+        let started = |k: &usize| self.steps[*k].state != State::Waiting;
+        (0..self.steps.len()).filter(started).rfind(|&k| self.heading_at(k, output).is_some_and(|h| h <= at))
     }
 
     /// What a marker line of this run's says after its key — None for any other line, a marker with another
@@ -375,10 +398,7 @@ impl Preflight {
         }
         let started = |k: &usize| self.steps[*k].state != State::Waiting;
         match top {
-            Some(top) => (0..self.steps.len()).filter(started).rfind(|&k| {
-                let head = format!("── {} ──", self.steps[k].name);
-                output.position(|l| l == head).is_some_and(|at| at <= top)
-            }),
+            Some(top) => self.step_at(top, output),
             None => (0..self.steps.len()).rfind(started),
         }
     }
@@ -1721,9 +1741,10 @@ mod tests {
         assert_eq!(listed(&many), "PYTHON0, PYTHON1, PYTHON2, PYTHON3 and 2 more");
     }
 
-    /// #126: a failed step's output one key away — `o` in the task panel opens it whole in a buffer (only
-    /// its lines, on its failure), `:preflight-output <step>` any step's; a test step and a step named
-    /// `test bundled` don't get mixed up.
+    /// #126: a failed step's output one key away — `o` on the output selects the step in view in the steps' list
+    /// beside it (panes P3 §2.2), `o` there opens the selected step's whole in a buffer (only its lines, on its
+    /// failure), `:preflight-output <step>` any step's; a test step and a step named `test bundled` don't get mixed
+    /// up.
     #[test]
     fn a_failed_steps_output_is_one_key_away() {
         let dir = std::env::temp_dir().join(format!("tarae-preflight-output-{}", std::process::id()));
@@ -1744,9 +1765,17 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        // The panel has the keys (a click on it, `C-w j`): `o`
+        // The output has the keys (a click on it, `C-w j`), its cursor at its end: `o` — the step in view selected
         ed.session.at = crate::session::At::Slot;
-        ed.handle_key(crate::key::Key::plain(crate::key::Code::Char('o')));
+        ed.focus_sync();
+        let key = |ed: &mut Editor, c: char| ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(c)));
+        key(&mut ed, 'o');
+        let listed = ed.list_focused().map(|g| g.kind);
+        assert_eq!(listed, Some(crate::pane::GroupKind::Preflight), "the steps' list has the keys");
+        assert_eq!(ed.session.preflight.as_ref().map(|p| p.selected), Some(2), "test bundled, in view");
+        // …then the step above, and `o` there
+        key(&mut ed, 'k');
+        key(&mut ed, 'o');
         let title = ed.doc().title.clone();
         assert_eq!(title.as_deref(), Some("preflight · test"), "{:?}", ed.messages.last());
         let text = ed.doc().text.to_string();

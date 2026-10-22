@@ -744,8 +744,14 @@ mod tests {
         (
             "Task panel",
             "`o`",
-            "A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output <step>`)",
+            "A preflight step's whole output in a buffer — the failed one's, else the one in view (`:preflight-output <step>`); beside the steps' list, the step in view selected there",
         ),
+        (
+            "A task's places, a preflight's steps (beside the output)",
+            "`j` `k` and every list's moves · `enter` · `tab` `S-tab` · `q`",
+            "Pick one — the output follows: the place's line, the step's heading at the top · the place in the code (a step's first place, else its output from its heading) · the output and back · close once the run has ended",
+        ),
+        ("A preflight's steps", "`o`", "The step picked, its whole output in a buffer"),
         (
             "Task panel",
             "`K`",
