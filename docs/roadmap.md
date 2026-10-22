@@ -446,8 +446,8 @@ main that has what it waits for, and the user says go:
   floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
-  would conflict (to a Claude only in the `edit`/`read` of that file) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b (part 1 under way) the merged view — everyone works in their own workspace and tarae shows the merge, each change in its
-  participant's colour, the merged tree's preflight on demand; C3 workspaces kept close to main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
+  would conflict (to a Claude only in the `edit`/`read` of that file) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the woven view (`:weave` — the user's name, 2026-10-22: a view, never a merge done) — everyone works in their own workspace and tarae shows the merge, each change in its
+  participant's colour (part 1 `3501b885`: a file, in memory on a worker; 1b under way: the name, deletions shown, `enter` goes to that session's line), the woven tree's preflight on demand (part 2); C3 workspaces kept close to main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
