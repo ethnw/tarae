@@ -213,12 +213,13 @@ fn with_results(ed: &mut Editor) {
 fn the_tests_panel_is_a_linked_group_of_two_panes() {
     let mut ed = every_surface();
     with_results(&mut ed);
-    let g = ed.session.tests;
+    let g = ed.session.group(GroupKind::Tests).unwrap();
+    let detail_id = g.detail_pane().unwrap();
     let ids: Vec<_> = ed.screen.leaves.iter().map(|l| l.0).collect();
-    assert!(ids.contains(&g.list) && ids.contains(&g.detail), "both members laid out: {ids:?}");
+    assert!(ids.contains(&g.list) && ids.contains(&detail_id), "both members laid out: {ids:?}");
     assert!(!ids.contains(&ed.session.leaf(Shows::Slot).unwrap()), "the slot's leaf is its members");
     let list = ed.screen.leaves.iter().find(|l| l.0 == g.list).unwrap().1;
-    let detail = ed.screen.leaves.iter().find(|l| l.0 == g.detail).unwrap().1;
+    let detail = ed.screen.leaves.iter().find(|l| l.0 == detail_id).unwrap().1;
     assert_eq!((list.y, list.h), (detail.y, detail.h), "side by side, one header over both");
     assert_eq!(detail.x, list.x + list.w + 1, "a line between them");
     let sc = &ed.screen;
@@ -229,7 +230,7 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
         "from right under the header — the line over them, panes P3 §1 — to the slot's end"
     );
     // (the list, by a hop from the detail)
-    ed.focus_pane(g.detail);
+    ed.focus_pane(detail_id);
     frame(&mut ed);
     assert!(
         ed.session.is_at(At::Slot) && crate::rundoc::has_keys(&ed).is_some(),
@@ -237,7 +238,8 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     );
     feed(&mut ed, "<C-w>h");
     assert_eq!(ed.session.at, At::List(g.list));
-    assert_eq!(ed.keys_to().region, crate::uistate::Region::List(crate::sizes::Slot::Test));
+    assert_eq!(ed.keys_to().region, crate::uistate::Region::List(GroupKind::Tests));
+    assert_eq!(ed.keys_to().region.name(), "list:tests");
     assert_eq!(ed.keys_to().to, format!("pane#{}", g.list));
     // (its selection drives the detail: the failure picked, then the output again)
     feed(&mut ed, "j");
@@ -248,14 +250,25 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     // (tab to the detail, S-tab back; the one tab there is rounds its two members)
     feed(&mut ed, "<tab>");
     assert!(ed.session.is_at(At::Slot), "tab: the detail");
+    let state = ed.ui_state();
+    let panes = &state.sessions.iter().find(|s| s.front).unwrap().panes;
+    let at: Vec<_> = panes.iter().filter(|p| p.at).map(|p| p.shows.as_str()).collect();
+    assert_eq!(at, ["detail:tests"], "the slot's keys: its detail's");
+    // (`C-w w` goes round from where the keys are on screen — the detail, not the slot's leaf under it: on to the
+    // chat; from the list, on to the detail)
+    feed(&mut ed, "<C-w>w");
+    assert_eq!(ed.session.at, At::Chat, "C-w w from the detail: the next pane, the chat");
+    ed.focus_pane(g.list);
+    feed(&mut ed, "<C-w>w");
+    assert!(ed.session.is_at(At::Slot), "C-w w from the list: its detail");
     feed(&mut ed, "<S-tab>");
     assert_eq!(ed.session.at, At::List(g.list), "S-tab: the list");
     // (the state: both members, the keys the list's)
     let state = ed.ui_state();
     let panes = &state.sessions.iter().find(|s| s.front).unwrap().panes;
     let at: Vec<_> = panes.iter().filter(|p| p.at).map(|p| p.shows.as_str()).collect();
-    assert_eq!(at, ["tests:list"]);
-    assert!(panes.iter().any(|p| p.shows == "tests:detail" && p.rect.is_some()));
+    assert_eq!(at, ["list:tests"]);
+    assert!(panes.iter().any(|p| p.shows == "detail:tests" && p.rect.is_some()));
     // (a click on a row picks it and gives the list the keys; on its title, the detail's; past the last result,
     // the list's, the selection where it was)
     let click = |ed: &mut Editor, x: usize, y: usize| {
@@ -282,6 +295,66 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     assert_eq!(ed.session.at, At::Code);
 }
 
+/// P3 §2.1: the groups are one model — `Session.groups` holds the tests' from a session's start, in the slot's leaf;
+/// its list takes the keys only while it's laid out (no results: a hop to it is said; the run gone: the keys back to
+/// the code), moves by the list keys, and `enter` goes to the selected test's place, the code taking the keys.
+#[test]
+fn a_groups_list_has_the_keys_only_while_its_laid_out() {
+    let dir = crate::scratch::Scratch::new("pane-group-list");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "a\nb\nc\nd\n").unwrap();
+    let mut ed = every_surface();
+    ed.session.root = dir.to_path_buf();
+    assert_eq!(ed.session.groups.len(), 1, "one group, the tests'");
+    let g = ed.session.group(GroupKind::Tests).unwrap();
+    assert_eq!(Some(g.host), ed.session.leaf(Shows::Slot), "in the slot's leaf");
+    // (no results: the output alone — the list no pane to go to, said)
+    ed.focus_pane(g.list);
+    frame(&mut ed);
+    assert_ne!(ed.session.at, At::List(g.list));
+    assert!(ed.toasts.iter().any(|t| t.text.contains("no results to list")), "said");
+    with_results(&mut ed);
+    ed.focus_pane(g.list);
+    frame(&mut ed);
+    assert_eq!(ed.list_focused(), Some(g));
+    feed(&mut ed, "G");
+    assert_eq!(ed.session.test_run.as_ref().unwrap().selected, 1, "G: the last");
+    feed(&mut ed, "g");
+    assert_eq!(ed.session.test_run.as_ref().unwrap().selected, 0, "g: the first");
+    // (enter on the failed one: its place, the code given the keys)
+    feed(&mut ed, "j<ret>");
+    assert_eq!(ed.session.at, At::Code);
+    assert!(ed.doc().path.as_ref().is_some_and(|p| p.ends_with("src/lib.rs")), "{:?}", ed.doc().path);
+    // (the run gone while the list has the keys: they go back to the code, the list no layer)
+    ed.focus_pane(g.list);
+    frame(&mut ed);
+    assert_eq!(ed.session.at, At::List(g.list));
+    ed.session.test_run = None;
+    frame(&mut ed);
+    assert_eq!((ed.session.at, ed.list_focused()), (At::Code, None));
+    assert_eq!(ed.keys_to().region, crate::uistate::Region::Code);
+}
+
+/// Every kind's name reads back; a kind whose detail is the code (the git tab's, the review's) takes one id, the list's.
+#[test]
+fn a_groups_kind_names_it_and_says_what_its_detail_is() {
+    for k in GroupKind::ALL {
+        assert_eq!(GroupKind::of_name(k.name()), Some(k));
+        let g = Group::new(k, 3, 20);
+        assert_eq!((g.list, g.member(20)), (20, Some(Shows::List(k))));
+        match k {
+            GroupKind::Git | GroupKind::Review => {
+                assert_eq!((g.detail, Group::ids(k), g.member(21)), (Detail::Code, 1, None));
+            }
+            _ => assert_eq!(
+                (g.detail, Group::ids(k), g.member(21)),
+                (Detail::Pane(21), 2, Some(Shows::Detail(k)))
+            ),
+        }
+        assert_eq!(g.member(3), None, "its host isn't a member");
+    }
+}
+
 /// The frame as text.
 fn shown(ed: &mut Editor) -> String {
     frame(ed);
@@ -295,7 +368,7 @@ fn the_default_tree_holds_every_surface_once() {
     assert_eq!(tree.leaves(), [8, 9, 7, 10, 11]);
     assert_eq!(panes.iter().map(|p| p.shows).collect::<Vec<_>>(), SURFACES);
     for s in SURFACES {
-        assert_eq!(Shows::of_name(s.name()), Some(s));
+        assert_eq!(Shows::of_name(&s.name()), Some(s));
     }
     let ed = Editor::new(Config::default());
     assert_eq!(ed.session.split.leaves().len(), 1 + SURFACES.len(), "a new session's tree");

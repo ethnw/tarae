@@ -25,50 +25,126 @@ pub enum Shows {
     Slot,
     /// The session's chat.
     Chat,
-    /// The tests' linked group (§2.1b, `Group`): the list of results — its selection drives the detail.
-    TestList,
-    /// …and the detail: the failure picked, else the run's output (its view mode, `view.rs`).
-    TestDetail,
+    /// A linked group's list (§2.1, `Group`): its selection drives the detail.
+    List(GroupKind),
+    /// …and its detail, a pane of its own (`Detail::Pane`) — the tests': the failure picked, else the run's output.
+    Detail(GroupKind),
 }
 
 impl Shows {
-    /// Its name in the state (`panes: [{shows: "chat"}]`) and the restart's file.
-    pub fn name(self) -> &'static str {
+    /// Its name in the state (`panes: [{shows: "chat"}]`, `list:tests`) and the restart's file.
+    pub fn name(self) -> String {
         match self {
-            Shows::Code => "code",
-            Shows::Side => "side",
-            Shows::Rail => "rail",
-            Shows::Slot => "slot",
-            Shows::Chat => "chat",
-            Shows::TestList => "tests:list",
-            Shows::TestDetail => "tests:detail",
+            Shows::Code => "code".into(),
+            Shows::Side => "side".into(),
+            Shows::Rail => "rail".into(),
+            Shows::Slot => "slot".into(),
+            Shows::Chat => "chat".into(),
+            Shows::List(k) => format!("list:{}", k.name()),
+            Shows::Detail(k) => format!("detail:{}", k.name()),
         }
     }
 
     /// A surface of the tree's (`SURFACES`, the code) by its name — a group's members aren't kept by name: the
-    /// group comes with its host.
+    /// group comes with its host (`Session.groups`).
     pub fn of_name(s: &str) -> Option<Self> {
         [Shows::Code, Shows::Side, Shows::Rail, Shows::Slot, Shows::Chat].into_iter().find(|k| k.name() == s)
     }
 }
 
-/// A linked group (§2.1b): a list and its detail, two panes laid out side by side in their host's rect — the slot's,
+/// What a linked group lists (§2.1–2.2): one model for every master–detail surface. The tests' is built (in the
+/// slot); the task's, the preflight's, `:procs`', the git tab's and the review's move onto it in P3's steps 3–5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GroupKind {
+    Tests,
+    Task,
+    Preflight,
+    Procs,
+    Git,
+    Review,
+}
+
+impl GroupKind {
+    pub const ALL: [GroupKind; 6] = [
+        GroupKind::Tests,
+        GroupKind::Task,
+        GroupKind::Preflight,
+        GroupKind::Procs,
+        GroupKind::Git,
+        GroupKind::Review,
+    ];
+
+    /// Its name in the state (`list:tests`, `keys.region`) and the restart's file (`groups: [{kind}]`).
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupKind::Tests => "tests",
+            GroupKind::Task => "task",
+            GroupKind::Preflight => "preflight",
+            GroupKind::Procs => "procs",
+            GroupKind::Git => "git",
+            GroupKind::Review => "review",
+        }
+    }
+
+    pub fn of_name(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == s)
+    }
+
+    /// Its detail is the code pane last focused (`Session.focus`) — the git tab's and the review's — not a pane of
+    /// its own.
+    fn detail_is_code(self) -> bool {
+        matches!(self, GroupKind::Git | GroupKind::Review)
+    }
+}
+
+/// A group's detail: a pane of its own, or the code pane last focused, which the list drives (git, review).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    Pane(PaneId),
+    Code,
+}
+
+/// A linked group (§2.1): a list and its detail, two panes laid out side by side in their host's rect — the slot's,
 /// for the tests — under one header and one `q`, a line between them; the list's selection drives the detail. Each
-/// is a pane of its own: hopped to (`C-w h/l`, `tab`), its own keys and selection. They aren't the tree's leaves
-/// (the slot shows one panel at a time); term.rs lays them out in the slot's leaf while it shows the tests with
-/// results to list (`Screen.leaves` has them there, the slot's leaf not).
+/// is a pane of its own: hopped to (`C-w h/l`, `tab`), its own keys and selection. They aren't the tree's leaves —
+/// `host` is (the slot shows one panel at a time); term.rs lays them out in the host's rect while the group has
+/// something to list (`group_members`: `Screen.leaves` has them there, the host's leaf not). One a kind, in
+/// `Session.groups`; one made again (a new run) keeps its ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
+    pub kind: GroupKind,
+    /// The leaf that holds it: the slot's (a docked leaf's or a floating frame's come with steps 6–7).
+    pub host: PaneId,
     pub list: PaneId,
-    pub detail: PaneId,
+    pub detail: Detail,
 }
 
 impl Group {
+    /// Kind `kind`'s group in leaf `host`, its members' ids from `first` on — one, the list's, when its detail is the
+    /// code.
+    pub fn new(kind: GroupKind, host: PaneId, first: PaneId) -> Self {
+        let detail = if kind.detail_is_code() { Detail::Code } else { Detail::Pane(first + 1) };
+        Group { kind, host, list: first, detail }
+    }
+
+    /// The ids it takes from `first` (`new`).
+    pub fn ids(kind: GroupKind) -> u64 {
+        if kind.detail_is_code() { 1 } else { 2 }
+    }
+
+    /// Its detail's pane, when it has one of its own.
+    pub fn detail_pane(&self) -> Option<PaneId> {
+        match self.detail {
+            Detail::Pane(id) => Some(id),
+            Detail::Code => None,
+        }
+    }
+
     /// The member pane `id` is, if it's one.
     pub fn member(&self, id: PaneId) -> Option<Shows> {
         match id {
-            _ if id == self.list => Some(Shows::TestList),
-            _ if id == self.detail => Some(Shows::TestDetail),
+            _ if id == self.list => Some(Shows::List(self.kind)),
+            _ if Some(id) == self.detail_pane() => Some(Shows::Detail(self.kind)),
             _ => None,
         }
     }
@@ -87,10 +163,11 @@ pub const SURFACES: [Shows; 4] = [Shows::Side, Shows::Rail, Shows::Slot, Shows::
 /// The ids a new session takes: its first code pane's, one for each of `SURFACES`, then its tests group's two.
 pub const IDS: u64 = 1 + SURFACES.len() as u64 + 2;
 
-/// The tests group of a session whose first code pane is `code` — the two ids after its surfaces'.
+/// The tests group of a session whose first code pane is `code` — in the slot's leaf, the two ids after its
+/// surfaces'.
 pub fn tests_group(code: PaneId) -> Group {
-    let list = code + 1 + SURFACES.len() as u64;
-    Group { list, detail: list + 1 }
+    let slot = code + 1 + SURFACES.iter().position(|s| *s == Shows::Slot).unwrap_or(0) as u64;
+    Group::new(GroupKind::Tests, slot, code + 1 + SURFACES.len() as u64)
 }
 
 /// A new session's panes and tree, its first code pane `code`, the surfaces' the ids after it: today's screen.

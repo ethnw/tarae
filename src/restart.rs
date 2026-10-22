@@ -1128,6 +1128,7 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         "views": views,
         "panes": l.panes.iter().map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect::<Vec<_>>(),
         "split": split_json(&l.split),
+        "groups": groups_json(&l.groups),
         "focus": l.focus,
         "sidebar": sidebar,
         "chat": chat,
@@ -1420,8 +1421,11 @@ pub(crate) fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::
         crate::sorting::sort(&mut leaves);
         let mut ids: Vec<_> = views.iter().map(|w| w.id).chain(panes.iter().map(|p| p.id)).collect();
         crate::sorting::sort(&mut ids);
+        // (the groups: each kind once, the tests' among them, each in a leaf of the tree)
+        let groups = groups_of(&v["groups"]).filter(|gs| gs.iter().all(|g| leaves.contains(&g.1)));
         if leaves == ids
             && every_surface
+            && let Some(groups) = groups
             && let Some(f) = views.iter().find(|w| w.id == focus)
             && let Some(i) = ed.docs.iter().position(|d| d.id == f.doc)
         {
@@ -1431,8 +1435,20 @@ pub(crate) fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::
             // Each pane an id of this tarae's own counter — the state's only tie its panes to its split (two
             // sessions' may be the same)
             let first = ed.next_pane;
-            ed.next_pane += ids.len() as u64;
+            let members: u64 = groups.iter().map(|g| crate::pane::Group::ids(g.0)).sum();
+            ed.next_pane += ids.len() as u64 + members;
             let new = |old| first + ids.iter().position(|&i| i == old).unwrap_or(0) as u64;
+            // (a group's members aren't kept: new ids after the panes')
+            let mut next = first + ids.len() as u64;
+            let groups = groups
+                .iter()
+                .map(|&(kind, host)| {
+                    let g = crate::pane::Group::new(kind, new(host), next);
+                    next += crate::pane::Group::ids(kind);
+                    g
+                })
+                .collect();
+            ed.session.groups = groups;
             let mut views = views;
             for v in &mut views {
                 v.id = new(v.id);
@@ -1491,6 +1507,23 @@ pub(crate) fn split_json(s: &Split) -> Value {
             json!({ key: kids.iter().map(kid).collect::<Vec<_>>() })
         }
     }
+}
+
+/// A session's linked groups as kept: each one's kind and the leaf that holds it — its members' ids are made anew.
+pub(crate) fn groups_json(groups: &[crate::pane::Group]) -> Value {
+    json!(groups.iter().map(|g| json!({ "kind": g.kind.name(), "host": g.host })).collect::<Vec<_>>())
+}
+
+/// The groups kept (kind, host) — None unless each kind is there once and the tests' is (every session has it).
+pub(crate) fn groups_of(v: &Value) -> Option<Vec<(crate::pane::GroupKind, crate::split::PaneId)>> {
+    use crate::pane::GroupKind;
+    let groups: Vec<_> = v
+        .as_array()?
+        .iter()
+        .map(|g| Some((GroupKind::of_name(g["kind"].as_str()?)?, g["host"].as_u64()?)))
+        .collect::<Option<_>>()?;
+    let once = GroupKind::ALL.iter().all(|k| groups.iter().filter(|g| g.0 == *k).count() <= 1);
+    (once && groups.iter().any(|g| g.0 == GroupKind::Tests)).then_some(groups)
 }
 
 pub(crate) fn split_of(v: &Value) -> Option<Split> {
@@ -2047,6 +2080,50 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Panes P3 §5.3: a session's linked groups come back with its tree — each one's host the same surface's leaf,
+    /// renumbered with it, its members ids no pane has; a kept tree whose groups are missing, twice a kind or in no
+    /// leaf isn't taken (the default layout).
+    #[test]
+    fn the_groups_come_back_with_the_tree() {
+        use crate::pane::{GroupKind, Shows};
+        let (front, _back, dir, mut ed) = two_sessions("groups");
+        ed.open(&front.join("f.txt")).unwrap();
+        ed.split_view(Dir::Vertical);
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let host = state["groups"][0]["host"].clone();
+        assert_eq!(state["groups"], json!([{ "kind": "tests", "host": host }]), "kept: kind and host");
+        let again = |state: &Value| {
+            let mut ed = started_in(&dir, &front);
+            restore(&mut ed, state);
+            ed
+        };
+        let ed = again(&state);
+        assert_eq!(ed.session.views.len(), 2, "the tree taken");
+        let g = ed.session.group(GroupKind::Tests).unwrap();
+        assert_eq!(Some(g.host), ed.session.leaf(Shows::Slot), "in the slot's leaf, renumbered with it");
+        let detail = g.detail_pane().unwrap();
+        let panes: Vec<u64> =
+            ed.session.views.iter().map(|v| v.id).chain(ed.session.panes.iter().map(|p| p.id)).collect();
+        assert!(!panes.contains(&g.list) && !panes.contains(&detail) && g.list != detail, "{g:?} {panes:?}");
+        assert!(ed.next_pane > g.list.max(detail), "the next id past them");
+        assert_eq!(
+            (ed.session.shows(g.list), ed.session.shows(detail)),
+            (Some(Shows::List(GroupKind::Tests)), Some(Shows::Detail(GroupKind::Tests)))
+        );
+        let twice = json!([{ "kind": "tests", "host": host }, { "kind": "tests", "host": host }]);
+        for broken in [json!(null), json!([{ "kind": "tests", "host": 9999 }]), twice, json!([])] {
+            let mut s = state.clone();
+            s["groups"] = broken.clone();
+            let blocks = s["sessions"]["sessions"].as_array_mut().unwrap();
+            blocks.iter_mut().find(|b| b["root"] == json!(front)).unwrap()["groups"] = broken.clone();
+            let ed = again(&s);
+            assert_eq!(ed.session.views.len(), 1, "{broken}: the default layout");
+            assert!(ed.session.group(GroupKind::Tests).is_some(), "{broken}: its tests group still");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Panes come back with ids of this tarae's own counter — two sessions whose panes had the same ids in
     /// the state (an earlier build's, or a hand-edited file) don't share one; no two views anywhere do.
     #[test]
@@ -2067,19 +2144,23 @@ mod tests {
         let ids_of =
             |b: &Value| b["views"].as_array().unwrap().iter().map(|v| v["id"].clone()).collect::<Vec<_>>();
         let front_ids = ids_of(&blocks[0]);
-        let (front_panes, front_split) = (blocks[0]["panes"].clone(), blocks[0]["split"].clone());
+        let (front_panes, front_split, front_groups) =
+            (blocks[0]["panes"].clone(), blocks[0]["split"].clone(), blocks[0]["groups"].clone());
         let behind = blocks.iter_mut().find(|b| b["root"] == json!(back)).unwrap();
         for (v, id) in behind["views"].as_array_mut().unwrap().iter_mut().zip(&front_ids) {
             v["id"] = id.clone();
         }
-        (behind["panes"], behind["split"]) = (front_panes, front_split);
+        (behind["panes"], behind["split"], behind["groups"]) = (front_panes, front_split, front_groups);
         behind["focus"] = front_ids[1].clone();
         let mut ed = started_in(&dir, &front);
         restore(&mut ed, &state);
         let all: Vec<u64> = ed
             .sessions_in_order()
             .iter()
-            .flat_map(|l| l.views.iter().map(|v| v.id).chain(l.panes.iter().map(|p| p.id)))
+            .flat_map(|l| {
+                let members = l.groups.iter().flat_map(|g| std::iter::once(g.list).chain(g.detail_pane()));
+                l.views.iter().map(|v| v.id).chain(l.panes.iter().map(|p| p.id)).chain(members)
+            })
             .collect();
         let mut distinct = all.clone();
         distinct.sort_unstable();

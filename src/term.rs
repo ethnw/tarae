@@ -727,28 +727,41 @@ impl Layout {
     }
 }
 
-/// Every pane laid out with room this frame, as `C-w h/j/k/l` hop between them: the tree's leaves — the slot's
-/// replaced by the tests group's two members while it shows them (`tests_members`).
+/// Every pane laid out with room this frame, as `C-w h/j/k/l` hop between them: the tree's leaves — a group's host
+/// replaced by its members while it lays them out (`group_members`).
 fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, crate::split::Rect)> {
     let mut leaves: Vec<_> = lay.leaves.iter().filter(|l| l.1.w > 0 && l.1.h > 0).copied().collect();
-    if let Some((list, detail)) = tests_members(editor, lay)
-        && let Some(slot) = editor.session.leaf(crate::pane::Shows::Slot)
-        && let Some(i) = leaves.iter().position(|l| l.0 == slot)
-    {
-        let g = editor.session.tests;
-        leaves.splice(i..=i, [(g.list, list), (g.detail, detail)]);
+    for g in &editor.session.groups {
+        if let Some((list, detail)) = group_members(editor, lay, g)
+            && let Some(i) = leaves.iter().position(|l| l.0 == g.host)
+        {
+            let detail = g.detail_pane().map(|d| (d, detail));
+            leaves.splice(i..=i, std::iter::once((g.list, list)).chain(detail));
+        }
     }
     leaves
 }
 
-/// The tests group's two members in the slot, under its header — the list, a line, the detail — while the slot
-/// shows a run with results to list (with none it's the output alone: one pane).
-fn tests_members(editor: &Editor, lay: &Layout) -> Option<(crate::split::Rect, crate::split::Rect)> {
-    let r = editor.session.test_run.as_ref().filter(|r| !r.cases.is_empty())?;
-    if editor.slot() != Some(crate::sizes::Slot::Test) || lay.debug_h <= lay.slot_head || lay.slot_w == 0 {
+/// The tests group in the slot, while it lays out its members.
+fn tests_group(editor: &Editor) -> Option<crate::pane::Group> {
+    editor.slot_group().filter(|g| g.kind == crate::pane::GroupKind::Tests)
+}
+
+/// Group `g`'s two members in its host, under its header — the list, a line, the detail — while it has something
+/// to list (`Editor::group_laid`; with nothing it's the detail alone: one pane). The host is the slot's leaf (a
+/// docked leaf's and a floating frame's come with P3's steps 6–7); the list as wide as the kind's rows want.
+fn group_members(
+    editor: &Editor,
+    lay: &Layout,
+    g: &crate::pane::Group,
+) -> Option<(crate::split::Rect, crate::split::Rect)> {
+    if !editor.group_laid(g) || lay.debug_h <= lay.slot_head || lay.slot_w == 0 {
         return None;
     }
-    let left_w = tests_list_w(r, lay.slot_w);
+    let left_w = match g.kind {
+        crate::pane::GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, lay.slot_w),
+        _ => return None,
+    };
     let (y, h) = (lay.slot_y() + lay.slot_head, lay.debug_h - lay.slot_head);
     let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
     let detail =
@@ -2805,8 +2818,11 @@ fn draw_test_panel(
         }
     });
     // (where the list and the detail meet, the line down from the header's)
-    let splits: Vec<usize> =
-        tests_members(editor, lay).map(|(list, _)| list.x + list.w).into_iter().collect();
+    let splits: Vec<usize> = tests_group(editor)
+        .and_then(|g| group_members(editor, lay, &g))
+        .map(|(list, _)| list.x + list.w)
+        .into_iter()
+        .collect();
     let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits)?;
 
     // The sandbox's line, when it blocked something: the bottom row, under the rest — and over it, what waits
@@ -2876,8 +2892,7 @@ fn draw_test_panel(
     r.list_top.set(first);
     editor.screen.tests_list.set(Some((body + 1, list_rows, first)));
     // (the member with the keys says so in its title — one header over both, the names lit as the frame's are)
-    let g = editor.session.tests;
-    let list_keys = editor.session.is_at(At::List(g.list));
+    let list_keys = tests_group(editor).is_some_and(|g| editor.session.is_at(At::List(g.list)));
     let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Test);
     let title =
         |keys: bool| if keys { Style { bold: true, ..strong } } else { Style { bold: true, ..faint } };

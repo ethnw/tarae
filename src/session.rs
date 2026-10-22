@@ -33,8 +33,8 @@ pub enum At {
     Chat,
     /// The terminal's program.
     Program,
-    /// A linked group's list (§2.1b: the tests' results, `Session.tests`), by its pane id — its detail is the slot's
-    /// view mode (`Slot`).
+    /// A linked group's list (§2.1: the tests' results, `Session.groups`), by its pane id — its detail in the slot is
+    /// the slot's (`Slot`).
     List(crate::split::PaneId),
     /// The slot's panel with tarae's keys: the test run's, the task's, the terminal's view mode.
     Slot,
@@ -70,8 +70,9 @@ pub struct Session {
     pub views: Vec<View>,
     pub panes: Vec<crate::pane::Pane>,
     pub split: crate::split::Split,
-    /// The tests' linked group — the list and the detail, laid out in the slot while it shows results (`pane.rs`).
-    pub tests: crate::pane::Group,
+    /// The linked groups, one a kind (`pane::Group`): the tests' from the start — the list and the detail, laid out in
+    /// the slot while it shows results.
+    pub groups: Vec<crate::pane::Group>,
     /// The code pane last focused — what `doc()` means, wherever the keys are (`at`).
     pub focus: crate::split::PaneId,
     /// Where the keys are: one value (`At`) — never a flag on each surface.
@@ -350,7 +351,7 @@ impl Session {
             panes,
             split,
             focus: view,
-            tests: crate::pane::tests_group(view),
+            groups: vec![crate::pane::tests_group(view)],
             at: At::Code,
             under: At::Code,
             floats: Vec::new(),
@@ -460,10 +461,11 @@ impl Session {
 
     /// The pane showing surface `shows` (a code pane: the one last focused).
     pub fn leaf(&self, shows: crate::pane::Shows) -> Option<crate::split::PaneId> {
+        use crate::pane::Shows;
         match shows {
-            crate::pane::Shows::Code => Some(self.focus),
-            crate::pane::Shows::TestList => Some(self.tests.list),
-            crate::pane::Shows::TestDetail => Some(self.tests.detail),
+            Shows::Code => Some(self.focus),
+            Shows::List(k) => self.group(k).map(|g| g.list),
+            Shows::Detail(k) => self.group(k)?.detail_pane(),
             _ => self.panes.iter().find(|p| p.shows == shows).map(|p| p.id),
         }
     }
@@ -472,8 +474,18 @@ impl Session {
     pub fn shows(&self, id: crate::split::PaneId) -> Option<crate::pane::Shows> {
         match self.views.iter().any(|v| v.id == id) {
             true => Some(crate::pane::Shows::Code),
-            false => self.panes.iter().find(|p| p.id == id).map(|p| p.shows).or(self.tests.member(id)),
+            false => self
+                .panes
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.shows)
+                .or_else(|| self.groups.iter().find_map(|g| g.member(id))),
         }
+    }
+
+    /// Its linked group of kind `kind`, when it has one.
+    pub fn group(&self, kind: crate::pane::GroupKind) -> Option<crate::pane::Group> {
+        self.groups.iter().find(|g| g.kind == kind).copied()
     }
 
     /// The pane the keys are in (`at`'s): the code pane last focused, the chat's, the slot's (the terminal's

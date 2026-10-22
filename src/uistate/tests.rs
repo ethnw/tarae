@@ -545,19 +545,17 @@ const SCENES: &[Scene] = &[
         ed.session.test_run = Some(crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]));
         ed.bottom_take_keys();
     }),
-    // (panes P2b: the tests' group — its list a pane of its own, beside the detail)
-    ("the tests' list", |ed| {
-        let case = crate::test_results::Case {
-            name: "adds".into(),
-            status: crate::test_results::Status::Passed,
-            secs: None,
-            message: Vec::new(),
-            at: None,
-        };
-        let run = crate::testing::TestRun::finished("t", vec![case.clone(), case], vec!["ok".into()]);
-        ed.session.test_run = Some(run);
+    // (panes P2b, P3 §2.1: the tests' group — its list a pane of its own, beside the detail; `list:tests`)
+    ("list:tests, the tests group's list", tests_group_list),
+    ("detail:tests, the tests group's detail (the run's output) by tab from its list", |ed| {
+        tests_group_list(ed);
         frame(ed);
-        ed.tests_list_focus();
+        feed(ed, &["<tab>"]);
+    }),
+    ("list:tests, the window prefix taken from it", |ed| {
+        tests_group_list(ed);
+        frame(ed);
+        feed(ed, &["<C-w>"]);
     }),
     ("a card over the task panel's output", |ed| {
         task_panel(ed);
@@ -671,6 +669,21 @@ fn mismatches(scenes: &[Scene], model: impl Fn(&Editor) -> KeysTo) -> Vec<String
         }
     }
     off
+}
+
+/// A finished test run with two results in the slot, its group's list with the keys.
+fn tests_group_list(ed: &mut Editor) {
+    let case = crate::test_results::Case {
+        name: "adds".into(),
+        status: crate::test_results::Status::Passed,
+        secs: None,
+        message: Vec::new(),
+        at: None,
+    };
+    let run = crate::testing::TestRun::finished("t", vec![case.clone(), case], vec!["ok".into()]);
+    ed.session.test_run = Some(run);
+    frame(ed);
+    ed.list_focus(crate::pane::GroupKind::Tests);
 }
 
 /// The routing test: `keys_to` is `handle_key`'s chain — in every state, for every probe key.

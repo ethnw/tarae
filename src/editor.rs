@@ -1526,9 +1526,11 @@ impl Editor {
             order = self.code_leaves();
         }
         let mut here = self.session.at_pane().unwrap_or(self.session.focus);
-        // (the slot's keys on the tests' group: its detail's)
-        if !order.contains(&here) && order.contains(&self.session.tests.detail) {
-            here = self.session.tests.detail;
+        // (the slot's keys on a group: its detail's)
+        if !order.contains(&here)
+            && let Some(d) = self.hosted_detail(here, &self.screen.leaves)
+        {
+            here = d;
         }
         let i = order.iter().position(|v| *v == here).unwrap_or(0) as isize;
         let next = order[(i + delta).rem_euclid(order.len() as isize) as usize];
@@ -1571,10 +1573,9 @@ impl Editor {
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
         let Some(mut from) = self.session.at_pane() else { return self.nothing_toward(dx, dy) };
         let leaves = &self.screen.leaves;
-        // (the slot's keys on the tests' group: its detail's — the slot's leaf is its two members on screen)
-        let detail = self.session.tests.detail;
-        if self.session.leaf(crate::pane::Shows::Slot) == Some(from) && leaves.iter().any(|l| l.0 == detail) {
-            from = detail;
+        // (the slot's keys on a group: its detail's — the slot's leaf is its members on screen)
+        if let Some(d) = self.hosted_detail(from, leaves) {
+            from = d;
         }
         // (from what has no room on screen — the minimized chat's input — a hop goes back to the code)
         if self.screen.width.is_some() && from != self.session.focus && !leaves.iter().any(|l| l.0 == from) {
@@ -1591,7 +1592,8 @@ impl Editor {
     /// The tests' result at screen cell (x, y), as the list was last drawn (its pane in `Screen.leaves`).
     fn tests_list_row(&self, x: usize, y: usize) -> Option<usize> {
         let (y0, rows, first) = self.screen.tests_list.get()?;
-        let list = self.screen.leaves.iter().find(|l| l.0 == self.session.tests.list)?.1;
+        let id = self.session.group(crate::pane::GroupKind::Tests)?.list;
+        let list = self.screen.leaves.iter().find(|l| l.0 == id)?.1;
         ((list.x..list.x + list.w).contains(&x) && (y0..y0 + rows).contains(&y)).then(|| first + y - y0)
     }
 
@@ -1599,7 +1601,7 @@ impl Editor {
     pub fn focus_pane(&mut self, id: crate::split::PaneId) {
         use crate::pane::Shows;
         let Some(shows) = self.session.shows(id) else { return };
-        if !matches!(shows, Shows::Slot | Shows::TestList | Shows::TestDetail) {
+        if !matches!(shows, Shows::Slot | Shows::List(_) | Shows::Detail(_)) {
             self.plugin_panel_unfocus();
             self.procs_unfocus();
         }
@@ -1613,12 +1615,9 @@ impl Editor {
             // (the rail as `space e` gives it the keys: on the file in hand)
             Shows::Rail => crate::codereview::rail_focus(self),
             Shows::Slot => self.bottom_take_keys(),
-            Shows::TestList => self.tests_list_focus(),
-            // (the detail is the slot's view mode on the tests)
-            Shows::TestDetail => {
-                self.session.slot_front = Some(crate::sizes::Slot::Test);
-                self.bottom_take_keys();
-            }
+            Shows::List(k) => self.list_focus(k),
+            // (a detail in the slot is the slot's view mode on it)
+            Shows::Detail(k) => self.detail_focus(k),
         }
     }
 
@@ -3994,7 +3993,7 @@ impl Editor {
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);
         }
-        if crate::testing::list_key(self, key) {
+        if crate::grouplist::key(self, key) {
             return took(Handler::List);
         }
         // Start screen: `r` = the files last open here

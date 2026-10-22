@@ -36,7 +36,9 @@ use crate::sizes::Slot;
 /// stands; since added: a card's `refused`, a session's `answer`.
 /// 11: the chat's `view` `line`/`lines` count the transcript document's lines — a paragraph each (`chatdoc.rs`),
 /// a drawn row before.
-pub const V: u64 = 11;
+/// 12: a linked group's list is `keys.region` `list:<kind>` (`list:tests`, the slot's name before) and its panes
+/// `list:<kind>` / `detail:<kind>` (`tests:list` / `tests:detail` before).
+pub const V: u64 = 12;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -60,8 +62,8 @@ pub enum Region {
     EditReview,
     /// The bottom slot with tarae's keys: its panel's own (the terminal's are its view mode's).
     Slot(Slot),
-    /// A linked group's list with the keys (§2.1b — the tests' results, `testing::list_key`).
-    List(Slot),
+    /// A linked group's list with the keys (panes P3 §2.1 — the tests' results, `grouplist::key`), by its kind.
+    List(crate::pane::GroupKind),
     /// The terminal's program: every key goes to it.
     Program,
     /// Card `id`: its answers (`offer_key`), or every key once `C-q` gave it them (`card_key`).
@@ -91,7 +93,7 @@ impl Region {
             Region::Rail => "review".into(),
             Region::EditReview => "edit-review".into(),
             Region::Slot(s) => format!("slot:{}", slot_name(s)),
-            Region::List(s) => format!("list:{}", slot_name(s)),
+            Region::List(k) => format!("list:{}", k.name()),
             Region::Program => "terminal-program".into(),
             Region::Card(_) => "card".into(),
             Region::NextCard => "next-card".into(),
@@ -504,8 +506,8 @@ impl Editor {
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
-            if self.tests_list_focused() {
-                v.push(layer(Region::List(Slot::Test), editors(&[ctrl('w')])));
+            if let Some(g) = self.list_focused() {
+                v.push(layer(Region::List(g.kind), editors(&[ctrl('w')])));
             }
             // (the terminal's, the test and task panels' are their view modes', above)
         }
@@ -663,7 +665,7 @@ impl Editor {
             Region::EditReview => s.review_change.get().is_some(),
             Region::Slot(Slot::Terminal) | Region::Program => s.terminal_rows.is_some(),
             Region::Slot(Slot::Test) => s.test_panel.get().is_some(),
-            Region::List(_) => s.tests_list.get().is_some(),
+            Region::List(k) => crate::grouplist::drawn(self, k),
             Region::Slot(Slot::Task) => s.task_panel.get().is_some(),
             Region::Slot(Slot::Procs) => s.procs_panel.get().is_some(),
             Region::Slot(Slot::Plugin) => s.plugin_panel.get().is_some(),
@@ -690,7 +692,10 @@ impl Editor {
                 "terminal".into()
             }
             Region::Slot(s) => slot_name(s).into(),
-            Region::List(_) => format!("pane#{}", self.session.tests.list),
+            Region::List(k) => match self.session.group(k) {
+                Some(g) => format!("pane#{}", g.list),
+                None => r.name(),
+            },
             Region::Rail => "review".into(),
             Region::Unfold | Region::View(crate::view::Surface::Chat) => "chat".into(),
             Region::Output(r) => slot_name(r.slot()).into(),
@@ -1020,17 +1025,13 @@ impl Editor {
         use crate::pane::Shows;
         let floats_keys = matches!(l.at, At::Float(_));
         let mut at = l.at_pane().filter(|_| !floats_keys);
-        // (the tests' group on screen: its two members after the slot, the slot's keys its detail's)
+        // (a group on screen: its members after its host, the host's keys its detail's)
         let mut ids = l.split.leaves();
-        let g = l.tests;
-        let slot = l.leaf(Shows::Slot);
-        if is_front
-            && self.screen.leaves.iter().any(|r| r.0 == g.list)
-            && let Some(i) = ids.iter().position(|&id| Some(id) == slot)
-        {
-            ids.splice(i + 1..i + 1, [g.list, g.detail]);
-            if at == slot {
-                at = Some(g.detail);
+        for g in l.groups.iter().filter(|g| is_front && self.screen.leaves.iter().any(|r| r.0 == g.list)) {
+            let Some(i) = ids.iter().position(|&id| id == g.host) else { continue };
+            ids.splice(i + 1..i + 1, std::iter::once(g.list).chain(g.detail_pane()));
+            if at == Some(g.host) {
+                at = g.detail_pane().or(at);
             }
         }
         let mut out: Vec<PaneState> = ids
@@ -1045,7 +1046,7 @@ impl Editor {
                             None => "code".into(),
                         }
                     }
-                    s => s.name().into(),
+                    s => s.name(),
                 };
                 let rect = is_front
                     .then(|| {

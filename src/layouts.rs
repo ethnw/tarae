@@ -41,7 +41,8 @@ pub fn of(
     }
     let panes: Vec<Value> = l.panes.iter().map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect();
     Some(
-        json!({ "split": crate::restart::split_json(&l.split), "panes": panes, "views": views, "focus": l.focus }),
+        json!({ "split": crate::restart::split_json(&l.split), "panes": panes, "groups": crate::restart::groups_json(&l.groups),
+                "views": views, "focus": l.focus }),
     )
 }
 
@@ -128,8 +129,8 @@ impl Editor {
         let current = views.iter().find(|v| v["id"].as_u64() == focus).map(|v| v["doc"].clone());
         let n = views.len();
         let v = json!({
-            "current": current, "views": views, "panes": kept["panes"], "split": crate::restart::split_json(&split),
-            "focus": focus,
+            "current": current, "views": views, "panes": kept["panes"], "groups": kept["groups"],
+            "split": crate::restart::split_json(&split), "focus": focus,
         });
         let before = self.session.split.clone();
         crate::restart::layout(self, &v, &docs);

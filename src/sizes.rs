@@ -276,7 +276,8 @@ impl crate::editor::Editor {
             Region::Side(_) => self.session.sidebar = None,
             Region::Rail => crate::codereview::close_asked(self),
             Region::Slot(Slot::Plugin) => self.set_status("a plugin's panel closes by its own keys"),
-            Region::Slot(s) | Region::List(s) => self.slot_close(s),
+            Region::Slot(s) => self.slot_close(s),
+            Region::List(k) => crate::grouplist::close(self, k),
             Region::View(crate::view::Surface::Terminal) => self.slot_close(Slot::Terminal),
             Region::Output(r) => self.slot_close(r.slot()),
             Region::Chat | Region::Unfold | Region::View(crate::view::Surface::Chat) => {
@@ -604,7 +605,10 @@ impl crate::editor::Editor {
             Some(Slot::Terminal) => self.session.is_at(At::Slot) || self.session.is_at(At::Program),
             Some(Slot::Plugin) => self.plugin_panel_focused(),
             Some(Slot::Procs) => self.procs_focused(),
-            Some(Slot::Test) => self.session.is_at(At::Slot) || self.tests_list_focused(),
+            Some(Slot::Test) => {
+                self.session.is_at(At::Slot)
+                    || self.slot_group().is_some_and(|g| self.session.is_at(At::List(g.list)))
+            }
             Some(Slot::Task) => self.session.is_at(At::Slot),
             Some(Slot::Debug) | None => false,
         }
@@ -692,7 +696,7 @@ impl crate::editor::Editor {
             At::Program => s.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()),
             At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task)),
             At::Procs => self.procs.panel.is_some(),
-            At::List(id) => id == s.tests.list && self.tests_grouped(),
+            At::List(id) => s.groups.iter().any(|g| g.list == id && self.group_laid(g)),
             At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
             At::Side => s.sidebar.is_some(),
             At::Rail => s.code_review.is_some(),

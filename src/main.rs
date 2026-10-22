@@ -74,6 +74,7 @@ mod grammar;
 mod granted;
 mod graphemes;
 mod grep;
+mod grouplist;
 mod hooks;
 mod hosts;
 mod inbox;

@@ -535,7 +535,7 @@ impl Editor {
     }
 
     /// The slot shows the tests' linked group: a run with results to list, in front — its list and its detail two
-    /// panes (`pane::Group`, `Session.tests`).
+    /// panes (`pane::Group`, `Session.groups`).
     pub fn tests_grouped(&self) -> bool {
         self.slot() == Some(crate::sizes::Slot::Test)
             && self.session.test_run.as_ref().is_some_and(|r| !r.cases.is_empty())
@@ -543,7 +543,7 @@ impl Editor {
 
     /// The tests' list has the keys (normal mode, the group in sight).
     pub fn tests_list_focused(&self) -> bool {
-        self.session.is_at(At::List(self.session.tests.list)) && self.tests_grouped()
+        self.list_focused().is_some_and(|g| g.kind == crate::pane::GroupKind::Tests)
     }
 
     /// The keys to the tests' list (`C-w h` from its detail, `S-tab`, a click on its rows): the slot showing the
@@ -552,16 +552,17 @@ impl Editor {
         if self.session.test_run.as_ref().is_none_or(|r| r.cases.is_empty()) {
             return self.set_status("no results to list yet — the output is all the panel has");
         }
+        let Some(g) = self.session.group(crate::pane::GroupKind::Tests) else { return };
         self.session.slot_front = Some(crate::sizes::Slot::Test);
         self.procs_unfocus();
         self.plugin_panel_unfocus();
-        self.session.at = At::List(self.session.tests.list);
+        self.session.at = At::List(g.list);
         crate::rundoc::sync(self);
     }
 
     /// `enter` on the tests' list: the selected test's place in the code — the code gets the keys (as the side
     /// panel's files do); one with no place says so.
-    fn tests_list_open(&mut self) {
+    pub(crate) fn tests_list_open(&mut self) {
         let Some(c) = self.session.test_run.as_ref().and_then(|r| r.cases.get(r.selected)).cloned() else {
             return;
         };
@@ -966,49 +967,6 @@ impl Editor {
             How::Pack { debug: None, .. } => self.set_error(format!("the {lang} pack has no debug for this")),
         }
     }
-}
-
-/// The tests' list with the keys (§2.1b, its own pane in the group): it moves as every list does (`key::list_move` —
-/// its selection drives the detail beside it), `enter` goes to the test's place, `tab` to the detail (`S-tab` the
-/// slot's tab before), `q` closes the group once its run has ended, `esc` back to the code; `space`, `:` and `C-w`
-/// are the editor's. Anything else is said.
-pub fn list_key(ed: &mut Editor, key: crate::key::Key) -> bool {
-    use crate::key::{Code, ListMove};
-    if ed.mode != crate::editor::Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
-        return false;
-    }
-    if !ed.tests_list_focused() {
-        return false;
-    }
-    let rows = ed.screen.tests_list.get().map_or(0, |l| l.1);
-    let Some(r) = ed.session.test_run.as_mut() else { return false };
-    let n = r.cases.len();
-    if let Some(m) = crate::key::list_move(key, rows) {
-        let was = r.selected;
-        r.selected = match m {
-            // (`C-e`/`C-y`: the view, the selection staying unless it would leave it)
-            ListMove::Scroll(by) => {
-                let (top, at) = crate::key::in_sight(by, r.list_top.get(), r.selected, n, rows, 0);
-                r.list_top.set(top);
-                at
-            }
-            m => m.from(r.selected, n),
-        };
-        if r.selected != was {
-            r.scroll = None;
-        }
-        return true;
-    }
-    match (key.code, key.ctrl, key.alt) {
-        (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
-        (Code::Esc, ..) => ed.session.at = At::Code,
-        (Code::Char('q'), false, false) => ed.slot_close(crate::sizes::Slot::Test),
-        (Code::Enter, false, false) => ed.tests_list_open(),
-        (Code::Tab, false, false) => ed.slot_step(1),
-        (Code::BackTab, false, false) => ed.slot_step(-1),
-        _ => ed.key_unused(key, "the tests' list", "esc code"),
-    }
-    true
 }
 
 /// Tests that run a real cargo in a temp project: its build goes inside the project (`target/build`) —

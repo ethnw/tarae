@@ -251,7 +251,12 @@ impl Editor {
             R::Rail => Keys::Review,
             R::EditReview => Keys::Change,
             R::Side(m) => Keys::Side(m),
-            R::Slot(s) | R::List(s) => Keys::Slot(s),
+            R::Slot(s) => Keys::Slot(s),
+            R::List(k) => match (k.slot(), k) {
+                (Some(s), _) => Keys::Slot(s),
+                (None, crate::pane::GroupKind::Git) => Keys::Side(crate::sidebar::Mode::Git),
+                (None, _) => Keys::Review,
+            },
             R::Program => Keys::Program,
             R::Point => Keys::Point,
             R::View(s) => Keys::View(s),
@@ -399,16 +404,17 @@ impl Editor {
         if tabs.is_empty() {
             return self.set_status("nothing at the bottom — tests, tasks and the terminal show there");
         }
-        let g = self.session.tests;
-        if self.tests_grouped() {
-            let on_list = self.tests_list_focused();
+        if let Some(g) = self.slot_group()
+            && let Some(detail) = g.detail_pane()
+        {
+            let on_list = self.session.is_at(crate::session::At::List(g.list));
             let on_detail = !on_list && self.session.is_at(crate::session::At::Slot);
             match (on_list, on_detail, by > 0) {
-                (true, _, true) => return self.focus_pane(g.detail),
+                (true, _, true) => return self.focus_pane(detail),
                 (_, true, false) => return self.focus_pane(g.list),
                 // (the one tab there is: round its two members)
                 (true, _, false) | (_, true, true) if tabs.len() == 1 => {
-                    return self.focus_pane(if on_list { g.detail } else { g.list });
+                    return self.focus_pane(if on_list { detail } else { g.list });
                 }
                 _ => {}
             }
@@ -420,8 +426,11 @@ impl Editor {
             None => 0,
         };
         self.slot_show(tabs[next].slot);
-        // (onto the tests' group going forward: its first member, the list)
-        if by > 0 && tabs[next].slot == Slot::Test && self.tests_grouped() && self.bottom_has_keys() {
+        // (onto a group going forward: its first member, the list)
+        if by > 0
+            && self.bottom_has_keys()
+            && let Some(g) = self.slot_group()
+        {
             self.focus_pane(g.list);
         }
     }

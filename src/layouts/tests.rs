@@ -100,6 +100,8 @@ fn the_layout_is_kept_as_it_changes_and_comes_back_with_the_files() {
         .collect();
     assert!(shown.contains(&a) && shown.contains(&b), "{shown:?}");
     assert!(ed.session.split.leaves().iter().all(|id| ed.session.shows(*id).is_some()), "every leaf a pane");
+    let tests = ed.session.group(crate::pane::GroupKind::Tests).map(|g| g.host);
+    assert_eq!(tests, ed.session.leaf(crate::pane::Shows::Slot), "the tests group kept, in the slot's leaf");
     // A file gone: its pane with it, the other taking the room
     std::fs::remove_file(&b).unwrap();
     let mut ed = started(&[&a, &b]);
