@@ -237,8 +237,13 @@ configs carry over as they are.
   `q` the same, with `space x c`); Esc gives the keys to the code (its header says `esc code`).
   - **The tests panel is two panes** — the list of results and, beside it, the failure picked (else the output),
     under one header, one `q` closing both. `C-w h`/`l` or `tab`/`S-tab` go between them; on the list `j`/`k` (and
-    every list's moves) pick a test — the failure beside it follows — and `enter` goes to its place in the code; its
-    title is lit while it has the keys.
+    every list's moves) pick a test — the failure beside it follows — and `enter` goes to its place in the code.
+    Each names itself in the line over its own column, as every pane does (`─ tests ▲ › results ── all tests ● 1 ▲ 1
+    ─┬─ failure ── src/main.rs:31 ─`); the one with the keys has its stretch of that line lit and its name strong, the
+    line between them lit while either has them. A click on a name gives that pane the keys. Too narrow for both
+    (the list under 24 columns or the detail under 40), they're stacked, as zellij stacks panes: one open, both
+    named in its line (`results · failure`); `tab` or `C-w h`/`l` open the other, and the one that had the keys last
+    stays open. Narrow, the line folds what the run says (its time, then its counts) before the names.
   - **A task's places and a preflight's steps are lists too** — a run that pointed at two places or more lists them
     beside its output (`▲ src/main.rs:31  mismatched types`, the errors first, each as found); a preflight of two
     steps or more lists its steps (`● fmt 6ms`, `▲ test`, `◦` not run yet, the wave on the one running). The same

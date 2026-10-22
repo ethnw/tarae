@@ -479,6 +479,144 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (panes P3 step 3b: each group with its list's keys, then its detail's — which member's name and stretch of the
+    // line are lit)
+    Scene {
+        name: "group-tests-list",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", "\x17", "j", "@1", "\x1b[Z", "@1"],
+    },
+    Scene {
+        name: "group-tests-detail",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", "\x17", "j", "@1", "\x1b[Z", "@1", "\t", "@1"],
+    },
+    Scene {
+        name: "group-task-detail",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?2 warnings",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "j",
+            "@1",
+            "\t",
+            "@1",
+        ],
+    },
+    Scene {
+        name: "group-preflight-detail",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "preflight",
+            "\r",
+            "@30?test result",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "j",
+            "j",
+            "@1",
+            "\t",
+            "@1",
+        ],
+    },
+    // (…and with the side panel up: at 80 too narrow for both members — stacked, the list's keys; the tests' detail's)
+    Scene {
+        name: "group-task-stacked",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?2 warnings",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+        ],
+    },
+    // (…under `ui.edge = "ground"`: both members named in the header row, the list open)
+    Scene {
+        name: "group-task-stacked-ground",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "task check",
+            "\r",
+            "@20?2 warnings",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+        ],
+    },
+    Scene {
+        name: "group-tests-stacked",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "x",
+            "f",
+            "@90?right: 8",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\t",
+            "@1",
+        ],
+    },
     // (a floating frame over the tests group — which-key's top line beside the slot's)
     Scene {
         name: "panes-float",
@@ -1673,6 +1811,15 @@ fn one(
         let theme = if bg == "dark" { "meok-transparent" } else { "hanji-transparent" };
         toml = format!("theme = \"{theme}\"\n{toml}");
     }
+    // (the `-ground` scenes: meok or hanji with `ui.edge = "ground"` — half cells of ground, no lines)
+    if scene.name.ends_with("-ground") {
+        let base = if bg == "dark" { "meok" } else { "hanji" };
+        write(
+            &config.join("tarae/themes/ground.toml"),
+            &format!("inherits = \"{base}\"\n\"ui.edge\" = \"ground\"\n"),
+        )?;
+        toml = format!("theme = \"ground\"\n{toml}");
+    }
     // (the shuttle scenes: a program may type, and the one that does)
     if scene.name.starts_with("shuttle") {
         toml.push_str("\n[ui]\nshuttle-keys = \"light\"\n");
@@ -1887,7 +2034,8 @@ echo '    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s'
 /// never cargo's shared one).
 fn run_files(scene: &str) -> Vec<(&'static str, String)> {
     match scene {
-        "output-task" | "panes-task-places" => vec![
+        "output-task" | "panes-task-places" | "group-task-detail" | "group-task-stacked"
+        | "group-task-stacked-ground" => vec![
             (".tarae.toml", "[task.check]\ncmd = \"sh check.sh\"\n".into()),
             ("check.sh", CHECK_SH.into()),
         ],
@@ -1899,7 +2047,7 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
                 "i=0\nwhile [ $i -lt 300 ]; do echo \"knot $i tied\"; i=$((i+1)); sleep 0.2; done\n".into(),
             ),
         ],
-        "output-preflight" | "panes-preflight-steps" => vec![
+        "output-preflight" | "panes-preflight-steps" | "group-preflight-detail" => vec![
             (
                 ".tarae.toml",
                 "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"sh fmt.sh\" },\n  { name = \"clippy\", cmd = \"sh check.sh\" },\n  { name = \"test\", cmd = \"sh test.sh\" },\n]\n"
@@ -1913,7 +2061,8 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
                     .into(),
             ),
         ],
-        "output-tests" | "panes-tests-code" | "panes-float" => vec![
+        "output-tests" | "panes-tests-code" | "panes-float" | "group-tests-list" | "group-tests-detail"
+        | "group-tests-stacked" => vec![
             ("src/main.rs", format!("{MAIN_RS}{MAIN_TESTS}")),
             (".cargo/config.toml", "[build]\nbuild-dir = \"target/build\"\n".into()),
         ],

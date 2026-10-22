@@ -202,6 +202,40 @@ impl Editor {
         self.next_pane += Group::ids(kind);
     }
 
+    /// Every event: the member of a group that has the keys is its front (`Group.front`) — the one in sight while it's
+    /// stacked, kept once the keys leave.
+    pub fn groups_front(&mut self) {
+        let detail = self.slot_group().filter(|_| self.session.is_at(At::Slot)).map(|g| g.kind);
+        let at = self.session.docked();
+        for g in &mut self.session.groups {
+            if at == At::List(g.list) {
+                g.front = crate::pane::Member::List;
+            } else if detail == Some(g.kind) {
+                g.front = crate::pane::Member::Detail;
+            }
+        }
+    }
+
+    /// The other member of a stacked group (§2.3: one member open, the other named in its line) when pane `id` is the
+    /// one open in `leaves` (the last frame's) — and which way it lies as side by side (the list `-1`, left; the detail
+    /// `1`). None while the group is side by side or `id` is no member.
+    pub fn stacked_other(
+        &self,
+        id: crate::split::PaneId,
+        leaves: &[(crate::split::PaneId, crate::split::Rect)],
+    ) -> Option<(crate::split::PaneId, i32)> {
+        let laid = |p: crate::split::PaneId| leaves.iter().any(|l| l.0 == p);
+        self.session.groups.iter().filter(|g| self.group_laid(g)).find_map(|g| {
+            let detail = g.detail_pane()?;
+            let (other, way) = match id {
+                _ if id == g.list => (detail, 1),
+                _ if id == detail => (g.list, -1),
+                _ => return None,
+            };
+            (laid(id) && !laid(other)).then_some((other, way))
+        })
+    }
+
     /// The group the slot lays out now, its panel in front.
     pub fn slot_group(&self) -> Option<Group> {
         let slot = self.slot()?;

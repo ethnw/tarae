@@ -117,6 +117,15 @@ pub struct Group {
     pub host: PaneId,
     pub list: PaneId,
     pub detail: Detail,
+    /// The member that had the keys last — the one in sight while the group is stacked (§2.3); the list at first.
+    pub front: Member,
+}
+
+/// One of a group's two members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Member {
+    List,
+    Detail,
 }
 
 impl Group {
@@ -124,7 +133,7 @@ impl Group {
     /// code.
     pub fn new(kind: GroupKind, host: PaneId, first: PaneId) -> Self {
         let detail = if kind.detail_is_code() { Detail::Code } else { Detail::Pane(first + 1) };
-        Group { kind, host, list: first, detail }
+        Group { kind, host, list: first, detail, front: Member::List }
     }
 
     /// The ids it takes from `first` (`new`).

@@ -483,6 +483,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
             .then(|| (lay.slot_y(), lay.slot_y() + lay.debug_h - 1)),
         slot_x: lay.slot_x,
         slot_tabs: Default::default(),
+        member_names: Default::default(),
         // (the terminal's rows: its panel's — the size you set, or its own — under the header)
         terminal_size: std::cell::Cell::new(Some((
             crate::sizes::bottom(
@@ -737,8 +738,9 @@ fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, cr
         if let Some((list, detail)) = group_members(editor, lay, g)
             && let Some(i) = leaves.iter().position(|l| l.0 == g.host)
         {
+            // (stacked, only the one in sight)
             let detail = g.detail_pane().map(|d| (d, detail));
-            leaves.splice(i..=i, std::iter::once((g.list, list)).chain(detail));
+            leaves.splice(i..=i, std::iter::once((g.list, list)).chain(detail).filter(|l| l.1.w > 0));
         }
     }
     leaves
@@ -749,9 +751,15 @@ fn tests_group(editor: &Editor) -> Option<crate::pane::Group> {
     editor.slot_group().filter(|g| g.kind == crate::pane::GroupKind::Tests)
 }
 
+/// The least a group's list and detail are wide side by side (§2.3): narrower, it's stacked.
+const LIST_MIN: usize = 24;
+const DETAIL_MIN: usize = 40;
+
 /// Group `g`'s two members in its host, under its header — the list, a line, the detail — while it has something
 /// to list (`Editor::group_laid`; with nothing it's the detail alone: one pane). The host is the slot's leaf (a
-/// docked leaf's and a floating frame's come with P3's steps 6–7); the list as wide as the kind's rows want.
+/// docked leaf's and a floating frame's come with P3's steps 6–7); the list as wide as the kind's rows want. Where
+/// one of them would get less than its least (`LIST_MIN`, `DETAIL_MIN`) it's stacked (§2.3): the one in front
+/// (`Group.front`) the host's whole width, the other none wide.
 fn group_members(
     editor: &Editor,
     lay: &Layout,
@@ -771,20 +779,43 @@ fn group_members(
     let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
     let detail =
         crate::split::Rect { x: lay.slot_x + left_w + 1, y, w: lay.slot_w.saturating_sub(left_w + 1), h };
+    if list.w < LIST_MIN || detail.w < DETAIL_MIN {
+        let all = crate::split::Rect { x: lay.slot_x, y, w: lay.slot_w, h };
+        let none = crate::split::Rect { w: 0, ..all };
+        return Some(match g.front {
+            crate::pane::Member::List => (all, none),
+            crate::pane::Member::Detail => (none, all),
+        });
+    }
     Some((list, detail))
 }
 
-/// The tests' list's width in a slot `w` wide: its names (the shared prefix dropped) and their marks, within
-/// 45 % of it — the detail keeps 20.
+/// A group's members laid side by side (not stacked): the column of the line between them.
+fn side_by_side((list, detail): &(crate::split::Rect, crate::split::Rect)) -> Option<usize> {
+    (list.w > 0 && detail.w > 0).then_some(list.x + list.w)
+}
+
+/// Which of a group's members has the keys: its list (`listing`), its detail, or neither.
+fn member_keys(listing: bool, detail: bool) -> Option<crate::pane::Member> {
+    match (listing, detail) {
+        (true, _) => Some(crate::pane::Member::List),
+        (_, true) => Some(crate::pane::Member::Detail),
+        _ => None,
+    }
+}
+
+/// The tests' list's width in a slot `w` wide: its names (the shared prefix dropped) and their marks — as a run's
+/// list (`run_list_w`).
 fn tests_list_w(r: &crate::testing::TestRun, w: usize) -> usize {
     let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
     let name_w = short.iter().map(|n| n.width()).max().unwrap_or(10);
-    (name_w + 14).clamp(26, (w * 45 / 100).max(26)).min(w.saturating_sub(20))
+    run_list_w(name_w + 14, w)
 }
 
-/// The least a task's or a preflight's list is wide: the header's details over it (`failed ▲ 2  28ms`) stay whole
-/// left of its `┬` where the slot is wide enough.
-const RUN_LIST_MIN: usize = 36;
+/// The least a run's list (the tests', a task's, a preflight's) is wide: the header's details over it (`failed ▲ 2
+/// 28ms`) stay whole left of its `┬`, after the tab's name and the list's (`check ▲ › places`, step 3b), where the
+/// slot is wide enough.
+const RUN_LIST_MIN: usize = 45;
 
 /// A task's places' list's width in a slot `w` wide: a row's `▲ path:line  message` as long as the longest place's
 /// path wants it, a message's start beside it — within 45 % of it, as the tests' (the output keeps 20).
@@ -1154,7 +1185,7 @@ fn draw_debug_panel(
     let cw = [w * 45 / 100, w * 25 / 100];
     let cols = [(0, cw[0]), (cw[0] + 1, cw[1]), (cw[0] + cw[1] + 2, w.saturating_sub(cw[0] + cw[1] + 2))];
     let splits: Vec<usize> = cols[1..].iter().map(|&(x, _)| x0 + x - 1).collect();
-    let body = slot_header(out, editor, ui, lay, card, &details, hints, &splits)?;
+    let body = slot_header(out, editor, ui, lay, card, &details, hints, &splits, None)?;
     let rows = lay.debug_h.saturating_sub(lay.slot_head);
     let var_scope = color("variable").or(ui.base.fg);
     let root = editor.root();
@@ -1167,7 +1198,7 @@ fn draw_debug_panel(
         for (c, &(x, cw)) in cols.iter().enumerate() {
             if c > 0 {
                 queue!(out, MoveTo((x0 + x - 1) as u16, y))?;
-                leaf_line(out, ui, card, faint)?;
+                leaf_line(out, ui, card, faint, false)?;
             }
             // (the first column's text at the panel's padding, the others a cell in from their line)
             let pad = if c == 0 { PAD } else { 1 };
@@ -1449,6 +1480,15 @@ fn badge_glyph(b: crate::chrome::Badge, editor: &Editor, ui: &Ui) -> Option<(Str
 ///   terminal   check ▲   tests ●  │  sh                                                C-\ type  space T hide
 ///   ──────────────────────────────────────────────────────────────────────────────────────────────
 /// ```
+///
+/// A group in front names its members after the tabs (`members`, panes P3 step 3b): side by side each over its own
+/// column, the run's details in the list's stretch, the detail's after its name, the stretch of the member with the
+/// keys lit; stacked both after ` › `, `·` between:
+///
+/// ```text
+/// ─ check ▲ › places ── warnings ▲ 2 6ms ────┬─ output ───────────────── enter go to it  tab output  esc code ─
+/// ─ check ▲ › places · output ── warnings ▲ 2 6ms ─────────────── enter go to it  tab output ─
+/// ```
 #[allow(clippy::too_many_arguments)]
 fn slot_header(
     out: &mut impl Write,
@@ -1459,8 +1499,10 @@ fn slot_header(
     details: &[(String, Style)],
     hints: &[(&str, &str)],
     splits: &[usize],
+    members: Option<&Members>,
 ) -> io::Result<usize> {
     use crate::chrome::{HEAD, PAD, PAD_R};
+    use crate::pane::Member;
     let (x0, y0, w) = (lay.slot_x, lay.slot_y(), lay.slot_w);
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
@@ -1469,8 +1511,32 @@ fn slot_header(
     let front = editor.slot();
     let tabs = editor.slot_tabs();
     let lines = ui.edge == crate::theme::Edge::Lines;
-    // (the line's own cells: its lead `─ `, a blank and a `─` after the names — `top_line`)
-    let room = w.saturating_sub(if lines { TOP_LINE_OWN } else { PAD + PAD_R });
+    // (the members' names in the line under `lines`; under `ground` a group side by side keeps its title rows, a
+    // stacked one names both in the header row, as that row names its tabs — the detail's own details after the
+    // run's while it's beside the list or open)
+    let ground_stacked = members.filter(|m| !lines && m.split.is_none());
+    let merged: Vec<(String, Style)>;
+    let details = match members.filter(|m| !lines && (m.split.is_some() || m.front == Member::Detail)) {
+        Some(m) => {
+            merged = details.iter().chain(&m.details).cloned().collect();
+            &merged[..]
+        }
+        None => details,
+    };
+    let members = members.filter(|_| lines);
+    // (the line's own cells: its lead `─ `, a blank and a `─` after the names — `top_line`; side by side the tabs
+    // share the list's stretch with its name, stacked both members' names. The names stand, the details fold before
+    // them — step 1's order, `top_line`'s)
+    let stretch = members.and_then(|m| m.split).map_or(w, |s| s.saturating_sub(x0));
+    let member_w = members.map_or(0, |m| match m.split {
+        Some(_) => MEMBERS_SEP.width() + m.list.width(),
+        None => MEMBERS_SEP.width() + m.list.width() + NAMES_SEP.width() + m.detail.width(),
+    });
+    let ground_w = ground_stacked.map_or(0, |m| MEMBERS_SEP.width() + m.list.width() + 3 + m.detail.width());
+    let room = match lines {
+        true => stretch.saturating_sub(TOP_LINE_OWN + member_w),
+        false => w.saturating_sub(PAD + PAD_R + ground_w),
+    };
     // As wide as they come; too wide, the ones behind shorten first, then the one in front
     let badge_w = |t: &crate::chrome::Tab| badge_glyph(t.badge, editor, ui).map_or(0, |(g, _)| 1 + g.width());
     let labels = |behind: usize, ahead: usize| -> Vec<String> {
@@ -1512,15 +1578,62 @@ fn slot_header(
                 owner.push(Some(t.slot));
             }
         }
-        let key = Style { bold: true, ..dim };
-        let head = TopLine { names: &names, details, keys: hints, key, faint, plain: false };
+        // The group's members after ` › ` (step 3b): side by side the list's here, the detail's past the `┬`, each
+        // strong with the keys; stacked both, `·` between, the one in sight strong
+        let mut who: Vec<Option<Member>> = vec![None; names.len()];
+        let mut beyond_names = Vec::new();
+        let mut said = details.to_vec();
         let line = edge_style(ui, card, Region::Slot);
-        let cols = top_line(out, line, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
-        // (a tab's spot from its label's first cell to its badge's last)
-        for (slot, (a, b)) in owner.iter().zip(cols).filter_map(|(o, c)| o.map(|s| (s, c))) {
+        let wash = Style { fg: ui.window, ..line };
+        let mut stretches = (line, None);
+        if let Some(m) = members {
+            let name = |of: Member| {
+                let strong_one = if m.split.is_some() { m.keys == Some(of) } else { m.front == of };
+                if strong_one { strong } else { dim }
+            };
+            names.push((MEMBERS_SEP.to_string(), frame_line(ui, card)));
+            names.push((m.list.to_string(), name(Member::List)));
+            who.extend([None, Some(Member::List)]);
+            match m.split {
+                Some(_) => {
+                    beyond_names.push((m.detail.to_string(), name(Member::Detail)));
+                    who.push(Some(Member::Detail));
+                    let of = |who: Member| if m.keys == Some(who) { line } else { wash };
+                    stretches = (of(Member::List), Some(of(Member::Detail)));
+                }
+                None => {
+                    names.push((NAMES_SEP.to_string(), frame_line(ui, card)));
+                    names.push((m.detail.to_string(), name(Member::Detail)));
+                    who.extend([None, Some(Member::Detail)]);
+                    if m.front == Member::Detail {
+                        said.extend(m.details.iter().cloned());
+                    }
+                }
+            }
+        }
+        let key = Style { bold: true, ..dim };
+        let beyond = members.zip(stretches.1).map(|(m, detail_line)| Beyond {
+            names: &beyond_names,
+            details: &m.details,
+            line: detail_line,
+            join: line,
+        });
+        let head = TopLine { names: &names, details: &said, keys: hints, key, faint, plain: false, beyond };
+        let cols = top_line(out, stretches.0, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
+        // (a tab's spot from its label's first cell to its badge's last; a member's its name's)
+        for (slot, (a, b)) in owner.iter().zip(&cols).filter_map(|(o, c)| o.map(|s| (s, *c))) {
             match spots.last_mut() {
                 Some(last) if last.3 == slot => last.2 = b,
                 _ => spots.push((y0, a, b, slot)),
+            }
+        }
+        if let Some(m) = members {
+            let mut named = editor.screen.member_names.borrow_mut();
+            for (of, (a, b)) in who.iter().zip(&cols).filter_map(|(o, c)| o.map(|o| (o, *c))) {
+                let id = if of == Member::List { m.ids.0 } else { m.ids.1 };
+                if b > a {
+                    named.push((y0, a, b, id));
+                }
             }
         }
         return Ok(y0 + 1);
@@ -1547,6 +1660,26 @@ fn slot_header(
         }
         spots.push((y0, start, x0 + used, t.slot));
     }
+    // A stacked group's members after ` › `, three cells apart as the tabs are, the open one strong (step 3b)
+    if let Some(m) = ground_stacked {
+        apply(out, faint)?;
+        queue!(out, Print(MEMBERS_SEP))?;
+        used += MEMBERS_SEP.width();
+        let mut named = editor.screen.member_names.borrow_mut();
+        for (i, (name, of, id)) in
+            [(m.list, Member::List, m.ids.0), (m.detail, Member::Detail, m.ids.1)].into_iter().enumerate()
+        {
+            if i > 0 {
+                apply(out, card)?;
+                queue!(out, Spaces(3))?;
+                used += 3;
+            }
+            apply(out, if m.front == of { strong } else { dim })?;
+            queue!(out, Print(name))?;
+            named.push((y0, x0 + used, x0 + used + name.width(), id));
+            used += name.width();
+        }
+    }
     // What the one in front says, set apart from the tabs by a faint `│` — as much as there's room for, folded
     // as on the line (`fold_details`), the keys keeping theirs
     let shown = fold_details(details, w.saturating_sub(used + 5 + PAD_R + 2), false);
@@ -1569,6 +1702,19 @@ fn slot_header(
     Ok(y0 + HEAD)
 }
 
+/// A group's members as the slot's line names them (panes P3 step 3b, plan §1.2): their names and pane ids, the
+/// detail's own details (the failure's place, `↓ output after`), which has the keys and which had them last (the one
+/// open while stacked) — side by side the `┬`'s column, stacked none.
+struct Members<'a> {
+    list: &'a str,
+    detail: &'a str,
+    ids: (crate::split::PaneId, crate::split::PaneId),
+    details: Vec<(String, Style)>,
+    keys: Option<crate::pane::Member>,
+    front: crate::pane::Member,
+    split: Option<usize>,
+}
+
 /// A top line's own cells besides its ends (`top_line`): the lead's `─ `, the blank after the names and one `─`.
 const TOP_LINE_OWN: usize = 4;
 
@@ -1582,6 +1728,18 @@ struct TopLine<'a> {
     faint: Style,
     /// The names unfaded, as a line is (a frame's: what floats is never the faded side).
     plain: bool,
+    /// A group laid side by side: its detail's part, past the first line down.
+    beyond: Option<Beyond<'a>>,
+}
+
+/// The part of a top line over a group's detail (panes P3 step 3b): from the first line down (`splits`) on, its own
+/// names and details after `─ `, its stretch of the line in `line` — the stretch before it in the top line's own — and
+/// the join in `join` (each stretch lit only over the member with the keys; the join by the dividers' rule).
+struct Beyond<'a> {
+    names: &'a [(String, Style)],
+    details: &'a [(String, Style)],
+    line: Style,
+    join: Style,
 }
 
 /// The details' least room on a top line: under it they go whole, the keys before them.
@@ -1693,19 +1851,23 @@ fn top_line(
     // (what's left for the text: the line's own cells and its ends kept)
     let room = |col: usize| w.saturating_sub(col + 2 + r.width());
     let mut cols = Vec::new();
-    for (text, st) in head.names {
-        let t = match room(col) {
-            0 => String::new(),
-            n => fit_ellipsis(text, n),
-        };
-        // (a `·` between names is the line's wash, unfaded)
-        match head.plain || text.as_str() == NAMES_SEP {
-            true => put(&mut buf, *st, &t)?,
-            false => apply_put(&mut buf, *st, &t)?,
+    let mut names = |buf: &mut Vec<u8>, names: &[(String, Style)], col: &mut usize| -> io::Result<()> {
+        for (text, st) in names {
+            let t = match room(*col) {
+                0 => String::new(),
+                n => fit_ellipsis(text, n),
+            };
+            // (a `·` or `›` between names is the line's wash, unfaded)
+            match head.plain || [NAMES_SEP, MEMBERS_SEP].contains(&text.as_str()) {
+                true => put(buf, *st, &t)?,
+                false => apply_put(buf, *st, &t)?,
+            }
+            cols.push((x + *col, x + *col + t.width()));
+            *col += t.width();
         }
-        cols.push((x + col, x + col + t.width()));
-        col += t.width();
-    }
+        Ok(())
+    };
+    names(&mut buf, head.names, &mut col)?;
     // The lines down from it past the names (`splits`, from `x`): no text over one — the details end short of the
     // first, the keys start past the last, each a blank and a `─` from its `join` (one under a name stays unjoined:
     // the names fold last)
@@ -1714,17 +1876,40 @@ fn top_line(
     let short_of = downs.iter().min().map_or(usize::MAX, |&s| s.saturating_sub(col + lead + 2));
     let past = downs.iter().max().map_or(0, |&s| s + 2);
     // What the one in front says, after ` ── `: as much as there's room for, the first without its leading blanks
-    let details = match room(col) >= 4 + DETAILS_MIN && short_of >= DETAILS_MIN {
-        true => fold_details(head.details, (room(col) - 4).min(short_of), true),
-        false => Vec::new(),
-    };
-    if !details.is_empty() {
-        put(&mut buf, line, if head.names.is_empty() { "─ " } else { " ── " })?;
-        col += lead;
-        for (s, st) in &details {
-            apply_put(&mut buf, *st, s)?;
-            col += s.width();
+    // (`bare`: no names before them — `─ ` then, not ` ── `)
+    let said_after =
+        |buf: &mut Vec<u8>, line: Style, details: &[(String, Style)], col: &mut usize, most, bare| {
+            let lead = if bare { 2 } else { 4 };
+            let details = match room(*col) >= 4 + DETAILS_MIN && most >= DETAILS_MIN {
+                true => fold_details(details, (room(*col) - 4).min(most), true),
+                false => Vec::new(),
+            };
+            if !details.is_empty() {
+                put(buf, line, if lead == 2 { "─ " } else { " ── " })?;
+                *col += lead;
+                for (s, st) in &details {
+                    apply_put(buf, *st, s)?;
+                    *col += s.width();
+                }
+            }
+            io::Result::Ok(())
+        };
+    said_after(&mut buf, line, head.details, &mut col, short_of, head.names.is_empty())?;
+    // A group's detail past the first line down (`beyond`): this stretch's line to it, the join, then its own names
+    // and details after `─ ` — the rest of the line in its stretch's look
+    let mut line = line;
+    if let (Some(b), Some(&s)) = (&head.beyond, downs.iter().min()) {
+        if said {
+            put(&mut buf, line, " ")?;
+            col += 1;
         }
+        put(&mut buf, line, &"─".repeat(s.saturating_sub(col)))?;
+        put(&mut buf, b.join, join)?;
+        line = b.line;
+        put(&mut buf, line, "─ ")?;
+        col = s.max(col) + 1 + 2;
+        names(&mut buf, b.names, &mut col)?;
+        said_after(&mut buf, line, b.details, &mut col, usize::MAX, b.names.is_empty())?;
     }
     // The keys at the right end: as many whole pairs as fit, from the first — a run of the line (`KEYS_AFTER`)
     // before them, so it reads as a line still
@@ -2014,7 +2199,7 @@ fn draw_terminal_panel(
     {
         hints.insert(0, ("alt+drag", "select"));
     }
-    let body = slot_header(out, editor, ui, lay, card, &head, &hints, &[])?;
+    let body = slot_header(out, editor, ui, lay, card, &head, &hints, &[], None)?;
     let rows = lay.debug_h.saturating_sub(lay.slot_head);
     let cols = terminal_cols(lay);
     let sel = t.selected();
@@ -2185,10 +2370,23 @@ fn draw_task_panel(
     let (to_out, rest) = slot_keys.split_at(after_out);
     hints.splice(own..own, rest.iter().map(|(k, d)| (k.as_str(), *d)));
     hints.splice(0..0, to_out.iter().map(|(k, d)| (k.as_str(), *d)));
-    summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Task));
     let y0 = lay.slot_y();
-    let splits: Vec<usize> = members.iter().map(|(_, (list, _))| list.x + list.w).collect();
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits)?;
+    // (its members named in the line — step 3b: side by side the `┬` where they meet, stacked none)
+    let splits: Vec<usize> = members.iter().filter_map(|(_, m)| side_by_side(m)).collect();
+    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Task);
+    let head = members.map(|(g, m)| Members {
+        list: if steps.is_some() { "steps" } else { "places" },
+        detail: "output",
+        ids: (g.list, g.detail_pane().unwrap_or(g.list)),
+        details: output_head(editor, ui, card, crate::sizes::Slot::Task),
+        keys: member_keys(listing, detail_keys),
+        front: g.front,
+        split: side_by_side(&m),
+    });
+    if head.is_none() {
+        summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Task));
+    }
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits, head.as_ref())?;
     // A preflight's steps: the row under the header (beside the output, its list's rows instead)
     let top = body - y0 + usize::from(steps.is_some() && members.is_none());
     if let Some(p) = steps.filter(|_| members.is_none()) {
@@ -2226,9 +2424,9 @@ fn draw_task_panel(
             faint,
         )?;
     }
-    if let Some((g, (list, _))) = members {
+    if let Some((g, m)) = members {
         let at = (y0 + top, rows, y0 + top - 1 + rows + below);
-        return draw_task_group(r, editor, ui, lay, out, g, list.w, at);
+        return draw_task_group(r, editor, ui, lay, out, g, m, at);
     }
     // Its output, a document (`rundoc.rs`): its end, unless scrolled back — its own top while it has the keys; the
     // wheel's thumb when it doesn't fit
@@ -2268,11 +2466,16 @@ fn draw_task_group(
     lay: &Layout,
     out: &mut impl Write,
     g: crate::pane::Group,
-    list_w: usize,
+    (list, detail): (crate::split::Rect, crate::split::Rect),
     (y, rows, last): (usize, usize, usize),
 ) -> io::Result<()> {
     use crate::chrome::PAD;
     use crate::pane::GroupKind;
+    // (stacked, one is none wide; their names are in the slot's line — under `ground` a title row each)
+    let side = list.w > 0 && detail.w > 0;
+    let titled = ui.edge == crate::theme::Edge::Ground && side;
+    let head = usize::from(titled);
+    let list_w = list.w;
     let t = &editor.theme;
     let card = panel_style(ui, editor);
     let dim = Style { fg: ui.virt.fg, ..card };
@@ -2283,7 +2486,7 @@ fn draw_task_group(
     let (x0, w) = (lay.slot_x, lay.slot_w);
     let right_x = list_w + 1;
     let right_w = w.saturating_sub(right_x + 1);
-    let list_rows = rows.saturating_sub(1);
+    let list_rows = rows.saturating_sub(head);
     let steps = crate::grouplist::preflight(editor).filter(|_| g.kind == GroupKind::Preflight);
     let order = if steps.is_some() { Vec::new() } else { r.place_rows() };
     let (n, sel) = match steps {
@@ -2294,12 +2497,23 @@ fn draw_task_group(
     // (the selection kept in sight from where the list is — `C-e`/`C-y` move it)
     let first = list_top.get().min(sel).max((sel + 1).saturating_sub(list_rows)).min(n.saturating_sub(1));
     list_top.set(first);
+    // (the output's text: beside the list, or stacked the slot's width inside its padding)
+    let text = match side {
+        true => (x0 + right_x + 1, right_w.saturating_sub(1)),
+        false => (x0 + PAD, w.saturating_sub(2 * PAD)),
+    };
     editor.screen.task_panel.set(Some((lay.slot_y(), last, list_rows)));
-    editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y + 1, x0 + right_x + 1, list_rows)));
-    editor.screen.lists.borrow_mut().push((g.kind, (y + 1, list_rows, first)));
+    if detail.w > 0 {
+        editor.screen.run_rows.set(Some((crate::sizes::Slot::Task, y + head, text.0, list_rows)));
+    }
+    if list.w > 0 {
+        editor.screen.lists.borrow_mut().push((g.kind, (y + head, list_rows, first)));
+    }
     let list_keys = editor.session.is_at(At::List(g.list));
     let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Task);
     let title = |keys: bool| Style { bold: true, ..if keys { strong } else { faint } };
+    // (the line between them lit while either has the keys — it edges both, as a code pane's divider)
+    let lit = ui.lit == Some(Region::Slot);
     // (the link, while the list has the keys: the place's line, the step's heading)
     let band = match steps {
         Some(p) => p.heading_at(p.selected, &r.output),
@@ -2313,18 +2527,25 @@ fn draw_task_group(
         let yy = (y + i) as u16;
         queue!(out, MoveTo(x0 as u16, yy))?;
         apply(out, card)?;
-        queue!(out, Spaces(w), MoveTo((x0 + list_w) as u16, yy))?;
-        leaf_line(out, ui, card, faint)?;
-        if i == 0 {
-            apply(out, title(list_keys))?;
-            let name = if steps.is_some() { "STEPS" } else { "PLACES" };
-            queue!(out, MoveTo((x0 + PAD) as u16, yy), Print(name))?;
-            apply(out, title(detail_keys))?;
-            queue!(out, MoveTo((x0 + right_x + 1) as u16, yy), Print("OUTPUT"))?;
+        queue!(out, Spaces(w))?;
+        if side {
+            queue!(out, MoveTo((x0 + list_w) as u16, yy))?;
+            leaf_line(out, ui, card, faint, lit)?;
+        }
+        if titled && i == 0 {
+            if list.w > 0 {
+                apply(out, title(list_keys))?;
+                let name = if steps.is_some() { "STEPS" } else { "PLACES" };
+                queue!(out, MoveTo((x0 + PAD) as u16, yy), Print(name))?;
+            }
+            if detail.w > 0 {
+                apply(out, title(detail_keys))?;
+                queue!(out, MoveTo((text.0) as u16, yy), Print("OUTPUT"))?;
+            }
             continue;
         }
-        let idx = first + i - 1;
-        if idx >= n {
+        let idx = first + i - head;
+        if idx >= n || list.w == 0 {
             continue;
         }
         let is_sel = list_keys && idx == sel;
@@ -2375,11 +2596,18 @@ fn draw_task_group(
         let pad = list_w.saturating_sub(used + right.width() + 1);
         queue!(out, Spaces(pad), Print(&right), Print(" "))?;
     }
-    let at = (x0 + right_x + 1, y + 1, right_w.saturating_sub(1), list_rows);
+    if detail.w == 0 {
+        return Ok(());
+    }
+    let at = (text.0, y + head, text.1, list_rows);
     draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Task, start, at, band)?;
     for i in (0..list_rows).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
         apply(out, faint)?;
-        queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, (y + 1 + i) as u16), Print(thumb_glyph(ui)))?;
+        queue!(
+            out,
+            MoveTo((x0 + w).saturating_sub(1) as u16, (y + head + i) as u16),
+            Print(thumb_glyph(ui))
+        )?;
     }
     Ok(())
 }
@@ -2542,7 +2770,7 @@ fn draw_plugin_panel<W: Write>(
     let mut hints: Vec<(&str, &str)> = keys.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect();
     let focus = editor.plugin_panel_focused();
     hints.push(if focus { ("esc", "code") } else { ("click", "keys") });
-    let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints, &[])?;
+    let top = slot_header(out, editor, ui, lay, card, &[(title, strong)], &hints, &[], None)?;
     // The table, and the status line under it
     let header = !panel.columns.is_empty();
     let body = lay.debug_h.saturating_sub(lay.slot_head + 1 + header as usize);
@@ -2683,7 +2911,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     {
         summary.pop();
     }
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[])?;
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[], None)?;
     // The columns: FOR takes what's left; narrow, the resident column goes first, then the pid, then the time
     let foot = p.rows.iter().any(|r| r.footprint.is_some());
     // (a row with nothing to say for what it's for — what a server started — runs its name on into that column;
@@ -3005,7 +3233,6 @@ fn draw_test_panel(
     }
     let slot_keys = slot_hints(editor);
     let mut hints: Vec<(&str, &str)> = slot_keys.iter().map(|(k, d)| (k.as_str(), *d)).collect();
-    summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Test));
     hints.extend_from_slice(match r.state {
         RunState::Running => &[("space x c", "stop")],
         // (most useful first — the ones that don't fit fold away from the end)
@@ -3013,13 +3240,53 @@ fn draw_test_panel(
             &[("space x l", "again"), ("space x o", "output"), ("space x c", "close"), ("space x d", "debug")]
         }
     });
-    // (where the list and the detail meet, the line down from the header's)
-    let splits: Vec<usize> = tests_group(editor)
-        .and_then(|g| group_members(editor, lay, &g))
-        .map(|(list, _)| list.x + list.w)
-        .into_iter()
-        .collect();
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits)?;
+    // (where the list and the detail meet, the line down from the header's; its members named in it — step 3b: the
+    // detail's name and own details, the failure's place and which of how many, after the `┬`)
+    let group = tests_group(editor);
+    let members = group.and_then(|g| Some((g, group_members(editor, lay, &g)?)));
+    let splits: Vec<usize> = members.iter().filter_map(|(_, m)| side_by_side(m)).collect();
+    let list_keys = group.is_some_and(|g| editor.session.is_at(At::List(g.list)));
+    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Test);
+    let cwd = &r.target.cwd;
+    let rel = |p: &std::path::Path| p.strip_prefix(cwd).unwrap_or(p).display().to_string();
+    let fails = r.failures();
+    let selected = r.picked();
+    // (in its stretch of the line — under `ground` its title row's while side by side, else the header row's)
+    let stacked = members.as_ref().is_some_and(|(_, m)| side_by_side(m).is_none());
+    let named = ui.edge == crate::theme::Edge::Lines || stacked;
+    let mut own = Vec::new();
+    if let Some(c) = selected.filter(|_| named) {
+        if let Some((p, l)) = &c.at {
+            own.push((format!("{}:{}", rel(p), l + 1), faint));
+        }
+        // (which failure of how many, and the keys that step through them — said where they act, beside the failure,
+        // one piece: it folds whole, before the place, and outlasts the panel's keys, which fold first)
+        if fails.len() > 1 {
+            let at = fails.iter().position(|&f| f == r.selected).unwrap_or(0) + 1;
+            let key = Style { bold: true, ..dim };
+            own.push((format!("   {at}/{}  ", fails.len()), faint));
+            own.extend([
+                ("]x ".into(), key),
+                ("next  ".into(), faint),
+                ("[x ".into(), key),
+                ("prev".into(), faint),
+            ]);
+        }
+    }
+    own.extend(output_head(editor, ui, card, crate::sizes::Slot::Test));
+    let head = members.map(|(g, m)| Members {
+        list: "results",
+        detail: if selected.is_some() { "failure" } else { "output" },
+        ids: (g.list, g.detail_pane().unwrap_or(g.list)),
+        details: own.clone(),
+        keys: member_keys(list_keys, detail_keys),
+        front: g.front,
+        split: side_by_side(&m),
+    });
+    if head.is_none() {
+        summary.extend(output_head(editor, ui, card, crate::sizes::Slot::Test));
+    }
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits, head.as_ref())?;
 
     // The sandbox's line, when it blocked something: the bottom row, under the rest — and over it, what waits
     // for the pane, a row each (`queued.rs`)
@@ -3073,11 +3340,23 @@ fn draw_test_panel(
     // ── Two columns: result list · selected failure (or output if none)
     // List names drop the shared prefix (`math::tests::adds` → `adds` — the full name is in the header)
     let short = short_names(r.cases.iter().map(|c| c.name.as_str()));
-    let left_w = tests_list_w(r, w);
+    // (stacked, one is none wide; their names are in the slot's line — under `ground` a title row each)
+    let (list, detail) = members.map(|(_, m)| m).unwrap_or_else(|| {
+        let l = tests_list_w(r, w);
+        let rect = |x, w| crate::split::Rect { x, y: body, w, h: rows };
+        (rect(x0, l), rect(x0 + l + 1, w.saturating_sub(l + 1)))
+    });
+    let side = list.w > 0 && detail.w > 0;
+    let titled = ui.edge == crate::theme::Edge::Ground && side;
+    let head = usize::from(titled);
+    let left_w = list.w;
     let right_x = left_w + 1;
     let right_w = w.saturating_sub(right_x + 1);
-    let selected = r.picked();
-    let list_rows = rows.saturating_sub(1);
+    let text = match side {
+        true => (x0 + right_x + 1, right_w.saturating_sub(1)),
+        false => (x0 + PAD, w.saturating_sub(2 * PAD)),
+    };
+    let list_rows = rows.saturating_sub(head);
     editor.screen.test_panel.set(Some((y0, last, list_rows)));
     // Keep the selection visible from where the list is (`C-e`/`C-y` move it); while running, the latest visible
     let first = if r.state == RunState::Running {
@@ -3086,31 +3365,43 @@ fn draw_test_panel(
         r.list_top.get().min(r.selected).max((r.selected + 1).saturating_sub(list_rows))
     };
     r.list_top.set(first);
-    editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Tests, (body + 1, list_rows, first)));
-    // (the member with the keys says so in its title — one header over both, the names lit as the frame's are)
-    let list_keys = tests_group(editor).is_some_and(|g| editor.session.is_at(At::List(g.list)));
-    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Test);
+    if list.w > 0 {
+        editor
+            .screen
+            .lists
+            .borrow_mut()
+            .push((crate::pane::GroupKind::Tests, (body + head, list_rows, first)));
+    }
+    // (under `ground` the member with the keys says so in its title)
     let title =
         |keys: bool| if keys { Style { bold: true, ..strong } } else { Style { bold: true, ..faint } };
-    let cwd = &r.target.cwd;
-    let rel = |p: &std::path::Path| p.strip_prefix(cwd).unwrap_or(p).display().to_string();
-    let fails = r.failures();
+    // (the line between them lit while either has the keys — it edges both, as a code pane's divider)
+    let lit = ui.lit == Some(Region::Slot);
     // Right column: the detail — the failure picked's message, else the output (drawn once the rows are laid)
     let top = output_top(editor, crate::sizes::Slot::Test, list_rows);
-    let bar = thumb(list_rows, top);
-    editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + 1, x0 + right_x + 1, list_rows)));
+    let bar = thumb(list_rows, top).filter(|_| detail.w > 0);
+    if detail.w > 0 {
+        editor.screen.run_rows.set(Some((crate::sizes::Slot::Test, body + head, text.0, list_rows)));
+    }
     for i in 0..rows {
         let y = (body + i) as u16;
         queue!(out, MoveTo(x0 as u16, y))?;
         apply(out, card)?;
         queue!(out, Spaces(w))?;
-        queue!(out, MoveTo((x0 + left_w) as u16, y))?;
-        leaf_line(out, ui, card, faint)?;
-        if i == 0 {
+        if side {
+            queue!(out, MoveTo((x0 + left_w) as u16, y))?;
+            leaf_line(out, ui, card, faint, lit)?;
+        }
+        if titled && i == 0 {
             // Column title
-            apply(out, title(list_keys))?;
-            queue!(out, MoveTo((x0 + PAD) as u16, y), Print("TESTS"))?;
-            queue!(out, MoveTo((x0 + right_x + 1) as u16, y))?;
+            if list.w > 0 {
+                apply(out, title(list_keys))?;
+                queue!(out, MoveTo((x0 + PAD) as u16, y), Print("TESTS"))?;
+            }
+            if detail.w == 0 {
+                continue;
+            }
+            queue!(out, MoveTo(text.0 as u16, y))?;
             apply(out, title(detail_keys))?;
             match selected {
                 Some(c) => {
@@ -3140,8 +3431,10 @@ fn draw_test_panel(
             continue;
         }
         // List
-        if let Some(c) = r.cases.get(first + i - 1) {
-            let idx = first + i - 1;
+        if list.w > 0
+            && let Some(c) = r.cases.get(first + i - head)
+        {
+            let idx = first + i - head;
             // (a failure picked; with the list's keys whatever row it's on)
             let is_sel = (selected.is_some() || list_keys) && idx == r.selected;
             let row_bg = if is_sel { selected_row(ui, editor, card) } else { card };
@@ -3171,14 +3464,16 @@ fn draw_test_panel(
                 Print(" ")
             )?;
         }
-        if bar.as_ref().is_some_and(|b| b.contains(&(i - 1))) {
+        if bar.as_ref().is_some_and(|b| b.contains(&(i - head))) {
             apply(out, faint)?;
             queue!(out, MoveTo((x0 + w).saturating_sub(1) as u16, y), Print(thumb_glyph(ui)))?;
         }
     }
-    // Right: the detail, under its title
-    let at = (x0 + right_x + 1, body + 1, right_w.saturating_sub(1), list_rows);
-    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at, None)?;
+    // Right: the detail (stacked, the slot's width)
+    if detail.w > 0 {
+        let at = (text.0, body + head, text.1, list_rows);
+        draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Test, top, at, None)?;
+    }
     Ok(())
 }
 
@@ -10234,11 +10529,11 @@ fn draw_sidebar(
     let lines = sb.lines();
     // Unfocused, only the row the editor is on is marked (nothing, on a file outside the list)
     let mark = if editor.session.is_at(At::Side) { Some(sb.selected) } else { sb.here(editor) };
-    // Header: the views as tabs (the list's only when there is one), the one showing strong; what it's of
+    // Header: the views stacked (the list's only when there is one), the one showing strong; what it's of
     // at the right
     let wash = if ui.edge == crate::theme::Edge::Lines { Style { fg: ui.virt.fg, ..card } } else { faint };
     let tab_style = |m: SMode| if sb.mode == m { strong } else { wash };
-    // (its views are a group laid as tabs: under `lines` named as `pane_names` names them, `·` between)
+    // (its views are a group stacked: under `lines` named as `pane_names` names them, `·` between)
     let gap = match ui.edge {
         crate::theme::Edge::Lines => sp(NAMES_SEP, frame_line(ui, card)),
         crate::theme::Edge::Ground => sp("  ", card),
@@ -10491,10 +10786,15 @@ fn gutter_cell(
     }
 }
 
-/// The line between two leaves of one group (D3, linked panes): under `ui.edge = "lines"` the faint wash, unfaded —
-/// one line can't say which side has the keys; under `"ground"` `faint` as before.
-fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, faint: Style) -> io::Result<()> {
+/// The line between two leaves of one group (D3, linked panes): under `ui.edge = "lines"` unfaded, `lit` (the accent)
+/// while either has the keys — it edges both, as a code pane's divider edges the pane with the keys (`draw_panes`);
+/// which one has them its stretch of the slot's line says (step 3b) — else the faint wash; under `"ground"` `faint`
+/// as before.
+fn leaf_line(out: &mut impl Write, ui: &Ui, card: Style, faint: Style, lit: bool) -> io::Result<()> {
     match ui.edge {
+        crate::theme::Edge::Lines if lit => {
+            put_line(out, Style { fg: ui.accent.fg, ..frame_line(ui, card) }, "│")
+        }
         crate::theme::Edge::Lines => put_line(out, frame_line(ui, card), "│"),
         crate::theme::Edge::Ground => {
             apply(out, faint)?;
@@ -14206,7 +14506,7 @@ fn frame_line(ui: &Ui, card: Style) -> Style {
 }
 
 /// A pane's names as its top line has them (panes plan §2.1c, D3) — one model for a frame's top line and a docked
-/// group's header: a pane alone is one name, a group laid as tabs names all its members, `·` between (the faint
+/// group's header: a pane alone is one name, a stacked group names all its members, `·` between (the faint
 /// wash), the one in sight lit (`ui.text.focus`), the others in the dim wash. `tab`/`S-tab` move between them.
 fn pane_names(ui: &Ui, editor: &Editor, base: Style, names: &[&str], current: usize) -> Vec<(String, Style)> {
     let strong = editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() });
@@ -14224,6 +14524,10 @@ fn pane_names(ui: &Ui, editor: &Editor, base: Style, names: &[&str], current: us
 
 /// Between two names on a top line or a docked group's header (`pane_names`).
 const NAMES_SEP: &str = " · ";
+
+/// Between the slot's tabs and the members of the group in front (step 3b): `check ▲ › places` — `›` inside, as the
+/// path bar's `src › main.rs`; `·` stays between peers.
+const MEMBERS_SEP: &str = " › ";
 
 /// Whether what floats here gets a frame (D3: what takes keys — which-key, a picker, a prompt, a card with the
 /// keys): under `ui.edge = "lines"` only.
@@ -14255,7 +14559,15 @@ fn draw_frame(
     let line = frame_line(ui, card);
     // Its top and bottom lines are top lines (`top_line`, the slot's header's drawer): the spans set in after `─ `
     let across = |out: &mut Vec<u8>, yy: usize, ends: (&str, &str, &str), spans: &[(String, Style)]| {
-        let head = TopLine { names: spans, details: &[], keys: &[], key: card, faint: card, plain: true };
+        let head = TopLine {
+            names: spans,
+            details: &[],
+            keys: &[],
+            key: card,
+            faint: card,
+            plain: true,
+            beyond: None,
+        };
         top_line(out, line, card, (x, yy, w), ends, splits, drawn, &head).map(|_| ())
     };
     let mut buf = Vec::new();

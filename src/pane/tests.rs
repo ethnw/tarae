@@ -212,6 +212,8 @@ fn with_results(ed: &mut Editor) {
 #[test]
 fn the_tests_panel_is_a_linked_group_of_two_panes() {
     let mut ed = every_surface();
+    // (side by side: the slot wide enough for both members' least — with the side panel up too it's stacked)
+    ed.session.sidebar = None;
     with_results(&mut ed);
     let g = ed.session.group(GroupKind::Tests).unwrap();
     let detail_id = g.detail_pane().unwrap();
@@ -269,8 +271,8 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     let at: Vec<_> = panes.iter().filter(|p| p.at).map(|p| p.shows.as_str()).collect();
     assert_eq!(at, ["list:tests"]);
     assert!(panes.iter().any(|p| p.shows == "detail:tests" && p.rect.is_some()));
-    // (a click on a row picks it and gives the list the keys; on its title, the detail's; past the last result,
-    // the list's, the selection where it was)
+    // (a click on a row picks it and gives the list the keys; on the detail's name in the slot's line, the detail's;
+    // past the last result, the list's, the selection where it was)
     let click = |ed: &mut Editor, x: usize, y: usize| {
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
         frame(ed);
@@ -280,8 +282,10 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     ed.session.at = At::Code;
     click(&mut ed, list.x + 3, y0 + 1 - first);
     assert_eq!((ed.session.at, ed.session.test_run.as_ref().unwrap().selected), (At::List(g.list), 1));
-    click(&mut ed, list.x + 3, y0 - 1);
-    assert!(ed.session.is_at(At::Slot), "the title row: the detail's keys");
+    let name = ed.screen.member_names.borrow().iter().find(|n| n.3 == detail_id).copied().expect("its name");
+    assert_eq!(name.0, y0 - 1, "in the line over the members");
+    click(&mut ed, name.1, name.0);
+    assert!(ed.session.is_at(At::Slot), "the detail's name: its keys");
     click(&mut ed, list.x + 3, y0 + 2);
     assert_eq!((ed.session.at, ed.session.test_run.as_ref().unwrap().selected), (At::List(g.list), 1));
     // (a word the list has no use for is said; esc to the code; back, and one q closes the group)

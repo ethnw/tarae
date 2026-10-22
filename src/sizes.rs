@@ -341,7 +341,10 @@ impl crate::editor::Editor {
         if s.side_w > 0 && x + 1 == s.side_w && y < end {
             return Some(Border::Side);
         }
-        let tab = || s.slot_tabs.borrow().iter().any(|t| t.0 == y && (t.1..t.2).contains(&x));
+        let tab = || {
+            s.slot_tabs.borrow().iter().any(|t| t.0 == y && (t.1..t.2).contains(&x))
+                || s.member_names.borrow().iter().any(|t| t.0 == y && (t.1..t.2).contains(&x))
+        };
         if s.bottom_h > 0 && y == bottom_y && x >= s.slot_x && x < total - s.chat_w && !tab() {
             return Some(Border::Bottom);
         }
@@ -705,6 +708,7 @@ impl crate::editor::Editor {
         if !there {
             self.session.leave(self.session.docked());
         }
+        self.groups_front();
         // `:procs`' panel gives the slot to the terminal given the keys (`C-\`), which it covered
         if self.procs_up() && self.session.program_has_keys() {
             self.procs_close();

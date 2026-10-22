@@ -13,16 +13,26 @@ const H: u16 = 34;
 
 /// A frame, after the event's `focus_sync` as the loop runs it (the groups made, the slot's front).
 fn frame(ed: &mut Editor) -> String {
+    cells(ed, W).screen().contents()
+}
+
+/// A frame `w` wide, its cells.
+fn cells(ed: &mut Editor, w: u16) -> vt100::Parser {
     ed.focus_sync();
     let mut bytes = Vec::new();
-    crate::term::render(ed, &mut bytes, W, H).unwrap();
-    let mut p = vt100::Parser::new(H, W, 0);
+    crate::term::render(ed, &mut bytes, w, H).unwrap();
+    let mut p = vt100::Parser::new(H, w, 0);
     p.process(&bytes);
-    p.screen().contents()
+    p
 }
 
 /// Keys as `run` takes them (`<C-w>`, `<S-tab>`), a frame after each.
 fn feed(ed: &mut Editor, keys: &str) {
+    feed_at(ed, keys, W);
+}
+
+/// `feed` on a screen `w` wide.
+fn feed_at(ed: &mut Editor, keys: &str, w: u16) {
     let mut chars = keys.chars();
     while let Some(c) = chars.next() {
         let key: Key = match c {
@@ -30,7 +40,7 @@ fn feed(ed: &mut Editor, keys: &str) {
             c => Key::plain(Code::Char(c)),
         };
         ed.handle_key(key);
-        frame(ed);
+        cells(ed, w);
     }
 }
 
@@ -68,10 +78,15 @@ fn place(path: &std::path::Path, line: usize, severity: u8, message: &str) -> cr
 
 /// An editor in `root` whose task panel shows a run that ended.
 fn editor(root: &std::path::Path) -> Editor {
+    editor_of(root, "check")
+}
+
+/// `editor`, the task named `name` (its tab's label).
+fn editor_of(root: &std::path::Path, name: &str) -> Editor {
     let mut ed = Editor::new(Config::default());
     ed.session.root = root.to_path_buf();
     ed.docs[0].text = ropey::Rope::from_str("fn main() {}\n");
-    let t = crate::task::Task { name: "check".into(), cmd: "cargo check".into(), cwd: root.to_path_buf() };
+    let t = crate::task::Task { name: name.into(), cmd: "cargo check".into(), cwd: root.to_path_buf() };
     let mut r = crate::task::Run::for_test(t);
     r.state = crate::task::State::Passed;
     ed.session.task_run = Some(r);
@@ -113,7 +128,7 @@ fn a_tasks_places_list_beside_its_output_drives_it() {
     assert_eq!(g.kind, GroupKind::Task);
     let rows = list_rows(&shown);
     assert!(rows.len() == 2 && rows[0].contains("b.rs:10") && rows[1].contains("a.rs:5"), "{rows:?}");
-    assert!(shown.contains("PLACES") && shown.contains("OUTPUT"), "{shown}");
+    assert!(shown.contains("› places ") && shown.contains("┬─ output "), "{shown}");
     // The list's keys (`S-tab` from the output), on the place found first — the warning, second row
     feed(&mut ed, "<C-w>j");
     if region(&ed) != "list:task" {
@@ -376,7 +391,7 @@ fn a_preflights_steps_list_beside_its_output_drives_it() {
     assert_eq!(g.kind, GroupKind::Preflight);
     ed.list_focus(GroupKind::Preflight);
     let shown = frame(&mut ed);
-    assert!(shown.contains("STEPS") && ed.screen.task_steps.borrow().is_empty(), "a list, no chip row");
+    assert!(shown.contains("› steps ") && ed.screen.task_steps.borrow().is_empty(), "a list, no chip row");
     // `j`: clippy — its heading at the top of the output
     feed(&mut ed, "j");
     let heading = |ed: &Editor| {
@@ -410,4 +425,333 @@ fn a_preflights_steps_list_beside_its_output_drives_it() {
     frame(&mut ed);
     assert!(ed.slot_group().is_none(), "one step: one pane");
     assert!(!ed.screen.task_steps.borrow().is_empty(), "its chip");
+}
+
+/// A group of each kind in the slot, its list's two rows first: the task's places (`two` an error, listed first),
+/// a preflight's steps (`fmt`, `test`), the tests' results (a pass, a failure in `src/lib.rs` picked).
+fn each_kind(root: &std::path::Path) -> Vec<(Editor, GroupKind, &'static str, &'static str, &'static str)> {
+    let a = root.join("a.rs");
+    let mut task = editor(root);
+    print(&mut task, 3, place(&a, 0, 2, "one"));
+    print(&mut task, 3, place(&a, 2, 1, "two"));
+    let step = |n: &str| crate::preflight::Step {
+        name: n.into(),
+        cmd: String::new(),
+        note: None,
+        from: String::new(),
+        full: false,
+    };
+    let mut preflight = editor_of(root, "preflight");
+    let mut p = crate::preflight::Preflight::new(
+        0,
+        &[step("fmt"), step("test")],
+        crate::preflight::Set::Full,
+        "k".into(),
+    );
+    p.steps.iter_mut().for_each(|s| s.state = crate::preflight::State::Passed);
+    preflight.session.preflight = Some(p);
+    let r = preflight.session.task_run.as_mut().unwrap();
+    for name in ["fmt", "test"] {
+        r.push_line(false, format!("── {name} ──"), true);
+        (0..5).for_each(|i| r.push_line(false, format!("{name} {i}"), false));
+    }
+    let mut tests = editor(root);
+    let case = |name: &str, status, at| crate::test_results::Case {
+        name: name.into(),
+        status,
+        secs: None,
+        message: vec!["assertion failed".into()],
+        at,
+    };
+    use crate::test_results::Status;
+    // (names as long as the demo's: the list wide enough for its name and the counts)
+    let cases = vec![
+        case("tests::length_sums_the_knots", Status::Passed, None),
+        case("tests::a_tied_knot_lengthens_it", Status::Failed, Some(("src/lib.rs".into(), 30))),
+    ];
+    let mut run = crate::testing::TestRun::finished("t", cases, vec!["ok".into()]);
+    run.selected = 1;
+    tests.session.test_run = Some(run);
+    tests.session.task_run = None;
+    vec![
+        (task, GroupKind::Task, "places", "output", "a.rs:3"),
+        (preflight, GroupKind::Preflight, "steps", "output", "fmt"),
+        (tests, GroupKind::Tests, "results", "failure", "length_sums_the_knots"),
+    ]
+}
+
+/// A frame's row `y`, a char a cell.
+fn row(p: &vt100::Parser, y: u16) -> Vec<char> {
+    let w = p.screen().size().1;
+    (0..w)
+        .map(|x| p.screen().cell(y, x).map_or(' ', |c| c.contents().chars().next().unwrap_or(' ')))
+        .collect()
+}
+
+/// The column `name` starts at in `row`, after column `from`.
+fn column(row: &[char], name: &str, from: usize) -> Option<usize> {
+    let n: Vec<char> = name.chars().collect();
+    (from..row.len().saturating_sub(n.len())).find(|&x| row[x..x + n.len()] == n[..])
+}
+
+/// The slot's line (the row naming the group's members after ` › `) and, laid side by side, the column of the line
+/// between its members.
+fn slot_line(ed: &Editor, p: &vt100::Parser, kind: GroupKind) -> (u16, Option<usize>) {
+    let h = p.screen().size().0;
+    let y = (0..h)
+        .find(|&y| row(p, y)[0] == '─' && column(&row(p, y), " › ", 0).is_some())
+        .expect("the slot's line");
+    let g = ed.session.group(kind).unwrap();
+    let leaf = |id| ed.screen.leaves.iter().find(|l| l.0 == id).map(|l| l.1);
+    let split = leaf(g.list).zip(g.detail_pane().and_then(leaf)).map(|(l, _)| l.x + l.w);
+    (y, split)
+}
+
+/// Panes P3 step 3b: each member of a group names itself in the line over its own column — the list's after the
+/// tab's name and ` › `, the detail's after the `┬` — and the caps title rows are gone: the row under the line is the
+/// list's first.
+#[test]
+fn a_groups_members_are_named_over_their_own_columns() {
+    let dir = crate::scratch::Scratch::new("group-names");
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n".repeat(5)).unwrap();
+    for (mut ed, kind, list, detail, first) in each_kind(dir.path()) {
+        let p = cells(&mut ed, W);
+        assert_eq!(ed.slot_group().map(|g| g.kind), Some(kind));
+        let (y, split) = slot_line(&ed, &p, kind);
+        let split = split.expect("side by side at 120");
+        let line = row(&p, y);
+        let at = |name: &str| {
+            column(&line, name, 0).unwrap_or_else(|| panic!("{name}: {}", String::from_iter(&line)))
+        };
+        assert_eq!(line[split], '┬', "{}", String::from_iter(&line));
+        assert!(at(&format!("› {list} ")) < split, "{list} over the list");
+        assert_eq!(at(&format!("┬─ {detail} ")), split, "{detail} over the detail");
+        // (the failure's place after its name)
+        if kind == GroupKind::Tests {
+            assert!(at("src/lib.rs:31") > split, "{}", String::from_iter(&line));
+        }
+        let under = String::from_iter(row(&p, y + 1));
+        assert!(under[..under.find('│').unwrap()].contains(first), "the list's first row: {under:?}");
+        let all = p.screen().contents();
+        for title in ["PLACES", "STEPS", "TESTS", "FAILURE", "OUTPUT"] {
+            assert!(!all.contains(title), "{title}: {all}");
+        }
+    }
+}
+
+/// Step 3b, decision 3 amended: the member with the keys has its stretch of the line lit and its name strong, the
+/// other's in the wash; the `┬` and the `│` under it lit while either has them (they edge both, as a code pane's
+/// divider); the code's keys — nothing lit.
+#[test]
+fn only_the_member_with_the_keys_is_lit() {
+    let dir = crate::scratch::Scratch::new("group-lit");
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n".repeat(5)).unwrap();
+    for (mut ed, kind, list, detail, _) in each_kind(dir.path()) {
+        // (colours drawn though tarae's test runner sets NO_COLOR; meok's accent and wash)
+        crossterm::style::force_color_output(true);
+        ed.theme = crate::theme::load("meok").unwrap();
+        let p = cells(&mut ed, W);
+        let (y, split) = slot_line(&ed, &p, kind);
+        let s = split.unwrap() as u16;
+        let fg = |p: &vt100::Parser, y: u16, x: u16| p.screen().cell(y, x).unwrap().fgcolor();
+        let name = |p: &vt100::Parser, name: &str| {
+            let x = column(&row(p, y), name, 0).unwrap() as u16;
+            p.screen().cell(y, x).map(|c| (c.fgcolor(), c.bold())).unwrap()
+        };
+        // (the list's stretch · the detail's · the `┬` · the `│` under it)
+        let look = |p: &vt100::Parser| [fg(p, y, 0), fg(p, y, s + 1), fg(p, y, s), fg(p, y + 1, s)];
+        let [wash, ..] = look(&p);
+        assert_eq!(look(&p), [wash; 4], "{kind:?}, the code's keys: nothing lit");
+        assert_eq!(name(&p, list), name(&p, detail), "both names dim");
+        // The list's keys
+        ed.list_focus(kind);
+        let p = cells(&mut ed, W);
+        let lit = fg(&p, y, 0);
+        assert_ne!(lit, wash, "{kind:?}: the list's stretch lit");
+        assert_eq!(look(&p), [lit, wash, lit, lit], "{kind:?}, the list's keys");
+        // (the names faded while the code had the keys — compared within a frame)
+        let (strong, dim) = (name(&p, list), name(&p, detail));
+        assert_ne!(strong, dim, "the list's name strong, the detail's dim");
+        // `tab`: the detail's
+        feed(&mut ed, "<tab>");
+        assert_eq!(ed.session.at, At::Slot, "{kind:?}");
+        let p = cells(&mut ed, W);
+        assert_eq!(look(&p), [wash, lit, lit, lit], "{kind:?}, the detail's keys");
+        assert_eq!((name(&p, list), name(&p, detail)), (dim, strong));
+        // `esc`: the code's again
+        feed(&mut ed, "<esc>");
+        assert_eq!(ed.session.at, At::Code);
+        assert_eq!(look(&cells(&mut ed, W)), [wash; 4], "{kind:?}: nothing lit again");
+    }
+}
+
+/// Step 3b, step 1's fold order: side by side at 80 the members' names stand and the run's details fold before them —
+/// the time, then the counts (the tab's `▲` already says how it went), the words last.
+#[test]
+fn the_names_stand_and_the_details_fold_side_by_side() {
+    let dir = crate::scratch::Scratch::new("group-folds");
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n".repeat(5)).unwrap();
+    for (mut ed, kind, list, detail, _) in each_kind(dir.path()) {
+        if let Some(r) = ed.session.task_run.as_mut() {
+            (r.state, r.found) = (crate::task::State::Failed(Some(101)), (0, 2));
+        }
+        if let Some(r) = ed.session.test_run.as_mut() {
+            r.target.label = "all tests".into();
+        }
+        let p = cells(&mut ed, 80);
+        let (y, split) = slot_line(&ed, &p, kind);
+        let line = String::from_iter(row(&p, y));
+        assert!(split.is_some(), "{kind:?}: side by side at 80: {line}");
+        let words = if kind == GroupKind::Tests { "all tests" } else { "failed" };
+        assert!(line.contains(&format!("› {list} ── {words} ")), "{kind:?}: the name and the words: {line}");
+        assert!(line.contains(&format!("┬─ {detail} ")), "{line}");
+        // (the task's name is short: its counts still fit)
+        let folded = !line.contains("▲ 2") && !line.contains("● 1");
+        assert!(folded || kind == GroupKind::Task, "{kind:?}: the counts folded: {line}");
+    }
+}
+
+/// Under `ui.edge = "ground"` a stacked group names both members in its header row, as that row names its tabs
+/// (` › places   output`, the open one strong) — no title row; a click on the other opens it.
+#[test]
+fn a_stacked_group_names_both_under_ground() {
+    const N: u16 = 60;
+    let dir = crate::scratch::Scratch::new("group-ground");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, "fn a() {}\n".repeat(5)).unwrap();
+    let mut ed = editor(dir.path());
+    crossterm::style::force_color_output(true);
+    ed.theme = crate::theme::load("meok").unwrap();
+    ed.theme.edge = crate::theme::Edge::Ground;
+    print(&mut ed, 3, place(&a, 0, 2, "one"));
+    print(&mut ed, 3, place(&a, 2, 1, "two"));
+    let p = cells(&mut ed, N);
+    let h = p.screen().size().0;
+    let y = (0..h).find(|&y| column(&row(&p, y), " › places   output", 0).is_some());
+    let y = y.unwrap_or_else(|| panic!("both named in the header row:\n{}", p.screen().contents()));
+    let look = |p: &vt100::Parser, name: &str| {
+        let x = column(&row(p, y), name, 0).unwrap() as u16;
+        p.screen().cell(y, x).map(|c| (c.fgcolor(), c.bold())).unwrap()
+    };
+    assert_ne!(look(&p, "places"), look(&p, "output"), "the open one strong");
+    let all = p.screen().contents();
+    assert!(!all.contains("PLACES") && !all.contains("OUTPUT"), "no title row: {all}");
+    assert!(all.contains("a.rs:3") && !all.contains("filler"), "the list open: {all}");
+    // A click on `output`: its keys, open
+    let g = ed.session.group(GroupKind::Task).unwrap();
+    let detail = g.detail_pane().unwrap();
+    let spot = ed.screen.member_names.borrow().iter().find(|s| s.3 == detail).copied().expect("its spot");
+    assert_eq!(spot.0, y as usize);
+    let click = crate::event::Mouse {
+        kind: crate::event::MouseKind::Down,
+        x: spot.1 as u16,
+        y: spot.0 as u16,
+        alt: false,
+    };
+    ed.handle_mouse(click);
+    let p = cells(&mut ed, N);
+    assert_eq!(ed.session.at, At::Slot);
+    assert!(p.screen().contents().contains("filler"), "the output open");
+    let (places, output) = (look(&p, "places"), look(&p, "output"));
+    assert_ne!(places, output, "the strong one moved");
+}
+
+/// The keys that step through the failures, `]x next  [x prev`, are said where they act: in the failure's stretch of
+/// the line beside its place and which of how many (`src/lib.rs:31 1/2`), one piece that folds whole — so they
+/// outlast the panel's keys, which fold first.
+#[test]
+fn the_failures_keys_are_said_beside_the_failure() {
+    let dir = crate::scratch::Scratch::new("group-fails");
+    let mut ed = editor(dir.path());
+    ed.session.task_run = None;
+    use crate::test_results::Status;
+    let case = |name: &str, status, line| crate::test_results::Case {
+        name: name.into(),
+        status,
+        secs: None,
+        message: vec!["assertion failed".into()],
+        at: (status == Status::Failed).then(|| ("src/lib.rs".into(), line)),
+    };
+    let cases = vec![
+        case("tests::length_sums_the_knots", Status::Passed, 0),
+        case("tests::a_tied_knot_lengthens_it", Status::Failed, 30),
+        case("tests::a_cut_knot_shortens_it", Status::Failed, 40),
+    ];
+    let mut run = crate::testing::TestRun::finished("t", cases, vec!["ok".into()]);
+    run.selected = 1;
+    ed.session.test_run = Some(run);
+    for w in [100, 120] {
+        let p = cells(&mut ed, w);
+        let (y, split) = slot_line(&ed, &p, GroupKind::Tests);
+        let line = String::from_iter(row(&p, y));
+        let at = line
+            .find("─ failure ── src/lib.rs:31 1/2  ]x next  [x prev ─")
+            .map(|b| line[..b].chars().count());
+        assert!(at.is_some_and(|x| Some(x) > split), "{w}: beside the failure: {line}");
+    }
+}
+
+/// §2.3: narrower than the list's and the detail's least, a group is stacked — one member in sight, the slot's
+/// width, both named in the line (`places · output`, no `┬`); `tab` brings the other; the one that had the keys last
+/// stays in sight once they go (`Group.front`); a click on a member's name gives it the keys.
+#[test]
+fn a_narrow_group_is_stacked() {
+    const N: u16 = 60;
+    let dir = crate::scratch::Scratch::new("group-tabs");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, "fn a() {}\n".repeat(5)).unwrap();
+    let mut ed = editor(dir.path());
+    print(&mut ed, 3, place(&a, 0, 2, "one"));
+    print(&mut ed, 3, place(&a, 2, 1, "two"));
+    let p = cells(&mut ed, N);
+    let (y, split) = slot_line(&ed, &p, GroupKind::Task);
+    let line = String::from_iter(row(&p, y));
+    assert!(split.is_none() && line.contains("› places · output ") && !line.contains('┬'), "{line}");
+    // The list in sight (its first time), the slot's width; the output not drawn
+    let g = ed.session.group(GroupKind::Task).unwrap();
+    let list = ed.screen.leaves.iter().find(|l| l.0 == g.list).map(|l| l.1).expect("the list laid out");
+    assert_eq!(list.w, N as usize);
+    assert!(!ed.screen.leaves.iter().any(|l| Some(l.0) == g.detail_pane()), "the output no pane on screen");
+    let all = p.screen().contents();
+    assert!(all.contains("a.rs:3") && !all.contains("filler"), "{all}");
+    // The list's keys: the whole line lit (one pane's), the list's name strong
+    crossterm::style::force_color_output(true);
+    ed.theme = crate::theme::load("meok").unwrap();
+    let fg = |p: &vt100::Parser, x: u16| p.screen().cell(y, x).unwrap().fgcolor();
+    let wash = fg(&cells(&mut ed, N), 0);
+    ed.list_focus(GroupKind::Task);
+    let p = cells(&mut ed, N);
+    assert!(fg(&p, 0) != wash && fg(&p, N - 1) == fg(&p, 0), "lit end to end");
+    // `C-w l` / `C-w h`: the other member opened, as side by side they'd hop to it — each is a pane, whichever layout
+    feed_at(&mut ed, "<C-w>l", N);
+    assert_eq!(ed.session.at, At::Slot, "C-w l: the output");
+    assert!(cells(&mut ed, N).screen().contents().contains("filler"), "opened");
+    feed_at(&mut ed, "<C-w>l", N);
+    assert_eq!(ed.session.at, At::Slot, "nothing further right");
+    feed_at(&mut ed, "<C-w>h", N);
+    assert_eq!(region(&ed), "list:task", "C-w h: the list");
+    assert!(cells(&mut ed, N).screen().contents().contains("a.rs:3"), "opened");
+    // `tab` from the list: the output in sight, the list not
+    feed_at(&mut ed, "<tab>", N);
+    assert_eq!(ed.session.at, At::Slot);
+    let all = cells(&mut ed, N).screen().contents();
+    assert!(all.contains("filler") && !all.contains("a.rs:3 "), "{all}");
+    // `esc`: the code's keys, the output still in sight
+    feed_at(&mut ed, "<esc>", N);
+    assert_eq!(ed.session.at, At::Code);
+    assert!(cells(&mut ed, N).screen().contents().contains("filler"), "kept in sight");
+    assert_eq!(ed.session.group(GroupKind::Task).unwrap().front, crate::pane::Member::Detail);
+    // A click on `places`: the list's keys, in sight
+    let spot =
+        ed.screen.member_names.borrow().iter().find(|s| s.3 == g.list).copied().expect("its name's spot");
+    let click = crate::event::Mouse {
+        kind: crate::event::MouseKind::Down,
+        x: spot.1 as u16,
+        y: spot.0 as u16,
+        alt: false,
+    };
+    ed.handle_mouse(click);
+    let all = cells(&mut ed, N).screen().contents();
+    assert_eq!(region(&ed), "list:task");
+    assert!(all.contains("a.rs:3") && !all.contains("filler"), "{all}");
 }

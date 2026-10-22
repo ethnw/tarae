@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 use serde_json::json;
 
-use super::{TopLine, Ui, card_style, render, top_line};
+use super::{Beyond, MEMBERS_SEP, TopLine, Ui, card_style, render, top_line};
 use crate::config::Config;
 use crate::document::DocId;
 use crate::editor::Editor;
@@ -6389,6 +6389,7 @@ fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
         key: card,
         faint: card,
         plain: false,
+        beyond: None,
     };
     let mut out = Vec::new();
     // (the split under the details' text gets no join; the one in the line's run does)
@@ -6397,6 +6398,20 @@ fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
     let p = cells(&out, 80, 10);
     let rows: Vec<String> = p.screen().rows(0, 80).take(2).collect();
     assert_eq!(rows[0], "─ tests ▲ ── all tests ● 1 ───┬────── tab failure  q close ─");
+    assert_eq!(rows[1], format!("╭{}╮", rows[0]), "the same spans in a frame");
+    // A group side by side (step 3b): the detail's name and details past the `┬`, the keys after them — the same in
+    // a frame (step 7 draws a floating group's top line with these spans)
+    let names = [("check".to_string(), card), (MEMBERS_SEP.to_string(), card), ("places".to_string(), card)];
+    let detail = [("output".to_string(), card)];
+    let after = [("↓ output after".to_string(), card)];
+    let beyond = Some(Beyond { names: &detail, details: &after, line: card, join: card });
+    let head = TopLine { names: &names, details: &details, beyond, ..head };
+    let mut out = Vec::new();
+    top_line(&mut out, card, card, (0, 2, 78), ("", "", "┬"), &[36], true, &head).unwrap();
+    top_line(&mut out, card, card, (0, 3, 80), ("╭", "╮", "┬"), &[37], true, &head).unwrap();
+    let p = cells(&out, 80, 10);
+    let rows: Vec<String> = p.screen().rows(0, 80).skip(2).take(2).collect();
+    assert_eq!(rows[0], "─ check › places ── all tests ● 1 ──┬─ output ── ↓ output after ──────────────");
     assert_eq!(rows[1], format!("╭{}╮", rows[0]), "the same spans in a frame");
 }
 
@@ -6482,7 +6497,7 @@ fn what_takes_the_keys_is_framed_with_its_name() {
     assert!(!rows(&mut s).iter().any(|row| row.contains('╭')), "ground: which-key as before");
 }
 
-/// Panes plan §2.1c: a group laid as tabs names all its members where a pane's name goes — the side panel's
+/// Panes plan §2.1c: a stacked group names all its members where a pane's name goes — the side panel's
 /// views, the slot's panels — `·` between, the one in sight lit, the others in the dim wash; `tab` lights the next.
 /// Under `ground` the names stand apart by blanks as before.
 #[test]
@@ -6787,7 +6802,9 @@ fn a_slot_headers_lines_down_start_at_a_join() {
         let at = |y: u16, x: u16| p.screen().cell(y, x).unwrap().contents().to_string();
         let row = |y: u16| (0..w).map(|x| at(y, x)).collect::<String>();
         let downs: Vec<u16> = (1..w - 1).filter(|&x| at(y + 1, x) == "│" && at(y + 2, x) == "│").collect();
-        assert!(!downs.is_empty(), "{what} at {w}: lines down\n{}\n{}", row(y), row(y + 1));
+        // (a group too narrow for both its members is stacked, both named, no line down — step 3b, §2.3)
+        let stacked = [" · output ", " · failure "].iter().any(|t| row(y).contains(t));
+        assert!(!downs.is_empty() || stacked, "{what} at {w}: lines down\n{}\n{}", row(y), row(y + 1));
         let line: Vec<char> = row(y).chars().collect();
         let half = line.windows(2).any(|p| p[0].is_ascii_digit() && p[1] == '…');
         assert!(!half, "{what} at {w}: a number cut\n{}", row(y));
@@ -6834,9 +6851,14 @@ fn a_slot_headers_lines_down_start_at_a_join() {
         run.took = Some(Duration::from_millis(648));
         s.ed.session.test_run = Some(run);
         let line = header(&mut s, w, "the tests");
-        assert!(line.contains("tests ▲ ── all tests"), "its details stay, cut if need be: {line}");
+        // (the members' names stand, the details fold before them — step 1's order, step 3b: ` › results` at every
+        // width, the counts once the list's stretch has room for them, ~100 columns)
+        assert!(line.contains("tests ▲ › results "), "the list's name stands: {line}");
+        // (its details after it, cut if need be — under `DETAILS_MIN` of room, none)
+        let after = line.split("› results ").nth(1).unwrap_or_default();
+        assert!(!after.starts_with("── ") || after.starts_with("── all t"), "its details: {line}");
         assert_eq!(line.contains("● 1"), line.contains("▲ 1"), "the counts fold together: {line}");
-        if w >= 80 {
+        if w >= 100 {
             let counts = line.contains("all tests ● 1 ▲ 1 ─") || line.contains("all tests ● 1 ▲ 1 648ms ─");
             assert!(counts, "the counts stay, the time whole or folded: {line}");
         }

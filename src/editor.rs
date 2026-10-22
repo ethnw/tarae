@@ -375,6 +375,9 @@ pub struct Screen {
     /// The bottom slot's first column · its tabs as drawn: (row, start col, end col, the panel).
     pub slot_x: usize,
     pub slot_tabs: std::cell::RefCell<Vec<(usize, usize, usize, crate::sizes::Slot)>>,
+    /// The names of the group's members in the slot's line as drawn (panes P3 step 3b): (row, start col, end col, the
+    /// member's pane) — a click gives it the keys.
+    pub member_names: std::cell::RefCell<Vec<(usize, usize, usize, crate::split::PaneId)>>,
     pub terminal_size: std::cell::Cell<Option<(u16, u16)>>,
     /// The test panel: its rows (first, last) and how many of them the detail has — the wheel scrolls it.
     pub test_panel: std::cell::Cell<Option<(usize, usize, usize)>>,
@@ -1588,6 +1591,13 @@ impl Editor {
         if let Some(d) = self.hosted_detail(from, leaves) {
             from = d;
         }
+        // (a stacked group's other member, the list left of its detail as side by side: opened, as `tab` opens it)
+        if let Some((other, way)) = self.stacked_other(from, leaves)
+            && way == dx.signum()
+            && dy == 0
+        {
+            return self.focus_pane(other);
+        }
         // (from what has no room on screen — the minimized chat's input — a hop goes back to the code)
         if self.screen.width.is_some() && from != self.session.focus && !leaves.iter().any(|l| l.0 == from) {
             return self.focus_pane(self.session.focus);
@@ -2289,6 +2299,14 @@ impl Editor {
                 s.slot_tabs.borrow().iter().find(|t| t.0 == y && (t.1..t.2).contains(&x))
         {
             return self.slot_show(slot);
+        }
+        // A group member's name in the slot's line: the keys to it (stacked, it comes into sight)
+        if m.kind == K::Down
+            && self.picker.is_none()
+            && let Some(&(.., id)) =
+                s.member_names.borrow().iter().find(|t| t.0 == y && (t.1..t.2).contains(&x))
+        {
+            return self.focus_pane(id);
         }
         if let Some(p) = self.picker.as_mut() {
             // (a click acts on this query's rows, not the last one's)

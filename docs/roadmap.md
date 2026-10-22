@@ -419,7 +419,7 @@ main that has what it waits for, and the user says go:
   while the shell stays yours. **The skeleton first** (the user, 2026-10-21: design / session / tab / pane before anything else;
   the plan's §2.1b–d): **linked panes** (a master–detail pair is one group — one header, one `q`, the list drives the
   detail), **everything is a pane** (cards, pickers, which-key, prompts are floating panes under the one focus; a
-  card is a pane that asks; a group lays its members side by side or as tabs under one header, `tab`/`S-tab`
+  card is a pane that asks; a group lays its members side by side or stacked under one header, `tab`/`S-tab`
   between them, never `]`/`[`), **session → tabs → panes as zellij's** (a tab is one of a session's named layouts;
   the tab bar top-left only with two or more), **a session is Claude's task on its own checkout** (the session list
   is the task list, the main checkout the home session, the chat the spine). Done: P2a (`e002ceb1`: focus as one
@@ -437,8 +437,8 @@ main that has what it waits for, and the user says go:
   the first linked group; its 12 decisions taken 2026-10-22; step 1 (`3d7ca662`): the
   slot's header in the line where it meets the code, one drawer with a frame's top line, the code a row taller; step 2
   (`3b00bb04`): groups as one model; step 3 (`66a80e78`): the task's places and a preflight's steps as linked groups, the
-  one output scrolled to the place's line or the step's heading; step 3b under way: a group's panes named in their own
-  stretch of the line, the one with the keys lit, side by side or stacked when narrow — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  one output scrolled to the place's line or the step's heading; step 3b (the user, 2026-10-22): a group's members
+  named in the line over their own columns, the one with the keys lit, side by side or stacked when narrow), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 an overlap between workspaces said the moment it
   would conflict — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the merged view — everyone works in their own workspace and tarae shows the merge, each change in its
