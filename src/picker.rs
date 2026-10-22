@@ -118,6 +118,15 @@ pub struct Item {
     pub glyph: Option<(&'static str, &'static str)>,
 }
 
+/// A row painted by what it stands for (the session list: its name in its session's colour, the state that needs
+/// you in warning — collab C1): the label's theme scope, and byte ranges of the hint, each in a scope (`ui.accent`
+/// through the accent's fallbacks).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Paint {
+    pub label: Option<&'static str>,
+    pub hint: Vec<(std::ops::Range<usize>, &'static str)>,
+}
+
 /// One visible line.
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -137,6 +146,8 @@ pub struct Row {
     pub spots: Vec<(u32, u32)>,
     /// The list's stamp column (`Picker::stamps`): None — it has none; `Some(None)` — this row's is empty.
     pub stamp: Option<Option<crate::stamp::Stamp>>,
+    /// Its paint (`Picker::paints`), if the list paints its rows.
+    pub paint: Option<Paint>,
 }
 
 /// Matches laid out as a tree while typing, best first — the rest only counted (a tree of all 200k files
@@ -365,6 +376,8 @@ pub struct Picker {
     /// The most rows it listed (or items it held) while open: its list card keeps that height — typing never
     /// makes it shrink and jump (`term::PickerBox`).
     pub tallest: std::cell::Cell<usize>,
+    /// Rows painted by their item's action (the session list's names and states).
+    pub paints: Vec<(Action, Paint)>,
 }
 
 impl Picker {
@@ -424,6 +437,7 @@ impl Picker {
             closing: None,
             kind: "test",
             tallest: std::cell::Cell::new(0),
+            paints: Vec::new(),
         };
         p.refilter();
         p
@@ -974,6 +988,7 @@ impl Picker {
                     tree: (item.action == Action::Heading).then_some((0, Kind::Group)),
                     spots: Vec::new(),
                     stamp: self.stamps.then(|| item.action.stamp()),
+                    paint: self.paints.iter().find(|(a, _)| *a == item.action).map(|(_, p)| p.clone()),
                 })
                 .collect();
         };
@@ -1052,6 +1067,7 @@ impl Picker {
                 tree: Some((r.depth, r.kind)),
                 spots,
                 stamp: None,
+                paint: None,
             });
         }
         self.lines = lines;

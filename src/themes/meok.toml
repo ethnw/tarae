@@ -14,6 +14,14 @@
 "ui.text.focus" = { fg = "paper_hi", bold = true }
 "ui.text.directory" = "blue"
 "ui.accent" = "coral"
+# Participants (collab C1): one colour a session for its life — its caret, name tag, marks, its dot in the list and
+# the strip; identity colours, as diff's green and red are meaning's, never the accent nor diff's (ayu's hues)
+"ui.participant.1" = "thread_blue"
+"ui.participant.2" = "thread_violet"
+"ui.participant.3" = "thread_mint"
+"ui.participant.4" = "thread_pink"
+"ui.participant.5" = "thread_lemon"
+"ui.participant.6" = "thread_cyan"
 "ui.selection" = { bg = "sel" }
 "ui.selection.primary" = { bg = "sel_hi" }
 "ui.cursor" = { fg = "ink", bg = "coral_dim" }
@@ -129,3 +137,9 @@ teal = "#86cfc0"
 sand = "#e2c27f"
 red = "#f0727e"
 amber = "#ffb52e"
+thread_blue = "#6fa8ff"
+thread_violet = "#d2a6ff"
+thread_mint = "#7ee0b8"
+thread_pink = "#ff9ccf"
+thread_lemon = "#f2e27a"
+thread_cyan = "#5fd7ef"

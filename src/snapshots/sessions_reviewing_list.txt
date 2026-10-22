@@ -2,10 +2,10 @@
 ## text
 00 ╭─ sessions ───────────────────────────────────────────────────────────────────────────────────╮│  claude                                                 ready
 01 │  letters are keys here, nothing is typed · 1–3 switch                                     3/3││  ────────────────────────────────────────────────────────────
-02 │──────────────────────────────────────────────────────────────────────────────────────────────││  main │ fix-login ● ¶ reviewing │ docs • │ +
-03 │   main                                                               here     ¶ reviewing    ││
-04 │ ● fix-login                                                          working  ¶ reviewing    ││  ▎ Ask Claude
-05 │   docs                                                                        ¶ reviewer done││
+02 │──────────────────────────────────────────────────────────────────────────────────────────────││  main │ fix-login working ¶ reviewing │ docs • │ +
+03 │ main                                                                 here     ¶ reviewing    ││
+04 │ fix-login                                                            working  ¶ reviewing    ││  ▎ Ask Claude
+05 │ docs                                                                          ¶ reviewer done││
 06 │                                                                                              ││  It reads the whole project,
 07 │                                                                                              ││  starting from [scratch].
 08 │                                                                                              ││
@@ -36,9 +36,9 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00 ff TTTTTTTT fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  dddddd                                                 fffff
 01 f  fffffff fff ffff fffff fffffff ff fffff f fff ffffff                                     fffff  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02 fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  TTTT f ddddddddd a             f dddd d f d
-03 f   TTTT                                                               dddd     d ddddddddd    ff
-04 f a                                                                    ddddddd  d ddddddddd    ff  a TTT TTTTTT
+02 fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  BBBB f           fffffff             f      d f d
+03 f BBBB                                                                 dddd     d ddddddddd    ff
+04 f                                                                      ddddddd  d ddddddddd    ff  a TTT TTTTTT
 05 f                                                                               d dddddddd ddddff
 06 f                                                                                              ff  dd ddddd ddd ddddd dddddddd
 07 f                                                                                              ff  dddddddd dddd dddddddddd
@@ -52,4 +52,4 @@
 15  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff              d d ddddd                                                       ddddd dd   TTT
 ## legend
 bg: P=ui.menu.selected
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

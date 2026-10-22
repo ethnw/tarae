@@ -2,7 +2,7 @@
 ## text
 00  tarae  ›  [scratch]                                                                            │  claude                                                 ready
 01  ────────────────────────────────────────────────────────────────────────────────────────────── │  ────────────────────────────────────────────────────────────
-02   1                                                                                             │  main │ fix-login ● ¶ reviewing │ docs • │ +
+02   1                                                                                             │  main │ fix-login working ¶ reviewing │ docs • │ +
 03                                                                                                 │
 04                                                                                                 │  ▎ Ask Claude
 05                                                                                                 │
@@ -36,7 +36,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  TTTTTTTTT                                                                            a  dddddd                                                 fffff
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa a  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02   A                                                                                             a  TTTT f ddddddddd a             f dddd d f d
+02   A                                                                                             a  BBBB f           fffffff             f      d f d
 03                                                                                                 a
 04                                                                                                 a  a TTT TTTTTT
 05                                                                                                 a
@@ -52,4 +52,4 @@
 15  a TTTTTT               d d ddddd                                                                                                               ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

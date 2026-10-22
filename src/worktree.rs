@@ -1158,6 +1158,10 @@ pub struct Shown {
     /// Marked to bring (`bring 2nd`), or where it is in the bring queue going (`bring queue · preflight`) —
     /// `bringqueue.rs`.
     pub queue: Option<String>,
+    /// Where its Claude is in its turn: `src/term.rs:3614 · writing` (`presence::at`) — empty between turns.
+    pub at: String,
+    /// Its participant colour (`Session.colour`): its `●` on its row, always.
+    pub colour: u8,
 }
 
 impl Shown {
@@ -1200,16 +1204,32 @@ impl Shown {
     }
 }
 
-/// The list's rows: the name, a glyph for what its Claude does (`●` working, `▲` waiting for you, `◦` a
-/// tool call unanswered too long — `stuck? symbols 42s`; a turn ended behind says `done` in words), and the
-/// rest in columns — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
-/// Claude compacted behind (`≈ compacted`), what it's doing, its reviewer (`¶ reviewing`), `api` when your key
+/// The list's rows: its `●` in its participant colour (every row, whatever its state — collab C1), the name, and the
+/// rest in columns — what its Claude does in words (`working`, `waits for you`, `stuck? symbols 42s`, `done — not
+/// looked at`, `here`) — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
+/// Claude compacted behind (`≈ compacted`), what it's doing and where (`src/term.rs:3614 · writing`), its reviewer (`¶ reviewing`), `api` when your key
 /// pays for its Claude, its Claude's cache and cost so far, CPU and memory — each column as wide as its widest and empty ones left out, so the
 /// hints (right-aligned) line up row under row.
+#[cfg(test)]
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
+    painted(sessions).into_iter().map(|(item, _)| item).collect()
+}
+
+/// `items`, each with its paint (`picker::Paint`, collab C1 — the user, 2026-10-22: who it is is its name in its
+/// colour, its state after it): the name in its participant colour, no glyph before it; what needs you in its state
+/// column as the strip says it — `▲ waits for you`, `◦ stuck? …` in warning, `done — not looked at` in the accent — the
+/// calm states as the rest of the row.
+pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::Paint)> {
     use crate::session::Doing;
     use unicode_width::UnicodeWidthStr as _;
-    let cols: Vec<[String; 12]> = sessions
+    // (what needs you, said and its scope: the state column's words that stand out)
+    let needs = |d: Doing| match d {
+        Doing::Waiting => Some(("▲ waits for you".to_string(), "warning")),
+        Doing::Done => Some(("done — not looked at".to_string(), "ui.accent")),
+        d @ Doing::Stuck { .. } => Some((format!("◦ stuck? {}", d.said()), "warning")),
+        _ => None,
+    };
+    let cols: Vec<[String; 13]> = sessions
         .iter()
         .map(|l| {
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
@@ -1219,9 +1239,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             let moved: Vec<String> = ahead.into_iter().chain(behind).collect();
             let changed = if f.changed > 0 { format!("{} changed", f.changed) } else { String::new() };
             let doing = match (l.doing, l.front) {
-                (Doing::Waiting, _) => "waits for you".to_string(),
-                (Doing::Done, _) => "done — not looked at".to_string(),
-                (d @ Doing::Stuck { .. }, _) => format!("stuck? {}", d.said()),
+                (d @ (Doing::Waiting | Doing::Done | Doing::Stuck { .. }), _) => needs(d).unwrap().0,
                 (d @ Doing::Queued { .. }, _) => format!("working · {}", d.said()),
                 (Doing::Working, _) => "working".to_string(),
                 (Doing::Idle, true) => "here".to_string(),
@@ -1256,6 +1274,7 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                 reloaded,
                 compacted,
                 doing,
+                l.at.clone(),
                 reviewer,
                 billing,
                 cache,
@@ -1265,9 +1284,9 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
             ]
         })
         .collect();
-    let widths: Vec<usize> = (0..12).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..13).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, false, false, false, true, true, true];
+    let right = [false, true, true, true, false, false, false, false, false, false, true, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1281,21 +1300,34 @@ pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
                     if right[c] { format!("{pad}{s}") } else { format!("{s}{pad}") }
                 })
                 .collect();
-            let glyph = match l.doing {
-                Doing::Working => ("●", "ui.accent"),
-                Doing::Waiting => ("▲", "warning"),
-                Doing::Stuck { .. } => ("◦", "warning"),
-                Doing::Queued { .. } => ("●", "ui.virtual"),
-                Doing::Done | Doing::Idle => (" ", "ui.linenr"),
+            // (the state column's place in the hint: the shown columns before it, two cells between each)
+            let before: usize =
+                (0..5).filter(|&c| widths[c] > 0).map(|c| parts_len(&row, c, &widths) + 2).sum();
+            let hint_ranges: Vec<_> = needs(l.doing)
+                .and_then(|(said, scope)| {
+                    row[5].find(&said).map(|at| (before + at..before + at + said.len(), scope))
+                })
+                .into_iter()
+                .collect();
+            let paint = crate::picker::Paint {
+                label: Some(crate::session::PARTICIPANTS[l.colour as usize % crate::session::COLOURS]),
+                hint: hint_ranges,
             };
-            crate::picker::Item {
+            let item = crate::picker::Item {
                 label: l.name.clone(),
                 action: crate::picker::Action::Session(l.id),
                 hint: parts.join("  "),
-                glyph: Some(glyph),
-            }
+                glyph: None,
+            };
+            (item, paint)
         })
         .collect()
+}
+
+/// Column `c`'s bytes as `painted` lays it: its text padded to the column's width.
+fn parts_len(row: &[String; 13], c: usize, widths: &[usize]) -> usize {
+    use unicode_width::UnicodeWidthStr as _;
+    row[c].len() + (widths[c] - row[c].width())
 }
 
 // ── Kept ─────────────────────────────────────────────────────────────────────
@@ -2068,9 +2100,11 @@ impl Editor {
     /// it, `b` brings it into its base, `n` makes a new one. Git's part is read on a worker (the last read
     /// shown meanwhile); the processes are looked at once.
     pub fn session_list(&mut self) {
-        let mut p =
-            crate::picker::Picker::of("sessions", "sessions", self.session_items(), false).without_preview();
+        let (items, paints): (Vec<_>, Vec<_>) = self.session_rows().into_iter().unzip();
+        let paints = items.iter().map(|i| i.action.clone()).zip(paints).collect();
+        let mut p = crate::picker::Picker::of("sessions", "sessions", items, false).without_preview();
         p.keys = true;
+        p.paints = paints;
         let front = self.session.id;
         p.select_where(|a| *a == crate::picker::Action::Session(front));
         self.open_picker(p, None);
@@ -2169,7 +2203,13 @@ impl Editor {
     }
 
     /// The list's rows as things are now.
-    fn session_items(&self) -> Vec<crate::picker::Item> {
+    #[cfg(test)]
+    pub(crate) fn session_items(&self) -> Vec<crate::picker::Item> {
+        self.session_rows().into_iter().map(|(item, _)| item).collect()
+    }
+
+    /// The list's rows as things are now, each with its paint (`painted`).
+    pub(crate) fn session_rows(&self) -> Vec<(crate::picker::Item, crate::picker::Paint)> {
         let now_ms = crate::usage::now_ms();
         let shown: Vec<Shown> = self
             .sessions_in_order()
@@ -2194,9 +2234,11 @@ impl Editor {
                 billing: l.billing,
                 build: self.session_store.build_dirs.get(&l.id).map(|(_, size)| *size),
                 queue: self.bring_said(l.id),
+                at: crate::presence::at(self, l.id).unwrap_or_default(),
+                colour: l.colour,
             })
             .collect();
-        items(&shown)
+        painted(&shown)
     }
 
     /// Every event: the list, while it's open, says what's so now (the row in hand stays).
@@ -2204,10 +2246,12 @@ impl Editor {
         if !self.picker.as_ref().is_some_and(|p| p.kind == "sessions") {
             return;
         }
-        let items = self.session_items();
+        let (items, paints): (Vec<_>, Vec<_>) = self.session_rows().into_iter().unzip();
+        let paints: Vec<_> = items.iter().map(|i| i.action.clone()).zip(paints).collect();
         if let Some(p) = self.picker.as_mut()
-            && p.items().iter().map(|i| (&i.hint, i.glyph)).ne(items.iter().map(|i| (&i.hint, i.glyph)))
+            && (p.items().iter().map(|i| &i.hint).ne(items.iter().map(|i| &i.hint)) || p.paints != paints)
         {
+            p.paints = paints;
             p.set_found(items);
         }
     }
@@ -2215,7 +2259,7 @@ impl Editor {
     /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
     /// one, `d` ends the one in hand, `b` brings it into its base, `m` marks it for the bring queue (`B` brings
     /// the marked ones in turn — `bringqueue.rs`), `x` drops its build folder, `w` marks its conversation to be
-    /// kept warm (or not), `$` switches who pays for its Claude.
+    /// kept warm (or not), `$` switches who pays for its Claude, `f` follows it (`follow::follow_session`).
     pub(crate) fn session_list_key(&mut self, c: char) {
         use crate::picker::Action;
         let Some(p) = self.picker.as_mut() else { return };
@@ -2271,6 +2315,12 @@ impl Editor {
             'w' => {
                 let Some(id) = here else { return };
                 crate::keepwarm::mark_in(self, id);
+            }
+            // Followed: into its checkout, the editor where its Claude is (`follow::follow_session`)
+            'f' => {
+                let Some(id) = here else { return };
+                self.picker = None;
+                crate::follow::follow_session(self, id);
             }
             '$' => {
                 let Some(id) = here else { return };
@@ -5584,6 +5634,8 @@ mod tests {
             billing: Default::default(),
             build: None,
             queue: None,
+            at: String::new(),
+            colour: 0,
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[
@@ -5595,13 +5647,22 @@ mod tests {
         assert_eq!(
             hints,
             [
-                "main                     here             3%   40 MB",
-                "      ↑12 ↓1  3 changed  working        104%  1.0 GB",
-                "                         waits for you              ",
+                "main                     here               3%   40 MB",
+                "      ↑12 ↓1  3 changed  working          104%  1.0 GB",
+                "                         ▲ waits for you              ",
             ]
         );
-        let glyphs: Vec<&str> = rows.iter().map(|i| i.glyph.unwrap().0).collect();
-        assert_eq!(glyphs, [" ", "●", "▲"]);
+        assert!(rows.iter().all(|i| i.glyph.is_none()), "no glyph: who it is is its name");
+        // (the painted rows: the name in its colour, what needs you — parser's waiting — in warning, at its place)
+        let painted = painted(&[
+            shown(1, "fix-login", Some("fix-login"), f(12, 1, 3), Doing::Working, None),
+            Shown { colour: 2, ..shown(2, "parser", Some("parser"), None, Doing::Waiting, None) },
+        ]);
+        assert_eq!(painted[0].1.hint, [], "working is calm");
+        let (item, paint) = &painted[1];
+        assert_eq!(paint.label, Some(crate::session::PARTICIPANTS[2]));
+        let (range, scope) = &paint.hint[0];
+        assert_eq!((&item.hint[range.clone()], *scope), ("▲ waits for you", "warning"));
         assert_eq!(rows[2].action, crate::picker::Action::Session(2));
         // Its Claude's cache and cost so far: a column each, the costs right-aligned
         let claude = |cache: &str, cost: &str| Some((cache.to_string(), cost.to_string()));

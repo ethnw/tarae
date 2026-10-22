@@ -273,6 +273,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space D` | `workspace_diagnostics_picker` | Diagnostics in every file |
 | `space e` | `file_explorer` | Files panel: show / hide |
 | `space f` | `file_picker` | Open a file |
+| `space F` | `follow_next` | Follow next session at work |
 | `space g` | `git_panel` | Git: stage, commit, push |
 | `space G` | … | More keys — see `space G` below |
 | `space h` | `select_references_to_symbol_under_cursor` | Select this symbol's uses |

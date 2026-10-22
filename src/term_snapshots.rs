@@ -2508,7 +2508,7 @@ fn snapshot_sessions_with_the_reviewer_reading() {
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let row = parser.screen().rows(0, s.w).find(|r| r.contains(" │ +")).unwrap_or_default();
-    assert!(row.contains("main │ fix-login ● ¶ reviewing │ docs • │ +"), "{row}");
+    assert!(row.contains("main │ fix-login working ¶ reviewing │ docs • │ +"), "{row}");
     let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
     assert!(!status.contains("waiting") && status.contains("¶ reviewing · 0 reads"), "{status}");
     s.check("sessions_reviewing_tabs");
@@ -5984,12 +5984,9 @@ fn reading_the_answer_moves_the_editor() {
     // As a turn leaves it: at the bottom (the last place shows), read from here on
     let c = s.ed.session.chat.as_mut().unwrap();
     c.follow.read_at = Some(c.scroll);
-    let at = |s: &Shot| {
-        (
-            s.ed.doc().path.clone().unwrap(),
-            s.ed.doc().text.byte_to_line(s.ed.doc().selection().primary().head),
-        )
-    };
+    // (the view's place — follow moves the view, never your cursor: collab C1)
+    let at =
+        |s: &Shot| (s.ed.doc().path.clone().unwrap(), crate::follow::view_line(&s.ed).unwrap_or(usize::MAX));
     let cwd = std::env::current_dir().unwrap();
     s.ed.session.chat.as_mut().unwrap().scroll = 1000; // to the top
     s.frame();

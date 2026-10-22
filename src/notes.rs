@@ -400,10 +400,11 @@ pub fn marks(ed: &Editor) -> Vec<(DocId, u64)> {
     ed.session.notes.list.iter().filter_map(|n| n.at).collect()
 }
 
-/// Notes over the cursor line in the current document, in (first line, age) order.
+/// Notes over the cursor line in the current document — while follow holds the view, over Claude's place there
+/// (`follow::view_line`: the screen is Claude's, your cursor elsewhere) — in (first line, age) order.
 pub fn all_here(ed: &Editor) -> Vec<&Note> {
     let Some(path) = ed.doc().path.as_deref() else { return Vec::new() };
-    let line = ed.cursor_line();
+    let line = crate::follow::view_line(ed).unwrap_or_else(|| ed.cursor_line());
     let mut v: Vec<&Note> =
         ed.session.notes.list.iter().filter(|n| n.path == path && n.lines.contains(&line)).collect();
     crate::sorting::by_key(&mut v, |n| (n.lines.start, n.id));

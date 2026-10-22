@@ -5071,8 +5071,10 @@ mod tests {
                 }
             }
         };
-        let printed =
-            |lines: &[(bool, String)]| lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("\n");
+        // (a run's output as printed — `runout::Output`, read as a list as the sandbox's readers read it)
+        let printed = |out: &crate::runout::Output| {
+            out.to_vec().into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("\n")
+        };
         let filtered = |out: &str| {
             out.lines().any(|l| l.split_whitespace().eq(["Seccomp:", "2"]))
                 && out.contains("Operation not permitted")

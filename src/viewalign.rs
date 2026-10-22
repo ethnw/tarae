@@ -112,7 +112,7 @@ impl Editor {
     }
 
     /// An edit being written over `line` (`writing.rs`): the view so its first row is `above` rows down — where
-    /// the review will show it (`term::review_lead`); its head is kept in sight from there (`term::scroll_to_cursor`).
+    /// the review will show it (`term::review_lead`); its head is kept in sight from there (`term::scroll_to`).
     pub fn align_writing(&mut self, line: usize, above: usize) {
         let last = mv::last_line(&self.doc().text);
         let m = self.measure(line.min(last));

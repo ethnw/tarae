@@ -2,9 +2,10 @@
 //! on a worker (the result landing among the steps), the call made once its input is whole and its review opening
 //! from another job; keys between — moves, typing in the buffer, `y`/`n` on the review — frames at two widths, the
 //! turn's end, the next turn's edit over another line, time passing. After every step: no document's text changed
-//! but by a key (nothing applied, nothing decided); a stream piece never moved the keys, and moved the cursor only
-//! while follow led it — onto the line a drawn block rewrites (`Block::place`; its caret, drawn, may move with every
-//! frame); a key of yours that moved the cursor paused follow; a buffer with nothing unsaved and no save under
+//! but by a key (nothing applied, nothing decided); a stream piece never moved the keys nor your cursor (collab C1:
+//! follow moves the view, never your cursor), and moved the view's line only while follow led — onto the line a drawn
+//! block rewrites (`Block::place`; its caret, drawn, may move with every frame); a key of yours that moved the cursor
+//! paused follow; a buffer with nothing unsaved and no save under
 //! way is its file on disk (a review's `y` saves through the saver's job, the simulation's own); rows are drawn only in a
 //! buffer that holds what they replace, never under a review, none once the turn is over; and a review that opens
 //! on rows drawn whole shows the same rows — the same lines taken out, the same lines written.
@@ -130,18 +131,19 @@ fn cursor(ed: &Editor) -> (crate::document::DocId, usize) {
     (ed.doc().id, ed.cursor_line())
 }
 
-/// A piece moved the cursor: only while follow could lead it (on, not paused, nothing of yours under way), and onto
-/// the line a drawn block in the document in front rewrites (`Block::place`) — never a line between.
+/// A piece moved the view's line (collab C1: follow moves the view, never your cursor): only while follow could lead
+/// (on, not paused, nothing of yours under way), and onto the line a drawn block in the document in front rewrites
+/// (`Block::place`) — never a line between.
 fn led_right(ed: &Editor, could: bool) -> Result<(), String> {
     if !could {
-        return Err("a piece moved the cursor while follow couldn't lead it".into());
+        return Err("a piece moved the view while follow couldn't lead".into());
     }
     let doc = ed.doc();
-    let line = ed.cursor_line();
+    let Some(line) = crate::follow::view_line(ed) else { return Ok(()) };
     let last = crate::movement::last_line(&doc.text);
     let blocks = crate::writing::shown(doc).map(|s| s.blocks.clone()).unwrap_or_default();
     if !blocks.iter().any(|b| b.place().min(last) == line) {
-        return Err(format!("a piece led the cursor to line {line}, no line rewritten there"));
+        return Err(format!("a piece led the view to line {line}, no line rewritten there"));
     }
     Ok(())
 }
@@ -174,12 +176,16 @@ fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
             let region = ed.keys_to().region.name().to_string();
             let could =
                 ed.session.chat.as_ref().is_some_and(|c| c.follow.active()) && crate::follow::free(ed);
-            let before = (cursor(ed), could);
+            let before = (cursor(ed), could, crate::follow::view_line(ed), ed.doc().id);
             crate::chat::stream_event(ed, g, StreamEv::Writing(d));
             if ed.keys_to().region.name() != region {
                 w.moved_keys = Some(format!("{region} → {}", ed.keys_to().region.name()));
             }
-            if cursor(ed) != before.0
+            // (your cursor: never a piece's — in the document it was in)
+            let still = ed.doc().id != before.3 || cursor(ed) == before.0;
+            if !still {
+                w.led_wrong = Some(format!("a piece moved your cursor: {:?} → {:?}", before.0, cursor(ed)));
+            } else if crate::follow::view_line(ed) != before.2
                 && let Err(e) = led_right(ed, before.1)
             {
                 w.led_wrong = Some(e);

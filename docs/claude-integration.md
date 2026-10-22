@@ -442,11 +442,11 @@ The sent message's row lists its quotes; it opens a copy of what went.
 ([hanji theme](screenshots/follow-hanji.png))
 
 Follow is on by default (`C-f` in the chat toggles it; `llm.follow = false` starts with it off). The editor goes
-where Claude is reading while it works. Each file it reads opens with the cursor on the first line read and
-the range placed as a whole: left where it is if it's all on screen already, centred if it fits, and starting
+where Claude is reading while it works — **the view, never your cursor**: your cursor stays where you left it, in
+sight or not, and the screen follows Claude's place. Each file it reads opens with the range read placed as a whole: left where it is if it's all on screen already, centred if it fits, and starting
 near the top if it's taller than the screen. Those lines get a faint accent wash. Each edit is shown once it's
 written, review at the end included: its new lines on the review's green wash, the lines it replaced in red
-above them, the cursor on its first changed line — so too after your `y` in its review. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
+above them, the view on its first changed line — so too after your `y` in its review. A search or a lookup jumps to its first hit, with the count on the card (`1 matching line in 1
 file`), and the finished answer takes you to its first `path:line`. A card beside the code says what Claude is at
 and for how long (`thinking 3.2s`) and the turn as the chat shows it: its stops as knots, the one in hand `●` (`● edit  src/trust.rs  L15–20`, `● grep …`, `● search (project) …`, `● definition Session`), and
 what Claude thinks and says between them, a running log of the turn: a new thought goes under the last one
@@ -459,21 +459,41 @@ being read. The panel comes back with the finished answer, or right away with `s
 While Claude waits on you (a command or a read on its card, an edit under review), the card says `waiting for
 your answer`, and over an edit's review it keeps to the room between the changes.
 
-While follow leads the cursor the status line says `● follow` where it says the mode (`● chat · follow` with the
-keys in the chat). Claude's place is a mark, not a cursor: while it writes, its caret — a bar `▎` in the accent
-in the cell right after the last character written, an insert caret riding the end of the line as it types, with
-the keys in the code or not. Your cursor stays a block, so the two never look alike. With
-nothing being written and the keys elsewhere (the code has no cursor then), the bar before the line follow led the
-cursor to is in the accent. Neither fades with the pane. When the keys come back to the code, the
-cursor is on that line.
+While follow leads the view the status line says `● follow` where it says the mode (`● chat · follow` with the
+keys in the chat). Claude's place is a mark, not a cursor: while it writes, its caret — a bar `▎` in its session's
+colour (below) in the cell right after the last character written, an insert caret riding the end of the line as it
+types, kept in sight as it goes. Your cursor stays the theme's block, where you left it, so the two never look
+alike. With nothing being written, the bar before the line follow keeps in sight marks Claude's place. Neither
+fades with the pane.
 
-Moving in the editor (a key, a click or a paste that moves the cursor or switches files) pauses following, and so
-does a key that edits where the cursor is (`d`, `r`, `~`) or enters INSERT or SELECT. While a key sequence is under
-way — a pending `g`, a count, `space`, `C-w` — follow holds the cursor still, and the sequence's end decides: a
-move or an edit pauses it, a hop to the chat or a picker doesn't. Follow never moves the cursor from under you. The status line says `you took over — C-f follows Claude again`, and the cursor stays where you took it.
+A key of yours that moves the cursor (a click or a paste too) pauses following, and so does a key that edits where
+the cursor is (`d`, `r`, `~`) or enters INSERT or SELECT, and one that moves the view (`zz`, the pages, the wheel):
+it acts at your cursor, the view coming back to it first. While a key sequence is under way — a pending `g`, a
+count, `space`, `C-w` — follow holds the view still, and the sequence's end decides: a move or an edit pauses it, a
+hop to the chat or a picker doesn't. The status line says `you took over — C-f follows Claude again`; `C-f` brings
+the view back to Claude.
 Claude's edit reloading the file you're in doesn't pause it, and neither does switching sessions. Follow takes over again
 by itself `llm.follow-resume` seconds (20 by default; 0 = only `C-f`) after your last key if Claude is still
 working. The next question also turns it back on.
+
+**Several sessions: where each is, and following one.** With more than one session open, every session's Claude
+shows where it is in its turn — the lines it reads, the edit it's writing, the lines its edits changed — wherever
+that file is shown, in any checkout of the repository: a `▎` in the code's sign column on those lines and a name
+tag at the end of the first (`‹fix writing›`; two on one line, each its tag). A file at the same path in another
+checkout is the same file, its lines mapped through a line diff of the two texts, so the marks land on the same code
+even where the branches differ. **Each session has a colour of its own for its life** (`ui.participant.1` … `.6` in
+the theme — identity colours, never the accent, never the diff's green or red): its caret, its name tag, its marks,
+and its name wherever it's listed — the session list, the strip over the chat, the status line with the chat
+closed — in its colour at full strength, whatever it's doing, what it does said after it: what needs you in the
+warning colour (`▲ waits`, `▲ waits for you` in the list, `◦ stuck? …`), `done` in the accent, the calm states
+(`working`, `queued 2nd`) faint. In the code, the session you follow is at full strength and the others dim; the accent stays where the keys are, and the name is always beside
+the colour. The session list says where each is (`src/term.rs:3614 · writing`), the sessions' strip over
+the chat its file, and the side panel's files and git tabs `◦ fix` on a file another session is in. A session's
+marks go when its turn ends. You follow one session at a time: by default the Claude of the session in front, as
+above; a click on another's name tag, `f` on its row in the session list, or `space F` (the next session at work)
+follows it — into its checkout, the view where its Claude is (your cursor as you left it there), `● follow` on
+the status line, the session's `fix` after it in its colour. Your first key stops it there as always, and `C-f` in its chat follows again. None of this is told
+to Claude.
 
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,
@@ -1838,7 +1858,7 @@ continued from it, and nothing of the chat goes into what it's sent
   waits too, and its time runs from its start, not from its wait.
   `space v r` (`:review-verdict`) shows the whole report, and `:reviewer-stop` stops it.
 - While it reads, its session says so wherever a working chat would, beside what the chat does: its tab
-  (`main ● ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
+  (`● main working ¶ reviewing`), its row in the session list (`space W`), and `tarae state` (`reviewer: "reviewing"`).
   The session in front leaves its tab's `¶` to the status line's segment while that shows, so it isn't said
   twice; a session behind keeps it on its tab.
   While it waits its turn they say that instead (`¶ waits`, `¶ waits to review`, `"waits to review"`). It

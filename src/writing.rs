@@ -196,7 +196,7 @@ pub struct Block {
     pub first: usize,
     pub last: usize,
     pub rows: Vec<Row>,
-    /// The row it's writing now (None once its text is whole) — kept in sight (`term::scroll_to_cursor`).
+    /// The row it's writing now (None once its text is whole) — kept in sight (`term::scroll_to`).
     pub head: Option<usize>,
     /// A name Claude's runs can't write — the review's warning row, counted where it will open.
     pub protected: bool,

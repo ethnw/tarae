@@ -7,27 +7,27 @@
 04   3 ▎ Counts how often each word appears.
 05     ▎
 06     ▎ Words are split on whi╭─ space ─────────────────────────────────────────────────────────────╮
-07   6 pub fn word_counts(text:│ '  Reopen the last picker          L  Close chat                    │
-08   7     let mut counts = Has│ /  Search in project               m  Tasks …                       │
-09   8     for word in text.spl│ >  Quote or view chat              n  Ask Claude here, or reply     │
-10   9     │   *counts.entry(wo│ ?  Find a command                  N  Claude's notes                │
-11  10     }                   │ @  Point Claude at something       o  Outline panel: show / hide    │
-12  11     counts              │ a  Code actions                    p  Paste clipboard after         │
-13  12 }                       │ b  Switch to an open buffer        P  Paste clipboard before        │
-14  13                         │ c  Comment or uncomment lines      q  List panel: show / hide       │
-15  14 fn main() {             │ C  Block-comment the selections    r  Rename symbol                 │
-16  15     let text = "the quic│ d  Diagnostics                     s  Symbols in this file          │
-17  16     let counts = word_co│ D  Diagnostics in every file       S  Symbols in the workspace      │
-18  17     println!("{} distinc│ e  Files panel: show / hide        t  Choose a theme (live preview) │
-19  18 }                       │ f  Open a file                     T  Terminal: show / hide         │
-20                             │ g  Git: stage, commit, push        u  Undo Claude's last turn       │
-21                             │ G  Debug …                         U  Bring Claude's turn back      │
-22                             │ h  Select this symbol's uses       v  Review …                      │
-23                             │ i  Ask Claude to edit selection    w  Window …                      │
-24                             │ I  What waits for your answer      W  Sessions: switch, end, new    │
-25                             │ j  Jump list                       x  Tests …                       │
-26                             │ k  Show docs under cursor          y  Copy to clipboard             │
-27                             │ l  Chat with Claude                                                 │
+07   6 pub fn word_counts(text:│ '  Reopen the last picker          l  Chat with Claude              │
+08   7     let mut counts = Has│ /  Search in project               L  Close chat                    │
+09   8     for word in text.spl│ >  Quote or view chat              m  Tasks …                       │
+10   9     │   *counts.entry(wo│ ?  Find a command                  n  Ask Claude here, or reply     │
+11  10     }                   │ @  Point Claude at something       N  Claude's notes                │
+12  11     counts              │ a  Code actions                    o  Outline panel: show / hide    │
+13  12 }                       │ b  Switch to an open buffer        p  Paste clipboard after         │
+14  13                         │ c  Comment or uncomment lines      P  Paste clipboard before        │
+15  14 fn main() {             │ C  Block-comment the selections    q  List panel: show / hide       │
+16  15     let text = "the quic│ d  Diagnostics                     r  Rename symbol                 │
+17  16     let counts = word_co│ D  Diagnostics in every file       s  Symbols in this file          │
+18  17     println!("{} distinc│ e  Files panel: show / hide        S  Symbols in the workspace      │
+19  18 }                       │ f  Open a file                     t  Choose a theme (live preview) │
+20                             │ F  Follow next session at work     T  Terminal: show / hide         │
+21                             │ g  Git: stage, commit, push        u  Undo Claude's last turn       │
+22                             │ G  Debug …                         U  Bring Claude's turn back      │
+23                             │ h  Select this symbol's uses       v  Review …                      │
+24                             │ i  Ask Claude to edit selection    w  Window …                      │
+25                             │ I  What waits for your answer      W  Sessions: switch, end, new    │
+26                             │ j  Jump list                       x  Tests …                       │
+27                             │ k  Show docs under cursor          y  Copy to clipboard             │
 28                             ╰─────────────────────────────────────────────────────────────────────╯
 29  ● normal                                                                   rust   utf-8 LF   space
 ## bg · surface per cell, blank = ui.background
@@ -70,8 +70,8 @@
 05     f
 06     f                       ff TTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 07   f                         f A                                  A                                f
-08   f                         f A                                  A  ddddd d                       f
-09   f                         f A                                  A                                f
+08   f                         f A                                  A                                f
+09   f                         f A                                  A  ddddd d                       f
 10   f                         f A                                  A                                f
 11  ff                         f A                                  A                                f
 12  ff                         f A                                  A                                f
@@ -83,13 +83,13 @@
 18  ff              ggg gggggggf A                                  A                                f
 19  ff                         f A                                  A                                f
 20                             f A                                  A                                f
-21                             f A  ddddd d                         A                                f
-22                             f A                                  A  dddddd d                      f
+21                             f A                                  A                                f
+22                             f A  ddddd d                         A                                f
 23                             f A                                  A  dddddd d                      f
-24                             f A                                  A                                f
-25                             f A                                  A  ddddd d                       f
-26                             f A                                  A                                f
-27                             f A                                                                   f
+24                             f A                                  A  dddddd d                      f
+25                             f A                                  A                                f
+26                             f A                                  A  ddddd d                       f
+27                             f A                                  A                                f
 28                             fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 29  a TTTTTT                                                                   dddd   ddddd dd   AAAAA
 ## legend

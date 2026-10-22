@@ -533,9 +533,11 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         let above = review_lead(editor, &ui, &lay);
         editor.align_writing(line, above);
     }
-    // During `/` preview the screen follows the match, not the cursor
+    // During `/` preview the screen follows the match, not the cursor; while follow leads, Claude's place (the row it
+    // writes, the lines it reads) — never moving your cursor (collab C1)
     if editor.search_origin.is_none() {
-        scroll_to_cursor(editor, &focus_lay);
+        let at = crate::follow::view_line(editor).map(|l| mv::line_start(&editor.doc().text, l));
+        scroll_to(editor, &focus_lay, at);
     }
     // The terminal is told its panel's size (it redraws for it)
     // (not while another tab has the slot — the program would draw for a size nobody sees)
@@ -1069,7 +1071,7 @@ fn panes(
             let idx =
                 if focused { editor.current } else { editor.docs.iter().position(|d| d.id == v.doc)? };
             let doc = &editor.docs[idx];
-            // Focused pane uses the doc's scroll (moved by scroll_to_cursor each frame); others their own —
+            // Focused pane uses the doc's scroll (moved by scroll_to each frame); others their own —
             // clamped, since the doc may have shrunk under them (edited in another pane)
             // (and the rows of its top line above it: each pane's own — another pane's would be on this one)
             let (top, left) =
@@ -3309,14 +3311,14 @@ pub(crate) fn cursor_idx(mode: Mode, r: Range, text: &ropey::Rope) -> usize {
     if mode == Mode::Insert { r.head } else { r.cursor(text) }
 }
 
-fn scroll_to_cursor(editor: &mut Editor, lay: &Layout) {
+fn scroll_to(editor: &mut Editor, lay: &Layout, at: Option<usize>) {
     let so = editor.config.scrolloff.min(lay.text_rows.saturating_sub(1) / 2);
     let tab = editor.config.tab_width;
     let mode = editor.mode;
     let wrap_w = editor.wraps(editor.doc()).then_some(lay.text_cols);
     let ed = &*editor;
     let doc = ed.doc();
-    let pos = cursor_idx(mode, doc.selection().primary(), &doc.text);
+    let pos = at.unwrap_or_else(|| cursor_idx(mode, doc.selection().primary(), &doc.text));
     let line = mv::line_of(&doc.text, pos);
     // Rows a line takes, as the pane lays them out: its wrapped rows, the removed rows a code review (or a
     // shown edit) puts above it, a folded doc comment's rows
@@ -3452,6 +3454,9 @@ struct Ui {
     diff_minus: Style,
     /// Accent color (ui.accent → primary cursor bg → special) — selected-row bar, typed chars, mode pill…
     accent: Style,
+    /// The participants' colours (`ui.participant.1` … `.6`, collab C1): a session's for its life (`Session.colour`)
+    /// — its caret, name tag, marks, list dot and strip (`participant`).
+    participants: [Option<crossterm::style::Color>; crate::session::COLOURS],
     /// Lines between regions — header rules, gutters of themes without surfaces (`ui.window`, else faint).
     window: Option<crossterm::style::Color>,
     /// How surfaces meet (`ui.edge`): one thin line, or the half-cell ground.
@@ -3471,6 +3476,13 @@ struct Ui {
 }
 
 impl Ui {
+    /// Participant `colour`'s colour (`Session.colour`): at full strength for the session you follow, else dim — the
+    /// accent stays where the keys are, the colour is who it is (the name tag beside it, never the colour alone).
+    fn participant(&self, colour: u8, full: bool) -> Option<crossterm::style::Color> {
+        let c = self.participants[colour as usize % crate::session::COLOURS];
+        if full { c } else { blend(c, self.tint, 0.55).or(c) }
+    }
+
     fn new(editor: &Editor) -> Self {
         let t = &editor.theme;
         let get = |k: &str| t.try_get(k).or_else(|| builtin().try_get(k)).unwrap_or_default();
@@ -3507,6 +3519,7 @@ impl Ui {
                 Style { bold: true, ..status }
             },
             accent: Style { fg: accent_color(t), ..Style::default() },
+            participants: std::array::from_fn(|i| get(&format!("ui.participant.{}", i + 1)).fg),
             window: t.try_get("ui.window").and_then(|s| s.fg).or(base.patch(get("ui.linenr")).fg),
             edge: t.edge,
             lit: Region::with_keys(editor),
@@ -3662,9 +3675,10 @@ fn faded(s: Style, ground: Option<Color>) -> Style {
 /// Claude's caret while it writes (`draw_text`): an insert caret's bar — never the person's block cursor's shape.
 const CARET: &str = "▎";
 
-/// The caret's colour on the row it ends (`ground`: that row's, its wash): the accent, bold.
-fn caret_style(ui: &Ui, ground: Style) -> Style {
-    Style { fg: ui.accent.fg, bold: true, italic: false, underline: false, ..ground }
+/// The caret's colour on the row it ends (`ground`: that row's, its wash): its writer's participant colour (`fg`,
+/// collab C1), bold.
+fn caret_style(fg: Option<crossterm::style::Color>, ground: Style) -> Style {
+    Style { fg, bold: true, italic: false, underline: false, ..ground }
 }
 
 /// `apply` at full strength inside a region drawn faded — Claude's place in the code while the keys are elsewhere
@@ -4408,6 +4422,17 @@ fn draw_text(
     });
     let active_guide_style = Style { fg: ui.virt.fg, ..Style::default() };
     let signs = lay.gutter.saturating_sub(num_w(doc));
+    // A session's place on line `l` (`presence::marks`, the one you follow first): `▎` in its participant colour —
+    // full for the one you follow, as its caret, dim for the others
+    let presence_sign =
+        |l: usize| {
+            shows.presence.iter().find(|m| m.lines.contains(&l)).map(|m| {
+                ("▎", Style { fg: ui.participant(m.colour, m.followed), bold: m.followed, ..ui.base })
+            })
+        };
+    // Whose caret and place this document shows: its checkout's session's colour, full while you follow it
+    let (writer, followed) = crate::presence::colour_of(editor, doc);
+    let caret_fg = ui.participant(writer, followed);
     // The sign column's cell for lines `a..=b` (a folded block's: its lines together) — stopped line ▶ >
     // breakpoint ● > the most severe diagnostic's bar
     let sign_of = |a: usize, b: usize| -> (&str, Style) {
@@ -4470,7 +4495,14 @@ fn draw_text(
                 apply(out, ui.base)?;
                 if signs > 0 {
                     queue!(out, Spaces(signs - 1))?;
-                    let (glyph, st) = if *index == 0 { sign_of(*start, *end) } else { (" ", ui.base) };
+                    // (a session's place on any of its lines under the rest — `presence.rs`)
+                    let (glyph, st) = match *index == 0 {
+                        true => match sign_of(*start, *end) {
+                            (" ", _) => (*start..=*end).find_map(&presence_sign).unwrap_or((" ", ui.base)),
+                            s => s,
+                        },
+                        false => (" ", ui.base),
+                    };
                     apply(out, st)?;
                     queue!(out, Print(glyph))?;
                 }
@@ -4582,7 +4614,7 @@ fn draw_text(
                     && part.is_none_or(|p| p.last)
                     && room > 0
                 {
-                    apply_full(out, caret_style(ui, base))?;
+                    apply_full(out, caret_style(caret_fg, base))?;
                     queue!(out, Print(CARET))?;
                 }
                 continue;
@@ -4656,7 +4688,11 @@ fn draw_text(
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
             apply(out, gut(ui.base))?;
             queue!(out, Spaces(signs - 1))?;
-            let (glyph, st) = sign_of(line, line);
+            // (under them all: a session's place — `presence.rs`, the one you follow in the accent)
+            let (glyph, st) = match sign_of(line, line) {
+                (" ", _) => presence_sign(line).unwrap_or((" ", ui.base)),
+                s => s,
+            };
             apply(out, gut(st))?;
             queue!(out, Print(glyph))?;
         }
@@ -4678,7 +4714,7 @@ fn draw_text(
                 .then_some(("−", Style { fg: ui.diff_minus.fg, bold: true, ..line_base })),
             // (Claude's place where follow led the cursor, the keys elsewhere: its bar in the accent, over the git one)
             None if shows.claude == Some(line) => {
-                Some(("▎", Style { fg: ui.accent.fg, bold: true, ..line_base }))
+                Some(("▎", Style { fg: caret_fg, bold: true, ..line_base }))
             }
             None => git_marks.get(li).copied().flatten().filter(|(g, _)| last || *g != "▁"),
         };
@@ -4885,7 +4921,7 @@ fn draw_text(
         let caret_here =
             caret_line == Some(line) && last && !clipped && x0 + col.saturating_sub(row_left) < lay.text_cols;
         if caret_here {
-            apply_full(out, caret_style(ui, line_base))?;
+            apply_full(out, caret_style(caret_fg, line_base))?;
             queue!(out, Print(CARET))?;
             shift += 1;
         }
@@ -5141,9 +5177,43 @@ fn draw_text(
                 queue!(out, Print(&body))?;
             }
         }
+        // A session's name tag where it is now: `‹main writing›` — the accent for the one you follow, dim for the others;
+        // only where the line end is free, folded to its name, then gone, when narrow. A click follows it
+        let tag_here = shows.presence.iter().find(|m| m.here && m.lines.start == line).filter(|_| {
+            line_message_here.is_none() && note_here.is_none() && hint_here.is_none() && risk_here.is_none()
+        });
+        // (two sessions where they are on one line: each its tag, the one you follow first, the later ones the first to
+        // go when narrow)
+        if tag_here.is_some() && last && !clipped {
+            let mut used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
+            let mut gap = "   ";
+            let mut said: Vec<crate::event::SessionId> = Vec::new();
+            for m in shows.presence.iter().filter(|m| m.here && m.lines.start == line) {
+                if said.contains(&m.session) {
+                    continue;
+                }
+                said.push(m.session);
+                let Some(tag) = m.tag(lay.text_cols.saturating_sub(used + gap.len())) else { break };
+                let fg = ui.participant(m.colour, m.followed);
+                apply(out, line_base)?;
+                queue!(out, Print(gap))?;
+                apply(out, Style { fg, bold: m.followed, ..line_base })?;
+                queue!(out, Print(&tag))?;
+                let at = lay.x0 + lay.gutter + used + gap.len() - 1;
+                editor.screen.session_spots.borrow_mut().push((
+                    y as usize,
+                    at,
+                    at + tag.width(),
+                    crate::session::Spot::Follow(m.session),
+                ));
+                used += gap.len() + tag.width();
+                gap = " ";
+            }
+        }
         // Blame (`b` in the git tab): who changed the cursor line, when, and why — faint, only where the line end is
         // free (a diagnostic or debugger values take it first), and not while typing
         if shows.blame
+            && tag_here.is_none()
             && line == cur_line
             && last
             && !clipped
@@ -6128,6 +6198,14 @@ fn draw_list_row(
     }
     let name = if r.selected { base.patch(t.try_get("ui.text.focus").unwrap_or_default()) } else { base };
     let name = Style { bg: base.bg, ..name };
+    // (a painted row's scopes: `ui.accent` through its fallbacks, the rest as the theme has them)
+    let scope_fg =
+        |scope: &str| if scope == "ui.accent" { ui.accent.fg } else { t.try_get(scope).and_then(|s| s.fg) };
+    // (a painted row's name in its scope — the session list's, its session's colour)
+    let name = match r.paint.as_ref().and_then(|p| p.label).and_then(scope_fg) {
+        Some(fg) => Style { fg: Some(fg), ..name },
+        None => name,
+    };
     let (dim, faint) = (Style { fg: ui.virt.fg, ..base }, Style { fg: ui.linenr.fg, ..base });
     // Tree rows: indented by depth, then a column for `▸`/`▾` (folders) or the kind glyph,
     // so names at one depth line up
@@ -6250,8 +6328,22 @@ fn draw_list_row(
     apply(out, base)?;
     if hint_w > 0 && hint_w < lw {
         queue!(out, Spaces(lw - used - hint_w + 1))?;
-        apply(out, Style { fg: ui.virt.fg, ..base })?;
-        queue!(out, Print(hint), Print(" "))?;
+        let plain = Style { fg: ui.virt.fg, ..base };
+        // (a painted hint's ranges in their scopes — what's cut off by the fit isn't there to paint)
+        let mut at = 0;
+        for (range, scope) in r.paint.iter().flat_map(|p| &p.hint) {
+            let (start, end) = (range.start.min(hint.len()), range.end.min(hint.len()));
+            if start < at || start >= end || !hint.is_char_boundary(start) || !hint.is_char_boundary(end) {
+                continue;
+            }
+            apply(out, plain)?;
+            queue!(out, Print(&hint[at..start]))?;
+            apply(out, Style { fg: scope_fg(scope).or(plain.fg), ..base })?;
+            queue!(out, Print(&hint[start..end]))?;
+            at = end;
+        }
+        apply(out, plain)?;
+        queue!(out, Print(&hint[at..]), Print(" "))?;
         apply(out, base)?;
         used = lw;
     }
@@ -7397,16 +7489,14 @@ fn draw_statusline(
         true => format!("{mode} · FOLLOW"),
         false => mode,
     };
+    // (`● follow` alone: whom is the chip after it — following takes you into that workspace, the one in front)
     let mut left = Vec::new();
     // `● normal`: a dot in the mode's colour (the accent, or the mode's own with `color-modes`), the word in ink
     // bold — a mark, not a block of colour (geultarae decision 1); its word where a prompt's `:` stands over it
     let dot = ui.status_mode.bg.filter(|bg| Some(*bg) != ui.status.bg).or(ui.accent.fg);
     left.push(Seg { text: " ●".into(), style: Style { fg: dot, ..ui.status }, keep: 255 });
-    left.push(Seg {
-        text: format!(" {} ", mode.to_lowercase()),
-        style: Style { bold: true, ..strong },
-        keep: 255,
-    });
+    let ink = Style { bold: true, ..strong };
+    left.push(Seg { text: format!(" {} ", mode.to_lowercase()), style: ink, keep: 255 });
     // (a floating list's keys go right after the mode — laid in at the end, once the room is known)
     let hints_at = left.len();
     // (the terminal with tarae's keys: typing isn't the program's until `i` — a key hint, as the panels' are)
@@ -7467,9 +7557,16 @@ fn draw_statusline(
     let chip = !editor.sessions.is_empty() && lay.chat_w == 0;
     let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
     if chip {
+        // (a session named as everywhere in the chrome — collab C1, the user 2026-10-22: its name in its participant
+        // colour, bold as the front's is in the strip; no dot — the mode's `●` is the mode's)
+        let own = Style {
+            fg: ui.participant(editor.session.colour, true).or(ui.accent.fg),
+            bold: true,
+            ..ui.status
+        };
         left.push(Seg {
             text: format!("  {}", fit_ellipsis(editor.session.label(), 24)),
-            style: accent,
+            style: own,
             keep: CHIP,
         });
         // (its rebase under way — in the warning color once it waits for you)
@@ -7580,7 +7677,7 @@ fn draw_statusline(
         });
         left.push(Seg { text: modified.into(), style: accent, keep: 200 });
     }
-    // (a session's branch is its name — the chip said it)
+    // (a session's branch is its name — the chip said it; a branch is a branch, faint ink, never a session's colour)
     if let Some(b) =
         editor.session.git_branch.as_ref().filter(|b| !chip || b.as_str() != editor.session.label())
     {
@@ -10287,16 +10384,30 @@ fn draw_sidebar(
             (2, _) if !behind.is_empty() => chat_spans(out, &behind, card, w)?,
             (_, Some(i)) => match shown.get(i).map(|&r| (r, &lines[r])) {
                 Some((r, l)) => {
+                    // (a file another session is in: `◦ main` before what the row says — `presence.rs`)
+                    let rel = match &l.target {
+                        _ if editor.presence.now.is_empty() => None,
+                        crate::sidebar::Target::File(p) => p.strip_prefix(sb.root()).ok(),
+                        crate::sidebar::Target::Change { rel, file: true, .. } => {
+                            Some(std::path::Path::new(rel))
+                        }
+                        _ => None,
+                    };
+                    let hint = match rel {
+                        Some(rel) => crate::presence::hint(&crate::presence::in_file(editor, rel), &l.hint),
+                        None => l.hint.clone(),
+                    };
                     let row = crate::picker::Row {
                         label: l.label.clone(),
                         marks: Vec::new(),
                         selected: Some(r) == mark,
-                        hint: l.hint.clone(),
+                        hint,
                         hint_first: sb.mode == SMode::Plugin,
                         glyph: l.glyph,
                         tree: Some((l.depth, l.kind)),
                         spots: Vec::new(),
                         stamp: None,
+                        paint: None,
                     };
                     links.push((y, r));
                     // The selected row's name cut short: whole, over the code (drawn after the rest) — with
@@ -11429,14 +11540,17 @@ fn draw_review_rail(
 ///   enter send  esc normal  C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
-/// The sessions under the chat's header (with more than one): `main │ fix-login ● │ new-parser ▲ waits │
-/// docs done │ +` — the one in front strong, `●` its Claude working, `▲ waits` a card (or an edit) waiting for
+/// The sessions under the chat's header (with more than one): `main │ fix-login working │ new-parser ▲ waits │
+/// docs done │ +` — each name in its participant colour, full, the one in front bold (collab C1, the user
+/// 2026-10-22: who it is is its name in its colour; its state follows it), `working` its Claude at work, faint (and
+/// the file it's in, dim — `presence.rs`, the first to go when they don't fit), `queued 2nd` at work but its run in
+/// line, faint, `▲ waits` a card (or an edit) waiting for
 /// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
 /// call unanswered that long), `¶ reviewing` its reviewer reading (#195), `•` news while it was behind —
 /// files came again from disk there (#6), its reviewer ended (#195) — `+` a new one. Where that doesn't
-/// fit, one dropdown: `◂ fix-login ● ¶ ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
+/// fit, one dropdown: `◂ fix-login working ¶ ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
 /// `•1` news in one behind, the arrows step — how many things wait for you is the status
-/// line's `▲3 waiting`, every session's). Styles: strong, dim, faint, accent, warning · where each click goes
+/// line's `▲3 waiting`, every session's). Styles: dim, faint, accent, warning, the reviewer's · where each click goes
 /// (from the row's start).
 /// The other sessions as the dropdown and the status line's chip count them: ` ◦1` (possibly stuck) ·
 /// ` 1 done` (a turn ended, not looked at) — each empty when none (#86: what waits is counted apart).
@@ -11456,7 +11570,9 @@ fn session_tabs(
     editor: &Editor,
     w: usize,
     rail_w: usize,
-    [strong, dim, faint, accent, warn, reviewer]: [Style; 6],
+    [dim, faint, accent, warn, reviewer]: [Style; 5],
+    // (a session's own colour, collab C1: its name in it is who it is)
+    colour: &dyn Fn(u8) -> Style,
 ) -> (Vec<crate::markdown::Span>, Vec<(usize, usize, crate::session::Spot)>) {
     use crate::markdown::Span;
     use crate::session::{Doing, Spot};
@@ -11467,7 +11583,8 @@ fn session_tabs(
         false => l.parked.len(),
     };
     let mark = |l: &crate::session::Session| match editor.doing(l) {
-        Doing::Working => Some(Span { text: " ●".into(), style: accent }),
+        // (the calm states faint: what needs you stands out — collab C1)
+        Doing::Working => Some(Span { text: " working".into(), style: faint }),
         // (a card waits · a turn ended: said apart — #86, one `▲` meant both)
         Doing::Waiting => Some(Span {
             text: match cards(l) {
@@ -11478,8 +11595,8 @@ fn session_tabs(
         }),
         Doing::Done => Some(Span { text: " done".into(), style: accent }),
         d @ Doing::Stuck { .. } => Some(Span { text: format!(" ◦ {}", d.said()), style: warn }),
-        // (at work, held back in line — dim, not the accent's working nor stuck's warning)
-        d @ Doing::Queued { .. } => Some(Span { text: format!(" ● {}", d.said()), style: dim }),
+        // (at work, held back in line — calm, not stuck's warning)
+        d @ Doing::Queued { .. } => Some(Span { text: format!(" {}", d.said()), style: faint }),
         Doing::Idle => None,
     };
     // A rebase under way there: `rebasing 2/5` — in the warning color once it waits for you
@@ -11488,44 +11605,52 @@ fn session_tabs(
             .as_ref()
             .map(|r| Span { text: format!(" {}", r.said()), style: if r.stopped() { warn } else { dim } })
     };
-    let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
-    let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
-        x += text.width();
-        spans.push(Span { text, style });
-        x
-    };
-    for (i, l) in sessions.iter().enumerate() {
-        let start = if i > 0 { put(&mut spans, " │ ".into(), faint) } else { 0 };
-        let mut end =
-            put(&mut spans, l.label().to_string(), if l.id == editor.session.id { strong } else { dim });
-        if let Some(m) = mark(l) {
-            end = put(&mut spans, m.text, m.style);
+    // (where each is in its turn — its file, `presence.rs` — the first to go when the strip runs out of room)
+    for files in [true, false] {
+        let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
+        let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
+            x += text.width();
+            spans.push(Span { text, style });
+            x
+        };
+        for (i, l) in sessions.iter().enumerate() {
+            let start = if i > 0 { put(&mut spans, " │ ".into(), faint) } else { 0 };
+            // (who it is: its name in its colour, the front's bold — its state after it)
+            let own = colour(l.colour);
+            let own = Style { bold: l.id == editor.session.id || own.bold, ..own };
+            let mut end = put(&mut spans, l.label().to_string(), own);
+            if let Some(m) = mark(l) {
+                end = put(&mut spans, m.text, m.style);
+            }
+            if let Some(file) = crate::presence::file_of(editor, l.id).filter(|_| files) {
+                end = put(&mut spans, format!(" {file}"), dim);
+            }
+            // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195; the front session's
+            // left to the status line's segment while that shows — bgreview)
+            let front = l.id == editor.session.id && crate::reviewer::status_shows(editor, rail_w);
+            if let Some(said) = crate::reviewer::session_said(editor, l).filter(|_| !front) {
+                let said = if said == "reviewing" { " ¶ reviewing" } else { " ¶ waits" };
+                end = put(&mut spans, said.into(), reviewer);
+            }
+            if let Some(r) = rebasing(l) {
+                end = put(&mut spans, r.text, r.style);
+            }
+            // (news while it was behind: files came again from disk — #6, its reviewer ended — #195)
+            if l.news() {
+                end = put(&mut spans, " •".into(), dim);
+            }
+            // (a message typed in its chat, not sent — its input isn't on screen)
+            if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.blank()) {
+                end = put(&mut spans, " unsent".into(), dim);
+            }
+            spots.push((start, end, Spot::Session(l.id)));
         }
-        // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195; the front session's
-        // left to the status line's segment while that shows — bgreview)
-        let front = l.id == editor.session.id && crate::reviewer::status_shows(editor, rail_w);
-        if let Some(said) = crate::reviewer::session_said(editor, l).filter(|_| !front) {
-            let said = if said == "reviewing" { " ¶ reviewing" } else { " ¶ waits" };
-            end = put(&mut spans, said.into(), reviewer);
+        let start = put(&mut spans, " │ ".into(), faint);
+        let end = put(&mut spans, "+".into(), dim);
+        spots.push((start, end, Spot::New));
+        if x <= w {
+            return (spans, spots);
         }
-        if let Some(r) = rebasing(l) {
-            end = put(&mut spans, r.text, r.style);
-        }
-        // (news while it was behind: files came again from disk — #6, its reviewer ended — #195)
-        if l.news() {
-            end = put(&mut spans, " •".into(), dim);
-        }
-        // (a message typed in its chat, not sent — its input isn't on screen)
-        if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.blank()) {
-            end = put(&mut spans, " unsent".into(), dim);
-        }
-        spots.push((start, end, Spot::Session(l.id)));
-    }
-    let start = put(&mut spans, " │ ".into(), faint);
-    let end = put(&mut spans, "+".into(), dim);
-    spots.push((start, end, Spot::New));
-    if x <= w {
-        return (spans, spots);
     }
     // The dropdown
     let at = sessions.iter().position(|l| l.id == editor.session.id).unwrap_or(0) + 1;
@@ -11555,7 +11680,8 @@ fn session_tabs(
     let [waiting, done] = sessions_counted(editor);
     let name = fit_ellipsis(label, w.saturating_sub(fixed(&[waiting.clone(), done.clone()])).max(1));
     // (the arrows dim, not faint — they're what a click steps with)
-    let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: strong }];
+    let own = Style { bold: true, ..colour(editor.session.colour) };
+    let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: own }];
     spans.extend(mark);
     spans.extend(reviewing);
     spans.extend(rebasing);
@@ -12217,7 +12343,10 @@ fn draw_chat(
             t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
         let reviewer = Style { fg: reviewer_style(editor, ui).fg, ..card };
         let (spans, spots) =
-            session_tabs(editor, w, lay.rail_w, [strong, dim, faint, accent, warn, reviewer]);
+            session_tabs(editor, w, lay.rail_w, [dim, faint, accent, warn, reviewer], &|c| Style {
+                fg: ui.participant(c, true),
+                ..card
+            });
         chat_row_start(out, x0, y, edge(y), card)?;
         let used = chat_spans(out, &spans, card, w)?;
         chat_row_end(out, card, lay.chat_w, used)?;
@@ -14868,9 +14997,18 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
         let marked = editor.bring_queue.marks.len();
         let bring = format!("bring the {marked} in turn");
         let marks: &[(&'static str, &str)] = if marked > 0 { &[("B", bring.as_str())] } else { &[] };
+        // (`f`: the row's Claude at work — followed there, `presence.rs`)
+        let working = match p.current().map(|i| &i.action) {
+            Some(Action::Session(id)) => editor
+                .sessions_in_order()
+                .iter()
+                .any(|l| l.id == *id && matches!(editor.doing(l), crate::session::Doing::Working)),
+            _ => false,
+        };
+        let follow: &[(&'static str, &str)] = if working { &[("f", "follow")] } else { &[] };
         let with = |rest: &[(&'static str, &str)]| {
             let (enter, rest) = rest.split_at(1);
-            hints(&[enter, marks, rest].concat())
+            hints(&[enter, follow, marks, rest].concat())
         };
         match p.current().map(|i| &i.action) {
             None => with(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),

@@ -239,6 +239,7 @@ commands! {
         review_wide => "Read wide: hide rail and chat",
         session_new => "New session (its own branch)",
         session_list => "Sessions: switch, end, new",
+        follow_next => "Follow next session at work",
         inbox => "What waits for your answer",
         note_picker => "Claude's notes",
         undo_turn => "Undo Claude's last turn",
@@ -618,6 +619,8 @@ fn goto_line(cx: &mut Context) {
 }
 
 fn scroll_move(cx: &mut Context, dir: Direction, divisor: usize) {
+    // (follow holding the view: yours again first, the key acting from your cursor)
+    crate::follow::your_view(cx.editor);
     let lines = (cx.editor.viewport.0 / divisor).max(1) * cx.count();
     let extend = is_select(cx);
     visual(cx, dir, extend, lines);
@@ -1124,22 +1127,27 @@ fn textobject(cx: &mut Context, ch: char, kind: to::Kind) {
 // ── View (body in viewalign.rs) ──────────────────────────────────────────
 
 fn align_view_center(cx: &mut Context) {
+    crate::follow::your_view(cx.editor);
     cx.editor.align_view(crate::viewalign::Place::Center)
 }
 fn toggle_soft_wrap(cx: &mut Context) {
     cx.editor.soft_wrap_toggle(None)
 }
 fn align_view_top(cx: &mut Context) {
+    crate::follow::your_view(cx.editor);
     cx.editor.align_view(crate::viewalign::Place::Top)
 }
 fn align_view_bottom(cx: &mut Context) {
+    crate::follow::your_view(cx.editor);
     cx.editor.align_view(crate::viewalign::Place::Bottom)
 }
 fn scroll_down(cx: &mut Context) {
+    crate::follow::your_view(cx.editor);
     let (n, extend) = (cx.count() as isize, is_select(cx));
     cx.editor.scroll_view(n, extend)
 }
 fn scroll_up(cx: &mut Context) {
+    crate::follow::your_view(cx.editor);
     let (n, extend) = (cx.count() as isize, is_select(cx));
     cx.editor.scroll_view(-n, extend)
 }
@@ -2050,6 +2058,10 @@ fn session_new(cx: &mut Context) {
 
 fn session_list(cx: &mut Context) {
     cx.editor.session_list();
+}
+
+fn follow_next(cx: &mut Context) {
+    crate::follow::follow_next(cx.editor);
 }
 
 fn inbox(cx: &mut Context) {

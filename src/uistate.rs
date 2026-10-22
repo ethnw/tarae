@@ -988,6 +988,9 @@ pub struct SessionState {
     /// The edits its Claude is writing as their input streams (`writing.rs`) — drawn in their buffers, nothing
     /// applied or decided. Claude's level: its own session's only.
     pub writing: Vec<WritingState>,
+    /// Where its Claude is in its turn, as the session list says it (`presence::at`: `src/a.rs:12 · writing`) —
+    /// None: between turns, or one session open. Claude's level never (collab C1: nothing of it reaches Claude).
+    pub at: Option<String>,
     /// Its panes (panes P2b, plan §5.2): every leaf of its tree, and over the front's the floating ones.
     pub panes: Vec<PaneState>,
 }
@@ -1519,6 +1522,7 @@ impl Editor {
                 _ => Vec::new(),
             },
             writing: crate::writing::listed(l.chat.as_ref(), &self.docs),
+            at: crate::presence::at(self, l.id),
             panes: self.panes_state(l, is_front),
         };
         let mut sessions = vec![session(front, true)];
@@ -1750,6 +1754,9 @@ impl UiState {
                 }
                 if !s.writing.is_empty() {
                     v["writing"] = s.writing.iter().map(WritingState::json).collect();
+                }
+                if let Some(at) = &s.at {
+                    v["at"] = json!(at);
                 }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);

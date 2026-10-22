@@ -59,6 +59,125 @@ const QUOTE_VIEW: &[&str] = &[
     // (no wait on `enter quote`: a build from before quoting takes this one too)
     "@1",
 ];
+/// Claude writing src/main.rs in the checkout tarae started in, you in another checkout of the repository with the
+/// same file at the lines it writes (`presence` scenes).
+macro_rules! presence_keys {
+    ($($more:expr),* $(,)?) => {
+        &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@20?knots\", t.k",
+            "\x1b",
+            // (another checkout beside it, opened as a session — the shot's own folders, not tarae's worktrees')
+            ":",
+            "sh git worktree add -q ../fix",
+            "\r",
+            "@3",
+            ":",
+            "session-open ../fix",
+            "\r",
+            "@3",
+            ":",
+            "e src/main.rs",
+            "\r",
+            "@1",
+            "/",
+            "threads.insert",
+            "\r",
+            "z",
+            "z",
+            "@2",
+            $($more),*
+        ]
+    };
+}
+const PRESENCE: &[&str] = presence_keys!();
+const PRESENCE_LIST: &[&str] = presence_keys!(" ", "W", "@2");
+const PRESENCE_FILES: &[&str] = presence_keys!(" ", "e", "@2");
+const PRESENCE_FOLLOW: &[&str] = presence_keys!(" ", "F", "@2");
+// (a third checkout, idle, then back in fix with its chat open: the strip over it, each session its `●` in its colour,
+// main's `working` and its file, fix in front strong)
+const PRESENCE_STRIP: &[&str] = presence_keys!(
+    ":",
+    "sh git worktree add -q ../docs",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../docs",
+    "\r",
+    "@3",
+    " ",
+    "W",
+    "@1",
+    "2",
+    "@2",
+    " ",
+    "l",
+    "@2"
+);
+/// The main checkout's Claude asking for a run outside the sandbox (its card), you in another checkout: the card waits
+/// behind with main (`presencewaits` scenes).
+macro_rules! waits_keys {
+    ($($more:expr),* $(,)?) => {
+        &[
+            "@1",
+            ":",
+            "sh git worktree add -q ../fix",
+            "\r",
+            "@3",
+            ":",
+            "session-open ../fix",
+            "\r",
+            "@3",
+            // (back in main: its Claude asked, its card up)
+            " ",
+            "W",
+            "@1",
+            "1",
+            "@2",
+            " ",
+            "l",
+            "@1",
+            "run the tests",
+            "\r",
+            "@?Its reason",
+            "@1",
+            "\x1b",
+            // (into fix: main's card waits behind)
+            " ",
+            "W",
+            "@1",
+            "2",
+            "@2",
+            $($more),*
+        ]
+    };
+}
+// (fix's chat open: the strip over it — main's `▲ waits` in warning, each name in its colour)
+const PRESENCE_WAITS: &[&str] = waits_keys!(" ", "l", "@2");
+// (…the list: main's `▲ waits for you` in warning, each name in its colour)
+const PRESENCE_WAITS_LIST: &[&str] = waits_keys!(" ", "W", "@2");
+// (your cursor at the top, then this checkout's own Claude asked too: two Claudes writing one file — fix's caret and rows
+// in its colour at full strength, followed, main's mark and tag in its own, dim; the view on fix's writing, your
+// cursor left on line 1)
+const PRESENCE_TWO: &[&str] = presence_keys!(
+    "g",
+    "g",
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@20?knots\", t.k",
+    "\x1b",
+    "\x1b",
+    "@2"
+);
+
 const QUOTE_CHIP: &[&str] = &[
     "@1",
     " ",
@@ -1163,6 +1282,22 @@ const SCENES: &[Scene] = &[
             "@2",
         ],
     },
+    // (collab C1: the main checkout's Claude writing src/main.rs while you read the same file in another checkout
+    // — its lines marked there, its name tag at the first)
+    Scene { name: "presence", claude: "writemid", files: MAIN, keys: PRESENCE },
+    // (…the list says where each session is)
+    Scene { name: "presencelist", claude: "writemid", files: MAIN, keys: PRESENCE_LIST },
+    // (…the file tree marks the file another session is in)
+    Scene { name: "presencefiles", claude: "writemid", files: MAIN, keys: PRESENCE_FILES },
+    // (…`space F`: following the next session at work takes you into its checkout, `● follow <name>`)
+    Scene { name: "presencefollow", claude: "writemid", files: MAIN, keys: PRESENCE_FOLLOW },
+    // (…the sessions' strip over a chat: every session its `●` in its colour, whatever it does)
+    Scene { name: "presencestrip", claude: "writemid", files: MAIN, keys: PRESENCE_STRIP },
+    // (…a session waiting on you behind — its card parked: the strip and the list say it in warning)
+    Scene { name: "presencewaits", claude: "card", files: MAIN, keys: PRESENCE_WAITS },
+    Scene { name: "presencewaitslist", claude: "card", files: MAIN, keys: PRESENCE_WAITS_LIST },
+    // (…two Claudes writing one file in two checkouts, each its colour; follow holds the view, your cursor elsewhere)
+    Scene { name: "presencetwo", claude: "writemid", files: MAIN, keys: PRESENCE_TWO },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))

@@ -593,6 +593,60 @@ mod tests {
         }
     }
 
+    /// The participants' colours (`ui.participant.1` … `.6`, collab C1 — the user 2026-10-22): each clears its floor on
+    /// what it's drawn on — a name tag's 4.5 on the code's ground and the cursor line, a caret's 3 on the wash of the
+    /// row Claude writes (`term::draw_text`: diff's green over the ground, its strongest) — and every pair stands apart:
+    /// the six from each other, and each from the accent and diff's green and red (CIE76 ΔE ≥ 15), so a colour is
+    /// who it is, never what changed nor where the keys are.
+    #[test]
+    fn every_pair_clears_its_floor() {
+        use crate::chrome::contrast;
+        let rgb = |c: Option<Color>| match c {
+            Some(Color::Rgb { r, g, b }) => [r, g, b],
+            other => panic!("a built-in theme's colour is a true colour: {other:?}"),
+        };
+        let mix = |a: [u8; 3], b: [u8; 3], t: f64| -> [u8; 3] {
+            std::array::from_fn(|i| (a[i] as f64 * t + b[i] as f64 * (1.0 - t)).round() as u8)
+        };
+        let mut low = Vec::new();
+        for name in ["meok", "hanji"] {
+            let t = load(name).unwrap();
+            let ground = rgb(t.get("ui.background").bg);
+            let grounds = [
+                ("ground", ground, 4.5),
+                ("cursor line", rgb(t.get("ui.cursorline.primary").bg), 4.5),
+                ("writing wash", mix(rgb(t.get("diff.plus").fg), ground, 0.18), 3.0),
+            ];
+            let ps: Vec<(String, Option<Color>)> = (1..=crate::session::COLOURS)
+                .map(|i| format!("ui.participant.{i}"))
+                .map(|k| (k.clone(), t.get(&k).fg))
+                .collect();
+            for (k, c) in &ps {
+                for (g, bg, floor) in grounds {
+                    let r = contrast(rgb(*c), bg);
+                    if r < floor {
+                        low.push(format!("{name}: {k} on the {g} {r:.2} (floor {floor})"));
+                    }
+                }
+                for other in ["ui.accent", "diff.plus", "diff.minus"] {
+                    let de = delta_e(*c, t.get(other).fg);
+                    if de < 15.0 {
+                        low.push(format!("{name}: {k} is ΔE {de:.1} from {other} (floor 15)"));
+                    }
+                }
+            }
+            for (i, (a, ca)) in ps.iter().enumerate() {
+                for (b, cb) in &ps[i + 1..] {
+                    let de = delta_e(*ca, *cb);
+                    if de < 15.0 {
+                        low.push(format!("{name}: {a} is ΔE {de:.1} from {b} (floor 15)"));
+                    }
+                }
+            }
+        }
+        assert!(low.is_empty(), "under their floors:\n{}", low.join("\n"));
+    }
+
     /// meok and hanji have one set of keys, their palettes apart — change one, change the other.
     #[test]
     fn builtin_themes_have_the_same_keys() {

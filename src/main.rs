@@ -119,6 +119,7 @@ mod picker;
 mod plan;
 mod plugin;
 mod preflight;
+mod presence;
 mod procs;
 mod pty;
 mod queued;

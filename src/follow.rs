@@ -19,7 +19,9 @@
 //! - Files follow opened are previews: unedited ones close when it moves on (they stay once the turn ends).
 //!   Only files in the project (`in_project`): what Claude reads elsewhere (its memory, a temp file) shows on
 //!   the card but is never opened, nor put in the list.
-//! - The user wins: moving the cursor or switching files in the editor pauses following — a key, a click
+//! - Follow moves the view, never your cursor (collab C1, the user 2026-10-22): it keeps Claude's place in sight
+//!   (`led` → `view_line` → `term::scroll_to`), your cursor where you left it, in sight or not.
+//! - The user wins: moving the cursor or the view, or switching files in the editor pauses following — a key, a click
 //!   or a paste did it (a reload moving the cursor isn't you; switching sessions isn't either). It follows
 //!   again after `llm.follow-resume` seconds without one while Claude still works, on `C-f`, or with the
 //!   next question. `C-o` goes back to where you were before the turn (one jump point per turn).
@@ -103,8 +105,12 @@ pub struct Follow {
     jumped: bool,
     /// Documents follow opened this turn (closed when it moves on, unless edited).
     previews: Vec<DocId>,
-    /// Where follow last put the cursor — anything else means the user moved.
-    placed: Option<(DocId, usize, usize)>,
+    /// The line follow keeps in sight in a document (collab C1, the user 2026-10-22: follow moves the view, never your
+    /// cursor) — the frame scrolls to it instead of to the cursor while follow leads (`view_line`); kept past the
+    /// turn's end until a key of yours or the next question (`new_turn`).
+    led: Option<(DocId, usize)>,
+    /// Where the cursor was at the last event (a key of yours that moved it pauses follow).
+    seen_cursor: Option<(DocId, usize, usize)>,
     /// A big file follow opened is still loading — the cursor lands when its text is there.
     awaiting: Option<DocId>,
     /// How far the words of this turn were read for places: (message index, byte).
@@ -146,10 +152,11 @@ impl Follow {
     pub fn new_turn(&mut self) {
         self.paused = false;
         self.gaze = None;
+        // (the last turn's line isn't this one's: the view stays where it is until Claude goes somewhere)
+        self.led = None;
         self.calls.clear();
         self.jumped = false;
         self.previews.clear();
-        self.placed = None;
         self.awaiting = None;
         self.scanned = (0, 0);
         self.wanted = None;
@@ -195,7 +202,7 @@ fn follow(ed: &mut Editor) -> Option<&mut Follow> {
     ed.session.chat.as_mut().map(|c| &mut c.follow)
 }
 
-/// Where the cursor is (document, selection) — compared with `placed`.
+/// Where the cursor is (document, selection) — compared with `seen_cursor`.
 fn cursor_key(ed: &Editor) -> (DocId, usize, usize) {
     let r = ed.doc().selection().primary();
     (ed.doc().id, r.anchor, r.head)
@@ -265,7 +272,7 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
 /// Claude is writing an edit over `lines` of `path` (`writing.rs`): already in sight in the code, the screen holds
 /// still; else the editor there, as for a stop — the file opened for it if it isn't — and the next frame puts its
 /// rows where the review will show them (`term::review_lead`: it opens with them where they are, when there's room
-/// above for its title), its head then kept in sight as it's written (`term::scroll_to_cursor`). A jump within PACE
+/// above for its title), its head then kept in sight as it's written (`term::scroll_to`). A jump within PACE
 /// of the last one waits (`writing_due`): the view moves at most that often. Either way the cursor goes to the line
 /// it rewrites at once (`writing_at`).
 pub fn writing(ed: &mut Editor, path: &Path, lines: Range<usize>) {
@@ -283,9 +290,9 @@ pub fn writing(ed: &mut Editor, path: &Path, lines: Range<usize>) {
         return;
     }
     f.jump_wait = None;
-    let before = cursor_key(ed);
+    let before = view_key(ed);
     go_range(ed, path, lines);
-    if cursor_key(ed) != before
+    if view_key(ed) != before
         && let Some(f) = follow(ed)
     {
         f.block_jump = Some(crate::clock::now());
@@ -318,10 +325,10 @@ pub fn writing_due(ed: &mut Editor) {
 }
 
 /// Claude writes over `lines` of the document in front, rewriting line `place` (`writing::Block::place`: the first
-/// it takes out, else the line its new rows stand on): follow puts the cursor there at once — never paced, and
-/// where the change's first line will be once it lands; the cursor on the block keeps the row being written in sight
-/// (`term::scroll_to_cursor`), its caret riding that row's end (`term::draw_text`). `past`: that row went past what's
-/// in sight with the cursor elsewhere — the editor onto the block first, as for a stop.
+/// it takes out, else the line its new rows stand on): follow keeps that line in sight from now on (`led`) — never
+/// paced — so the row being written stays on screen as it comes (`term::scroll_to`), its caret riding that row's end
+/// (`term::draw_text`); your cursor stays where it is. `past`: that row went past what's in sight — the editor onto
+/// the block first, as for a stop.
 pub fn writing_at(ed: &mut Editor, path: &Path, lines: Range<usize>, place: usize, past: bool) {
     if past {
         go_range(ed, path, lines);
@@ -329,24 +336,50 @@ pub fn writing_at(ed: &mut Editor, path: &Path, lines: Range<usize>, place: usiz
     let Some(f) = ed.session.chat.as_ref().map(|c| &c.follow) else { return };
     let doc = ed.doc();
     let line = place.min(crate::movement::last_line(&doc.text));
-    // (a block's jump waits for PACE: the cursor goes with it — moved now, the frame would scroll to it)
+    // (a block's jump waits for PACE: the view goes with it)
     if f.jump_wait.is_some()
         || !f.active()
         || ed.background()
         || !free(ed)
         || doc.loading
         || doc.path.as_deref() != Some(path)
-        || ed.cursor_line() == line
     {
         return;
     }
-    let doc = ed.doc_mut();
-    doc.set_selection(Selection::point(crate::movement::line_start(&doc.text, line)));
-    let placed = cursor_key(ed);
-    let text = (ed.doc().id, ed.doc().version());
+    let id = doc.id;
     if let Some(f) = follow(ed) {
-        f.placed = Some(placed);
-        f.seen_text = Some(text);
+        f.led = Some((id, line));
+    }
+}
+
+/// The view's place: the document in front and its top line.
+fn view_key(ed: &Editor) -> (DocId, usize) {
+    (ed.doc().id, ed.doc().top)
+}
+
+/// The line the frame keeps in sight instead of the cursor (`term::render_frame`): while follow leads the document
+/// in front — on, not paused, the view it took (`led`) there. None: the cursor's, as ever.
+pub fn view_line(ed: &Editor) -> Option<usize> {
+    let f = &ed.session.chat.as_ref()?.follow;
+    let (id, line) = f.led?;
+    let doc = ed.doc();
+    (f.active() && !ed.background() && id == doc.id && !doc.loading)
+        .then(|| line.min(crate::movement::last_line(&doc.text)))
+}
+
+/// A key of yours that moves the view (`C-e`/`C-y`, the pages, `z…`, the wheel) while follow holds it: follow pauses,
+/// said, and the view comes back to your cursor first — the key acts from there, at your cursor.
+pub fn your_view(ed: &mut Editor) {
+    if view_line(ed).is_none() {
+        return;
+    }
+    if let Some(f) = follow(ed) {
+        f.paused = true;
+    }
+    let line = ed.cursor_line();
+    ed.show_range(line..line + 1);
+    if ed.session.chat.as_ref().is_some_and(crate::chat::Chat::busy) {
+        ed.set_status("you took over — C-f follows Claude again");
     }
 }
 
@@ -361,27 +394,22 @@ pub fn free(ed: &Editor) -> bool {
         && ed.on_next_char.is_none()
 }
 
-/// Follow is leading the cursor: on, not paused, a turn under way, the cursor where follow put it and nothing of
-/// yours under way — the status line says `● follow`, and with the keys elsewhere the code marks Claude's place.
+/// Follow is leading the view: on, not paused, a turn under way, the view held where Claude is and nothing of yours
+/// under way — the status line says `● follow`, and the code marks Claude's place.
 pub fn leads(ed: &Editor) -> bool {
     let Some(c) = ed.session.chat.as_ref() else { return false };
-    c.busy()
-        && c.follow.active()
-        && !ed.background()
-        && ed.session.review.is_none()
-        && c.follow.placed == Some(cursor_key(ed))
-        && free(ed)
+    c.busy() && ed.session.review.is_none() && view_line(ed).is_some() && free(ed)
 }
 
-/// The line of `doc` marked as Claude's place while the keys are elsewhere (`codeview::Shows.claude`): where follow
-/// led the cursor — none while an edit is written there (its head's row carries the mark).
+/// The line of `doc` marked as Claude's place (`codeview::Shows.claude`): the one follow keeps in sight — none while
+/// an edit is written there (its head's row carries the caret).
 pub fn place(ed: &Editor, doc: &crate::document::Document) -> Option<usize> {
     let writing = crate::writing::shown(doc).is_some_and(|s| s.blocks.iter().any(|b| b.head.is_some()));
-    (doc.id == ed.doc().id && !writing && leads(ed)).then(|| ed.cursor_line())
+    (doc.id == ed.doc().id && !writing && leads(ed)).then(|| view_line(ed)).flatten()
 }
 
-/// tarae's `edit` landed in `path` — unseen, or through its review (`refactor.rs`): the editor at its first changed
-/// line, as an Edit is once written (`landed`) — while following.
+/// tarae's `edit` landed in `path` — unseen, or through its review (`refactor.rs`): the view on its first changed
+/// line, as an Edit is once written (`landed`) — while following; the selection the review left stays yours.
 pub fn wrote(ed: &mut Editor, path: &Path, before: &ropey::Rope, after: &ropey::Rope) {
     if !ed.session.chat.as_ref().is_some_and(|c| c.follow.active())
         || ed.background()
@@ -389,18 +417,6 @@ pub fn wrote(ed: &mut Editor, path: &Path, before: &ropey::Rope, after: &ropey::
         || !in_project(ed, path)
     {
         return;
-    }
-    // (its review leaves the change it took selected: follow's place now, not something of yours under way — so it
-    // goes only once follow will move, in normal mode with nothing pending)
-    if ed.mode == crate::editor::Mode::Normal
-        && ed.pending.is_empty()
-        && ed.count.is_none()
-        && ed.on_next_char.is_none()
-        && ed.doc().path.as_deref() == Some(path)
-    {
-        let doc = ed.doc_mut();
-        let at = doc.selection().primary().from();
-        doc.set_selection(Selection::point(at));
     }
     let line = first_difference(before, after);
     go_range(ed, path, line..line + 1);
@@ -453,13 +469,16 @@ pub fn before_edit(ed: &mut Editor, real: PathBuf, before: Option<String>) {
     }
 }
 
-/// The walk-through's stop the cursor is on (its file, lines and why) — `space n` there asks about it.
+/// The walk-through's stop the cursor is on, or the view while follow holds it (its file, lines and why) — `space n`
+/// there asks about it.
 pub fn stop_here(ed: &Editor) -> Option<(PathBuf, Range<usize>, String)> {
     let g = ed.session.chat.as_ref()?.follow.gaze.as_ref()?;
     let (path, lines, why) = (g.path.as_ref()?, g.lines.clone()?, g.why.clone()?);
     g.step?;
     let doc = ed.doc();
-    let line = doc.text.byte_to_line(doc.selection().primary().cursor(&doc.text));
+    // (follow holding the view: the stop on screen is where it holds it — your cursor is elsewhere)
+    let line =
+        view_line(ed).unwrap_or_else(|| doc.text.byte_to_line(doc.selection().primary().cursor(&doc.text)));
     (doc.path.as_ref() == Some(path) && lines.contains(&line)).then(|| (path.clone(), lines, why))
 }
 
@@ -470,7 +489,6 @@ pub fn hold(ed: &mut Editor) {
         && f.touring()
     {
         f.paused = true;
-        f.placed = None;
     }
 }
 
@@ -746,9 +764,7 @@ pub fn session_in(ed: &mut Editor) {
     let input = ed.person_seq;
     let Some(f) = follow(ed) else { return };
     f.seen_input = input;
-    if f.placed.is_some() {
-        f.placed = Some(now);
-    }
+    f.seen_cursor = Some(now);
     let target = f
         .active()
         .then(|| f.gaze.as_ref().and_then(|g| Some((g.path.clone()?, g.lines.clone().unwrap_or(0..1)))))
@@ -1117,9 +1133,9 @@ pub fn reading(ed: &mut Editor) -> bool {
         f.playing = None;
         f.gaze = None;
     }
-    let before = cursor_key(ed);
+    let before = view_key(ed);
     go(ed, &link.path, link.line);
-    cursor_key(ed) != before
+    view_key(ed) != before
 }
 
 /// The list a walk-through leaves.
@@ -1137,8 +1153,8 @@ fn go(ed: &mut Editor, path: &Path, line: usize) {
     go_range(ed, path, line..line + 1);
 }
 
-/// Moves the editor to `lines` of `path`, the cursor on the first, the range placed as a whole
-/// (`Editor::show_range`) — when following and the user hasn't taken over, in the project only.
+/// Moves the view to `lines` of `path`, the range placed as a whole (`Editor::show_range`) and its first line kept in
+/// sight (`led`) — your cursor stays where it is — when following and the user hasn't taken over, in the project only.
 fn go_range(ed: &mut Editor, path: &Path, lines: Range<usize>) {
     // (a session behind keeps its trail; the editor in front is someone else's)
     if ed.background()
@@ -1169,21 +1185,18 @@ fn go_range(ed: &mut Editor, path: &Path, lines: Range<usize>) {
     if !already && aside {
         ed.doc_mut().aside = true;
     }
-    // A big file loads in the background: the spot is applied when its text arrives (`watch` then settles)
+    // A big file loads in the background: the frame takes the line into sight once its text arrives (`view_line`)
     let loading = ed.doc().loading;
-    if loading {
-        ed.goto_after_load = Some((here, line, 0));
-    } else {
-        let doc = ed.doc_mut();
-        let line = line.min(crate::movement::last_line(&doc.text));
-        doc.set_selection(Selection::point(crate::movement::line_start(&doc.text, line)));
+    if !loading {
         ed.show_range(lines);
     }
-    let placed = cursor_key(ed);
+    // (another document in front isn't you moving: where its cursor is counts as seen)
+    let now = cursor_key(ed);
     let text = (ed.doc().id, ed.doc().version());
     let Some(f) = follow(ed) else { return };
     f.jumped = true;
-    f.placed = (!loading).then_some(placed);
+    f.led = Some((here, line));
+    f.seen_cursor = Some(now);
     f.seen_text = Some(text);
     f.awaiting = loading.then_some(here);
     // Previews it opened before and nobody edited go away
@@ -1209,21 +1222,21 @@ pub fn watch(ed: &mut Editor) {
     // (the person's: a shuttle moving the cursor isn't you taking over — `shuttle.rs`)
     let input_seq = ed.person_seq;
     sync_shown(ed);
-    // Waiting for a big file: once loaded (the editor put the cursor there), that's where follow is
+    // Waiting for a big file: once loaded, the frame takes follow's line into sight (`view_line`)
     if let Some(id) = ed.session.chat.as_ref().and_then(|c| c.follow.awaiting) {
         let loaded = ed.docs.iter().any(|d| d.id == id && !d.loading);
         let gone = !ed.docs.iter().any(|d| d.id == id);
-        if let Some(f) = follow(ed)
-            && (loaded || gone)
-        {
-            f.awaiting = None;
-            f.placed = (loaded && now.0 == id).then_some(now);
-        }
         if let Some(f) = follow(ed) {
+            if loaded || gone {
+                f.awaiting = None;
+            }
             f.seen_text = Some(text);
+            f.seen_cursor = Some(now);
         }
         return;
     }
+    // (an edit's review had the keys, now or at the last event: its answers move the cursor and change the text —
+    // not you taking over)
     // (a key of yours in the code that leaves INSERT or SELECT is you taking over, though the cursor stays. A key
     // sequence under way — `g`…, a count, `space`, `C-w` — isn't yet: follow only holds the cursor still meanwhile
     // (`free`), and the sequence's end decides — a move or an edit pauses, a hop to the chat or a picker doesn't)
@@ -1235,24 +1248,16 @@ pub fn watch(ed: &mut Editor) {
     // (the text in front changed since: by a key of yours in the code, it's you editing there)
     let seen = f.seen_text.replace(text);
     let edited = in_code && seen.is_some_and(|s| s.0 == text.0 && s.1 != text.1);
+    // (the cursor moved since: follow never moves it, so with a key, a click or a paste of yours it's you — an edit's
+    // review moving it counts as seen as it shows and closes, `settle`)
+    let moved = f.seen_cursor.replace(now).is_some_and(|s| s != now);
     // You moving away from a replay's stop ends its showing (where it is in the replay stays)
     if input && f.replaying.is_some() && f.replay_placed.is_some_and(|p| p != now) {
         f.replaying = None;
         f.replay_placed = None;
     }
-    if let Some(p) = f.placed
-        && p != now
-    {
-        if !input {
-            f.placed = Some(now);
-        } else if f.active() {
-            f.paused = true;
-            f.placed = None;
-        }
-    }
-    if input && (under_way || edited && f.placed.is_some()) && f.active() {
+    if input && f.active() && (under_way || moved || edited) {
         f.paused = true;
-        f.placed = None;
     }
     let paused = was && f.paused;
     if input && f.paused {
@@ -1370,7 +1375,6 @@ pub fn replay_step(ed: &mut Editor, forward: bool) {
             f.replay_placed = None;
             if busy && f.on {
                 f.paused = false;
-                f.placed = None;
                 let target =
                     f.gaze.as_ref().and_then(|g| Some((g.path.clone()?, g.lines.clone().unwrap_or(0..1))));
                 ed.set_status("the newest stop — following Claude again");
@@ -1415,7 +1419,6 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
     // Looking back while Claude works holds follow (it takes over again a quiet while after your last key)
     if busy && f.active() {
         f.paused = true;
-        f.placed = None;
     }
     if f.paused {
         f.last_input = Some(crate::clock::now());
@@ -1470,14 +1473,14 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
     arm_resume(ed);
 }
 
-/// Where the cursor is now counts as follow's (a review of Claude's edit moved it — not the user).
+/// Where the cursor is now isn't you moving (a review of Claude's edit moved it — not the user).
 pub fn settle(ed: &mut Editor) {
     let now = cursor_key(ed);
     let text = (ed.doc().id, ed.doc().version());
     if let Some(f) = follow(ed)
         && f.active()
     {
-        f.placed = Some(now);
+        f.seen_cursor = Some(now);
         // (and the text it left: the change it applied isn't an edit of yours — `watch`)
         f.seen_text = Some(text);
     }
@@ -1486,23 +1489,60 @@ pub fn settle(ed: &mut Editor) {
 /// `C-f`: off → on · paused → following again · on → off. Turning it on goes to the current gaze.
 pub fn toggle(ed: &mut Editor) {
     let Some(f) = follow(ed) else { return };
-    let resume = !f.active();
-    if resume {
-        f.on = true;
-        f.paused = false;
-    } else {
+    if f.active() {
         f.on = false;
+        return ed.set_status("follow off");
     }
+    resume(ed);
+    ed.set_status("following Claude — move in the editor to take over");
+}
+
+/// Follow on and leading again, the editor where Claude is now.
+fn resume(ed: &mut Editor) {
+    let Some(f) = follow(ed) else { return };
+    f.on = true;
+    f.paused = false;
     let target =
         f.gaze.as_ref().and_then(|g| Some((g.path.clone()?, g.lines.as_ref().map_or(0, |l| l.start))));
-    if resume {
-        ed.set_status("following Claude — move in the editor to take over");
-        if let Some((path, line)) = target {
-            go(ed, &path, line);
+    if let Some((path, line)) = target {
+        go(ed, &path, line);
+    }
+    play(ed);
+}
+
+/// Follow session `id` (collab C1 — one session at a time: the one whose workspace you're in): into its workspace when
+/// it's another (your session moves there), its follow on and leading — a click on its name tag, `f` on its row in the
+/// list, `space F`. The first key of yours stops it there, as ever (`watch`); `C-f` in its chat follows again.
+pub fn follow_session(ed: &mut Editor, id: crate::event::SessionId) {
+    if id != ed.session.id && !ed.session_switch(id) {
+        return ed.set_status("that session is gone");
+    }
+    let name = ed.session.label().to_string();
+    if ed.session.chat.is_none() {
+        return ed.set_status(format!("{name} has no Claude to follow"));
+    }
+    resume(ed);
+    ed.set_status(format!("following {name} — move in the editor to take over"));
+}
+
+/// `space F`: follow the next session at work after the one in front (Zed's "follow next collaborator") — the one in
+/// front too, last, when it's the only one at work and you aren't following it.
+pub fn follow_next(ed: &mut Editor) {
+    let order: Vec<(crate::event::SessionId, bool)> = ed
+        .sessions_in_order()
+        .iter()
+        .map(|l| (l.id, matches!(ed.doing(l), crate::session::Doing::Working)))
+        .collect();
+    let at = order.iter().position(|(id, _)| *id == ed.session.id).unwrap_or(0);
+    let next = (1..=order.len()).map(|k| order[(at + k) % order.len()]).find(|&(id, working)| {
+        working && (id != ed.session.id || !crate::presence::followed(ed).is_some_and(|f| f == id))
+    });
+    match next {
+        Some((id, _)) => follow_session(ed, id),
+        None if order.iter().any(|(_, w)| *w) => {
+            ed.set_status(format!("already following {} — no other session is at work", ed.session.label()))
         }
-        play(ed);
-    } else {
-        ed.set_status("follow off");
+        None => ed.set_status("no session is at work"),
     }
 }
 

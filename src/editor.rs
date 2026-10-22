@@ -448,6 +448,8 @@ pub struct Editor {
     /// a session behind is being applied (`with_session` — what would take the screen waits in that session).
     pub sessions: Vec<crate::session::Session>,
     pub(crate) next_session: crate::event::SessionId,
+    /// Where every session is reading and writing, and what draws it in other checkouts (`presence.rs`).
+    pub presence: crate::presence::State,
     pub(crate) behind: bool,
     pub(crate) next_pane: crate::split::PaneId,
     pub mode: Mode,
@@ -860,6 +862,7 @@ impl Editor {
             session: crate::session::Session::new(0, root, 1),
             sessions: Vec::new(),
             next_session: 0,
+            presence: Default::default(),
             behind: false,
             next_pane: 1 + crate::pane::IDS,
             mode: Mode::Normal,
@@ -2066,6 +2069,7 @@ impl Editor {
         self.recovery_sync();
         self.saves_due(false);
         crate::follow::watch(self);
+        crate::presence::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);
@@ -2631,11 +2635,13 @@ impl Editor {
         if matches!(m.kind, K::Down | K::ScrollUp | K::ScrollDown) {
             self.focus_view(pid);
         }
-        // Scrolling the code yourself takes over from follow mode (clicks do too, via the cursor)
-        if matches!(m.kind, K::ScrollUp | K::ScrollDown)
-            && let Some(c) = self.session.chat.as_mut().filter(|c| c.follow.active() && c.busy())
-        {
-            c.follow.paused = true;
+        // Scrolling the code yourself takes over from follow mode — the view back at your cursor first, the wheel
+        // acting from there (clicks take over too, via the cursor)
+        if matches!(m.kind, K::ScrollUp | K::ScrollDown) {
+            crate::follow::your_view(self);
+            if let Some(c) = self.session.chat.as_mut().filter(|c| c.follow.active() && c.busy()) {
+                c.follow.paused = true;
+            }
         }
         if pid != self.session.focus {
             return;
@@ -5650,6 +5656,11 @@ mod tests {
         ed.doc().text.byte_to_line(ed.doc().selection().primary().cursor(&ed.doc().text))
     }
 
+    /// The line follow keeps in sight (collab C1: follow moves the view, never your cursor) — `usize::MAX` none.
+    fn led_line(ed: &Editor) -> usize {
+        crate::follow::view_line(ed).unwrap_or(usize::MAX)
+    }
+
     /// Follow stays in the project: a file Claude reads outside it (its memory, a temp file) isn't opened —
     /// the editor stays where it was, the card still says what it reads — and a place outside named in the
     /// answer doesn't go into the list. Inside, one pane is reused: the panes stay as they were (U5 said
@@ -5739,7 +5750,8 @@ mod tests {
         assert!(c.msgs.iter().any(|m| m.role == crate::chat::Role::Thought && m.text.contains("helpers")));
         assert!(c.follow.gaze.is_none(), "the gaze ends with the turn");
         assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "at the answer's reference");
-        assert_eq!(cursor_line(&ed), 4);
+        assert_eq!(led_line(&ed), 4, "the view held there");
+        assert_eq!(cursor_line(&ed), 0, "your cursor never led");
         assert!(!ed.docs.iter().any(|d| d.path.as_deref() == Some(util.as_path())), "the preview closed");
         assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
         feed(&mut ed, "<esc><esc><C-o>");
@@ -5782,13 +5794,9 @@ mod tests {
         settle_until(&mut ed, |ed| {
             ed.session.chat.as_ref().unwrap().follow.gaze.as_ref().is_some_and(|g| g.lines == Some(1..4))
         });
-        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 1));
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(lib.as_path()), 1));
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
-        assert_eq!(
-            (ed.doc().path.as_deref(), cursor_line(&ed)),
-            (Some(lib.as_path()), 1),
-            "the answer's first"
-        );
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(lib.as_path()), 1), "the answer's first");
         if rust {
             settle_until(&mut ed, |ed| ed.session.qlist.is_some());
             let list = ed.session.qlist.as_ref().unwrap();
@@ -5834,10 +5842,10 @@ mod tests {
         // The list it leaves says itself only once the tour is over (its card has the screen till then)
         let said = |ed: &Editor| ed.status.as_ref().is_some_and(|(m, _)| m.contains("in the list"));
         assert!(!said(&ed), "{:?}", ed.status);
-        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(main.as_path()), 0));
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(main.as_path()), 0));
         settle_until(&mut ed, |ed| showing(ed).is_some_and(|s| s.1.0 == 3));
         assert_eq!(
-            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (ed.doc().path.as_deref(), led_line(&ed)),
             (Some(lib.as_path()), 7),
             "never lib:1 (a mention)"
         );
@@ -5927,18 +5935,24 @@ mod tests {
             let c = ed.session.chat.as_ref().unwrap();
             !c.busy() && !c.follow.touring() && c.follow.gaze.as_ref().is_some_and(|g| g.step == Some((2, 2)))
         });
-        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 7));
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(lib.as_path()), 7));
         assert!(crate::follow::stop_here(&ed).is_some(), "the stop is here");
         let said =
             ed.status.as_ref().is_some_and(|(m, _)| m.contains("Claude's walk-through: 2 in the list"));
         assert!(said, "the tour over, the list says itself: {:?}", ed.status);
-        // The stop's card stays while the cursor is in it (the tour is over) — and goes when it leaves
+        // The stop's card stays while the view is on it (the tour is over: follow keeps it in sight, your cursor
+        // elsewhere) or your cursor is in it — and goes when your cursor leaves
         let card = |ed: &mut Editor| {
             crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
             ed.screen.thought_card.get().is_some()
         };
         assert!(card(&mut ed), "the stop's card stays");
-        feed(&mut ed, "<esc><esc>gg");
+        feed(&mut ed, "<esc><esc>8G");
+        // (as the loop sees each key: follow's look after it — `follow::watch`)
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(card(&mut ed), "your cursor at the stop");
+        assert!(!ed.session.chat.as_ref().unwrap().follow.active(), "your move took over");
+        feed(&mut ed, "gg");
         assert!(!card(&mut ed), "gone once the cursor leaves");
         feed(&mut ed, "8G");
         assert!(card(&mut ed), "back at the stop");
@@ -6025,7 +6039,7 @@ mod tests {
             "a quiet while after the last key"
         );
         assert_eq!(
-            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (ed.doc().path.as_deref(), led_line(&ed)),
             (Some(util.as_path()), 0),
             "back where Claude is — its next read is still held"
         );
@@ -6058,14 +6072,48 @@ mod tests {
         );
         feed(&mut ed, "<space>lwhere?<ret><esc>");
         settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(util.as_path()));
-        assert_eq!(cursor_line(&ed), 3);
-        // The file changes on disk (a line on top): the reload moves the cursor a line down
+        assert_eq!(
+            (led_line(&ed), cursor_line(&ed)),
+            (3, 0),
+            "the view on the read, your cursor where it was"
+        );
+        // The file changes on disk (a line on top), and the cursor moves with no key of yours
         std::fs::write(&util, &grown).unwrap();
         ed.disk_take(&util, &ropey::Rope::from_str(&grown), crate::disk::stamp(&util));
-        assert_eq!(cursor_line(&ed), 4, "the reload kept the cursor on its line");
+        ed.doc_mut().set_selection(crate::selection::Selection::point(5));
+        ed.handle_event(crate::event::Event::Resize);
+        assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "a cursor moved with no key isn't you");
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(!ed.session.chat.as_ref().unwrap().follow.paused, "not the user");
         assert_eq!(ed.doc().path.as_deref(), Some(lib.as_path()), "followed on");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The line follow held in the last turn isn't the next question's: asked again, the view stays where it is (no
+    /// scroll back to the last turn's line) until Claude reads somewhere.
+    #[test]
+    fn the_next_question_doesnt_take_the_view_back_to_the_last_turns_line() {
+        use serde_json::json;
+        let (dir, _, util, _) = follow_project("twice");
+        let read = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": util, "offset": 4, "limit": 2}}]}});
+        let mut ed = editor("");
+        ed.open(&util).unwrap();
+        fake_claude_stream(
+            &mut ed,
+            &[json!("sleep 0.3"), read, json!("sleep 0.3"), json!({"type": "result", "result": "done"})],
+        );
+        feed(&mut ed, "<space>lwhere?<ret>");
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
+        assert_eq!(
+            (led_line(&ed), cursor_line(&ed)),
+            (3, 0),
+            "the view held on the read past the turn's end"
+        );
+        feed(&mut ed, "again?<ret>");
+        assert!(ed.session.chat.as_ref().unwrap().busy());
+        assert_eq!(led_line(&ed), usize::MAX, "the new question: no line held yet");
+        settle_until(&mut ed, |ed| led_line(ed) == 3);
+        settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6207,7 +6255,7 @@ mod tests {
         assert!(back.elapsed() >= std::time::Duration::from_millis(95), "a quiet while after coming back");
         assert!(ed.session.chat.as_ref().unwrap().busy(), "taken over while Claude still works");
         assert_eq!(
-            (ed.doc().path.as_deref(), cursor_line(&ed)),
+            (ed.doc().path.as_deref(), led_line(&ed)),
             (Some(util.as_path()), 0),
             "back where Claude is"
         );
@@ -6287,7 +6335,7 @@ mod tests {
                 .as_ref()
                 .and_then(|c| c.follow.gaze.as_ref())
                 .map_or(String::new(), |g| format!("{} {} {}", g.look.verb, g.look.what, g.look.range));
-            (d.path.clone(), cursor_line(ed), shown, card)
+            (d.path.clone(), led_line(ed), shown, card)
         };
         let mut seen: Vec<Seen> = Vec::new();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -6550,8 +6598,8 @@ mod tests {
         assert!(answer.contains("failed (exit 101)") && answer.contains("tests::adds"), "{answer}");
         assert!(answer.contains("FAILED tests::adds at ") && answer.contains("src/lib.rs:11"), "{answer}");
         assert!(answer.contains("left: 0") && answer.contains("right: 4"), "the why: {answer}");
-        // The editor went to the failure, the card saying why
-        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 10));
+        // The view went to the failure, the card saying why
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(lib.as_path()), 10));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6965,8 +7013,8 @@ mod tests {
         assert!(ed.session.qlist.as_ref().is_some_and(|l| l.items.len() == 1), "and they are");
         assert!(answer.contains("Output:") && answer.contains("compiling calc"), "{answer}");
         assert!(!answer.contains("isError"), "{answer}");
-        // The editor went to the error (the row's ending is `chat.rs`'s test: this claude sends no result)
-        assert_eq!((ed.doc().path.as_deref(), cursor_line(&ed)), (Some(lib.as_path()), 1));
+        // The view went to the error (the row's ending is `chat.rs`'s test: this claude sends no result)
+        assert_eq!((ed.doc().path.as_deref(), led_line(&ed)), (Some(lib.as_path()), 1));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9205,7 +9253,8 @@ mod tests {
         let input = serde_json::json!({"file_path": b, "offset": 40_000, "limit": 20});
         crate::follow::on_tool(&mut ed, "r1", "Read", &input, &look);
         settle_until(&mut ed, |ed| ed.doc().path.as_deref() == Some(b.as_path()) && !ed.doc().loading);
-        assert_eq!(ed.cursor_line(), 39_999);
+        assert_eq!(crate::follow::view_line(&ed), Some(39_999), "the view lands once it's loaded");
+        assert_eq!(ed.cursor_line(), 0, "your cursor never led");
         assert!(ed.session.chat.as_ref().unwrap().follow.active(), "the load isn't the user taking over");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -12000,9 +12049,16 @@ mod tests {
         let r = rows(&ed);
         // (the checkout tarae started in by its branch, as the sessions are)
         assert_eq!(r.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["main", "feat", "other"]);
-        assert!(r[1].1.starts_with("↑1  1 changed  waits for you"), "{r:?}");
+        assert!(r[1].1.starts_with("↑1  1 changed  ▲ waits for you"), "{r:?}");
         assert!(r[0].1.starts_with("here"), "{r:?}");
-        assert_eq!(ed.picker.as_ref().unwrap().items()[1].glyph, Some(("▲", "warning")));
+        // (no glyph: each row's name in its session's colour, what needs you in warning)
+        let (id, colour) = (ed.sessions_in_order()[1].id, ed.sessions_in_order()[1].colour as usize);
+        let p = ed.picker.as_ref().unwrap();
+        assert_eq!(p.items()[1].glyph, None);
+        let paint = p.paints.iter().find(|(a, _)| *a == Action::Session(id)).map(|(_, p)| p).unwrap();
+        assert_eq!(paint.label, Some(crate::session::PARTICIPANTS[colour]));
+        let (range, scope) = &paint.hint[0];
+        assert_eq!((&r[1].1[range.clone()], *scope), ("▲ waits for you", "warning"));
         // `q` closes it, as every list's (the tutor teaches it)
         feed(&mut ed, "q");
         assert!(ed.picker.is_none(), "q closed it");

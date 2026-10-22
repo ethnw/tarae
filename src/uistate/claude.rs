@@ -76,6 +76,11 @@ impl Editor {
                 }
             }
         }
+        // (where each session is — presence, collab C1 — is the person's: what a Claude hears of the others is an
+        // overlap, in a tool's answer, C2)
+        for l in s.sessions.iter_mut() {
+            l.at = None;
+        }
         for l in s.sessions.iter_mut().filter(|l| l.id != own) {
             l.branch = None;
             l.root.clear();

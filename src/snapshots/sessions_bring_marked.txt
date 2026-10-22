@@ -4,10 +4,10 @@
 01  ╭─ sessions ─────────────────────────────────────────────────────────────────────────────────────────────────╮
 02  │   letters are keys here, nothing is typed · 1–4 switch                                                 4/4 │
 03  │ ────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-04  │    main                                                                                          here      │
-05  │    fix-login                                                                                     bring 1st │
-06  │    docs                                                                                                    │
-07  │▎   parser                                                                                        bring 2nd │
+04  │  main                                                                                            here      │
+05  │  fix-login                                                                                       bring 1st │
+06  │  docs                                                                                                      │
+07  │▎ parser                                                                                          bring 2nd │
 08  │                                                                                                            │
 09  │                                                                                                            │
 10  │                                                                                                            │
@@ -69,7 +69,7 @@
 04  f                                                                                                  dddd      f
 05  f                                                                                                  ddddd ddd f
 06  f                                                                                                            f
-07  fa   TTTTTT                                                                                        ddddd ddd f
+07  fa BBBBBB                                                                                          ddddd ddd f
 08  f                                                                                                            f
 09  f                                                                                                            f
 10  f                                                                                                            f
@@ -94,4 +94,4 @@
 29  a TTTTTT   DDDDD ffffff  D fffff fff f ff ffff  D fff  D fff  D fffff ffff fff ffff  D ffff ff fffff      TTT
 ## legend
 bg: P=ui.menu.selected
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

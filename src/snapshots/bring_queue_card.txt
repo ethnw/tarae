@@ -91,7 +91,7 @@
 26                                                    f ddddd dddd dddd dddd ddd dddd dd ddd                     f
 27                                                    ff A                    f A ddd ddd ffffffffffffffffffffffff
 28
-29  a TTTTTT   aaaa   a                                                                            ddddd dd   TTT
+29  a TTTTTT   BBBB   a                                                                            ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

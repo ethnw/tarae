@@ -133,9 +133,12 @@ pub struct Shows {
     pub guides: bool,
     /// The cursor line's blame at its end (focused, not INSERT).
     pub blame: bool,
-    /// Claude's place, where follow led the cursor while the keys are elsewhere (`follow::place`): its line's bar
-    /// in the accent — a mark, not a cursor.
+    /// Claude's place, the line follow keeps in sight (`follow::place`): its line's bar — a mark, not a cursor
+    /// (follow never moves yours).
     pub claude: Option<usize>,
+    /// Where the sessions are in it (`presence::marks`): `▎` in the sign column on their lines, a name tag at the
+    /// first line's end of where each is now — a pane's only.
+    pub presence: Vec<crate::presence::Mark>,
 }
 
 /// Where a code view's change marks come from — the one source of its signs, washes, removed rows, the
@@ -258,7 +261,7 @@ impl Changes {
 }
 
 /// The screen rows a pane's lines take, as `term::rows_pane` lays them out — what scrolling counts
-/// (`term::scroll_to_cursor`, `viewalign`): a line's wrapped rows, the removed rows above it, and for a doc
+/// (`term::scroll_to`, `viewalign`): a line's wrapped rows, the removed rows above it, and for a doc
 /// comment block that shows folded its rows on its first line and none on the rest (`j`/`k` step over it as one
 /// line; a top inside it is its first line with rows skipped, as it's drawn).
 pub struct Measure<'a> {
@@ -338,8 +341,8 @@ impl<'a> Measure<'a> {
         Some((b.first, b.last, n))
     }
 
-    /// The rows above a block's head (the line being written) inside it — where the cursor's row is counted while
-    /// it's on the block (`term::scroll_to_cursor`: follow keeps it in sight); 0 elsewhere.
+    /// The rows above a block's head (the line being written) inside it — where the row kept in sight is counted for a
+    /// place on the block (`term::scroll_to`: follow keeps it in sight); 0 elsewhere.
     pub fn head(&self, l: usize) -> usize {
         let Some(b) = self.writing.and_then(|w| w.at(l)).filter(|b| b.first == l) else { return 0 };
         b.head.map_or(0, |head| b.counts(&self.doc.text, self.wrap, self.tab)[head])
@@ -523,7 +526,8 @@ impl Shows {
             inlay: config.inlay_hints && left == 0,
             guides: config.indent_guides && left == 0,
             blame: focused && not_insert,
-            claude: (focused && !cursors).then(|| crate::follow::place(editor, doc)).flatten(),
+            claude: focused.then(|| crate::follow::place(editor, doc)).flatten(),
+            presence: crate::presence::marks(editor, doc),
         }
     }
 
@@ -550,6 +554,7 @@ impl Shows {
             guides: config.indent_guides && left == 0,
             blame: false,
             claude: None,
+            presence: Vec::new(),
         }
     }
 
@@ -573,6 +578,7 @@ impl Shows {
             guides: false,
             blame: false,
             claude: None,
+            presence: Vec::new(),
         }
     }
 
@@ -601,6 +607,7 @@ impl Shows {
             guides: config.indent_guides,
             blame: false,
             claude: None,
+            presence: Vec::new(),
         }
     }
 }

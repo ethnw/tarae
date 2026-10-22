@@ -36,7 +36,7 @@
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00  ddddd  f  TTTTTTTTT                                        a  dddddd                         fffff
 01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa a  ffffffffffffffffffffffffffffffffffff
-02   A                                                         a  d TTTTTTTTTTTTTTTTTTTTTTT d fff dd d
+02   A                                                         a  d BBBBBBBBBBBBBBBBBBBBBBB d fff dd d
 03                                                             a
 04                                                             a  a TTT TTTTTT
 05                                                             a
@@ -52,4 +52,4 @@
 15  a TTTTTT               d d ddddd                                                   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

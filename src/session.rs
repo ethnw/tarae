@@ -48,8 +48,22 @@ pub enum At {
     Rail,
 }
 
+/// The participants' colours a theme has (`ui.participant.1` … `.6`), by `Session.colour`.
+pub const COLOURS: usize = 6;
+pub const PARTICIPANTS: [&str; COLOURS] = [
+    "ui.participant.1",
+    "ui.participant.2",
+    "ui.participant.3",
+    "ui.participant.4",
+    "ui.participant.5",
+    "ui.participant.6",
+];
+
 pub struct Session {
     pub id: SessionId,
+    /// Its participant colour (`ui.participant.<colour + 1>`, collab C1): given as it's made — the lowest no other open
+    /// session has — and kept for its life, the same on every surface it shows on.
+    pub colour: u8,
     /// The checkout, links resolved: where git, the terminal, tasks, Claude, pickers and searches run, what
     /// paths are shown relative to, what a relative path means (follow mode goes nowhere else). Read once,
     /// in `Editor::with_root`; nothing reads the process's folder after that. Tests with a project of their
@@ -342,6 +356,7 @@ impl Session {
         let proxy_id = std::cell::RefCell::new((root.clone(), crate::sandbox::proxy::session_of(&root)));
         Self {
             id,
+            colour: 0,
             in_log: crate::log::Checkout::new(&root, &name),
             root,
             name,
@@ -621,6 +636,8 @@ pub enum Spot {
     Inbox,
     /// The status line's `¶ reviewing` (bgreview): the reviewer's report (`space v r`).
     Reviewer,
+    /// A session's name tag in the code (`presence.rs`): that session followed (`follow::follow_session`).
+    Follow(SessionId),
 }
 
 /// What a session's Claude is doing, as its tab and its row in the session list say it.
@@ -1252,6 +1269,10 @@ impl Editor {
         self.docs.push(Document::from_str(doc, ""));
         let mut session = Session::new(id, root.clone(), view);
         session.billing = self.new_session_billing();
+        // (its colour: the lowest no open session has — they repeat only past `COLOURS` at once)
+        let taken: Vec<u8> = std::iter::once(&self.session).chain(&self.sessions).map(|l| l.colour).collect();
+        session.colour =
+            (0..COLOURS as u8).find(|c| !taken.contains(c)).unwrap_or((id % COLOURS as u64) as u8);
         session.views.push(View::new(view, doc));
         (session.current_doc, session.scratch, session.docs) = (doc, Some(doc), vec![doc]);
         self.sessions.push(session);
@@ -1390,6 +1411,7 @@ impl Editor {
             Spot::Granted => self.granted(),
             Spot::Shuttle => crate::shuttle::end(self),
             Spot::Reviewer => crate::reviewer::verdict(self),
+            Spot::Follow(id) => crate::follow::follow_session(self, id),
         }
     }
 
@@ -2331,7 +2353,7 @@ mod tests {
         assert_eq!(ed.sessions_stuck(), 1);
         let tabs = screen(&mut ed, 160, 24).into_iter().find(|r| r.contains("front │")).expect("the tabs");
         assert!(tabs.contains("back ◦ symbols 42s"), "{tabs}");
-        assert!(!tabs.contains('●'), "{tabs}");
+        assert!(!tabs.contains("working"), "{tabs}");
         let shown = |doing| crate::worktree::Shown {
             id,
             name: "back".into(),
@@ -2345,13 +2367,16 @@ mod tests {
             compacted: false,
             reviewer: String::new(),
             claude: None,
+            at: String::new(),
+            colour: 0,
             billing: Default::default(),
             build: None,
             queue: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);
-        assert_eq!(row.glyph.map(|g| g.0), Some("◦"));
+        assert_eq!(row.glyph, None, "who it is is its name; stuck is said in words");
+        assert!(row.hint.contains("◦ stuck? symbols 42s"), "{}", row.hint);
         // In minutes past one; no room for the tabs: the dropdown counts it
         since(&mut ed, 200);
         assert_eq!(ed.doing(session_by(&ed, id)).said(), "symbols  3m");

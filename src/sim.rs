@@ -35,6 +35,7 @@ mod diskwatch;
 mod hosts;
 mod instructions;
 mod panes;
+mod presence;
 #[cfg(not(target_os = "linux"))]
 mod ptybroker;
 mod quota;
@@ -725,6 +726,29 @@ mod tests {
 
     /// A run's real time at most, in these tests.
     const LIMIT: Duration = Duration::from_secs(30);
+
+    /// Every scenario runs on every system but these, each under its own attribute — an attribute holds the one
+    /// declaration right after it, so a module put between the two takes it over (the presence scenario did: kept
+    /// out on Linux, and ptybroker's let in there).
+    const SOME_SYSTEMS: &[(&str, &str)] = &[("ptybroker", "#[cfg(not(target_os = \"linux\"))]")];
+
+    #[test]
+    fn every_scenario_runs_on_every_system_but_those_named() {
+        let mut under = Vec::new();
+        let mut attr: Option<&str> = None;
+        for line in include_str!("sim.rs").lines().take_while(|l| !l.starts_with("pub type Site")) {
+            match line.strip_prefix("mod ").and_then(|m| m.strip_suffix(';')) {
+                Some(m) => {
+                    if let Some(a) = attr.take() {
+                        under.push((m, a));
+                    }
+                }
+                None if line.starts_with("#[cfg") => attr = Some(line),
+                None => attr = None,
+            }
+        }
+        assert_eq!(under, SOME_SYSTEMS);
+    }
 
     /// `n` jobs spawned at once, each result noting its number as it lands: the order they landed in, and
     /// the run's trace.
