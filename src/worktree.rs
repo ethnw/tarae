@@ -1160,8 +1160,11 @@ pub struct Shown {
     pub queue: Option<String>,
     /// Where its Claude is in its turn: `src/term.rs:3614 · writing` (`presence::at`) — empty between turns.
     pub at: String,
-    /// Its participant colour (`Session.colour`): its `●` on its row, always.
+    /// Its participant colour (`Session.colour`): its name on its row, always.
     pub colour: u8,
+    /// Whom its changes would conflict with (`overlap::others`): each one's name and colour — `≈ main`, first after
+    /// the name.
+    pub overlap: Vec<(String, Option<u8>)>,
 }
 
 impl Shown {
@@ -1229,9 +1232,15 @@ pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::P
         d @ Doing::Stuck { .. } => Some((format!("◦ stuck? {}", d.said()), "warning")),
         _ => None,
     };
-    let cols: Vec<[String; 13]> = sessions
+    let cols: Vec<[String; 14]> = sessions
         .iter()
         .map(|l| {
+            let overlap = match l.overlap.is_empty() {
+                true => String::new(),
+                false => {
+                    format!("≈ {}", l.overlap.iter().map(|o| o.0.as_str()).collect::<Vec<_>>().join(", "))
+                }
+            };
             let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
             let f = l.facts.clone().unwrap_or_default();
             let ahead = (f.ahead > 0).then(|| format!("↑{}", f.ahead));
@@ -1268,6 +1277,7 @@ pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::P
             let billing = if l.billing == crate::billing::Billing::Api { "api" } else { "" }.to_string();
             let build = l.build.map(|s| format!("build {}", size_text(s))).unwrap_or_default();
             [
+                overlap,
                 branch,
                 moved.join(" "),
                 changed,
@@ -1284,9 +1294,9 @@ pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::P
             ]
         })
         .collect();
-    let widths: Vec<usize> = (0..13).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> = (0..14).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
     // (counts right-aligned, words left)
-    let right = [false, true, true, true, false, false, false, false, false, false, true, true, true];
+    let right = [false, false, true, true, true, false, false, false, false, false, false, true, true, true];
     sessions
         .iter()
         .zip(cols)
@@ -1302,16 +1312,27 @@ pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::P
                 .collect();
             // (the state column's place in the hint: the shown columns before it, two cells between each)
             let before: usize =
-                (0..5).filter(|&c| widths[c] > 0).map(|c| parts_len(&row, c, &widths) + 2).sum();
-            let hint_ranges: Vec<_> = needs(l.doing)
-                .and_then(|(said, scope)| {
-                    row[5].find(&said).map(|at| (before + at..before + at + said.len(), scope))
-                })
-                .into_iter()
-                .collect();
+                (0..6).filter(|&c| widths[c] > 0).map(|c| parts_len(&row, c, &widths) + 2).sum();
+            let mut hint_ranges = Vec::new();
+            // (the overlap's column first: `≈` in warning, each name in its colour — a branch no session has, plain)
+            if !l.overlap.is_empty() {
+                hint_ranges.push((0.."≈".len(), "warning"));
+                let mut at = "≈ ".len();
+                for (name, c) in &l.overlap {
+                    if let Some(c) = c {
+                        let scope = crate::session::PARTICIPANTS[*c as usize % crate::session::COLOURS];
+                        hint_ranges.push((at..at + name.len(), scope));
+                    }
+                    at += name.len() + ", ".len();
+                }
+            }
+            hint_ranges.extend(needs(l.doing).and_then(|(said, scope)| {
+                row[6].find(&said).map(|at| (before + at..before + at + said.len(), scope))
+            }));
             let paint = crate::picker::Paint {
                 label: Some(crate::session::PARTICIPANTS[l.colour as usize % crate::session::COLOURS]),
                 hint: hint_ranges,
+                bold: Vec::new(),
             };
             let item = crate::picker::Item {
                 label: l.name.clone(),
@@ -1325,7 +1346,7 @@ pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::P
 }
 
 /// Column `c`'s bytes as `painted` lays it: its text padded to the column's width.
-fn parts_len(row: &[String; 13], c: usize, widths: &[usize]) -> usize {
+fn parts_len(row: &[String; 14], c: usize, widths: &[usize]) -> usize {
     use unicode_width::UnicodeWidthStr as _;
     row[c].len() + (widths[c] - row[c].width())
 }
@@ -2038,8 +2059,9 @@ impl Editor {
         self.with_session(id, Editor::reviews_end);
         let i = self.sessions.iter().position(|l| l.id == id)?;
         let session = self.sessions.remove(i);
-        // (the proxy's answers for it go with it)
+        // (the proxy's answers for it go with it, its overlaps and their folder too)
         crate::hosts::session_ended(&session);
+        crate::overlap::ended(self, id);
         let kept = Kept::of(&session);
         // What it has now is what opening it again in this run brings back (`session_kept_back`): its notes
         // where the restore reads them (with its files still open, for their anchors), its turns written
@@ -2236,6 +2258,7 @@ impl Editor {
                 queue: self.bring_said(l.id),
                 at: crate::presence::at(self, l.id).unwrap_or_default(),
                 colour: l.colour,
+                overlap: crate::overlap::others(self, l.id),
             })
             .collect();
         painted(&shown)
@@ -5636,6 +5659,7 @@ mod tests {
             queue: None,
             at: String::new(),
             colour: 0,
+            overlap: Vec::new(),
         };
         let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
         let rows = items(&[

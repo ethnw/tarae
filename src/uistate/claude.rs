@@ -80,6 +80,7 @@ impl Editor {
         // overlap, in a tool's answer, C2)
         for l in s.sessions.iter_mut() {
             l.at = None;
+            l.overlaps.clear();
         }
         for l in s.sessions.iter_mut().filter(|l| l.id != own) {
             l.branch = None;
@@ -112,11 +113,12 @@ impl Editor {
             l.with = Vec::new();
         }
         s.cards.retain(|c| c.session == own);
-        // (a toast that's news of another session — its turn ended, it waits: theirs, a count here)
+        // (a toast that's news of another session — its turn ended, it waits: theirs, a count here; one that's the
+        // person's alone — an overlap: none)
         let others: Vec<String> = self
             .toasts
             .iter()
-            .filter(|t| t.of.is_some_and(|of| of != self.session.id))
+            .filter(|t| t.persons || t.of.is_some_and(|of| of != self.session.id))
             .map(|t| format!("toast#{}", t.id))
             .collect();
         s.toasts.retain(|t| !others.contains(&t.id));

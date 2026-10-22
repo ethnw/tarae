@@ -18,6 +18,9 @@ pub type Apply = Box<dyn FnOnce(&mut Editor) + Send>;
 pub enum Event {
     Key(Key),
     Mouse(Mouse),
+    /// The mouse moved, no button down (column, row) — not input: it moves nothing but what's under it says
+    /// (`presence::hovered`: a session's tag over its mark).
+    Hover(u16, u16),
     /// Terminal focus (regained = true).
     Focus(bool),
     Resize,

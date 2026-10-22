@@ -125,6 +125,8 @@ pub struct Item {
 pub struct Paint {
     pub label: Option<&'static str>,
     pub hint: Vec<(std::ops::Range<usize>, &'static str)>,
+    /// Those of the hint's ranges drawn bold too (a session's initial in the side panel — `presence::file_hint`).
+    pub bold: Vec<std::ops::Range<usize>>,
 }
 
 /// One visible line.

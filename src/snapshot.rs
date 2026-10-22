@@ -35,16 +35,36 @@ pub(crate) fn git(root: &Path, args: &[&str], index: Option<&Path>) -> Result<St
 }
 
 fn command(root: &Path, args: &[&str], index: Option<&Path>) -> Result<std::process::Command, String> {
+    command_env(root, args, index, &[])
+}
+
+/// `command` with variables of its own (`overlap.rs`: the objects written into tarae's folder).
+pub(crate) fn command_env(
+    root: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    env: &[(&str, std::ffi::OsString)],
+) -> Result<std::process::Command, String> {
     let all: Vec<&str> = crate::gitrepo::NO_HOOKS.iter().chain(args).copied().collect();
     let mut cmd = crate::gitrepo::repo(root)?.command(&all);
     if let Some(i) = index {
         cmd.env("GIT_INDEX_FILE", i);
     }
+    cmd.envs(env.iter().map(|(k, v)| (k, v)));
     Ok(cmd)
 }
 
 fn git_bytes(root: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>, String> {
-    crate::gitrepo::finish(&command(root, args, index)?, None)
+    git_bytes_env(root, args, index, &[])
+}
+
+fn git_bytes_env(
+    root: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    env: &[(&str, std::ffi::OsString)],
+) -> Result<Vec<u8>, String> {
+    crate::gitrepo::finish(&command_env(root, args, index, env)?, None)
 }
 
 /// The project at `root`'s working tree as a git tree (what `git add -A` would stage, ignored files left
@@ -94,13 +114,13 @@ pub fn snap(root: &Path) -> Result<Tree, String> {
     if !index.exists() {
         seed(&dir, &index)?;
     }
-    match stage(root, &index) {
+    match stage(root, &index, &Apart::NONE) {
         Ok(id) => Ok(id),
         // (another tarae's snapshot holds it: one of its own in the temp folder, as before there was one kept)
         Err(e) if e.contains(".lock") => {
             let seq = INDEX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let temp = std::env::temp_dir().join(format!("tarae-snap-{}-{seq}.index", std::process::id()));
-            let id = seed(&dir, &temp).and_then(|_| stage(root, &temp));
+            let id = seed(&dir, &temp).and_then(|_| stage(root, &temp, &Apart::NONE));
             std::fs::remove_file(&temp).ok();
             id
         }
@@ -108,7 +128,42 @@ pub fn snap(root: &Path) -> Result<Tree, String> {
         Err(_) => {
             std::fs::remove_file(&index).ok();
             seed(&dir, &index)?;
-            stage(root, &index)
+            stage(root, &index, &Apart::NONE)
+        }
+    }
+}
+
+/// How a tree is staged: git's variables and options of its own (`pre`, before the subcommand), the files it takes
+/// (`scope`, a pathspec), and the ones it takes as HEAD has them whatever the index says (`as_head`, a pathspec —
+/// listed from the index, put back from HEAD: a staged change of theirs, a new one, left out too). A run's snapshot:
+/// none, the whole checkout.
+pub(crate) struct Apart<'a> {
+    pub env: &'a [(&'a str, std::ffi::OsString)],
+    pub pre: &'a [&'a str],
+    pub scope: &'a str,
+    pub as_head: Option<&'a str>,
+}
+
+impl Apart<'_> {
+    const NONE: Apart<'static> = Apart { env: &[], pre: &[], scope: ".", as_head: None };
+}
+
+/// `snap` into a folder apart (collab C2, `overlap.rs`): `index` there — first a copy of the checkout's own, as
+/// `snap`'s is — the objects git writes where `how.env` says (`GIT_OBJECT_DIRECTORY`, the repository's read as an
+/// alternate), only the files `how.scope` takes: nothing written in the repository. One at a time per `index` (its
+/// caller's lock).
+pub(crate) fn snap_apart(root: &Path, index: &Path, how: &Apart) -> Result<Tree, String> {
+    let dir = git_dir(root)?;
+    if !index.exists() {
+        seed(&dir, index)?;
+    }
+    match stage(root, index, how) {
+        Ok(t) => Ok(t),
+        // (unreadable — a cut write: made again once)
+        Err(_) => {
+            std::fs::remove_file(index).ok();
+            seed(&dir, index)?;
+            stage(root, index, how)
         }
     }
 }
@@ -131,10 +186,14 @@ fn seed(git_dir: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
-fn stage(root: &Path, index: &Path) -> Result<Tree, String> {
+fn stage(root: &Path, index: &Path, how: &Apart) -> Result<Tree, String> {
+    let bytes = |args: &[&str]| {
+        let all: Vec<&str> = how.pre.iter().chain(args).copied().collect();
+        git_bytes_env(root, &all, Some(index), how.env)
+    };
+    let git = |args: &[&str]| bytes(args).map(|b| String::from_utf8_lossy(&b).into_owned());
     // (new to this index: none past `NEW_MAX` hashed and written)
-    let names =
-        git_bytes(root, &["ls-files", "-z", "--others", "--exclude-standard", "--", "."], Some(index))?;
+    let names = bytes(&["ls-files", "-z", "--others", "--exclude-standard", "--", how.scope])?;
     let names: Vec<String> = names
         .split(|&b| b == 0)
         .filter(|f| !f.is_empty())
@@ -142,8 +201,17 @@ fn stage(root: &Path, index: &Path) -> Result<Tree, String> {
         .collect();
     let all = names.len() <= NEW_MAX;
     // (a save's temp file isn't the run's: left out)
-    git(root, &["add", if all { "-A" } else { "-u" }, "--", ".", crate::disk::NOT_TEMP], Some(index))?;
-    let id = git(root, &["write-tree"], Some(index))?.trim().to_string();
+    git(&["add", if all { "-A" } else { "-u" }, "--", how.scope, crate::disk::NOT_TEMP])?;
+    if let Some(spec) = how.as_head {
+        let listed = bytes(&["ls-files", "-z", "--", spec])?;
+        if !listed.is_empty() {
+            let all: Vec<&str> =
+                how.pre.iter().copied().chain(["reset", "-q", "--pathspec-from-file=-"]).collect();
+            let all: Vec<&str> = all.into_iter().chain(["--pathspec-file-nul", "HEAD"]).collect();
+            crate::gitrepo::finish(&command_env(root, &all, Some(index), how.env)?, Some(&listed))?;
+        }
+    }
+    let id = git(&["write-tree"])?.trim().to_string();
     // (past it: the names left out looked at all the same — no contents, a stat for a link)
     let flagged = match all {
         true => Vec::new(),

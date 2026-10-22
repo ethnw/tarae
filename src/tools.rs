@@ -4515,7 +4515,7 @@ fn some_named(names: &[String]) -> String {
 /// its own when that turn is over. `told` gets what Claude reads of it (nothing when nothing changed) — and
 /// the ignored files and folders it deleted, named, which nothing takes back; then the line's next run goes
 /// (held for this — `task.rs`, `testing.rs`).
-fn run_changes(
+pub(crate) fn run_changes(
     ed: &mut Editor,
     mut snap: crate::snapshot::Before,
     generation: u64,
@@ -4558,6 +4558,10 @@ fn run_changes_now(
                     || !output_code.is_empty() =>
                 {
                     let root = ed.session.root.clone();
+                    // (its tree moved: taken again for overlaps — `overlap.rs`)
+                    if !files.is_empty() || head.is_some() {
+                        crate::overlap::moved(ed, &root);
+                    }
                     let named: Vec<String> = files
                         .iter()
                         .map(|c| {

@@ -10,11 +10,11 @@
 //! asked there too (`worktree::common_dir`, git's own answer, kept).
 //!
 //! Drawn (`term::draw_text`): a `▎` in a code pane's sign column on its lines (under a stopped line, a breakpoint and
-//! a diagnostic) and a name tag at its first line's end (`‹main writing›`) — in the session's own participant colour
-//! (`ui.participant.N`, the user 2026-10-22), at full strength for the one you follow, dim for the others, the name
-//! always beside it (never the colour alone); a click on the tag follows it
-//! (`follow::follow_session`). The session list says where each is (`at`), the strip its file, the side panel's files
-//! and git tabs `◦ name` on a file another session is in (`in_file`).
+//! a diagnostic) and a name tag at its first line's end (`‹main writing›`) only while it says something new
+//! (`tag_shows`) — in the session's own participant colour (`ui.participant.N`, the user 2026-10-22), at full strength
+//! for the one you follow, dim for the others, the name beside it (never the colour alone); a click on the tag or the
+//! bar follows it (`follow::follow_session`). The session list says where each is (`at`), the strip its file, the side
+//! panel's files and git tabs each session's initial on a file it's in (`file_marks`).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -144,13 +144,34 @@ pub struct State {
     asking_same: HashSet<(PathBuf, PathBuf)>,
     /// By the file: the disk's stamps of the files the maps are worked out from.
     disk: HashMap<PathBuf, Seen>,
+    /// When each session was last seen writing in each file (`clock`) — its tag stays `TAG_STAY` after.
+    wrote: HashMap<(SessionId, PathBuf), std::time::Instant>,
+    /// The session whose mark (its sign column bar, its tag) the mouse is over — its tag shows (`hovered`).
+    pub hover: Option<SessionId>,
+    /// The mouse's cell as it last moved (column, row) — None: away (the terminal lost focus).
+    hover_at: Option<(usize, usize)>,
 }
+
+/// How long a session's name tag stays after its last write there (the user, 2026-10-22: the tag shows only while
+/// it says something new) — three seconds: long enough to read a name at a glance once the caret stops, short enough
+/// that a file several sessions passed through isn't left labelled; the bar and the caret stay, in its colour.
+pub const TAG_STAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Its going: a fade this short (the design note's ≤ 100 ms), drawn by ticks only while it fades, a frame every
+/// `TAG_STEP` — where nothing moves on a clock (`editor.motion`) it just goes.
+pub const TAG_FADE: std::time::Duration = std::time::Duration::from_millis(100);
+const TAG_STEP: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[cfg(test)]
 impl State {
     /// The buffers line maps are kept for (each in sight when the last event ended — `ask`).
     pub fn mapped(&self) -> Vec<DocId> {
         self.maps.keys().map(|k| k.1).collect()
+    }
+
+    /// How long since session `s` was last seen writing, in any file — None: not within its tag's stay and fade.
+    pub fn wrote_since(&self, s: SessionId) -> Option<std::time::Duration> {
+        self.wrote.iter().filter(|((w, _), _)| *w == s).map(|(_, t)| crate::clock::since(*t)).min()
     }
 }
 
@@ -251,7 +272,95 @@ pub fn sync(ed: &mut Editor) {
     if now != ed.presence.now {
         ed.presence.now = now;
     }
+    // (each session's writing, where: its tag stays a while after — the rest forgotten once past it)
+    let at = crate::clock::now();
+    let writing: Vec<(SessionId, PathBuf)> = ed
+        .presence
+        .now
+        .iter()
+        .filter(|p| p.act == Act::Writing)
+        .map(|p| (p.session, p.path.clone()))
+        .collect();
+    for key in writing {
+        ed.presence.wrote.insert(key, at);
+    }
+    ed.presence.wrote.retain(|_, t| crate::clock::since(*t) < TAG_STAY + TAG_FADE);
     ask(ed);
+}
+
+/// The mouse at (`x`, `y`): over a session's mark (its bar in the sign column, its tag — `Screen.session_spots`), its
+/// tag shows. A move that changes nothing draws nothing.
+pub fn hovered(ed: &mut Editor, x: usize, y: usize) {
+    ed.presence.hover_at = Some((x, y));
+    let over = under(ed, x, y);
+    match over == ed.presence.hover {
+        true => ed.unchanged = true,
+        false => ed.presence.hover = over,
+    }
+}
+
+/// The session whose mark is at (`x`, `y`) on the frame last drawn.
+fn under(ed: &Editor, x: usize, y: usize) -> Option<SessionId> {
+    ed.screen.session_spots.borrow().iter().find_map(|&(row, a, b, spot)| match spot {
+        crate::session::Spot::Follow(s) if row == y && (a..b).contains(&x) => Some(s),
+        _ => None,
+    })
+}
+
+/// A frame drawn while the mouse is over a mark (`term::render`): still that session's under it? A scroll, an edit,
+/// its gaze moving can take the mark from under a mouse that didn't move — then its tag goes (another's mark there:
+/// that one's shows). Whether it changed (the frame drawn again).
+pub fn hover_drawn(ed: &mut Editor) -> bool {
+    if ed.presence.hover.is_none() {
+        return false;
+    }
+    let over = ed.presence.hover_at.and_then(|(x, y)| under(ed, x, y));
+    let changed = over != ed.presence.hover;
+    ed.presence.hover = over;
+    changed
+}
+
+/// The terminal lost focus: the mouse is somewhere else — no tag for it.
+pub fn away(ed: &mut Editor) {
+    (ed.presence.hover, ed.presence.hover_at) = (None, None);
+}
+
+/// How much of session `p`'s tag shows, in percent (`Mark.tag`): all while it writes there, while your cursor is on
+/// its lines, while the mouse is over its mark, and `TAG_STAY` after its last write there; then a `TAG_FADE` fade
+/// (where things move on a clock); else none — only its bar and caret.
+fn tag_shows(ed: &Editor, p: &Presence, lines: &Range<usize>, cursor: usize) -> u8 {
+    if !p.here {
+        return 0;
+    }
+    if p.act == Act::Writing || ed.presence.hover == Some(p.session) || lines.contains(&cursor) {
+        return 100;
+    }
+    let Some(t) = ed.presence.wrote.get(&(p.session, p.path.clone())) else { return 0 };
+    let e = crate::clock::since(*t);
+    match e.checked_sub(TAG_STAY) {
+        None => 100,
+        Some(f) if f < TAG_FADE && ed.moving() => (100 - f.as_millis() * 100 / TAG_FADE.as_millis()) as u8,
+        Some(_) => 0,
+    }
+}
+
+/// When a frame is next wanted for a tag (`Editor::tick_wanted`): as its stay ends, then every `TAG_STEP` while it
+/// fades — None when no tag is on its clock (an idle tarae isn't woken).
+pub fn tag_wake(ed: &Editor) -> Option<std::time::Duration> {
+    let live = |s: SessionId| ed.presence.now.iter().any(|p| p.session == s && p.here && live(ed, p));
+    ed.presence
+        .wrote
+        .iter()
+        .filter(|((s, _), _)| live(*s))
+        .filter_map(|(_, t)| {
+            let e = crate::clock::since(*t);
+            match e.checked_sub(TAG_STAY) {
+                None => Some(TAG_STAY - e + std::time::Duration::from_millis(2)),
+                Some(f) if f < TAG_FADE && ed.moving() => Some(TAG_STEP),
+                Some(_) => None,
+            }
+        })
+        .min()
 }
 
 /// The documents of the panes in front, by id.
@@ -411,6 +520,8 @@ pub struct Mark {
     pub followed: bool,
     /// Where it is now: its name tag at the first line's end.
     pub here: bool,
+    /// How much of that tag shows, in percent (`tag_shows`: 0 — only the bar and the caret).
+    pub tag: u8,
 }
 
 impl Mark {
@@ -432,6 +543,7 @@ pub fn marks(ed: &Editor, doc: &Document) -> Vec<Mark> {
     let Some(path) = doc.path.as_deref() else { return Vec::new() };
     let last = crate::movement::last_line(&doc.text);
     let followed = followed(ed);
+    let cursor = doc.text.byte_to_line(doc.selection().primary().cursor(&doc.text).min(doc.text.len_bytes()));
     let mut out: Vec<Mark> = ed
         .presence
         .now
@@ -444,8 +556,10 @@ pub fn marks(ed: &Editor, doc: &Document) -> Vec<Mark> {
                 false => ed.presence.maps.get(&(p.path.clone(), doc.id))?.map.as_ref()?.range(lines),
             };
             let start = lines.start.min(last);
+            let lines = start..lines.end.min(last + 1).max(start + 1);
             Some(Mark {
-                lines: start..lines.end.min(last + 1).max(start + 1),
+                tag: tag_shows(ed, p, &lines, cursor),
+                lines,
                 session: p.session,
                 name: p.name.clone(),
                 act: p.act,
@@ -489,29 +603,127 @@ pub fn file_of(ed: &Editor, id: SessionId) -> Option<String> {
 }
 
 /// The other sessions in file `rel` (from the front checkout's top) — its own checkout's or another of the repository's,
-/// each named once, where it is first.
-pub fn in_file(ed: &Editor, rel: &Path) -> Vec<String> {
+/// each once, where it is first: its name, its colour, what it does there.
+pub fn in_file(ed: &Editor, rel: &Path) -> Vec<(String, u8, Act)> {
     let root = &ed.session.root;
-    let mut names: Vec<String> = Vec::new();
+    let mut out: Vec<(String, u8, Act)> = Vec::new();
     let mut ps: Vec<&Presence> =
         ed.presence.now.iter().filter(|p| p.session != ed.session.id && live(ed, p)).collect();
     crate::sorting::by_key(&mut ps, |p| !p.here);
     for p in ps {
         let same = p.root == *root || ed.presence.same.get(&pair(root, &p.root)).copied().unwrap_or(false);
-        if same && p.path.strip_prefix(&p.root).ok() == Some(rel) && !names.contains(&p.name) {
-            names.push(p.name.clone());
+        if same && p.path.strip_prefix(&p.root).ok() == Some(rel) && !out.iter().any(|x| x.0 == p.name) {
+            out.push((p.name.clone(), p.colour, p.act));
         }
     }
-    names
+    out
 }
 
-/// `◦ main` · `◦ main, fix` — a file row's hint for the sessions in it (`in_file`), before what the row says.
-pub fn hint(names: &[String], rest: &str) -> String {
-    if names.is_empty() {
-        return rest.to_string();
+// ── The side panel's marks ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A session on a file row of the side panel (files and git tabs; the user, 2026-10-22, Google Docs' way): its name's
+/// shortest telling prefix, bold, in its colour — the letter, never the colour alone, says who — and `≈` before it
+/// when its changes would conflict with yours there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMark {
+    pub prefix: String,
+    /// None: a branch no session has (the base's tip) — plain.
+    pub colour: Option<u8>,
+    pub overlap: bool,
+}
+
+/// Marks a file row shows at most; the rest are `+N`.
+pub const MARKS_MAX: usize = 3;
+
+/// Each name's shortest prefix no other name starts with (letters compared without case: `m` · `f`; `ma` · `me` for
+/// main and merge) — the whole name when every prefix is another's too.
+pub fn prefixes(names: &[String]) -> Vec<String> {
+    let low: Vec<Vec<char>> = names.iter().map(|n| n.to_lowercase().chars().collect()).collect();
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let chars: Vec<char> = n.chars().collect();
+            let unique = |k: usize| {
+                low.iter()
+                    .enumerate()
+                    .all(|(j, o)| j == i || o.len() < k || o[..k] != low[i][..k.min(low[i].len())])
+            };
+            let k = (1..=chars.len()).find(|&k| unique(k)).unwrap_or(chars.len());
+            chars[..k].iter().collect()
+        })
+        .collect()
+}
+
+/// File `rel`'s marks (from the front checkout's top): the sessions whose changes would conflict with yours there
+/// (`≈`), then the others in it — each once — and the words the row in hand says them in at the panel's foot
+/// (`main would conflict L10`, `fix writing`).
+pub fn file_marks(ed: &Editor, rel: &Path) -> (Vec<FileMark>, Vec<String>) {
+    let mut who: Vec<(String, Option<u8>, bool)> = Vec::new();
+    let mut words = Vec::new();
+    for (name, colour, lines) in crate::overlap::in_file(ed, rel) {
+        let at = lines.map(|l| format!(" {}", crate::overlap::lines_said(&l))).unwrap_or_default();
+        words.push(format!("{name} would conflict{at}"));
+        who.push((name, colour, true));
     }
-    let who = format!("◦ {}", names.join(", "));
-    if rest.is_empty() { who } else { format!("{who} · {rest}") }
+    for (name, colour, act) in in_file(ed, rel) {
+        words.push(format!("{name} {}", act.word()));
+        if !who.iter().any(|w| w.0 == name) {
+            who.push((name, Some(colour), false));
+        }
+    }
+    if who.is_empty() {
+        return (Vec::new(), words);
+    }
+    // (told apart from every open session, and from a branch named here)
+    let mut names: Vec<String> =
+        std::iter::once(&ed.session).chain(&ed.sessions).map(|l| l.label().to_string()).collect();
+    for w in &who {
+        if !names.contains(&w.0) {
+            names.push(w.0.clone());
+        }
+    }
+    let short = prefixes(&names);
+    let marks = who
+        .into_iter()
+        .map(|(name, colour, overlap)| {
+            let i = names.iter().position(|n| *n == name).unwrap_or(0);
+            FileMark { prefix: short[i].clone(), colour, overlap }
+        })
+        .collect();
+    (marks, words)
+}
+
+/// A file row's hint: its marks right-aligned after the name (`≈m f`, past `MARKS_MAX` `+2`), then what the row says
+/// besides — and its paint: `≈` in warning, each prefix bold in its session's colour.
+pub fn file_hint(marks: &[FileMark], rest: &str) -> (String, Option<crate::picker::Paint>) {
+    if marks.is_empty() {
+        return (rest.to_string(), None);
+    }
+    let mut paint = crate::picker::Paint::default();
+    let mut text = String::new();
+    for (k, m) in marks.iter().take(MARKS_MAX).enumerate() {
+        if k > 0 {
+            text.push(' ');
+        }
+        if m.overlap {
+            paint.hint.push((text.len()..text.len() + "≈".len(), "warning"));
+            text.push('≈');
+        }
+        let at = text.len()..text.len() + m.prefix.len();
+        if let Some(c) = m.colour {
+            paint.hint.push((at.clone(), crate::session::PARTICIPANTS[c as usize % crate::session::COLOURS]));
+        }
+        paint.bold.push(at);
+        text.push_str(&m.prefix);
+    }
+    if marks.len() > MARKS_MAX {
+        text.push_str(&format!(" +{}", marks.len() - MARKS_MAX));
+    }
+    if !rest.is_empty() {
+        text = format!("{text}  {rest}");
+    }
+    (text, Some(paint))
 }
 
 #[cfg(test)]

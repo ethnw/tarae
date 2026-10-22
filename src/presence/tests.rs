@@ -76,6 +76,11 @@ fn gaze(ed: &mut Editor, path: PathBuf, lines: Range<usize>) {
     l.chat.as_mut().unwrap().follow.gaze = Some(crate::follow::Gaze::new(look, Some(path), Some(lines)));
 }
 
+/// The main checkout's Claude wrote `path` a moment ago: its tag shows there for `TAG_STAY`.
+fn just_wrote(ed: &mut Editor, path: PathBuf) {
+    ed.presence.wrote.insert((0, path), crate::clock::now());
+}
+
 /// Events until `done` holds (a line map is worked out on a worker).
 fn settle(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
     sync(ed);
@@ -157,6 +162,8 @@ fn presence_maps_lines_across_checkouts() {
     settle(&mut ed, |ed| !main_marks(ed).is_empty());
     let m = &main_marks(&ed)[0];
     assert_eq!((m.lines.clone(), m.act, m.here, m.followed), (3..5, Act::Reading, true, false));
+    // (its tag: only while it says something new — here a write there a moment ago)
+    just_wrote(&mut ed, main.join("a.rs"));
     let p = frame(&mut ed, 100);
     let r = rows(&p);
     let (a, b, c) = (row_of(&r, "let a = 1;"), row_of(&r, "let b = 2;"), row_of(&r, "let c = 3;"));
@@ -181,12 +188,13 @@ fn presence_maps_lines_across_checkouts() {
     assert_eq!(main_at(ed.ui_state()).as_deref(), Some("a.rs:2 · reading"));
     assert_eq!(main_at(ed.ui_state_claude()), None);
     assert!(ed.ui_state().json()["sessions"].to_string().contains("a.rs:2 · reading"));
-    // The files tab: `◦ main` on the file
+    // The files tab: main's initial on the file
     ed.session.sidebar =
         Some(crate::sidebar::Sidebar::with_files(other.clone(), vec!["a.rs".into(), "b.rs".into()]));
     let r = rows(&frame(&mut ed, 100));
-    assert!(r.iter().any(|r| r.contains("a.rs") && r.contains("◦ main")), "{r:#?}");
-    assert!(r.iter().any(|r| r.contains("b.rs") && !r.contains('◦')), "{r:#?}");
+    let last_word = |r: &str| r.split('│').next().unwrap_or(r).split_whitespace().last().map(str::to_string);
+    assert!(r.iter().any(|r| r.contains("a.rs") && last_word(r).as_deref() == Some("m")), "{r:#?}");
+    assert!(r.iter().any(|r| r.contains("b.rs") && last_word(r).as_deref() == Some("b.rs")), "{r:#?}");
     // The strip over a chat: its file after its mark
     ed.session.chat = Some(crate::chat::Chat::new());
     let r = rows(&frame(&mut ed, 120));
@@ -270,6 +278,7 @@ fn space_f_follows_the_next_session_at_work() {
         "the view where its Claude is, your cursor where it was"
     );
     assert_eq!(followed(&ed), Some(0));
+    just_wrote(&mut ed, main.join("a.rs"));
     let p = frame(&mut ed, 100);
     let r = rows(&p);
     let status = r.last().unwrap();
@@ -304,6 +313,10 @@ fn two_sessions_on_one_line_each_its_colour() {
     c.follow.gaze = Some(crate::follow::Gaze::new(look, Some(other.join("a.rs")), Some(3..5)));
     ed.session.chat = Some(c);
     sync(&mut ed);
+    // (both wrote there a moment ago: each its tag)
+    let at = crate::clock::now();
+    ed.presence.wrote.insert((0, main.join("a.rs")), at);
+    ed.presence.wrote.insert((fix, other.join("a.rs")), at);
     ed.session.at = crate::session::At::Code;
     let p = frame(&mut ed, 120);
     let r = rows(&p);
@@ -435,6 +448,7 @@ fn a_click_on_the_tag_or_f_in_the_list_follows() {
     let Scene { mut ed, main, fix, _dir, .. } = scene("presence-follow-click");
     gaze(&mut ed, main.join("a.rs"), 1..2);
     settle(&mut ed, |ed| !main_marks(ed).is_empty());
+    just_wrote(&mut ed, main.join("a.rs"));
     let r = rows(&frame(&mut ed, 100));
     let y = row_of(&r, "‹main reading›");
     let x = r[y][..r[y].find('‹').unwrap()].chars().count() + 3;
@@ -452,6 +466,148 @@ fn a_click_on_the_tag_or_f_in_the_list_follows() {
     press(&mut ed, "f");
     assert!(ed.picker.is_none());
     assert_eq!((ed.session.id, followed(&ed)), (0, Some(0)), "followed from the list");
+}
+
+/// A session's name tag shows only while it says something new (the user, 2026-10-22): a Claude only reading there —
+/// its bar alone; the mouse over its bar — its tag, gone as the mouse leaves; your cursor on its line — its tag; a
+/// write there — its tag, `TAG_STAY` after, then a `TAG_FADE` fade (a frame wanted at each, none past them: an idle
+/// tarae draws nothing), then gone.
+#[test]
+fn a_tag_shows_only_while_it_says_something_new() {
+    let Scene { mut ed, main, _dir, .. } = scene("presence-tag-new");
+    gaze(&mut ed, main.join("a.rs"), 1..2);
+    settle(&mut ed, |ed| !main_marks(ed).is_empty());
+    let tag = |ed: &mut Editor| rows(&frame(ed, 100)).iter().any(|r| r.contains("‹main"));
+    let bar = |ed: &mut Editor| {
+        let p = frame(ed, 100);
+        let r = rows(&p);
+        let y = row_of(&r, "let a = 1;");
+        (sign(&p, y).0, y)
+    };
+    assert_eq!(main_marks(&ed)[0].tag, 0);
+    let (g, y) = bar(&mut ed);
+    assert_eq!(g, "▎", "its bar stays");
+    assert!(!tag(&mut ed), "reading only: no tag");
+    assert_eq!(tag_wake(&ed), None, "nothing on a clock");
+    // The mouse over its bar, then away
+    ed.handle_event(crate::event::Event::Hover(0, y as u16));
+    assert!(tag(&mut ed), "over its mark: its tag");
+    ed.handle_event(crate::event::Event::Hover(0, 0));
+    assert!(!tag(&mut ed), "away: gone");
+    // (a move that changes nothing draws nothing)
+    ed.unchanged = false;
+    ed.handle_event(crate::event::Event::Hover(5, 0));
+    assert!(ed.unchanged, "no frame for it");
+    // The mouse still over where its bar was, the bar gone from under it (its gaze moved down): the tag goes with
+    // the next frame
+    ed.handle_event(crate::event::Event::Hover(0, y as u16));
+    assert!(tag(&mut ed));
+    gaze(&mut ed, main.join("a.rs"), 3..4);
+    settle(&mut ed, |ed| main_marks(ed).first().is_some_and(|m| m.lines.start != 3));
+    assert!(!tag(&mut ed), "its bar gone from under the mouse: its tag too");
+    assert_eq!(ed.presence.hover, None);
+    // Over it again, then the terminal loses focus: gone
+    let y2 = row_of(&rows(&frame(&mut ed, 100)), "let c = 3;");
+    ed.handle_event(crate::event::Event::Hover(0, y2 as u16));
+    assert!(tag(&mut ed), "over its bar again");
+    ed.handle_event(crate::event::Event::Focus(false));
+    assert!(!tag(&mut ed), "the terminal lost focus: no tag");
+    ed.handle_event(crate::event::Event::Focus(true));
+    gaze(&mut ed, main.join("a.rs"), 1..2);
+    settle(&mut ed, |ed| main_marks(ed).first().is_some_and(|m| m.lines.start == 3));
+    // Your cursor on its line (fix's a.rs: two lines more on top — `let a = 1;` is line 4)
+    press(&mut ed, "4gg");
+    assert!(tag(&mut ed), "your cursor on its line: its tag");
+    press(&mut ed, "gg");
+    assert!(!tag(&mut ed));
+    // A write there: its tag, then its stay, its fade, gone
+    ed.presence.wrote.insert((0, main.join("a.rs")), crate::clock::now());
+    assert!(tag(&mut ed), "just wrote: its tag");
+    let stay =
+        |w: std::time::Duration| w <= TAG_STAY + std::time::Duration::from_millis(2) && w > TAG_STAY / 2;
+    assert!(ed.tick_wanted().is_some_and(stay), "the main loop's wake is the tag's: {:?}", ed.tick_wanted());
+    let wake = tag_wake(&ed).expect("a frame wanted as its stay ends");
+    assert!(wake <= TAG_STAY + std::time::Duration::from_millis(2) && wake > TAG_STAY / 2, "{wake:?}");
+    crate::clock::advance(TAG_STAY + TAG_FADE / 2);
+    let m = main_marks(&ed)[0].clone();
+    assert!(m.tag > 0 && m.tag < 100, "fading: {}", m.tag);
+    assert_eq!(tag_wake(&ed), Some(TAG_STEP), "a frame a step while it fades");
+    crate::clock::advance(TAG_FADE);
+    assert_eq!(main_marks(&ed)[0].tag, 0);
+    assert!(!tag(&mut ed), "gone");
+    assert_eq!(tag_wake(&ed), None, "no frame past it");
+    assert_eq!(ed.tick_wanted(), None, "an idle tarae isn't woken");
+}
+
+/// Performance budget: a sweep of the mouse is dozens of hovers a second, each only a look at what's under it
+/// (`presence::hovered`) — none of the work every other event does (`Editor::handle_event`): over a session's bar,
+/// still there, away, still away — under 200 ns a hover (4 measured).
+#[test]
+fn perf_budget_hover_burst() {
+    if crate::test_results::unoptimized("presence::tests::perf_budget_hover_burst") {
+        return;
+    }
+    let Scene { mut ed, main, _dir, .. } = scene("presence-hover-burst");
+    gaze(&mut ed, main.join("a.rs"), 1..2);
+    settle(&mut ed, |ed| !main_marks(ed).is_empty());
+    let y = row_of(&rows(&frame(&mut ed, 100)), "let a = 1;") as u16;
+    let at = [(0, y), (0, y), (0, 0), (5, 0)];
+    const N: usize = 40_000;
+    let mut runs: Vec<f64> = (0..9)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            for i in 0..N {
+                let (x, y) = at[i & 3];
+                ed.handle_event(crate::event::Event::Hover(x, y));
+            }
+            t.elapsed().as_secs_f64() * 1e9 / N as f64
+        })
+        .collect();
+    crate::sorting::by(&mut runs, f64::total_cmp);
+    let ns = runs[runs.len() / 2];
+    let line = format!("PERF hover_ns {ns:.0} budget=200 noise=5\n");
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
+    // (and it saw them: over the bar, its tag; away, none)
+    ed.handle_event(crate::event::Event::Hover(0, y));
+    assert_eq!(ed.presence.hover, Some(0));
+    ed.handle_event(crate::event::Event::Hover(0, 0));
+    assert_eq!(ed.presence.hover, None);
+    assert!(ns < 200.0, "{ns:.0} ns a hover (budget 200)");
+}
+
+/// The side panel's file rows: each session by the shortest prefix of its name that tells it from the other open
+/// sessions' (`m` · `f`; `ma` · `me`), bold in its colour, after the name — `≈` in warning before one whose changes
+/// would conflict with yours, past three `+N`; the row in hand in words at the panel's foot.
+#[test]
+fn the_side_panel_says_each_session_by_its_initial() {
+    let v = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(prefixes(&v(&["main", "fix", "docs"])), v(&["m", "f", "d"]));
+    assert_eq!(prefixes(&v(&["main", "merge", "fix"])), v(&["ma", "me", "f"]));
+    assert_eq!(prefixes(&v(&["Main", "merge"])), v(&["Ma", "me"]), "case aside, as written");
+    assert_eq!(prefixes(&v(&["main", "main2"])), v(&["main", "main2"]), "one a prefix of the other: whole");
+    let mark = |p: &str, c: u8, overlap: bool| FileMark { prefix: p.into(), colour: Some(c), overlap };
+    let (text, paint) = file_hint(&[mark("m", 1, true), mark("f", 2, false)], "M");
+    assert_eq!(text, "≈m f  M");
+    let paint = paint.unwrap();
+    let (p1, p2) = (crate::session::PARTICIPANTS[1], crate::session::PARTICIPANTS[2]);
+    let at = |s: &str| text.find(s).unwrap();
+    assert_eq!(
+        paint.hint,
+        [(0.."≈".len(), "warning"), (at("m")..at("m") + 1, p1), (at("f")..at("f") + 1, p2)]
+    );
+    assert_eq!(paint.bold, [at("m")..at("m") + 1, at("f")..at("f") + 1], "each initial bold");
+    let many: Vec<FileMark> = ["a", "b", "c", "d", "e"].iter().map(|p| mark(p, 0, false)).collect();
+    assert_eq!(file_hint(&many, "").0, "a b c +2");
+    // On screen: the files tab, the row in hand's words at its foot
+    let Scene { mut ed, main, other, _dir, .. } = scene("presence-initials");
+    gaze(&mut ed, main.join("a.rs"), 1..3);
+    settle(&mut ed, |ed| !main_marks(ed).is_empty());
+    let mut sb = crate::sidebar::Sidebar::with_files(other.clone(), vec!["a.rs".into(), "b.rs".into()]);
+    sb.selected = 0;
+    ed.session.sidebar = Some(sb);
+    ed.session.at = crate::session::At::Side;
+    let r = rows(&frame(&mut ed, 100));
+    assert!(r.iter().any(|r| r.contains("a.rs — main reading")), "the row in hand in words: {r:#?}");
 }
 
 /// A line map follows the lines kept, and a changed line goes where its change went.

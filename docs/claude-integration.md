@@ -479,7 +479,9 @@ working. The next question also turns it back on.
 **Several sessions: where each is, and following one.** With more than one session open, every session's Claude
 shows where it is in its turn — the lines it reads, the edit it's writing, the lines its edits changed — wherever
 that file is shown, in any checkout of the repository: a `▎` in the code's sign column on those lines and a name
-tag at the end of the first (`‹fix writing›`; two on one line, each its tag). A file at the same path in another
+tag at the end of the first (`‹fix writing›`; two on one line, each its tag) — the tag only while it says something
+new: while that Claude writes there and three seconds after, while your cursor is on its line, or while the mouse is
+over its mark; then it fades out in a tenth of a second, and the bar and the caret stay. A file at the same path in another
 checkout is the same file, its lines mapped through a line diff of the two texts, so the marks land on the same code
 even where the branches differ. **Each session has a colour of its own for its life** (`ui.participant.1` … `.6` in
 the theme — identity colours, never the accent, never the diff's green or red): its caret, its name tag, its marks,
@@ -488,12 +490,30 @@ closed — in its colour at full strength, whatever it's doing, what it does sai
 warning colour (`▲ waits`, `▲ waits for you` in the list, `◦ stuck? …`), `done` in the accent, the calm states
 (`working`, `queued 2nd`) faint. In the code, the session you follow is at full strength and the others dim; the accent stays where the keys are, and the name is always beside
 the colour. The session list says where each is (`src/term.rs:3614 · writing`), the sessions' strip over
-the chat its file, and the side panel's files and git tabs `◦ fix` on a file another session is in. A session's
+the chat its file, and the side panel's files and git tabs each session's initial after a file it's in, bold in its colour (`main.rs   m f`;
+`ma`/`me` where two names start alike; past three, `+2`), the row in hand saying it in words at the panel's foot
+(`main.rs — main writing`). A session's
 marks go when its turn ends. You follow one session at a time: by default the Claude of the session in front, as
 above; a click on another's name tag, `f` on its row in the session list, or `space F` (the next session at work)
 follows it — into its checkout, the view where its Claude is (your cursor as you left it there), `● follow` on
 the status line, the session's `fix` after it in its colour. Your first key stops it there as always, and `C-f` in its chat follows again. None of this is told
 to Claude.
+
+**Several sessions: an overlap, said the moment it happens.** Two sessions' changes that would conflict when merged —
+or a session's changes against its base's tip — are said as soon as they exist, not at the rebase. A few seconds
+after a session's files stop changing (a save, Claude's edit, its HEAD moving), tarae takes its working tree as a
+commit and asks `git merge-tree` whether it merges cleanly with its base's tip and with each other session's latest
+snapshot, only where the two changed a file in common; changes of one file far apart merge cleanly and say nothing.
+A new overlap is a toast once while it lasts (`fix ≈ main · src/term.rs L210–260 — would conflict`, your session's side
+and lines first; gone and back, or its lines elsewhere in the file, it's said again); the session list and the strip over the chat say `≈ main` after the name, the other side in its colour; the
+side panel's file row `≈m` (`≈` in warning before main's initial), its foot `main.rs — main would conflict L10`. One that goes away is said in `:messages` only. Nothing is written in the
+repository: the snapshots and merges are git objects in a folder of this tarae's own in its cache
+(`~/.cache/tarae/overlap/`), the repository's read through as an alternate; a session's folder goes when it ends,
+and a tarae's whole folder once it's gone (the next tarae removes it). No program of yours or the repository's runs
+for it — no hook, filter or merge driver: a file a filter takes (git-lfs's) is taken as HEAD has it. Claude hears of an overlap
+only in the answer of the tool that touches that file — its `edit` or `read` of it ends with one line,
+`src/term.rs: fix's change would conflict here: L30–34` (its own lines, the other's name, never the other's lines
+or text) — never as a note of its own, never a feed of what the others do.
 
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,

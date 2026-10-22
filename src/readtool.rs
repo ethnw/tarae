@@ -155,7 +155,13 @@ fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<P
             .collect();
         let r = read(&root, &items, &gate, &unsaved);
         move |ed: &mut Editor| match r {
-            Ok(Ok(parts)) => {
+            Ok(Ok(mut parts)) => {
+                // (another workspace's change that would conflict with a file read — collab C2: a line each)
+                let told: Vec<String> =
+                    stamps.iter().flat_map(|(p, _)| crate::overlap::told(ed, p)).collect();
+                if !told.is_empty() {
+                    parts.push(Part::Text(format!("{}\n", told.join("\n"))));
+                }
                 for (p, s) in stamps {
                     crate::edittool::saw(ed, &p, s);
                 }

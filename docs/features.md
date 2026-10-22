@@ -492,7 +492,9 @@ your `PATH`.
   ([rebasing a session](claude-integration.md#rebasing-a-session)); its git-ignored notes (`session.keep`:
   `target/sb`) moved to the main checkout's `target/sb/sessions/<name>/` when it ends; where each session's Claude
   is reading and writing shown wherever that file is, in any checkout (`▎` and a name tag, each session its own
-  colour), and `space F` follows the next one at work — follow moves the view, never your cursor
+  colour), and `space F` follows the next one at work — follow moves the view, never your cursor; two sessions'
+  changes that would conflict said the moment they do (`fix ≈ main · src/term.rs L210–260`, `git merge-tree` of the
+  working trees), and to a Claude only in the `edit` or `read` of that file
   ([several sessions](claude-integration.md#follow-mode))
 - **Review like a pull request** — Claude's edits hunk by hunk, or all at the turn's end
   ([review at the end](claude-integration.md#review-at-the-end)); any change reviewed over the real buffers, and a

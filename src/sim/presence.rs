@@ -86,8 +86,8 @@ fn chat<'a>(ed: &'a mut Editor, w: &World) -> Option<&'a mut crate::chat::Chat> 
 fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
     let c = &mut sim.choices;
     // (by arm: a gaze 3, an edit being written 2, a key 3, a frame 2, the turn's end 1, a new turn 1, the session
-    // closed 1, back 1, another buffer in front 1, time 1)
-    match c.weighted(&[3, 2, 3, 2, 1, 1, 1, 1, 1, 1]) {
+    // closed 1, back 1, another buffer in front 1, the mouse moving 1, time 1)
+    match c.weighted(&[3, 2, 3, 2, 1, 1, 1, 1, 1, 1, 1]) {
         0 => {
             let line = *c.pick(&[0, 1, 2, 4, 6]);
             let path = w.fix.join("a.rs");
@@ -169,8 +169,14 @@ fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
             keys(ed, &format!(":e {other}<ret>"));
             format!("{other} in front")
         }
+        // (over the sign column's rows — a session's bar there, or nothing — or away)
+        9 => {
+            let (x, y) = *c.pick(&[(0, 1), (0, 2), (0, 3), (0, 5), (40, 0)]);
+            ed.handle_event(crate::event::Event::Hover(x, y));
+            format!("the mouse at {x},{y}")
+        }
         _ => {
-            let ms = *c.pick(&[30, 2000]);
+            let ms = *c.pick(&[30, 2000, 4000]);
             sim.wait(Duration::from_millis(ms));
             "time passes".into()
         }
@@ -192,9 +198,25 @@ fn held(ed: &Editor, w: &World) -> Result<(), String> {
     let doc = ed.doc();
     let last = crate::movement::last_line(&doc.text);
     let marks = crate::presence::marks(ed, doc);
+    let cursor = doc.text.byte_to_line(doc.selection().primary().cursor(&doc.text).min(doc.text.len_bytes()));
     for m in &marks {
         if m.lines.is_empty() || m.lines.end > last + 1 {
             return Err(format!("a mark over lines {:?} of a buffer of {} lines", m.lines, last + 1));
+        }
+        // (its tag: shown with a reason — writing, the mouse over it, your cursor on it, a write within its stay and
+        // fade — and always while it writes)
+        let reason = m.act == crate::presence::Act::Writing
+            || ed.presence.hover == Some(m.session)
+            || m.lines.contains(&cursor)
+            || ed
+                .presence
+                .wrote_since(m.session)
+                .is_some_and(|e| e < crate::presence::TAG_STAY + crate::presence::TAG_FADE);
+        if m.tag > 0 && !reason {
+            return Err(format!("{}'s tag shown ({}%) with nothing new to say", m.name, m.tag));
+        }
+        if m.here && m.act == crate::presence::Act::Writing && m.tag != 100 {
+            return Err(format!("{}'s tag not whole while it writes", m.name));
         }
         let busy = chat_of(ed, m.session).is_some_and(|c| c.busy());
         if !busy {

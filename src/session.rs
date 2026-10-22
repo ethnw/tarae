@@ -2367,6 +2367,7 @@ mod tests {
             claude: None,
             at: String::new(),
             colour: 0,
+            overlap: Vec::new(),
             billing: Default::default(),
             build: None,
             queue: None,

@@ -143,6 +143,12 @@ pub struct Toast {
     /// The session it's news of, when that's one behind (said there, or about it) — Claude's level of the
     /// state leaves it out for any other session's Claude (other sessions are counts there).
     pub of: Option<crate::event::SessionId>,
+    /// The person's alone: never at any Claude's level (an overlap — a Claude hears of one only in the tool that
+    /// touches that file, `overlap.rs`).
+    pub persons: bool,
+    /// Words painted in a theme scope (`""`: as the text), in order — each the first found after the one before:
+    /// an overlap's two names in their participant colours and its `≈` in warning.
+    pub paint: Vec<(String, &'static str)>,
 }
 
 /// Two clicks on the same picker row this close together are a double click (it opens the row).
@@ -241,7 +247,18 @@ impl Toast {
             ToastKind::Error => 60_000,
         };
         let life = std::time::Duration::from_millis(ms);
-        Toast { text, kind, at: crate::clock::now(), life, step: None, shown: false, id: 0, of: None }
+        Toast {
+            text,
+            kind,
+            at: crate::clock::now(),
+            life,
+            step: None,
+            shown: false,
+            id: 0,
+            of: None,
+            persons: false,
+            paint: Vec::new(),
+        }
     }
 
     pub fn alive(&self) -> bool {
@@ -451,6 +468,8 @@ pub struct Editor {
     pub(crate) next_session: crate::event::SessionId,
     /// Where every session is reading and writing, and what draws it in other checkouts (`presence.rs`).
     pub presence: crate::presence::State,
+    /// Where two workspaces' changes would conflict, and what each was last taken as (`overlap.rs`).
+    pub overlap: crate::overlap::State,
     pub(crate) behind: bool,
     pub(crate) next_pane: crate::split::PaneId,
     pub mode: Mode,
@@ -864,6 +883,7 @@ impl Editor {
             sessions: Vec::new(),
             next_session: 0,
             presence: Default::default(),
+            overlap: Default::default(),
             behind: false,
             next_pane: 1 + crate::pane::IDS,
             mode: Mode::Normal,
@@ -2020,6 +2040,11 @@ impl Editor {
     // ── Dispatch ─────────────────────────────────────────────────────────
 
     pub fn handle_event(&mut self, ev: Event) {
+        // A hover moves nothing: only what's under the mouse says (`presence::hovered` — a frame only when that
+        // changed), none of the work every other event does below (a sweep sends dozens a second)
+        if let Event::Hover(x, y) = ev {
+            return crate::presence::hovered(self, x as usize, y as usize);
+        }
         // Input means the terminal has focus, whatever it said last (a focus-in lost on the way)
         let input = matches!(ev, Event::Key(_) | Event::Mouse(_) | Event::Paste(_));
         let before = input.then(|| crate::edits::before_input(self));
@@ -2039,8 +2064,12 @@ impl Editor {
                 self.plugin_input_went_in();
             }
             Event::Mouse(m) => self.handle_mouse(m),
+            Event::Hover(..) => {}
             Event::Focus(gained) => {
                 self.unfocused = !gained;
+                if !gained {
+                    crate::presence::away(self);
+                }
                 self.on_focus(gained)
             }
             Event::Resize => {}
@@ -2078,6 +2107,7 @@ impl Editor {
         self.saves_due(false);
         crate::follow::watch(self);
         crate::presence::sync(self);
+        crate::overlap::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);
@@ -2824,7 +2854,12 @@ impl Editor {
         // step lit on its chip: one frame when it goes faint (`shuttle::LIT`)
         // The terminal's view at a new panel size: one frame once it has held (`view::terminal_resized`)
         let settle = crate::view::terminal_settling(self).then_some(crate::view::SETTLE);
-        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle].into_iter().flatten().min()
+        // A session's name tag on its clock: as its stay ends, then while it fades (`presence::tag_wake`)
+        let tag = crate::presence::tag_wake(self);
+        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle, tag]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Whether the main loop draws after a batch of events (`unchanged`: every one of them said it changed

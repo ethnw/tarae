@@ -329,13 +329,40 @@ fn spawn_signals(tx: crate::event::Tx) {
 /// Input thread — so terminal reads don't block the main loop.
 fn spawn_input(tx: crate::event::Tx) {
     crate::event::thread("tarae-input", move || {
-        while let Ok(ev) = event::read() {
+        // (what was read past a sweep of the mouse: the next one handled)
+        let mut next: Option<CtEvent> = None;
+        loop {
+            let ev = match next.take() {
+                Some(ev) => ev,
+                None => match event::read() {
+                    Ok(ev) => ev,
+                    Err(_) => break,
+                },
+            };
             let ev = match ev {
                 CtEvent::Key(k) if k.kind != KeyEventKind::Release => Key::from_event(k).map(Event::Key),
                 CtEvent::Resize(..) => Some(Event::Resize),
                 CtEvent::FocusGained => Some(Event::Focus(true)),
                 CtEvent::FocusLost => Some(Event::Focus(false)),
                 CtEvent::Paste(text) => Some(Event::Paste(text)),
+                // (a move with no button down: what's under it, never input — `Event::Hover`; of a sweep already
+                // read in, only its newest place)
+                CtEvent::Mouse(m) if m.kind == MouseEventKind::Moved => {
+                    let mut at = (m.column, m.row);
+                    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                        match event::read() {
+                            Ok(CtEvent::Mouse(m)) if m.kind == MouseEventKind::Moved => {
+                                at = (m.column, m.row)
+                            }
+                            Ok(other) => {
+                                next = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Some(Event::Hover(at.0, at.1))
+                }
                 CtEvent::Mouse(m) => {
                     use crate::event::{Mouse, MouseKind};
                     let kind = match m.kind {
@@ -381,6 +408,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         | crate::rundoc::resized(editor)
         | crate::rundoc::procs_rewrapped(editor)
         | crate::chatdoc::resized(editor)
+        // (and the mark the mouse was over gone from under it: its tag with it — `presence::hover_drawn`)
+        | crate::presence::hover_drawn(editor)
     {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
@@ -4875,9 +4904,20 @@ fn draw_text(
             // Sign column — the cell before the numbers: stopped line ▶ > breakpoint ● > diagnostic bar
             apply(out, gut(ui.base))?;
             queue!(out, Spaces(signs - 1))?;
-            // (under them all: a session's place — `presence.rs`, the one you follow in the accent)
+            // (under them all: a session's place — `presence.rs`, the one you follow in the accent; its cell kept,
+            // a click follows it, the mouse over it shows its tag)
             let (glyph, st) = match sign_of(line, line) {
-                (" ", _) => presence_sign(line).unwrap_or((" ", ui.base)),
+                (" ", _) => match presence_sign(line) {
+                    Some(s) => {
+                        if let Some(m) = shows.presence.iter().find(|m| m.lines.contains(&line)) {
+                            let at = lay.x0 + signs - 1;
+                            let spot = crate::session::Spot::Follow(m.session);
+                            editor.screen.session_spots.borrow_mut().push((y as usize, at, at + 1, spot));
+                        }
+                        s
+                    }
+                    None => (" ", ui.base),
+                },
                 s => s,
             };
             apply(out, gut(st))?;
@@ -5366,22 +5406,32 @@ fn draw_text(
         }
         // A session's name tag where it is now: `‹main writing›` — the accent for the one you follow, dim for the others;
         // only where the line end is free, folded to its name, then gone, when narrow. A click follows it
-        let tag_here = shows.presence.iter().find(|m| m.here && m.lines.start == line).filter(|_| {
-            line_message_here.is_none() && note_here.is_none() && hint_here.is_none() && risk_here.is_none()
-        });
+        // (shown only while it says something new — `presence::tag_shows`: else only its bar and caret stay)
+        let tag_here =
+            shows.presence.iter().find(|m| m.here && m.tag > 0 && m.lines.start == line).filter(|_| {
+                line_message_here.is_none()
+                    && note_here.is_none()
+                    && hint_here.is_none()
+                    && risk_here.is_none()
+            });
         // (two sessions where they are on one line: each its tag, the one you follow first, the later ones the first to
         // go when narrow)
         if tag_here.is_some() && last && !clipped {
             let mut used = x0 + col.saturating_sub(row_left) + shift + 1 + extra_used;
             let mut gap = "   ";
             let mut said: Vec<crate::event::SessionId> = Vec::new();
-            for m in shows.presence.iter().filter(|m| m.here && m.lines.start == line) {
+            for m in shows.presence.iter().filter(|m| m.here && m.tag > 0 && m.lines.start == line) {
                 if said.contains(&m.session) {
                     continue;
                 }
                 said.push(m.session);
                 let Some(tag) = m.tag(lay.text_cols.saturating_sub(used + gap.len())) else { break };
+                // (going: faded toward the line's ground)
                 let fg = ui.participant(m.colour, m.followed);
+                let fg = match m.tag {
+                    100.. => fg,
+                    a => blend(fg, line_base.bg.or(ui.tint), f32::from(a) / 100.0).or(fg),
+                };
                 apply(out, line_base)?;
                 queue!(out, Print(gap))?;
                 apply(out, Style { fg, bold: m.followed, ..line_base })?;
@@ -6520,7 +6570,9 @@ fn draw_list_row(
             }
             apply(out, plain)?;
             queue!(out, Print(&hint[at..start]))?;
-            apply(out, Style { fg: scope_fg(scope).or(plain.fg), ..base })?;
+            let bold =
+                r.paint.as_ref().is_some_and(|p| p.bold.iter().any(|b| b.start <= start && end <= b.end));
+            apply(out, Style { fg: scope_fg(scope).or(plain.fg), bold: bold || base.bold, ..base })?;
             queue!(out, Print(&hint[start..end]))?;
             at = end;
         }
@@ -8656,8 +8708,9 @@ fn draw_toasts(
     let faint = Style { fg: fade(ui.linenr.fg.or(card.fg)), bg, ..Style::default() };
     let bar = |kind| Style { fg: fade(toast_color(editor, ui, kind)), bg, ..Style::default() };
 
-    // (bar, text, style) per row · the toast each one starts
+    // (bar, text, style) per row · its words painted (`Toast.paint`) · the toast each one starts
     let mut rows: Vec<(Option<Style>, String, Style)> = Vec::new();
+    let mut segs: Vec<Vec<(String, Option<&'static str>)>> = Vec::new();
     let mut starts: Vec<(usize, u64)> = vec![(0, newest.id)];
     // The newest: messages with newlines (language server notices etc.) wrap per paragraph
     let para: Vec<crate::markdown::Line> = newest
@@ -8679,6 +8732,8 @@ fn draw_toasts(
         }
         rows.push(((i == 0).then(|| bar(newest.kind)), text, body));
     }
+    let texts: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
+    segs.extend(toast_paint(&texts, &newest.paint));
     let older = editor.toasts.len() - 1;
     for t in editor.toasts.iter().rev().skip(1).take(TOAST_OLDER) {
         let first = t.text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
@@ -8688,12 +8743,17 @@ fn draw_toasts(
             _ => (Style { fg: blend(toast_color(editor, ui, t.kind), bg, 0.45), ..bar(t.kind) }, dim),
         };
         starts.push((rows.len(), t.id));
-        rows.push((Some(b), fit_ellipsis(first.trim_end(), max_inner), style));
+        let text = fit_ellipsis(first.trim_end(), max_inner);
+        segs.extend(toast_paint(std::slice::from_ref(&text), &t.paint));
+        rows.push((Some(b), text, style));
     }
     if older > TOAST_OLDER {
         starts.push((rows.len(), 0));
-        rows.push((None, format!("+{} earlier · :messages", older - TOAST_OLDER), faint));
+        let text = format!("+{} earlier · :messages", older - TOAST_OLDER);
+        segs.push(vec![(text.clone(), None)]);
+        rows.push((None, text, faint));
     }
+    let scope_fg = |scope: &str| fade(editor.theme.try_get(scope).and_then(|s| s.fg));
     let inner = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
     let width = inner + 5; // margin 1 · bar · margin 1 · text · margin 2
     let h = rows.len() + 2 * pad;
@@ -8744,10 +8804,44 @@ fn draw_toasts(
             None => queue!(out, Print(" "))?,
         }
         apply(out, lit(*style))?;
-        queue!(out, Print(" "), Print(text), Spaces(inner - text.width() + 2))?;
+        queue!(out, Print(" "))?;
+        for (s, scope) in &segs[i] {
+            let st = match scope.and_then(scope_fg) {
+                Some(fg) => Style { fg: Some(fg), ..*style },
+                None => *style,
+            };
+            apply(out, lit(st))?;
+            queue!(out, Print(s))?;
+        }
+        apply(out, lit(*style))?;
+        queue!(out, Spaces(inner - text.width() + 2))?;
     }
     card_edge(out, edge_card, x0, y0 + pad + rows.len(), width)?;
     Ok(true)
+}
+
+/// A toast's rows cut into what's plain and its painted words (`Toast.paint`): each word the first found after the
+/// one before, across the rows in order — one that isn't found leaves the rest plain.
+fn toast_paint(
+    rows: &[String],
+    paint: &[(String, &'static str)],
+) -> Vec<Vec<(String, Option<&'static str>)>> {
+    let mut next = 0;
+    rows.iter()
+        .map(|t| {
+            let (mut out, mut at) = (Vec::new(), 0);
+            while let Some((word, scope)) = paint.get(next) {
+                let Some(i) = t[at..].find(word.as_str()) else { break };
+                if i > 0 {
+                    out.push((t[at..at + i].to_string(), None));
+                }
+                out.push((word.clone(), Some(*scope).filter(|s| !s.is_empty())));
+                (at, next) = (at + i + word.len(), next + 1);
+            }
+            out.push((t[at..].to_string(), None));
+            out
+        })
+        .collect()
 }
 
 /// Grammar download offer (like IntelliJ's "install plugin" notice) — bottom right of the editing area:
@@ -10289,6 +10383,21 @@ fn spans_left(row: &[crate::markdown::Span], w: usize) -> Vec<crate::markdown::S
     out
 }
 
+/// A side panel row's file, from its tab's root (the files tab's files, the git tab's changed files) — None with
+/// no other session's presence or overlap anywhere (nothing to mark: no lookup).
+fn side_rel<'a>(
+    editor: &Editor,
+    sb: &'a crate::sidebar::Sidebar,
+    l: &'a crate::sidebar::Line,
+) -> Option<&'a std::path::Path> {
+    match &l.target {
+        _ if editor.presence.now.is_empty() && editor.overlap.now.is_empty() => None,
+        crate::sidebar::Target::File(p) => p.strip_prefix(sb.root()).ok(),
+        crate::sidebar::Target::Change { rel, file: true, .. } => Some(std::path::Path::new(rel)),
+        _ => None,
+    }
+}
+
 /// List rows of the side panel: all but the header (its title and rule), a row saying a review is behind
 /// it, and the gap and two key rows at the bottom.
 fn sidebar_list_rows(lay: &Layout, behind: bool) -> usize {
@@ -10440,6 +10549,15 @@ fn draw_sidebar(
     } else {
         Vec::new()
     };
+    // (the row in hand: its file's sessions said in words at the foot)
+    let foot = match mark.and_then(|r| lines.get(r)).and_then(|l| Some((l, side_rel(editor, sb, l)?))) {
+        Some((l, rel)) => {
+            let (_, words) = crate::presence::file_marks(editor, rel);
+            let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(l.label.clone());
+            if words.is_empty() { String::new() } else { format!("{name} — {}", words.join(" · ")) }
+        }
+        None => String::new(),
+    };
     let mut links = editor.screen.sidebar.borrow_mut();
     let mut overflow = None;
     // (a row's id, looked up only while something's marked or flashing — `Editor::ui_lit`)
@@ -10464,18 +10582,13 @@ fn draw_sidebar(
             (2, _) if !behind.is_empty() => chat_spans(out, &behind, card, w)?,
             (_, Some(i)) => match shown.get(i).map(|&r| (r, &lines[r])) {
                 Some((r, l)) => {
-                    // (a file another session is in: `◦ main` before what the row says — `presence.rs`)
-                    let rel = match &l.target {
-                        _ if editor.presence.now.is_empty() => None,
-                        crate::sidebar::Target::File(p) => p.strip_prefix(sb.root()).ok(),
-                        crate::sidebar::Target::Change { rel, file: true, .. } => {
-                            Some(std::path::Path::new(rel))
+                    // (a file another session is in, or whose changes would conflict with yours: each its initial
+                    // in its colour after the name, `≈` before it for a conflict — `presence::file_marks`)
+                    let (hint, paint) = match side_rel(editor, sb, l) {
+                        Some(rel) => {
+                            crate::presence::file_hint(&crate::presence::file_marks(editor, rel).0, &l.hint)
                         }
-                        _ => None,
-                    };
-                    let hint = match rel {
-                        Some(rel) => crate::presence::hint(&crate::presence::in_file(editor, rel), &l.hint),
-                        None => l.hint.clone(),
+                        None => (l.hint.clone(), None),
                     };
                     let row = crate::picker::Row {
                         label: l.label.clone(),
@@ -10487,7 +10600,7 @@ fn draw_sidebar(
                         tree: Some((l.depth, l.kind)),
                         spots: Vec::new(),
                         stamp: None,
-                        paint: None,
+                        paint,
                     };
                     links.push((y, r));
                     // The selected row's name cut short: whole, over the code (drawn after the rest) — with
@@ -10529,6 +10642,14 @@ fn draw_sidebar(
                 },
                 None => 0,
             },
+            // (the row in hand's sessions in words, on the gap over the keys: `main.rs — main would conflict L10 ·
+            // fix writing`)
+            _ if y + 3 == lay.body_h && !foot.is_empty() => {
+                apply(out, Style { fg: ui.virt.fg, ..card })?;
+                let said = fit_ellipsis(&foot, w);
+                queue!(out, Print(&said))?;
+                said.width()
+            }
             _ if y + 2 == lay.body_h => chat_spans(out, &hints[0], card, w)?,
             _ if y + 1 == lay.body_h => chat_spans(out, &hints[1], card, w)?,
             _ => 0,
@@ -11655,6 +11776,11 @@ fn session_tabs(
             if let Some(m) = mark(l) {
                 end = put(&mut spans, m.text, m.style);
             }
+            // (whom its changes would conflict with — `≈ main`, each in its colour: `overlap.rs`)
+            for (k, (name, c)) in crate::overlap::others(editor, l.id).into_iter().enumerate() {
+                put(&mut spans, if k == 0 { " ≈ " } else { ", " }.into(), if k == 0 { warn } else { faint });
+                end = put(&mut spans, name, c.map_or(faint, colour));
+            }
             if let Some(file) = crate::presence::file_of(editor, l.id).filter(|_| files) {
                 end = put(&mut spans, format!(" {file}"), dim);
             }
@@ -11697,7 +11823,10 @@ fn session_tabs(
     let reviewing = (editor.session.reviewing() && !crate::reviewer::status_shows(editor, rail_w))
         .then(|| Span { text: " ¶".into(), style: reviewer });
     let rebasing = rebasing(&editor.session);
-    let marks_w = [&mark, &reviewing, &rebasing]
+    // (its changes would conflict with another's: the glyph alone — the list names whose)
+    let overlap = (!crate::overlap::others(editor, editor.session.id).is_empty())
+        .then(|| Span { text: " ≈".into(), style: warn });
+    let marks_w = [&mark, &overlap, &reviewing, &rebasing]
         .iter()
         .filter_map(|m| m.as_ref())
         .map(|m| m.text.width())
@@ -11716,6 +11845,7 @@ fn session_tabs(
     let own = Style { bold: true, ..colour(editor.session.colour) };
     let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: own }];
     spans.extend(mark);
+    spans.extend(overlap);
     spans.extend(reviewing);
     spans.extend(rebasing);
     spans.push(Span { text: " ▾".into(), style: dim });

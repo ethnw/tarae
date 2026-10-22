@@ -988,6 +988,9 @@ pub struct SessionState {
     /// Where its Claude is in its turn, as the session list says it (`presence::at`: `src/a.rs:12 · writing`) —
     /// None: between turns, or one session open. Claude's level never (collab C1: nothing of it reaches Claude).
     pub at: Option<String>,
+    /// Where its changes would conflict with another workspace's or its base's tip (`overlap.rs`): `main · src/a.rs
+    /// L3–5`, its own lines. Claude's level never (it hears of one in the answer of the tool that touches that file).
+    pub overlaps: Vec<String>,
     /// Its panes (panes P2b, plan §5.2): every leaf of its tree, and over the front's the floating ones.
     pub panes: Vec<PaneState>,
 }
@@ -1520,6 +1523,7 @@ impl Editor {
             },
             writing: crate::writing::listed(l.chat.as_ref(), &self.docs),
             at: crate::presence::at(self, l.id),
+            overlaps: crate::overlap::listed(self, l.id),
             panes: self.panes_state(l, is_front),
         };
         let mut sessions = vec![session(front, true)];
@@ -1754,6 +1758,9 @@ impl UiState {
                 }
                 if let Some(at) = &s.at {
                     v["at"] = json!(at);
+                }
+                if !s.overlaps.is_empty() {
+                    v["overlaps"] = json!(s.overlaps);
                 }
                 if let Some(k) = &s.key_source {
                     v["key_source_seen"] = json!(k);

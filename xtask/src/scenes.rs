@@ -99,8 +99,8 @@ const PRESENCE: &[&str] = presence_keys!();
 const PRESENCE_LIST: &[&str] = presence_keys!(" ", "W", "@2");
 const PRESENCE_FILES: &[&str] = presence_keys!(" ", "e", "@2");
 const PRESENCE_FOLLOW: &[&str] = presence_keys!(" ", "F", "@2");
-// (a third checkout, idle, then back in fix with its chat open: the strip over it, each session its `●` in its colour,
-// main's `working` and its file, fix in front strong)
+// (a third checkout, idle, then back in fix with its chat open: the strip over it, each session's name in its colour,
+// main's `working` and its file after it, fix in front in bold)
 const PRESENCE_STRIP: &[&str] = presence_keys!(
     ":",
     "sh git worktree add -q ../docs",
@@ -177,6 +177,58 @@ const PRESENCE_TWO: &[&str] = presence_keys!(
     "\x1b",
     "@2"
 );
+/// The line `threads.insert` is on changed and saved in the checkout tarae started in, then another checkout opened as
+/// a session and the same line changed its own way and saved there: their changes would conflict (`overlap` scenes,
+/// collab C2 — said once the trees are still, a few seconds after the save).
+macro_rules! overlap_keys {
+    ($($more:expr),* $(,)?) => {
+        &[
+            "@1",
+            "/",
+            "threads.insert",
+            "\r",
+            "A",
+            " // main's way",
+            "\x1b",
+            ":",
+            "w",
+            "\r",
+            "@1",
+            ":",
+            "sh git worktree add -q ../fix",
+            "\r",
+            "@3",
+            ":",
+            "session-open ../fix",
+            "\r",
+            "@3",
+            ":",
+            "e src/main.rs",
+            "\r",
+            "@1",
+            "/",
+            "threads.insert",
+            "\r",
+            "A",
+            " // fix's way",
+            "\x1b",
+            ":",
+            "w",
+            "\r",
+            "@12?fix ≈ main",
+            "@1",
+            $($more),*
+        ]
+    };
+}
+// (the toast, once)
+const OVERLAP: &[&str] = overlap_keys!();
+// (…the strip over fix's chat: `fix ≈ main`, `main ≈ fix`, each name in its colour)
+const OVERLAP_STRIP: &[&str] = overlap_keys!(" ", "l", "@2");
+// (…the list: `≈ main` on fix's row, `≈ fix` on main's)
+const OVERLAP_LIST: &[&str] = overlap_keys!(" ", "W", "@2");
+// (…the file tree: `≈m` on src/main.rs — main's initial in its colour — and the row in hand's words at its foot)
+const OVERLAP_FILES: &[&str] = overlap_keys!(" ", "e", "@?main.rs", "@1");
 
 const QUOTE_CHIP: &[&str] = &[
     "@1",
@@ -1420,13 +1472,18 @@ const SCENES: &[Scene] = &[
     Scene { name: "presencefiles", claude: "writemid", files: MAIN, keys: PRESENCE_FILES },
     // (…`space F`: following the next session at work takes you into its checkout, `● follow <name>`)
     Scene { name: "presencefollow", claude: "writemid", files: MAIN, keys: PRESENCE_FOLLOW },
-    // (…the sessions' strip over a chat: every session its `●` in its colour, whatever it does)
+    // (…the sessions' strip over a chat: every session's name in its colour, what it does after it)
     Scene { name: "presencestrip", claude: "writemid", files: MAIN, keys: PRESENCE_STRIP },
     // (…a session waiting on you behind — its card parked: the strip and the list say it in warning)
     Scene { name: "presencewaits", claude: "card", files: MAIN, keys: PRESENCE_WAITS },
     Scene { name: "presencewaitslist", claude: "card", files: MAIN, keys: PRESENCE_WAITS_LIST },
     // (…two Claudes writing one file in two checkouts, each its colour; follow holds the view, your cursor elsewhere)
     Scene { name: "presencetwo", claude: "writemid", files: MAIN, keys: PRESENCE_TWO },
+    // (collab C2: the same line changed and saved two ways in two checkouts — the toast, the strip, the list, the tree)
+    Scene { name: "overlap", claude: "writemid", files: MAIN, keys: OVERLAP },
+    Scene { name: "overlapstrip", claude: "writemid", files: MAIN, keys: OVERLAP_STRIP },
+    Scene { name: "overlaplist", claude: "writemid", files: MAIN, keys: OVERLAP_LIST },
+    Scene { name: "overlapfiles", claude: "writemid", files: MAIN, keys: OVERLAP_FILES },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))

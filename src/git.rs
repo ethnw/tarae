@@ -319,6 +319,8 @@ impl Editor {
         for id in ids {
             self.git_load_base(id);
         }
+        // (its tree may have moved with it: taken again for overlaps)
+        crate::overlap::moved(self, dir);
     }
 
     /// On every event: if the current document's diff is stale, redo it on a worker thread shortly after

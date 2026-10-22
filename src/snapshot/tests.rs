@@ -623,7 +623,7 @@ fn perf_snapshot_of_untracked_files() {
     let temp = dir.join(".git/copy.index");
     let t = Instant::now();
     std::fs::copy(dir.join(".git/index"), &temp).unwrap();
-    stage(&dir, &temp).unwrap();
+    stage(&dir, &temp, &Apart::NONE).unwrap();
     let copy_ms = ms(t);
     std::fs::remove_dir_all(&dir).ok();
     let lines = [

@@ -1034,6 +1034,50 @@ fn chat_prompt_tokens_with_a_toast_up() {
     eprintln!("TOKENS first request's prompt: {:?}", p.first());
 }
 
+/// What an overlap's line costs in a tool's answer (collab C2): Claude reads `a.rs` in the main checkout with its `read`
+/// — once while another checkout (`fix`, a session) changed the same line its own way, its answer then ending
+/// `a.rs: fix's change would conflict here: L3`, and once without. The file read is the same in both: the requests
+/// after the read differ by the line.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_overlap_line_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let after_read = |overlap: bool| {
+        let (sb, out) = teed_chat(if overlap { "overlap-line" } else { "overlap-none" });
+        std::fs::write(sb.git_config(), "[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = false\n")
+            .unwrap();
+        let text: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        sb.write("a.rs", &text);
+        sb.git(&["init", "-q", "-b", "main"]);
+        sb.git(&["add", "-A"]);
+        sb.git(&["commit", "-q", "-m", "base"]);
+        let wt = sb.work().with_file_name("fix");
+        sb.git(&["worktree", "add", "-q", "-b", "fix", wt.to_str().unwrap()]);
+        // (main's line 3 its own way in both; fix's the other way in one)
+        sb.write("a.rs", &text.replace("line 3\n", "line 3, main\n"));
+        if overlap {
+            std::fs::write(wt.join("a.rs"), text.replace("line 3\n", "line 3, fix\n")).unwrap();
+        }
+        let mut t = sb.spawn(&["a.rs"]);
+        t.send(&format!(":session-open {}\r", wt.display()));
+        let two = |s: &serde_json::Value| s["sessions"].as_array().is_some_and(|a| a.len() == 2);
+        t.wait_state("two sessions", two);
+        t.send(":session-switch 0\r");
+        if overlap {
+            t.wait_state("the overlap", |s| {
+                s["sessions"].as_array().is_some_and(|a| a.iter().any(|l| l["overlaps"].is_array()))
+            });
+        }
+        chat_turn(&mut t, "Read a.rs with the read tool, then reply with the single word ok.");
+        prompts(&std::fs::read_to_string(&out).unwrap_or_default())
+    };
+    let (with, without) = (after_read(true), after_read(false));
+    eprintln!("TOKENS requests' prompts — with the overlap's line: {with:?} · without: {without:?}");
+    assert!(with.len() >= 2 && without.len() >= 2, "a request after the read in each");
+}
+
 /// Keep-warm (`keepwarm.rs`): a ping of a fork of the conversation reads the cache the chat's turn wrote — its
 /// request's cache read is at least 95 % of the chat's last prompt, so the fork's prefix (tools, system prompt,
 /// history) is the chat's to the byte. Asked for now (`:keep-warm now`) rather than waited for 55 minutes; the

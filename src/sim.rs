@@ -34,6 +34,7 @@ mod commit;
 mod diskwatch;
 mod hosts;
 mod instructions;
+mod overlap;
 mod panes;
 mod presence;
 #[cfg(not(target_os = "linux"))]

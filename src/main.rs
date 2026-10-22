@@ -109,6 +109,7 @@ mod nofile;
 mod notes;
 mod offer;
 mod outlines;
+mod overlap;
 mod packs;
 mod pairs;
 mod palette;
