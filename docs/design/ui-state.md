@@ -122,8 +122,10 @@ side git · 4 rows · in hand git:src/term.rs
     transcript, a read-only document, `chatdoc.rs`; its handler `chat-view`, V 8) · `view:terminal` (the terminal's — tarae's keys on its panel, its handler
     `terminal-view`; there's no `slot:terminal`) · `output:task` · `output:preflight` · `output:tests` (panes P2c,
     `rundoc.rs`: a run panel's output as a read-only document, normal mode on it with `[run]` over — their handler
-    `output`; no `slot:task` or `slot:tests`) · `side:<tab>` · `review` · `edit-review` · `slot:<panel>` (`:procs`,
-    a plugin's) · `terminal-program` · `card`. In a view mode or on an output `pending` and `char_next` are its own
+    `output`; no `slot:task` or `slot:tests`) · `output:procs` (`:procs`' detail, what its table selected — panes P3
+    step 4, the same document pane) · `list:<kind>` (a linked group's list, below; `:procs`' table is `list:procs`,
+    handler `list` — there's no `slot:procs` and no `procs` handler since) · `side:<tab>` · `review` ·
+    `edit-review` · `slot:plugin` · `terminal-program` · `card`. In a view mode or on an output `pending` and `char_next` are its own
     (its count, `g`, `f`).
   - `takes`:
     - `commands`: normal mode, panels.
@@ -257,15 +259,15 @@ side git · 4 rows · in hand git:src/term.rs
     (full level adds its text).
   - `follow`: on, paused, the gaze.
   - Where the keys are is one value, the session's `at` (panes P2a, `session::At`: the code, the chat, the
-    terminal's program, the slot, `:procs`, a plugin's panel, the side panel, the review's rail): `side`'s,
+    terminal's program, the slot, a group's list, a plugin's panel, the side panel, the review's rail): `side`'s,
     `review`'s and `chat`'s `focused` and `slot`'s has-the-keys read it, so at most one is true — the one `keys`
     names. A code pane's `focused` is the pane the code means (`Session.focus`), wherever the keys are.
     Panes P2b: a floating pane with the keys — a card (held, or taking its answers), the picker, a prompt,
     which-key — is `at` itself (`At::Float(pane id)`), the docked pane it rose over `Session.under`, the keys' again
     once it goes (`Editor::float_sync`, every key and event); a linked group's list (panes P3 §2.1, `Session.groups` —
-    the tests', the task's places, a preflight's steps) is `At::List(pane id)`, `keys.region` `list:<kind>`
-    (`list:tests`, `list:task`, `list:preflight`, `grouplist::key`), its detail the slot's output document (`At::Slot`,
-    P2c).
+    the tests', the task's places, a preflight's steps, `:procs`' table) is `At::List(pane id)`, `keys.region`
+    `list:<kind>` (`list:tests`, `list:task`, `list:preflight`, `list:procs`, `grouplist::key`), its detail the slot's
+    output document (`At::Slot`, P2c; `:procs`' since P3 step 4, `output:procs`).
   - `panes` (per session, panes P2b): every leaf of its tree in the tree's order — `{id: pane#N, shows:
     code:src/a.rs | side | rail | slot | chat, rect, at}` (rects the front's, as the last frame laid them out), the
     members of a group after its host while it lays them out (`list:tests`, `detail:tests`, `list:task` … — the host's keys the

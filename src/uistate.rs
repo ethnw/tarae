@@ -116,7 +116,6 @@ impl Region {
             Region::Side(_) => Handler::Side,
             Region::Rail => Handler::Rail,
             Region::EditReview => Handler::EditReview,
-            Region::Slot(Slot::Procs) => Handler::Procs,
             Region::Slot(Slot::Plugin) => Handler::PluginPanel,
             // (the test, task and terminal panels' keys are their view modes')
             Region::Slot(_) => Handler::Code,
@@ -174,7 +173,6 @@ pub enum Handler {
     Chat,
     Rail,
     Side,
-    Procs,
     PluginPanel,
     List,
     Prompt,
@@ -199,7 +197,6 @@ impl Handler {
             Handler::Chat => "chat",
             Handler::Rail => "review",
             Handler::Side => "side",
-            Handler::Procs => "procs",
             Handler::PluginPanel => "plugin",
             Handler::List => "list",
             Handler::Prompt => "prompt",
@@ -500,9 +497,6 @@ impl Editor {
             if let Some(s) = self.session.sidebar.as_ref().filter(|_| at(At::Side) && !self.side_folded()) {
                 v.push(layer(Region::Side(s.mode), editors(&[ctrl('w')])));
             }
-            if self.procs_focused() {
-                v.push(layer(Region::Slot(Slot::Procs), editors(&[ctrl('w')])));
-            }
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
@@ -677,6 +671,7 @@ impl Editor {
             Region::View(crate::view::Surface::Chat) => s.chat_view.get().is_some(),
             Region::View(crate::view::Surface::Terminal) => s.terminal_rows.is_some(),
             Region::Output(crate::rundoc::Run::Tests) => s.test_panel.get().is_some(),
+            Region::Output(crate::rundoc::Run::Procs) => s.procs_panel.get().is_some_and(|a| a.detail > 0),
             Region::Output(_) => s.task_panel.get().is_some(),
         }
     }
@@ -844,9 +839,11 @@ pub struct ProcRow {
 impl ProcsState {
     pub fn of(p: &crate::procs::Procs) -> ProcsState {
         use crate::procs::Kind;
+        // (what runs: not a gone one the selection is kept on)
         let rows = p
             .rows
             .iter()
+            .filter(|r| r.gone.is_none())
             .map(|r| ProcRow {
                 pid: r.pid,
                 parent: r.ppid,

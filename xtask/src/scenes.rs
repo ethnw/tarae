@@ -855,6 +855,22 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (panes P3 step 4: `:procs` as a group — the table with the keys, a shell's row selected; at 80 stacked)
+    Scene {
+        name: "group-procs-list",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", " ", "T", "@3", "\x1c", "@1", "\x1b", "@1", ":procs", "\r", "@2", "G", "@1"],
+    },
+    // (…and its detail with the keys: what that row is — its command line whole, its parents up to tarae)
+    Scene {
+        name: "group-procs-detail",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1", " ", "T", "@3", "\x1c", "@1", "\x1b", "@1", ":procs", "\r", "@2", "G", "@1", "\t", "@1",
+        ],
+    },
     // (H1, Helix's picker keys: the file picker's hints, then `C-v` — the file opened beside, in a split — and `C-t`,
     // the preview put away)
     Scene {

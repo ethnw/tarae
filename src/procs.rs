@@ -18,6 +18,7 @@
 //!   with what tarae did (`Procs.checks`, under the list, and the log); while one holds, the status line
 //!   says so (`Procs::mark`) — nothing otherwise.
 
+pub mod detail;
 pub mod sockets;
 
 use std::collections::{HashMap, HashSet};
@@ -25,9 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::editor::{Editor, Mode};
+use crate::editor::Editor;
 use crate::event::{Event, SessionId};
-use crate::key::{Code, Key};
 use crate::lsp::ClientId;
 
 /// How often tarae looks while `:procs` is closed (`TARAE_PROCS_EVERY` ms stands in, for measurements).
@@ -77,6 +77,9 @@ pub struct Os {
     /// Its working folder — read for tarae's own children only (`Sampler::sample`): one the editor can't
     /// name goes under the session whose checkout it works in (#100).
     pub cwd: Option<PathBuf>,
+    /// Its command line (`command`) — read, with its folder, for every process while `:procs` is open
+    /// (`Sampler.whole`: its detail says them).
+    pub command: Option<String>,
     /// The run of Claude's that left it running, by its environment (Linux: tarae's own children only —
     /// `sandbox::left_by`): the run's tag, and its project when tarae knows it.
     pub left: Option<(String, Option<PathBuf>)>,
@@ -133,6 +136,7 @@ pub fn read(pid: u32) -> Option<Os> {
             footprint: ok.then_some(ri.ri_phys_footprint),
             zombie: bsd.pbi_status == libc::SZOMB,
             cwd: None,
+            command: None,
             left: None,
             sid: None,
         })
@@ -180,6 +184,7 @@ fn parse_stat(pid: u32, stat: &str, hz: u64, page: u64, boot: u64) -> Option<Os>
         footprint: None,
         zombie: f.first() == Some(&"Z"),
         cwd: None,
+        command: None,
         left: None,
         sid: num(3).map(|s| s as u32),
     })
@@ -665,6 +670,8 @@ pub fn disk_check(vols: &[Volume], shot: bool) -> Vec<Finding> {
 pub struct Sampler {
     prev: HashMap<(u32, u64), Duration>,
     at: Option<Instant>,
+    /// `:procs` is open: every process's command line and folder are read too (its detail says them).
+    pub whole: bool,
 }
 
 impl Sampler {
@@ -677,6 +684,10 @@ impl Sampler {
                 if os.ppid == root {
                     os.cwd = cwd(os.pid);
                     os.left = crate::sandbox::left_by(os.pid);
+                }
+                if self.whole && !os.zombie {
+                    os.command = command(os.pid);
+                    os.cwd = os.cwd.take().or_else(|| cwd(os.pid));
                 }
                 let before = self.prev.get(&(os.pid, os.started));
                 let pct = wall
@@ -733,6 +744,7 @@ pub fn start(events: crate::event::Tx, usual_path: Option<PathBuf>) -> Sender<Wa
         let free_as = std::env::var("TARAE_DISK_FREE").ok().and_then(|v| v.parse::<u64>().ok());
         let shot = std::env::var_os("TARAE_SHOT_NO_DISK").is_some_and(|v| v == "1");
         loop {
+            s.whole = open;
             let mut sample = look(&mut s, &mut reaper, Instant::now());
             sample.usual = usual.take();
             sample.free = volumes(&places);
@@ -913,6 +925,12 @@ pub struct Row {
     pub session: Option<SessionId>,
     /// Left by a program tarae ran, tarae only its last parent (`reaper`): not a stray of tarae's own.
     pub left: bool,
+    /// Its command line and folder, while `:procs` is open (`Sampler.whole`).
+    pub command: Option<String>,
+    pub cwd: Option<PathBuf>,
+    /// The process the selection was on, gone from the last look: kept in the list, the selection on it, said
+    /// gone since then until the selection leaves it (`Editor::procs_sampled`).
+    pub gone: Option<SystemTime>,
 }
 
 impl Row {
@@ -975,6 +993,9 @@ pub fn rows(
         flagged: false,
         session,
         left: false,
+        command: os.command.clone(),
+        cwd: os.cwd.clone(),
+        gone: None,
     };
     // No process: a held server, a session's heading
     let bare = |kind: Kind, under: Kind, title: &str, what: String, session| Row {
@@ -996,6 +1017,9 @@ pub fn rows(
         flagged: false,
         session,
         left: false,
+        command: None,
+        cwd: None,
+        gone: None,
     };
     let mut out = Vec::new();
     if let Some(os) = by_pid.get(&me) {
@@ -1135,6 +1159,9 @@ pub fn with_queued(rows: &mut Vec<Row>, queued: &[(SessionId, u64, String, Strin
             flagged: false,
             session,
             left: false,
+            command: None,
+            cwd: None,
+            gone: None,
         };
         rows.insert(at, row);
     }
@@ -1145,7 +1172,7 @@ pub fn with_queued(rows: &mut Vec<Row>, queued: &[(SessionId, u64, String, Strin
 pub fn summed(rows: &[Row], pids: &[u32]) -> Option<(f32, u64)> {
     let mut sum: Option<(f32, u64)> = None;
     let mut inside = false;
-    for r in rows {
+    for r in rows.iter().filter(|r| r.gone.is_none()) {
         if r.depth == 0 {
             inside = r.kind != Kind::Tarae && pids.contains(&r.pid);
         }
@@ -1371,6 +1398,8 @@ pub struct Finding {
 #[derive(Clone, Debug)]
 pub struct Check {
     key: String,
+    /// The process it's about (0: none — the disk, a held server).
+    pub pid: u32,
     pub what: String,
     pub short: String,
     pub did: String,
@@ -1401,23 +1430,29 @@ fn usual_of(usual: &Usual, program: &str) -> Option<u64> {
 }
 
 /// The panel's state while `:procs` is open.
+#[derive(Default)]
 pub struct Panel {
     pub selected: usize,
     /// The first row in sight (drawing keeps the selected one in sight).
     pub scroll: std::cell::Cell<usize>,
     /// The tallest it's been (`term::procs_panel_h` — it doesn't shrink while it's open).
     pub tall: std::cell::Cell<usize>,
+    /// The most memory each process took since it opened (its detail says it).
+    pub peak: HashMap<(u32, u64), u64>,
 }
 
 /// The panel as drawn last frame: its first screen line and its last, its first row's line, how many rows
-/// show, the first row shown.
-#[derive(Clone, Copy, Debug)]
+/// show, the first row shown — and its table's columns (x, width) and its detail's rows (0: not laid out).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Area {
     pub top: usize,
     pub bottom: usize,
     pub first: usize,
     pub shown: usize,
     pub scroll: usize,
+    pub x: usize,
+    pub w: usize,
+    pub detail: usize,
 }
 
 /// tarae's processes: the last look, the checks' memory, the panel.
@@ -1653,6 +1688,7 @@ impl Procs {
                 crate::log::line("procs", "check", &format!("{} — {}", f.what, f.did));
                 self.checks.push(Check {
                     key: f.key.clone(),
+                    pid: f.pid,
                     what: f.what.clone(),
                     short: f.short.clone(),
                     did: f.did.clone(),
@@ -1743,41 +1779,55 @@ impl Editor {
             return self.procs_close();
         }
         if self.procs.panel.is_none() {
-            self.procs.panel =
-                Some(Panel { selected: 0, scroll: Default::default(), tall: Default::default() });
+            self.procs.panel = Some(Panel::default());
             self.procs_wake(Wake::Open(true));
         }
         self.procs_took_keys();
     }
 
+    /// `:procs` closes — the keys, its table's or its detail's, back to the code.
     pub fn procs_close(&mut self) {
+        let detail = crate::rundoc::has_keys(self) == Some(crate::sizes::Slot::Procs);
+        self.procs_unfocus();
+        if detail {
+            self.session.leave(crate::session::At::Slot);
+        }
         self.procs.panel = None;
         self.procs_wake(Wake::Open(false));
     }
 
-    /// The panel took the keys: nothing else keeps them.
+    /// The panel took the keys: its table's (a linked group's list, panes P3 step 4 — `grouplist.rs`).
     fn procs_took_keys(&mut self) {
-        self.session.at = crate::session::At::Procs;
+        self.list_focus(crate::pane::GroupKind::Procs);
     }
 
-    /// Whether the panel has the keys.
+    /// Whether the panel's table has the keys.
     pub fn procs_focused(&self) -> bool {
-        self.session.is_at(crate::session::At::Procs) && self.procs.panel.is_some()
+        self.list_focused().is_some_and(|g| g.kind == crate::pane::GroupKind::Procs)
     }
 
-    /// The panel gives the keys back (the code was clicked, another place took them).
+    /// The table gives the keys back (the code was clicked, another place took them).
     pub fn procs_unfocus(&mut self) {
-        self.session.leave(crate::session::At::Procs);
+        if let Some(g) = self.session.group(crate::pane::GroupKind::Procs) {
+            self.session.leave(crate::session::At::List(g.list));
+        }
     }
 
-    /// A click on the panel's row `row` (None: its header): the keys, that row selected.
+    /// A click on the table's row `row` (None: its header, or the table stacked away): the keys, that row selected.
     pub fn procs_click(&mut self, row: Option<usize>) {
-        let n = self.procs.rows.len();
-        let Some(p) = self.procs.panel.as_mut() else { return };
-        if let Some(r) = row.filter(|&r| r < n) {
-            p.selected = r;
+        match row.filter(|&r| r < self.procs.rows.len()) {
+            Some(r) => crate::grouplist::click(self, crate::pane::GroupKind::Procs, r),
+            None => self.procs_took_keys(),
         }
-        self.procs_took_keys();
+    }
+
+    /// The table's own keys (`grouplist::key`): `s` stops the selected row, `r` restarts it, `l` its log.
+    pub(crate) fn procs_act(&mut self, c: char) {
+        match c {
+            's' => self.procs_stop(),
+            'r' => self.procs_restart(),
+            _ => self.procs_log(),
+        }
     }
 
     /// A watcher of `procs` came (`ui_watch_add`): a look now — what it's told is since a look after it came
@@ -1797,7 +1847,7 @@ impl Editor {
         // No thread (tests): a one-off look on a worker
         if open {
             self.events.jobs().spawn(|| {
-                let s = Sampler::default().sample(std::process::id());
+                let s = Sampler { whole: true, ..Sampler::default() }.sample(std::process::id());
                 move |ed: &mut Editor| ed.procs_sampled(s)
             });
         }
@@ -2010,11 +2060,28 @@ impl Editor {
         for r in &mut rows {
             r.flagged |= flagged.contains(&r.pid);
         }
-        // The selection stays on its process (its heading, its held server) as rows come and go
-        let was = self.procs.panel.as_ref().and_then(|p| self.procs.rows.get(p.selected));
-        let now = was.and_then(|w| rows.iter().position(|r| w.same(r)));
+        // The selection stays on its process (its heading, its held server) as rows come and go — one gone stays in
+        // the list where it was, said gone, until the selection leaves it (its detail says what it was)
+        let was =
+            self.procs.panel.as_ref().and_then(|p| Some((p.selected, self.procs.rows.get(p.selected)?)));
+        let found = was.and_then(|(_, w)| rows.iter().position(|r| w.same(r)));
+        let gone = was.filter(|(_, w)| found.is_none() && w.pid != 0).map(|(at, w)| {
+            let since = w.gone.unwrap_or(now);
+            (at.min(rows.len()), Row { gone: Some(since), cpu: None, flagged: false, ..w.clone() })
+        });
+        let gone_at = gone.as_ref().map(|g| g.0);
+        if let Some((at, row)) = gone {
+            rows.insert(at, row);
+        }
         if let Some(p) = self.procs.panel.as_mut() {
-            p.selected = now.unwrap_or(p.selected).min(rows.len().saturating_sub(1));
+            let at = gone_at.or(found);
+            p.selected = at.unwrap_or(p.selected).min(rows.len().saturating_sub(1));
+            // (the most each took since it opened — its detail's)
+            p.peak.retain(|k, _| rows.iter().any(|r| r.key() == *k));
+            for r in rows.iter().filter(|r| r.pid != 0 && r.gone.is_none()) {
+                let most = p.peak.entry(r.key()).or_default();
+                *most = (*most).max(r.memory());
+            }
         }
         self.procs.rows = rows;
         self.procs.took = Some(s.took);
@@ -2035,8 +2102,9 @@ impl Editor {
             true => format!("{} ({})", r.title, r.pid),
             false => format!("{} ({}) — {}", r.title, r.pid, r.what),
         };
-        let live =
-            |rs: &[Row]| -> Vec<(u32, u64)> { rs.iter().filter(|r| r.pid != 0).map(Row::key).collect() };
+        // (a gone row the selection is kept on was said ended at the look that lost it)
+        let running = |r: &&Row| r.pid != 0 && r.gone.is_none();
+        let live = |rs: &[Row]| -> Vec<(u32, u64)> { rs.iter().filter(running).map(Row::key).collect() };
         let (was, now) = (live(&self.procs.rows), live(rows));
         // (the first look has nothing before it: everything would be "started")
         if self.procs.looked.is_none() {
@@ -2045,7 +2113,7 @@ impl Editor {
         let started: Vec<String> =
             rows.iter().filter(|r| r.pid != 0 && !was.contains(&r.key())).map(name).collect();
         let ended: Vec<String> =
-            self.procs.rows.iter().filter(|r| r.pid != 0 && !now.contains(&r.key())).map(name).collect();
+            self.procs.rows.iter().filter(running).filter(|r| !now.contains(&r.key())).map(name).collect();
         let holding = self.procs.holding();
         let found: Vec<&String> = holding.iter().filter(|c| !held_before.contains(c)).collect();
         let over: Vec<&String> = held_before.iter().filter(|c| !holding.contains(c)).collect();
@@ -2148,6 +2216,10 @@ impl Editor {
         let Some(r) = self.procs_selected() else {
             return self.set_status("no row selected — nothing to stop");
         };
+        // (its pid may be another process's by now)
+        if r.gone.is_some() {
+            return self.set_status(format!("{} has ended — nothing to stop", r.title));
+        }
         let gone = |ed: &mut Editor, what: &str, then: Option<&str>| {
             ed.set_status(stopped(&ed.procs_whose(&r, what), then));
             ed.procs_wake(Wake::Now);
@@ -2250,6 +2322,9 @@ impl Editor {
         let Some(r) = self.procs_selected() else {
             return self.set_status("no row selected — nothing to restart");
         };
+        if r.gone.is_some() {
+            return self.set_status(format!("{} has ended — a row of what runs now restarts", r.title));
+        }
         match r.kind {
             Kind::Lsp(cid) => {
                 let docs: Vec<_> =
@@ -2382,49 +2457,10 @@ fn last_line_of(text: &str, source: &str) -> usize {
         .unwrap_or(lines.len().saturating_sub(1))
 }
 
-/// The panel's keys, while it has them: `j`/`k` (`g`/`G`, `C-d`/`C-u`) through the rows, `s` stop, `r`
-/// restart, `l` its log, `q` close, `tab`/`S-tab` the slot's other tabs, Esc back to the code (it stays, looking every second). The space menu,
-/// `:` and `C-w` stay the editor's. true if taken.
-pub fn key(ed: &mut Editor, key: Key) -> bool {
-    if ed.mode != Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
-        return false;
-    }
-    let n = ed.procs.rows.len();
-    let rows = ed.screen.procs_panel.get().map_or(0, |a| a.shown);
-    if !ed.session.is_at(crate::session::At::Procs) {
-        return false;
-    }
-    let Some(p) = ed.procs.panel.as_mut() else { return false };
-    if let Some(m) = crate::key::list_move(key, rows) {
-        p.selected = match m {
-            // (`C-e`/`C-y`: the view, the selection staying unless it would leave it)
-            crate::key::ListMove::Scroll(by) => {
-                let (top, at) = crate::key::in_sight(by, p.scroll.get(), p.selected, n, rows, 0);
-                p.scroll.set(top);
-                at
-            }
-            m => m.from(p.selected, n),
-        };
-        return true;
-    }
-    match (key.code, key.ctrl, key.alt) {
-        (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
-        (Code::Esc, ..) => ed.session.at = crate::session::At::Code,
-        (Code::Char('q'), false, false) => ed.procs_close(),
-        (Code::Char('s'), false, false) => ed.procs_stop(),
-        (Code::Char('r'), false, false) => ed.procs_restart(),
-        (Code::Char('l'), false, false) => ed.procs_log(),
-        // (the slot's other tabs, as from its view modes' `[view.run]` and `[view.terminal]` — view P3)
-        (Code::Tab, false, false) => ed.slot_step(1),
-        (Code::BackTab, false, false) => ed.slot_step(-1),
-        _ => ed.key_unused(key, ":procs", "esc code"),
-    }
-    true
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::key::{Code, Key};
 
     const MB: u64 = 1 << 20;
 
@@ -2642,6 +2678,300 @@ pub(crate) mod tests {
         assert_eq!(said, format!("{title} isn't running — r starts it"), "s names the row in sight");
     }
 
+    fn region(ed: &Editor) -> String {
+        ed.keys_to().region.name()
+    }
+
+    fn detail_text(ed: &Editor) -> String {
+        ed.session.outputs.doc(crate::sizes::Slot::Procs).map(|d| d.text.to_string()).unwrap_or_default()
+    }
+
+    const CTRL_W: Key = Key { code: Code::Char('w'), ctrl: true, alt: false, shift: false };
+
+    /// `:procs` is a linked group (panes P3 step 4): its table's selection drives the detail beside it — what that
+    /// process is: its command line, folder, the processes it's under up to tarae, what it started; `tab`, `enter`
+    /// and `C-w h`/`l` between them, as every group's; `esc` to the code; `q` closes it from either.
+    #[test]
+    fn the_tables_selection_says_in_the_detail_what_it_is() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let zsh =
+            Os { command: Some("/bin/zsh -l".into()), cwd: Some("/w/demo".into()), ..os(50_010, me, "zsh") };
+        let cargo = Os { command: Some("cargo test -q".into()), ..os(50_011, 50_010, "cargo") };
+        ed.procs_toggle();
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), zsh, cargo]));
+        let shown = screen(&mut ed, 160, 40);
+        assert_eq!(region(&ed), "list:procs", "the table has the keys");
+        assert!(
+            detail_text(&ed).starts_with("for      this editor\n"),
+            "tarae's first: {}",
+            detail_text(&ed)
+        );
+        // (side by side at 160: both named in the slot's line, the `┬` between)
+        let head = shown.iter().find(|l| l.contains("processes")).expect("the slot's line");
+        assert!(head.contains(" › processes ── ") && head.contains("┬─ detail ── tarae "), "{head}");
+        keys(&mut ed, "j");
+        let text = detail_text(&ed);
+        for s in [
+            "command  /bin/zsh -l\n",
+            "folder   /w/demo\n",
+            &format!("under    tarae {me}\n"),
+            "started  cargo 50011\n",
+        ] {
+            assert!(text.contains(s), "{s:?} in\n{text}");
+        }
+        keys(&mut ed, "j");
+        assert!(
+            detail_text(&ed).contains(&format!("under    tarae {me} › zsh 50010\n")),
+            "{}",
+            detail_text(&ed)
+        );
+        let shown = screen(&mut ed, 160, 40);
+        assert!(
+            shown.iter().any(|l| l.contains("─ detail ── cargo 50011 ")),
+            "named in its line:\n{}",
+            shown.join("\n")
+        );
+        // Its keys: as every group's
+        ed.handle_key(Key::plain(Code::Tab));
+        assert_eq!(region(&ed), "output:procs");
+        assert_eq!(crate::rundoc::cursor_line(&ed, crate::sizes::Slot::Procs), Some(0), "read from its top");
+        let shown = screen(&mut ed, 160, 40);
+        let head = shown.iter().find(|l| l.contains("─ detail ── ")).unwrap();
+        assert!(head.contains("y copy") && head.contains("q close") && !head.contains("latest"), "{head}");
+        ed.handle_key(CTRL_W);
+        keys(&mut ed, "h");
+        assert_eq!(region(&ed), "list:procs", "C-w h: the table");
+        ed.handle_key(CTRL_W);
+        keys(&mut ed, "l");
+        assert_eq!(region(&ed), "output:procs", "C-w l: the detail");
+        ed.handle_key(Key::plain(Code::Esc));
+        assert_eq!(region(&ed), "code");
+        ed.handle_key(CTRL_W);
+        keys(&mut ed, "j");
+        assert_eq!(region(&ed), "list:procs", "C-w j from the code: the table, as before");
+        // A click on the detail: its keys, the cursor there; on the table, its
+        let r =
+            ed.screen.run_rows.get().filter(|r| r.0 == crate::sizes::Slot::Procs).expect("the detail drawn");
+        let click = |ed: &mut Editor, x: usize, y: usize| {
+            let kind = crate::event::MouseKind::Down;
+            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false })
+        };
+        click(&mut ed, r.2 + 10, r.1 + 1);
+        assert_eq!(region(&ed), "output:procs", "a click on the detail");
+        assert_eq!(crate::rundoc::cursor_line(&ed, crate::sizes::Slot::Procs), Some(1));
+        let a = ed.screen.procs_panel.get().unwrap();
+        click(&mut ed, a.x + 4, a.first);
+        assert_eq!(region(&ed), "list:procs", "a click on the table");
+        assert_eq!(ed.procs.panel.as_ref().unwrap().selected, 0);
+        keys(&mut ed, "G");
+        ed.handle_key(Key::plain(Code::Enter));
+        assert_eq!(region(&ed), "output:procs", "enter: what the row is");
+        // (a read-only document: an edit put back, said)
+        keys(&mut ed, "d");
+        assert!(detail_text(&ed).contains("cargo test -q"));
+        keys(&mut ed, "q");
+        assert!(!ed.procs_up(), "q closes it from the detail");
+        assert_eq!(region(&ed), "code");
+    }
+
+    /// Narrow (80), the group is stacked: the table across the slot, both named in its line; `C-w l` opens the
+    /// detail in its place, `C-w h` the table again.
+    #[test]
+    fn a_narrow_procs_is_stacked() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        ed.procs_toggle();
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), os(50_020, me, "sleep")]));
+        let shown = screen(&mut ed, 80, 24);
+        let head = shown.iter().find(|l| l.contains("processes")).expect("the slot's line");
+        assert!(head.contains("processes · detail") && !head.contains('┬'), "stacked: {head}");
+        assert!(shown.iter().any(|l| l.contains("PID") && l.contains("RESIDENT")), "the table, whole");
+        ed.handle_key(CTRL_W);
+        keys(&mut ed, "l");
+        assert_eq!(region(&ed), "output:procs");
+        let shown = screen(&mut ed, 80, 24);
+        assert!(!shown.iter().any(|l| l.contains("PID")), "the detail in its place:\n{}", shown.join("\n"));
+        assert!(shown.iter().any(|l| l.starts_with("  for      this editor")), "{}", shown.join("\n"));
+        let head = shown.iter().find(|l| l.contains("processes")).unwrap();
+        assert!(head.contains(&format!("tarae {me}")), "the process named, not the table's totals: {head}");
+        assert!(!head.contains("2 processes"), "{head}");
+        ed.handle_key(CTRL_W);
+        keys(&mut ed, "h");
+        assert_eq!(region(&ed), "list:procs");
+        assert!(screen(&mut ed, 80, 24).iter().any(|l| l.contains("PID")), "the table again");
+    }
+
+    /// The selected process gone from a look: kept in the table where it was, the selection on it, said gone — in
+    /// its row and its detail, what it was kept — and `s` refuses it (its pid may be another process's by now: a
+    /// stand-in of the test's own stays untouched); the selection off it, it goes.
+    #[test]
+    fn a_gone_process_stays_said_gone_until_the_selection_leaves_it() {
+        let mut stand_in = Owned::sleep();
+        let pid = stand_in.id();
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let it = Os { command: Some("sleep 30".into()), ..os(pid, me, "sleep") };
+        ed.procs_toggle();
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), it, os(50_031, me, "tail")]));
+        keys(&mut ed, "j");
+        assert_eq!(ed.procs.rows[1].pid, pid);
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), os(50_031, me, "tail")]));
+        let r = &ed.procs.rows[1];
+        assert_eq!((r.pid, r.gone.is_some()), (pid, true), "kept where it was");
+        assert_eq!(ed.procs.panel.as_ref().unwrap().selected, 1, "the selection on it");
+        let shown = screen(&mut ed, 160, 40);
+        let row = shown.iter().find(|l| l.contains(&pid.to_string()) && l.contains('▎')).expect("its row");
+        assert!(row.contains("gone"), "{row}");
+        let text = detail_text(&ed);
+        assert!(text.starts_with("gone     it has ended — not seen since "), "{text}");
+        assert!(text.contains("command  sleep 30\n"), "what it was: {text}");
+        assert!(ed.ui_state().procs.rows.iter().all(|r| r.pid != pid), "not in the state: it doesn't run");
+        // Another look: still kept, still gone since the first
+        let since = ed.procs.rows[1].gone;
+        ed.procs_sampled(sample(vec![os(me, 1, "tarae"), os(50_031, me, "tail")]));
+        assert_eq!(ed.procs.rows[1].gone, since);
+        keys(&mut ed, "s");
+        let said = ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert_eq!(said, "sleep has ended — nothing to stop");
+        assert!(stand_in.try_wait().unwrap().is_none(), "nothing was sent to its pid");
+        keys(&mut ed, "r");
+        assert!(stand_in.try_wait().unwrap().is_none());
+        // The selection off it: it goes, the selection on the row it moved to
+        keys(&mut ed, "j");
+        let titles: Vec<&str> = ed.procs.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["tarae", "tail"]);
+        assert_eq!(ed.procs.panel.as_ref().unwrap().selected, 1);
+    }
+
+    /// A new look rewrites the detail where it changed: a cursor below a line that shrank (`12.3%` → `1.5%`) stays on
+    /// its line at its character — on the `·`, a character of two bytes, not a byte into it.
+    #[test]
+    fn a_new_look_keeps_the_details_cursor_on_its_line_and_character() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let zsh = Os { footprint: Some(5 * MB), ..os(50_050, me, "zsh") };
+        let look = |cpu: f32| Sample::of(vec![(os(me, 1, "tarae"), Some(1.0)), (zsh.clone(), Some(cpu))]);
+        ed.procs_toggle();
+        ed.procs_sampled(look(12.3));
+        keys(&mut ed, "j");
+        crate::rundoc::sync(&mut ed);
+        let slot = crate::sizes::Slot::Procs;
+        let d = ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut()).expect("the detail");
+        let text = d.text.to_string();
+        assert!(text.contains("cpu      12.3% of a core now\n"), "{text}");
+        let memory = text.find("memory   ").expect("its memory line");
+        let dot = memory + text[memory..].find('·').expect("a `·` on it");
+        let line = text[..dot].matches('\n').count();
+        d.set_selection(crate::selection::Selection::point(dot));
+        ed.procs_sampled(look(1.5));
+        crate::rundoc::sync(&mut ed);
+        let d = ed.session.outputs.doc(slot).unwrap();
+        let text = d.text.to_string();
+        assert!(text.contains("cpu      1.5% of a core now\n"), "{text}");
+        let at = d.selection().primary().cursor(&d.text);
+        assert!(text.is_char_boundary(at), "on a character's boundary: {at}");
+        assert_eq!(text[..at].matches('\n').count(), line, "on its line");
+        assert!(text[at..].starts_with('·'), "on its character: {:?}", &text[at..]);
+    }
+
+    /// The wheel over the table moves the selection as `C-e`/`C-y` do — off a gone row too, which then goes, the
+    /// selection and the view on the rows they were on.
+    #[test]
+    fn the_wheel_leaving_a_gone_row_lets_it_go() {
+        use crate::event::{Mouse, MouseKind};
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let many = |gone: bool| {
+            let mut v = vec![os(me, 1, "tarae")];
+            v.extend((0..60).filter(|i| !gone || *i != 0).map(|i| os(50_100 + i, me, "sleep")));
+            sample(v)
+        };
+        ed.procs_toggle();
+        ed.procs_sampled(many(false));
+        keys(&mut ed, "j");
+        ed.procs_sampled(many(true));
+        assert!(ed.procs.rows[1].gone.is_some(), "kept, said gone");
+        screen(&mut ed, 120, 40);
+        let a = ed.screen.procs_panel.get().expect(":procs drawn");
+        let down = Mouse { kind: MouseKind::ScrollDown, x: (a.x + 5) as u16, y: a.first as u16, alt: false };
+        ed.handle_mouse(down);
+        assert!(ed.procs.rows.iter().all(|r| r.gone.is_none()), "the gone row let go");
+        let p = ed.procs.panel.as_ref().unwrap();
+        let selected = &ed.procs.rows[p.selected];
+        // (the view three rows down — the gone row above it went, so a row less; the selection its first row)
+        assert_eq!((p.scroll.get(), selected.pid), (2, 50_102), "{}", selected.title);
+    }
+
+    /// The wheel over the detail while the table has the keys scrolls the detail itself, three rows a turn: down
+    /// past its end it stops at its last screenful, up it comes back to its top — the keys staying the table's.
+    #[test]
+    fn the_wheel_scrolls_the_detail_within_its_lines() {
+        use crate::event::{Mouse, MouseKind};
+        let mut ed = Editor::new(crate::config::Config::default());
+        let me = std::process::id();
+        let long = "/usr/bin/zsh ".to_string() + &"--a-long-option ".repeat(20);
+        let zsh = Os { command: Some(long), cwd: Some("/w/demo".into()), ..os(50_060, me, "zsh") };
+        let kids = (0..4).map(|i| os(50_061 + i, 50_060, "cargo"));
+        ed.procs_toggle();
+        ed.procs_sampled(sample([os(me, 1, "tarae"), zsh].into_iter().chain(kids).collect()));
+        keys(&mut ed, "j");
+        let (w, h) = (160, 20);
+        screen(&mut ed, w, h);
+        let r =
+            ed.screen.run_rows.get().filter(|r| r.0 == crate::sizes::Slot::Procs).expect("the detail drawn");
+        let rows = r.3;
+        let slot = crate::sizes::Slot::Procs;
+        let lines = ed.session.outputs.get(slot).unwrap().lines();
+        assert!(lines > rows + 3, "taller than its rows: {lines} lines in {rows}");
+        let top = |ed: &Editor| ed.session.outputs.doc(slot).unwrap().top;
+        let wheel = |ed: &mut Editor, kind| {
+            ed.handle_mouse(Mouse { kind, x: (r.2 + 2) as u16, y: r.1 as u16, alt: false });
+            screen(ed, w, h);
+        };
+        wheel(&mut ed, MouseKind::ScrollDown);
+        assert_eq!(top(&ed), 3, "three rows a turn");
+        for _ in 0..lines {
+            wheel(&mut ed, MouseKind::ScrollDown);
+        }
+        assert_eq!(top(&ed), lines - rows, "down past its end: its last screenful");
+        for _ in 0..lines {
+            wheel(&mut ed, MouseKind::ScrollUp);
+        }
+        assert_eq!(top(&ed), 0, "up: its top");
+        assert_eq!(region(&ed), "list:procs", "the keys stay the table's");
+    }
+
+    /// A `sleep 30` the test starts as its own child, one process: ended and reaped when the test ends, whatever it
+    /// found (`Child::kill` signals only its own unreaped child — its pid can't be another's yet).
+    struct Owned(std::process::Child);
+
+    impl Owned {
+        fn sleep() -> Owned {
+            Owned(std::process::Command::new("sleep").arg("30").spawn().expect("a stand-in"))
+        }
+    }
+
+    impl std::ops::Deref for Owned {
+        type Target = std::process::Child;
+        fn deref(&self) -> &std::process::Child {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for Owned {
+        fn deref_mut(&mut self) -> &mut std::process::Child {
+            &mut self.0
+        }
+    }
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     fn sample(procs: Vec<Os>) -> Sample {
         Sample {
             procs: procs.into_iter().map(|o| (o, Some(1.0))).collect(),
@@ -2675,7 +3005,39 @@ pub(crate) mod tests {
             flagged: false,
             session: None,
             left: false,
+            command: None,
+            cwd: None,
+            gone: None,
         }
+    }
+
+    /// While `:procs` is open a look reads every process's command line and folder (its detail says them); closed,
+    /// only tarae's children's folders, as before. (The stand-in is one process, the test's own child.)
+    #[test]
+    fn an_open_look_reads_every_command_line() {
+        let stand_in = Owned::sleep();
+        let pid = stand_in.id();
+        let me = std::process::id();
+        let mut s = Sampler::default();
+        let find =
+            |s: &Sample| -> Option<Os> { s.procs.iter().map(|p| &p.0).find(|o| o.pid == pid).cloned() };
+        let end = Instant::now() + Duration::from_secs(5);
+        let mut look = s.sample(me);
+        while find(&look).is_none() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+            look = s.sample(me);
+        }
+        let sleep = find(&look).expect("the stand-in");
+        assert_eq!(sleep.command, None, "closed: not read");
+        s.whole = true;
+        let sleep = find(&s.sample(me)).expect("still there");
+        drop(stand_in);
+        // (a sandbox that closes the process table to the run reads none — then nothing to check)
+        if command(me).is_none() {
+            return;
+        }
+        assert_eq!(sleep.command.as_deref(), Some("sleep 30"));
+        assert!(sleep.cwd.is_some(), "its folder too");
     }
 
     /// #143: what `:procs` lists is in the UI state (JSON and text) as of its last look, and a watcher of
@@ -3708,8 +4070,11 @@ pub(crate) mod tests {
         ] {
             assert!(shown.contains(s), "{s:?} in\n{shown}");
         }
-        let line = shown.lines().find(|l| l.contains(" fake ")).expect("the server's row");
-        assert!(line.contains(&pid.to_string()) && line.contains('▎'), "selected: {line}");
+        // (its row in the table, selected — the detail beside it names it too)
+        let line = shown.lines().find(|l| l.contains(" fake ") && l.contains('▎')).expect("the server's row");
+        assert!(line.contains(&pid.to_string()), "selected: {line}");
+        let head = shown.lines().find(|l| l.contains("─ detail ── fake ")).expect("the detail named");
+        assert!(head.contains(&format!("fake {pid}")), "{head}");
         keys(&mut ed, "s");
         assert!(ed.client(cid).is_none(), "stopped");
         // Said as it happened: what stopped first, then how it comes back

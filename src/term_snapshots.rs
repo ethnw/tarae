@@ -6403,8 +6403,9 @@ fn a_group_names_its_members_one_lit() {
     let p = cells(&s.frame(), w, h);
     let header: String = p.screen().rows(0, w).nth(slot).unwrap();
     let tabs: Vec<String> = s.ed.slot_tabs().iter().map(|t| t.label.clone()).collect();
-    // (each name with its badge, `·` between)
-    assert!(tabs.len() >= 2 && header.matches(" · ").count() == tabs.len() - 1, "{header:?}");
+    // (each name with its badge, `·` between — before ` › `, a group's members: `:procs`' is one, stacked)
+    let named_tabs = header.split(" › ").next().unwrap_or_default();
+    assert!(tabs.len() >= 2 && named_tabs.matches(" · ").count() == tabs.len() - 1, "{header:?}");
     assert!(tabs.iter().all(|t| header.contains(t.as_str())), "{header:?}");
     let bold = |n: &str| {
         let x = header[..header.find(&format!("{n} ")).unwrap()].chars().count();

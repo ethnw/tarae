@@ -30,12 +30,14 @@ use crate::session::At;
 use crate::sizes::Slot;
 use crate::transaction::{Assoc, Change, Transaction};
 
-/// What a run panel's document is of: the task's output, a preflight's, the tests' detail.
+/// What a run panel's document is of: the task's output, a preflight's, the tests' detail — and `:procs`' detail,
+/// what its table selected (no run: a panel's document all the same, `procs::detail`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Run {
     Task,
     Preflight,
     Tests,
+    Procs,
 }
 
 impl Run {
@@ -45,6 +47,7 @@ impl Run {
             Run::Task => "task",
             Run::Preflight => "preflight",
             Run::Tests => "tests",
+            Run::Procs => "procs",
         }
     }
 
@@ -52,14 +55,16 @@ impl Run {
         match self {
             Run::Tests => Slot::Test,
             Run::Task | Run::Preflight => Slot::Task,
+            Run::Procs => Slot::Procs,
         }
     }
 
-    /// The run line it waits in (`queued.rs`).
-    fn line(self) -> crate::queued::Slot {
+    /// The run line it waits in (`queued.rs`) — `:procs`' none.
+    fn line(self) -> Option<crate::queued::Slot> {
         match self {
-            Run::Tests => crate::queued::Slot::Tests,
-            Run::Task | Run::Preflight => crate::queued::Slot::Task,
+            Run::Tests => Some(crate::queued::Slot::Tests),
+            Run::Task | Run::Preflight => Some(crate::queued::Slot::Task),
+            Run::Procs => None,
         }
     }
 }
@@ -168,6 +173,8 @@ pub fn heading(l: &str) -> Option<&str> {
 pub struct Output {
     pub pane: Pane,
     made: Made,
+    /// `:procs`' detail: the row it's of (`procs::detail::Of`) — another, made anew.
+    of: Option<crate::procs::detail::Of>,
     /// Its panel had the keys at the last `sync` — another now: they came (landed in sight) or went.
     keyed: bool,
     /// Its lines when the keys came, or `G` caught up — more since: what came waits below (`came`).
@@ -202,11 +209,12 @@ impl Output {
     }
 }
 
-/// The session's two: the task panel's (a task, a preflight) and the tests'.
+/// The session's three: the task panel's (a task, a preflight), the tests' and `:procs`' detail.
 #[derive(Default)]
 pub struct Outputs {
     task: Option<Output>,
     tests: Option<Output>,
+    procs: Option<Output>,
 }
 
 impl Outputs {
@@ -214,6 +222,7 @@ impl Outputs {
         match slot {
             Slot::Task => self.task.as_ref(),
             Slot::Test => self.tests.as_ref(),
+            Slot::Procs => self.procs.as_ref(),
             _ => None,
         }
     }
@@ -222,6 +231,7 @@ impl Outputs {
         match slot {
             Slot::Task => self.task.as_mut(),
             Slot::Test => self.tests.as_mut(),
+            Slot::Procs => self.procs.as_mut(),
             _ => None,
         }
     }
@@ -229,6 +239,7 @@ impl Outputs {
     fn place(&mut self, slot: Slot) -> &mut Option<Output> {
         match slot {
             Slot::Test => &mut self.tests,
+            Slot::Procs => &mut self.procs,
             _ => &mut self.task,
         }
     }
@@ -258,17 +269,18 @@ pub fn run_of(ed: &Editor, slot: Slot) -> Option<Run> {
     match slot {
         Slot::Task => task_run(ed),
         Slot::Test => ed.session.test_run.as_ref().map(|_| Run::Tests),
+        Slot::Procs => ed.procs_up().then_some(Run::Procs),
         _ => None,
     }
 }
 
 /// The run panel whose document has the keys now: tarae's keys on the slot, in front, a run panel with its
-/// document (the tests' detail — the list beside it is a pane of its own, `At::List`).
+/// document (the tests' detail, `:procs`' — the list beside it is a pane of its own, `At::List`).
 pub fn has_keys(ed: &Editor) -> Option<Slot> {
     if !ed.session.is_at(At::Slot) {
         return None;
     }
-    let slot = ed.slot().filter(|s| matches!(s, Slot::Task | Slot::Test))?;
+    let slot = ed.slot().filter(|s| matches!(s, Slot::Task | Slot::Test | Slot::Procs))?;
     ed.session.outputs.get(slot).map(|_| slot)
 }
 
@@ -282,6 +294,7 @@ pub fn keyed(ed: &Editor) -> Option<(Run, &Output)> {
 pub fn rows(ed: &Editor, slot: Slot) -> usize {
     let p = match slot {
         Slot::Test => ed.screen.test_panel.get(),
+        Slot::Procs => return ed.screen.procs_panel.get().map_or(10, |a| a.detail).max(1),
         _ => ed.screen.task_panel.get(),
     };
     p.map_or(10, |p| p.2).max(1)
@@ -434,6 +447,54 @@ pub fn sync(ed: &mut Editor) {
         follow(ed, slot);
         keys_moved(ed, slot);
     }
+    follow_procs(ed);
+    keys_moved(ed, Slot::Procs);
+}
+
+/// `:procs`' detail as its table's selection is now (`procs::detail`): another row — made anew, from its top; the
+/// same one looked at again — its text replaced where it differs, the cursor and the view kept on their lines. The
+/// panel closed: gone (freed on a worker).
+fn follow_procs(ed: &mut Editor) {
+    let width = viewport(ed, Slot::Procs).1;
+    let Some((of, (text, paint))) = crate::procs::detail::of(ed, width) else {
+        if let Some(o) = ed.session.outputs.procs.take() {
+            crate::event::drop_later(o.pane.into_doc());
+        }
+        return;
+    };
+    let made = Made { generation: 0, picked: None, waiting: false, preflight: false, trimmed: 0, lines: 0 };
+    if let Some(o) = ed.session.outputs.procs.as_mut().filter(|o| o.of.as_ref() == Some(&of)) {
+        let d = o.doc_mut();
+        let new = ropey::Rope::from_str(&text);
+        if let Some(change) = crate::disk::minimal_change(&d.text, &new) {
+            // (each cursor on its line at its character — a number grown or shrunk above moves no line's bytes
+            // under it; `minimal_change` is one span, mapping through it would carry a cursor inside to its end)
+            let old = d.text.clone();
+            let at = |pos: usize| same_place(&old, &new, pos);
+            let sel = d.selection().transform(|r| Range::new(at(r.anchor), at(r.head)));
+            let top = d.top;
+            d.apply_with(&Transaction::new(vec![change]), sel);
+            d.set_top(top.min(mv::last_line(&d.text)));
+        }
+        d.paint = paint;
+        return;
+    }
+    let mut doc = Document::from_str(ed.alloc_id(), "");
+    doc.text = ropey::Rope::from_str(&text);
+    doc.wrap = Some(false);
+    doc.throwaway = true;
+    doc.paint = paint;
+    match ed.session.outputs.procs.as_mut() {
+        Some(o) => {
+            crate::event::drop_later(o.pane.replace(doc));
+            (o.of, o.keyed, o.placed) = (Some(of), false, false);
+        }
+        None => {
+            let pane = Pane::new(doc);
+            ed.session.outputs.procs =
+                Some(Output { pane, made, of: Some(of), keyed: false, seen: 0, placed: false });
+        }
+    }
 }
 
 /// The run's lines a document holding `lines` of them holds after `trims` (`Trim::Drain` past its end takes what
@@ -557,8 +618,8 @@ fn follow(ed: &mut Editor, slot: Slot) {
                     (o.made, o.keyed, o.placed) = (m, false, false);
                 }
                 None => {
-                    *place =
-                        Some(Output { pane: Pane::new(doc), made: m, keyed: false, seen: 0, placed: false })
+                    let pane = Pane::new(doc);
+                    *place = Some(Output { pane, made: m, of: None, keyed: false, seen: 0, placed: false })
                 }
             }
         }
@@ -586,6 +647,8 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
     let rows = rows(ed, slot);
     let so = ed.config.scrolloff.min((rows - 1) / 2);
     let (shown, running) = match slot {
+        // (`:procs`' detail is drawn from its own top, with the keys or not)
+        Slot::Procs => (ed.session.outputs.doc(slot).map(|d| d.top), false),
         Slot::Test => (
             ed.session.test_run.as_ref().map(|r| r.detail_top(rows)),
             ed.session.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running),
@@ -604,7 +667,8 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
         }
         match slot {
             Slot::Test => ed.session.test_run.as_mut().map(|r| r.scroll_to(top, rows)),
-            _ => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+            Slot::Task => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+            _ => None,
         };
         return;
     }
@@ -622,7 +686,8 @@ fn keys_moved(ed: &mut Editor, slot: Slot) {
         return sight(ed, slot, 0);
     }
     let line = match () {
-        _ if failure => top,
+        // (a failure's message, `:procs`' detail: read from their first line in sight)
+        _ if failure || slot == Slot::Procs => top,
         // (its last row in sight — inside the scrolloff margin, the view as it was, but at an ended run's end; one
         // still printing puts lines below, and the first key would scroll to keep the margin)
         _ if top + rows > last && !running => last,
@@ -655,7 +720,8 @@ fn pin(ed: &mut Editor, slot: Slot) {
     let Some(top) = ed.session.outputs.doc(slot).map(|d| d.top) else { return };
     match slot {
         Slot::Test => ed.session.test_run.as_mut().map(|r| r.scroll_to(top, rows)),
-        _ => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+        Slot::Task => ed.session.task_run.as_mut().map(|r| r.scroll_to(top, rows)),
+        _ => None,
     };
 }
 
@@ -672,6 +738,39 @@ pub fn resized(ed: &mut Editor) -> bool {
     let before = at(ed);
     in_sight(ed, slot);
     at(ed) != before
+}
+
+/// Byte `pos` of `old` in `new`: the same line, as many characters in (grapheme clusters), its end where it's
+/// shorter, the last line where there are fewer.
+fn same_place(old: &ropey::Rope, new: &ropey::Rope, pos: usize) -> usize {
+    use crate::graphemes::next_boundary;
+    let line = mv::line_of(old, pos);
+    let (mut at, mut n) = (mv::line_start(old, line), 0);
+    while at < pos {
+        at = next_boundary(old, at);
+        n += 1;
+    }
+    let line = line.min(mv::last_line(new));
+    let (mut at, end) = (mv::line_start(new, line), mv::line_end(new, line));
+    for _ in 0..n {
+        if at >= end {
+            break;
+        }
+        at = next_boundary(new, at);
+    }
+    at.min(end)
+}
+
+/// After a frame: `:procs`' detail laid out at another width than its text was wrapped for (its first frame, the
+/// slot resized) made again at it — true when that changed it (drawn again).
+pub fn procs_rewrapped(ed: &mut Editor) -> bool {
+    let version = |ed: &Editor| ed.session.outputs.doc(Slot::Procs).map(|d| (d.id, d.version()));
+    let before = version(ed);
+    if before.is_none() || swapped(ed) {
+        return false;
+    }
+    follow_procs(ed);
+    version(ed) != before
 }
 
 /// Before drawing: the matches its search shows — the pattern its `/` prompt is typing, else its last search
@@ -712,6 +811,7 @@ fn what(r: Run) -> &'static str {
         Run::Task => "the task's output",
         Run::Preflight => "the preflight's output",
         Run::Tests => "the tests' output",
+        Run::Procs => "the process's detail",
     }
 }
 
@@ -779,8 +879,8 @@ fn after(ed: &mut Editor, slot: Slot) {
         // (your own run waiting behind Claude's there, now — Claude's stopping, `queued.rs`; none waits: the chat's
         // input, to ask about what's read)
         After::Enter => {
-            let line = run_of(ed, slot).map_or(crate::queued::Slot::Task, Run::line);
-            if !crate::queued::run_now(ed, line) {
+            let line = run_of(ed, slot).map_or(Some(crate::queued::Slot::Task), Run::line);
+            if !line.is_some_and(|l| crate::queued::run_now(ed, l)) {
                 ed.session.leave(At::Slot);
                 crate::chat::open(ed);
             }
@@ -801,6 +901,7 @@ fn take(ed: &mut Editor, slot: Slot) {
     let Some(run) = run_of(ed, slot) else { return };
     let Some(d) = ed.session.outputs.doc(slot) else { return };
     let (from, title, case) = match run {
+        Run::Procs => ("procs", crate::procs::detail::title(ed).unwrap_or_default(), None),
         Run::Tests => {
             let r = ed.session.test_run.as_ref();
             let case = r.and_then(|r| r.picked().map(|c| c.name.clone()));
@@ -815,6 +916,7 @@ fn take(ed: &mut Editor, slot: Slot) {
         (Run::Tests, Some(_)) => "failure",
         (Run::Tests, None) => "test output",
         (Run::Preflight, _) => "preflight",
+        (Run::Procs, _) => "process",
         _ => "task output",
     };
     let total = mv::last_line(&d.text) + 1;
@@ -875,7 +977,7 @@ pub fn quotes(ed: &Editor) -> bool {
 
 /// Whether `enter` runs your run waiting behind on the output with the keys (nothing selected).
 pub fn run_waits(ed: &Editor) -> bool {
-    keyed(ed).is_some_and(|(r, _)| crate::queued::mine_waits(ed, r.line()))
+    keyed(ed).is_some_and(|(r, _)| r.line().is_some_and(|l| crate::queued::mine_waits(ed, l)))
 }
 
 /// A prompt the output with the keys opened (`/`, `?`, `s`) is up: its word on the status line under it.
@@ -895,14 +997,22 @@ pub fn wheel(ed: &mut Editor, slot: Slot, up: bool) {
     let by = if up { -3 } else { 3 };
     match slot {
         Slot::Test => ed.session.test_run.as_mut().map(|r| r.scroll_by(by, rows)),
-        _ => ed.session.task_run.as_mut().map(|r| r.scroll_by(by, rows)),
+        Slot::Task => ed.session.task_run.as_mut().map(|r| r.scroll_by(by, rows)),
+        // (`:procs`' detail: its own top, within its lines)
+        _ => ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut()).map(|d| {
+            let last = (mv::last_line(&d.text) + 1).saturating_sub(rows);
+            d.set_top(d.top.saturating_add_signed(by).min(last));
+        }),
     };
 }
 
 /// A press on a run panel's row `row` of its output at column `col` of its text: the keys its, the cursor on that
 /// character, as a click in the code puts it.
 pub fn click(ed: &mut Editor, slot: Slot, row: usize, col: usize) {
-    ed.bottom_take_keys();
+    match slot {
+        Slot::Procs => ed.detail_focus(crate::pane::GroupKind::Procs),
+        _ => ed.bottom_take_keys(),
+    }
     let Some(d) = ed.session.outputs.get_mut(slot).and_then(|o| o.doc_in_mut()) else { return };
     let line = (d.top + row).min(mv::last_line(&d.text));
     let (ls, le) = (mv::line_start(&d.text, line), mv::line_end(&d.text, line));

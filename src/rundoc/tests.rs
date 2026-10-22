@@ -343,16 +343,21 @@ fn a_preflights_o_and_k_and_tab_to_the_tests() {
     assert!(ed.doc().text.to_string().contains("fmt-says-ok"), "{}", ed.doc().text);
 }
 
-/// `tab`/`S-tab` go round the slot's tabs from the `:procs` panel too.
+/// `tab`/`S-tab` go round the slot's tabs from the `:procs` panel too — its group's members first (panes P3 step 4:
+/// the table, its detail), as every group's; back onto it, its detail first.
 #[test]
 fn tab_goes_round_the_slot_from_procs_too() {
     let mut ed = task(3);
     feed(&mut ed, ":procs<ret>");
-    assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Procs), "slot:procs"));
+    assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Procs), "list:procs"));
+    feed(&mut ed, "<tab>");
+    assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Procs), "output:procs"), "{}", said(&ed));
     feed(&mut ed, "<tab>");
     assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Task), "output:task"), "{}", said(&ed));
     feed(&mut ed, "<S-tab>");
-    assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Procs), "slot:procs"));
+    assert_eq!((ed.slot(), region(&ed).as_str()), (Some(Slot::Procs), "output:procs"));
+    feed(&mut ed, "<S-tab>");
+    assert_eq!(region(&ed), "list:procs");
     feed(&mut ed, "<S-tab>");
     assert_eq!(ed.slot(), Some(Slot::Task), "round the other way");
     assert!(!said(&ed).contains("isn't"), "never unused: {}", said(&ed));

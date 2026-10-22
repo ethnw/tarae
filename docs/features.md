@@ -162,7 +162,13 @@ configs carry over as they are.
   it's run, its CPU and its memory (the footprint Activity Monitor shows, on macOS, beside what's resident) — tarae
   itself first. On Linux each session's sandbox keeper has a row with its tier: what that session's commands are
   kept from and what they share with other sessions' ([on Linux](claude-integration.md#on-linux)). `s` stops one, `r` restarts it where that means something, `l` shows what it said (its panel, or
-  tarae's log at its last line), `tab`/`S-tab` go to the bottom slot's other tabs. tarae looks every 30 s while the list is closed (well under a thousandth of a
+  tarae's log at its last line). Beside the table, its **detail** says what the selected row is: what it's for, its
+  command line whole, the folder it works in, the processes it's under up to tarae and the ones it started, how long
+  it has run, its CPU and memory now and the most since `:procs` opened, tarae's checks on it; one that ended while
+  selected stays in the table, said `gone`, until the selection leaves it (`s` and `r` refuse it). The two are a
+  linked group as the tests' panel is: `tab`, `enter` or `C-w l` to the detail (normal mode on it, read-only: search,
+  select, `y` copies, `enter` quotes), `tab` again or `S-tab` round the bottom slot's other tabs; narrower than about
+  96 columns they're stacked, one open, both named in the slot's line. tarae looks every 30 s while the list is closed (well under a thousandth of a
   core) and checks what it sees: busy for minutes, memory far above what that program usually takes, a server
   left running with no file of it open (stopped), one that keeps exiting (not started again until `r`), a child
   it doesn't know, a disk running out of room (below 10 GB free, or a tenth of a small one: `▲ disk 8.0 GB free`;

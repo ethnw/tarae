@@ -33,13 +33,11 @@ pub enum At {
     Chat,
     /// The terminal's program.
     Program,
-    /// A linked group's list (§2.1: the tests' results, `Session.groups`), by its pane id — its detail in the slot is
-    /// the slot's (`Slot`).
+    /// A linked group's list (§2.1: the tests' results, a task's places, `:procs`' table — `Session.groups`), by its
+    /// pane id — its detail in the slot is the slot's (`Slot`).
     List(crate::split::PaneId),
-    /// The slot's panel with tarae's keys: the test run's, the task's, the terminal's view mode.
+    /// The slot's panel with tarae's keys: the test run's, the task's, `:procs`' detail, the terminal's view mode.
     Slot,
-    /// `:procs`' panel.
-    Procs,
     /// A plugin's panel in the slot.
     Plugin,
     /// The side panel.
@@ -511,7 +509,7 @@ impl Session {
             At::List(id) => return Some(id),
             At::Float(_) | At::Code => Shows::Code,
             At::Chat => Shows::Chat,
-            At::Program | At::Slot | At::Procs | At::Plugin => Shows::Slot,
+            At::Program | At::Slot | At::Plugin => Shows::Slot,
             At::Side => Shows::Side,
             At::Rail => Shows::Rail,
         })

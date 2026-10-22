@@ -2423,25 +2423,34 @@ impl Editor {
             }
             return;
         }
-        // `:procs`' panel: the same
+        // `:procs`' panel: the same — its detail beside the table (or stacked in its place) a run panel's document
         if let Some(a) = s.procs_panel.get()
             && (a.top..=a.bottom).contains(&y)
             && in_slot
             && self.slot() == Some(crate::sizes::Slot::Procs)
         {
+            let detail = s
+                .run_rows
+                .get()
+                .filter(|r| r.0 == crate::sizes::Slot::Procs && (r.1..r.1 + r.3).contains(&y) && x + 1 >= r.2)
+                .filter(|_| !(a.x..a.x + a.w).contains(&x));
+            let slot = crate::sizes::Slot::Procs;
             match m.kind {
-                K::Down => self
-                    .procs_click((a.first..a.first + a.shown).contains(&y).then(|| a.scroll + y - a.first)),
+                K::Down if let Some(r) = detail => {
+                    crate::rundoc::click(self, slot, y - r.1, x.saturating_sub(r.2))
+                }
+                K::ScrollDown | K::ScrollUp if detail.is_some() => {
+                    crate::rundoc::wheel(self, slot, m.kind == K::ScrollUp)
+                }
+                K::Down => {
+                    let row = (a.first..a.first + a.shown).contains(&y) && (a.x..a.x + a.w).contains(&x);
+                    self.procs_click(row.then(|| a.scroll + y - a.first))
+                }
                 // (the wheel scrolls it as `C-e`/`C-y` do, three rows: the selection stays unless it would leave
                 // the rows in sight, then the nearest — `s` and `r` act on it, so it's never out of sight)
                 K::ScrollDown | K::ScrollUp => {
-                    let n = self.procs.rows.len();
-                    if let Some(p) = self.procs.panel.as_mut() {
-                        let by = if m.kind == K::ScrollDown { 3 } else { -3 };
-                        let (top, at) = crate::key::in_sight(by, p.scroll.get(), p.selected, n, a.shown, 0);
-                        p.scroll.set(top);
-                        p.selected = at;
-                    }
+                    let by = if m.kind == K::ScrollDown { 3 } else { -3 };
+                    crate::grouplist::wheel(self, crate::pane::GroupKind::Procs, by)
                 }
                 _ => {}
             }
@@ -4013,9 +4022,6 @@ impl Editor {
         }
         if crate::sidebar::key(self, key) {
             return took(Handler::Side);
-        }
-        if crate::procs::key(self, key) {
-            return took(Handler::Procs);
         }
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);

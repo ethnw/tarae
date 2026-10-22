@@ -158,6 +158,7 @@ impl Keys {
             Keys::Output(crate::rundoc::Run::Task) => "TASK",
             Keys::Output(crate::rundoc::Run::Preflight) => "PREFLIGHT",
             Keys::Output(crate::rundoc::Run::Tests) => "TESTS",
+            Keys::Output(crate::rundoc::Run::Procs) => "PROCS",
             Keys::List(k) => match k {
                 crate::pane::GroupKind::Tests => "TESTS",
                 crate::pane::GroupKind::Task => "TASK",
@@ -399,9 +400,10 @@ impl Editor {
         }
     }
 
-    /// `tab` / `S-tab` while the slot has the keys: the next tab in front, or the one before. On the tests' group
-    /// (§2.1c) its members come first, in order — `tab` from the list to its detail, from the detail on to the next
-    /// tab, which starts at its first member; `S-tab` the other way.
+    /// `tab` / `S-tab` while the slot has the keys: the next tab in front, or the one before. On a group (§2.1c: the
+    /// tests', a task's places, a preflight's steps, `:procs`) its members come first, in order — `tab` from the list
+    /// to its detail, from the detail on to the next tab, which starts at its first member, the list; `S-tab` the
+    /// other way, onto a group at its last member, the detail.
     pub fn slot_step(&mut self, by: isize) {
         let tabs = self.slot_tabs();
         if tabs.is_empty() {
@@ -429,12 +431,15 @@ impl Editor {
             None => 0,
         };
         self.slot_show(tabs[next].slot);
-        // (onto a group going forward: its first member, the list)
-        if by > 0
-            && self.bottom_has_keys()
+        // (onto a group going forward: its first member, the list; going back, its last, the detail)
+        if self.bottom_has_keys()
             && let Some(g) = self.slot_group()
         {
-            self.focus_pane(g.list);
+            match (by > 0, g.detail_pane()) {
+                (true, _) => self.focus_pane(g.list),
+                (false, Some(detail)) => self.focus_pane(detail),
+                (false, None) => {}
+            }
         }
     }
 

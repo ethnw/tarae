@@ -379,6 +379,7 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     if crate::follow::reading(editor)
         | crate::chatdoc::wanted(editor)
         | crate::rundoc::resized(editor)
+        | crate::rundoc::procs_rewrapped(editor)
         | crate::chatdoc::resized(editor)
     {
         frame.clear();
@@ -772,13 +773,18 @@ fn group_members(
         GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, lay.slot_w),
         GroupKind::Task => places_list_w(editor, editor.session.task_run.as_ref()?, lay.slot_w),
         GroupKind::Preflight => steps_list_w(crate::grouplist::preflight(editor)?, lay.slot_w),
+        GroupKind::Procs => PROCS_TABLE_W.min(lay.slot_w.saturating_sub(PROCS_DETAIL_MIN + 1)),
         _ => return None,
+    };
+    let (list_min, detail_min) = match g.kind {
+        GroupKind::Procs => (PROCS_TABLE_MIN, PROCS_DETAIL_MIN),
+        _ => (LIST_MIN, DETAIL_MIN),
     };
     let (y, h) = (lay.slot_y() + lay.slot_head, lay.debug_h - lay.slot_head);
     let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
     let detail =
         crate::split::Rect { x: lay.slot_x + left_w + 1, y, w: lay.slot_w.saturating_sub(left_w + 1), h };
-    if list.w < LIST_MIN || detail.w < DETAIL_MIN {
+    if list.w < list_min || detail.w < detail_min {
         let all = crate::split::Rect { x: lay.slot_x, y, w: lay.slot_w, h };
         let none = crate::split::Rect { w: 0, ..all };
         return Some(match g.front {
@@ -788,6 +794,12 @@ fn group_members(
     }
     Some((list, detail))
 }
+
+/// `:procs`' table as wide as its columns want (pid, a name, what it's for, up, CPU, both memories), the detail the
+/// rest — side by side where the table gets 60 and the detail 36 (plan §2.3), else stacked.
+const PROCS_TABLE_W: usize = 88;
+const PROCS_TABLE_MIN: usize = 60;
+const PROCS_DETAIL_MIN: usize = 36;
 
 /// A group's members laid side by side (not stacked): the column of the line between them.
 fn side_by_side((list, detail): &(crate::split::Rect, crate::split::Rect)) -> Option<usize> {
@@ -1333,6 +1345,9 @@ fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
     // output whole)
     if let Some(g) = editor.list_focused() {
         use crate::pane::GroupKind;
+        if g.kind == GroupKind::Procs {
+            return procs_hints(editor).into_iter().map(|(k, d)| (k.to_string(), d)).collect();
+        }
         let picked = g.kind == GroupKind::Tests
             && editor.session.test_run.as_ref().is_some_and(|r| r.picked().is_some());
         let closes = g.kind.slot().is_some_and(|s| editor.q_closes(s));
@@ -1366,11 +1381,13 @@ fn slot_hints(editor: &Editor) -> Vec<(String, &'static str)> {
     let bound = |name: &str, like: &str| crate::rundoc::bound(editor, name, like);
     let quotes = crate::rundoc::quotes(editor);
     let closes = editor.q_closes(slot);
+    // (`:procs`' detail has no run to catch up with)
+    let run = slot != crate::sizes::Slot::Procs;
     [
         (bound("view_take", "ret").filter(|_| quotes), "quote"),
         (bound("view_copy", "y"), "copy"),
         (bound("search", "/"), "search"),
-        (bound("view_latest", "G"), "latest"),
+        (bound("view_latest", "G").filter(|_| run), "latest"),
         (bound("view_leave", "esc"), "code"),
         (bound("wclose", "q").filter(|_| closes), "close"),
         (Some("C-w z".into()), zoom),
@@ -1396,7 +1413,9 @@ fn output_head(editor: &Editor, ui: &Ui, card: Style, slot: crate::sizes::Slot) 
 fn output_top(editor: &Editor, slot: crate::sizes::Slot, rows: usize) -> usize {
     use crate::sizes::Slot;
     match (crate::rundoc::has_keys(editor) == Some(slot), editor.session.outputs.doc(slot)) {
+        // (`:procs`' detail: its own top, the keys or not — no run to follow)
         (true, Some(d)) => d.top,
+        (false, Some(d)) if slot == Slot::Procs => d.top,
         _ => match slot {
             Slot::Test => editor.session.test_run.as_ref().map_or(0, |r| r.detail_top(rows)),
             _ => editor.session.task_run.as_ref().map_or(0, |r| r.top(rows)),
@@ -2719,47 +2738,57 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let strong = card.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
     let warn = Style { fg: t.try_get("warning").and_then(|s| s.fg), ..card };
     let selected = selected_row(ui, editor, card);
-    let (x0, y0, w) = (lay.slot_x, lay.slot_y(), lay.slot_w);
-    // The header: the tabs, the totals, the keys
-    let live: Vec<&crate::procs::Row> = p.rows.iter().filter(|r| r.pid != 0).collect();
+    // Its group (panes P3 step 4): the table and, beside it, what its selected row is — stacked when narrow, one of
+    // them across the slot (the table none wide when the detail is the one open)
+    let group = editor.slot_group().filter(|g| g.kind == crate::pane::GroupKind::Procs);
+    let members = group.and_then(|g| Some((g, group_members(editor, lay, &g)?)));
+    let (x0, y0, w) = match members {
+        Some((_, (list, _))) => (list.x, lay.slot_y(), list.w),
+        None => (lay.slot_x, lay.slot_y(), lay.slot_w),
+    };
+    // The header: the tabs, the members' names, the totals over the table, the keys of what has them
+    let live: Vec<&crate::procs::Row> = p.rows.iter().filter(|r| r.pid != 0 && r.gone.is_none()).collect();
     let total_mem: u64 = live.iter().map(|r| r.memory()).sum();
     // (none yet at the first look — its share needs one before it)
     let cpus: Vec<f32> = live.iter().filter_map(|r| r.cpu).collect();
     let total_cpu = (!cpus.is_empty()).then(|| cpus.iter().fold(0.0, |a, c| a + c.max(0.0)));
-    let sel = p.rows.get(panel.selected);
-    let mut hints: Vec<(&str, &str)> = Vec::new();
-    if editor.procs_focused() {
-        let heading = sel.is_some_and(|r| matches!(r.kind, Kind::Session(_)));
-        // (a run waiting in line isn't stopped: it leaves the line)
-        match sel.map(|r| &r.kind) {
-            Some(Kind::Queued(_)) => hints.push(("s", "drop")),
-            Some(Kind::Tarae | Kind::Held(..) | Kind::Session(_)) | None => {}
-            Some(_) => hints.push(("s", "stop")),
-        }
-        if sel.is_some_and(|r| r.kind.restarts()) {
-            hints.push(("r", "restart"));
-        }
-        hints.extend([("l", if heading { "to front" } else { "log" }), ("q", "close"), ("esc", "code")]);
-    } else {
-        hints.push(("click", "keys"));
-    }
-    let hints_w: usize = hints.iter().map(|(k, v)| k.width() + v.width() + 3).sum();
+    let keys = slot_hints(editor);
+    let hints: Vec<(&str, &str)> = keys.iter().map(|(k, d)| (k.as_str(), *d)).collect();
     let mut summary: Vec<(String, Style)> = Vec::new();
     if !live.is_empty() {
         let n = live.len();
         summary.push((format!("{n} process{}", if n == 1 { "" } else { "es" }), strong));
         let cpu = total_cpu.map_or(String::new(), |c| format!(" · {c:.0}% CPU"));
         summary.push((format!(" · {}{cpu}", mem(total_mem)), dim));
-        if let Some(took) = p.took {
-            summary.push((format!(" · a look took {:.1} ms", took.as_secs_f64() * 1000.0), faint));
-        }
     }
-    // (the keys keep their room: the look's cost goes first, then the totals — the tabs take about 20)
-    while summary.iter().map(|(s, _)| s.width()).sum::<usize>() + 24 + hints_w + 3 > w && !summary.is_empty()
-    {
-        summary.pop();
+    // (stacked with the detail open: what's said is the process's, not the table's totals)
+    if w == 0 {
+        summary.clear();
     }
-    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &[], None)?;
+    let detail_keys = crate::rundoc::has_keys(editor) == Some(crate::sizes::Slot::Procs);
+    let splits: Vec<usize> = members.iter().filter_map(|(_, m)| side_by_side(m)).collect();
+    let head = members.map(|(g, m)| Members {
+        list: "processes",
+        detail: "detail",
+        ids: (g.list, g.detail_pane().unwrap_or(g.list)),
+        details: crate::procs::detail::title(editor).map(|t| vec![(t, dim)]).unwrap_or_default(),
+        keys: member_keys(editor.procs_focused(), detail_keys),
+        front: g.front,
+        split: side_by_side(&m),
+    });
+    let body = slot_header(out, editor, ui, lay, card, &summary, &hints, &splits, head.as_ref())?;
+    let detail_rows = match members {
+        Some((_, (list, detail))) => draw_procs_detail(editor, ui, lay, out, (list, detail), body)?,
+        None => 0,
+    };
+    // (stacked with the detail open: no table)
+    if w == 0 {
+        let bottom = y0 + lay.debug_h - 1;
+        let area =
+            crate::procs::Area { top: y0, bottom, first: body, detail: detail_rows, ..Default::default() };
+        editor.screen.procs_panel.set(Some(area));
+        return Ok(());
+    }
     // The columns: FOR takes what's left; narrow, the resident column goes first, then the pid, then the time
     let foot = p.rows.iter().any(|r| r.footprint.is_some());
     // (a row with nothing to say for what it's for — what a server started — runs its name on into that column;
@@ -2904,8 +2933,8 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         );
         let name_st = match () {
             _ if r.flagged => warn,
-            // (not running yet: no process to stand for)
-            _ if matches!(r.kind, Kind::Queued(_)) => dim,
+            // (not running yet, or no more: no process to stand for)
+            _ if matches!(r.kind, Kind::Queued(_)) || r.gone.is_some() => dim,
             _ if r.depth == 0 => strong,
             _ => dim,
         };
@@ -2915,6 +2944,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         };
         let none = || "—".to_string();
         let up_text = match (&r.kind, r.zombie, r.up) {
+            _ if r.gone.is_some() => "gone".to_string(),
             (Kind::Held(..), ..) => "held".to_string(),
             (Kind::Queued(_), ..) => "queued".to_string(),
             (_, true, _) => "ended".to_string(),
@@ -2944,6 +2974,7 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         cells.push(col(&cpu, 6, true, cpu_st));
         let (memory, rss, mem_st) = match (r.pid, r.flagged) {
             (0, _) => (none(), none(), faint),
+            _ if r.gone.is_some() => (none(), none(), faint),
             (_, true) => (mem(r.memory()), mem(r.rss), warn),
             _ => (mem(r.memory()), mem(r.rss), plain),
         };
@@ -2957,7 +2988,16 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
     let mut y = first + list;
     let end = y0 + lay.debug_h;
     if y < end {
-        line(out, y, &[col("SELF-CHECKS", 12, false, faint)], card, false)?;
+        // (what the last look cost, beside them: the header keeps its room for the keys)
+        let took = p.took.map(|t| format!("a look took {:.1} ms", t.as_secs_f64() * 1000.0));
+        let took = took.filter(|t| w > 14 + t.width() + 2).unwrap_or_default();
+        line(
+            out,
+            y,
+            &[col("SELF-CHECKS", 12, false, faint), col(&took, took.width(), false, faint)],
+            card,
+            false,
+        )?;
         y += 1;
     }
     let inner = w.saturating_sub(4);
@@ -3004,14 +3044,84 @@ fn draw_procs_panel<W: Write>(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut 
         y += 1;
     }
     let shown = list.min(n);
+    // (its group's list, drawn — `grouplist::drawn`)
+    editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Procs, (first, list, scroll)));
     editor.screen.procs_panel.set(Some(crate::procs::Area {
         top: y0,
         bottom: end - 1,
         first,
         shown,
         scroll,
+        x: x0,
+        w,
+        detail: detail_rows,
     }));
     Ok(())
+}
+
+/// `:procs`' table's keys while it has them (`grouplist::key`): what `s`, `r` and `l` do to the selected row, `tab`
+/// to the detail, the way out and `q`.
+fn procs_hints(editor: &Editor) -> Vec<(&'static str, &'static str)> {
+    use crate::procs::Kind;
+    let sel = editor.procs.panel.as_ref().and_then(|p| editor.procs.rows.get(p.selected));
+    let mut hints = Vec::new();
+    let heading = sel.is_some_and(|r| matches!(r.kind, Kind::Session(_)));
+    let running = sel.is_some_and(|r| r.gone.is_none());
+    // (a run waiting in line isn't stopped: it leaves the line)
+    match sel.map(|r| &r.kind) {
+        Some(Kind::Queued(_)) => hints.push(("s", "drop")),
+        Some(Kind::Tarae | Kind::Held(..) | Kind::Session(_)) | None => {}
+        Some(_) if running => hints.push(("s", "stop")),
+        Some(_) => {}
+    }
+    if sel.is_some_and(|r| r.kind.restarts()) && running {
+        hints.push(("r", "restart"));
+    }
+    hints.extend([
+        ("l", if heading { "to front" } else { "log" }),
+        ("tab", "detail"),
+        ("esc", "code"),
+        ("q", "close"),
+    ]);
+    hints
+}
+
+/// `:procs`' detail (`procs::detail`, a run panel's document — `rundoc.rs`): beside the table, a line between them
+/// lit while either has the keys, or stacked across the slot in its place; from `y` to the slot's end. Its rows.
+fn draw_procs_detail(
+    editor: &Editor,
+    ui: &Ui,
+    lay: &Layout,
+    out: &mut impl Write,
+    (list, detail): (crate::split::Rect, crate::split::Rect),
+    y: usize,
+) -> io::Result<usize> {
+    use crate::chrome::PAD;
+    if detail.w == 0 {
+        return Ok(0);
+    }
+    let card = panel_style(ui, editor);
+    let rows = (lay.slot_y() + lay.debug_h).saturating_sub(y);
+    let side = list.w > 0;
+    let (tx, tw) = match side {
+        true => (detail.x + 1, detail.w.saturating_sub(2)),
+        false => (lay.slot_x + PAD, lay.slot_w.saturating_sub(2 * PAD)),
+    };
+    let lit = ui.lit == Some(Region::Slot);
+    for i in 0..rows {
+        let yy = (y + i) as u16;
+        queue!(out, MoveTo(detail.x as u16, yy))?;
+        apply(out, card)?;
+        queue!(out, Spaces(detail.w))?;
+        if side {
+            queue!(out, MoveTo((list.x + list.w) as u16, yy))?;
+            leaf_line(out, ui, card, lit)?;
+        }
+    }
+    editor.screen.run_rows.set(Some((crate::sizes::Slot::Procs, y, tx, rows)));
+    let top = output_top(editor, crate::sizes::Slot::Procs, rows);
+    draw_output(out, editor, ui, lay, card, crate::sizes::Slot::Procs, top, (tx, y, tw, rows), None)?;
+    Ok(rows)
 }
 
 /// Test panel (a tab of the bottom slot — `slot_header`):

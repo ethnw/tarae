@@ -256,6 +256,46 @@ fn a_click_on_a_places_row_picks_it() {
     assert_eq!(cursor(&ed), r.origin(1).line.unwrap(), "the output at its line");
 }
 
+/// `tab` and `S-tab` go round the slot's groups member by member (P3 step 4: onto a group going forward its list,
+/// going back its detail) — the task's places and the tests' results, both tabs.
+#[test]
+fn tab_and_s_tab_go_round_each_groups_members() {
+    let dir = crate::scratch::Scratch::new("group-round");
+    let a = dir.path().join("a.rs");
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let mut ed = editor(dir.path());
+    print(&mut ed, 1, place(&a, 0, 1, "one"));
+    print(&mut ed, 1, place(&a, 0, 2, "two"));
+    let case = crate::test_results::Case {
+        name: "adds".into(),
+        status: crate::test_results::Status::Passed,
+        secs: None,
+        message: Vec::new(),
+        at: None,
+    };
+    let run = crate::testing::TestRun::finished("t", vec![case.clone(), case], vec!["ok".into()]);
+    ed.session.test_run = Some(run);
+    frame(&mut ed);
+    ed.list_focus(GroupKind::Task);
+    frame(&mut ed);
+    let mut round = vec![region(&ed)];
+    for _ in 0..4 {
+        feed(&mut ed, "<tab>");
+        round.push(region(&ed));
+    }
+    assert_eq!(round, ["list:task", "output:task", "list:tests", "output:tests", "list:task"], "forward");
+    let mut back = Vec::new();
+    for _ in 0..4 {
+        feed(&mut ed, "<S-tab>");
+        back.push(region(&ed));
+    }
+    assert_eq!(
+        back,
+        ["output:tests", "list:tests", "output:task", "list:task"],
+        "back: onto a group, its detail"
+    );
+}
+
 /// The status line's word with a list's keys names the surface as its header does (`● preflight` on a preflight's
 /// steps, not the task panel's word; `● task`, `● tests`).
 #[test]

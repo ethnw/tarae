@@ -217,6 +217,7 @@ impl crate::editor::Editor {
                 .task_run
                 .as_ref()
                 .is_some_and(|r| matches!(r.state, State::Passed | State::Failed(_))),
+            Slot::Procs => self.procs_up(),
             _ => false,
         }
     }
@@ -604,15 +605,12 @@ impl crate::editor::Editor {
     /// Whether the bottom slot has the keys — tarae's (`At::Slot`), or the terminal's program, or a
     /// plugin panel's.
     pub fn bottom_has_keys(&self) -> bool {
+        // (a group's list in the slot is the slot's: the tests', a task's places, a preflight's steps, `:procs`')
+        let listing = || self.slot_group().is_some_and(|g| self.session.is_at(At::List(g.list)));
         match self.slot() {
             Some(Slot::Terminal) => self.session.is_at(At::Slot) || self.session.is_at(At::Program),
             Some(Slot::Plugin) => self.plugin_panel_focused(),
-            Some(Slot::Procs) => self.procs_focused(),
-            Some(Slot::Test) => {
-                self.session.is_at(At::Slot)
-                    || self.slot_group().is_some_and(|g| self.session.is_at(At::List(g.list)))
-            }
-            Some(Slot::Task) => self.session.is_at(At::Slot),
+            Some(Slot::Procs | Slot::Test | Slot::Task) => self.session.is_at(At::Slot) || listing(),
             Some(Slot::Debug) | None => false,
         }
     }
@@ -698,8 +696,7 @@ impl crate::editor::Editor {
             At::Code | At::Float(_) => true,
             At::Chat => s.chat.is_some(),
             At::Program => s.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()),
-            At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task)),
-            At::Procs => self.procs.panel.is_some(),
+            At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task | Slot::Procs)),
             At::List(id) => s.groups.iter().any(|g| g.list == id && self.group_laid(g)),
             At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
             At::Side => s.sidebar.is_some(),

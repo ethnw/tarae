@@ -486,6 +486,12 @@ const SCENES: &[Scene] = &[
         ed.sidebar_show(crate::sidebar::Mode::Outline);
     }),
     (":procs", |ed| ed.procs_toggle()),
+    // (panes P3 step 4: `:procs`' detail — what its table selected, `output:procs`)
+    (":procs, its detail", |ed| {
+        ed.procs_toggle();
+        frame(ed);
+        ed.detail_focus(crate::pane::GroupKind::Procs);
+    }),
     (":procs behind another tab", |ed| {
         ed.procs_toggle();
         task_panel(ed);
@@ -954,8 +960,11 @@ fn no_key_is_refused_in_silence() {
     }
     let quiet = |k: &str, name: &str| match k {
         "<esc>" | "<C-w>" => true,
-        // (view mode's copy, an output's: said once the clipboard has it — its job's toast)
-        "y" => (name.contains("view mode") || name.contains("output")) && !name.contains("prompt"),
+        // (view mode's copy, an output's — `:procs`' detail is one: said once the clipboard has it, its job's toast)
+        "y" => {
+            (name.contains("view mode") || name.contains("output") || name.contains("its detail"))
+                && !name.contains("prompt")
+        }
         // (`x` again on the conversation's last row: no row below to take — `j` at a list's end)
         "x" => name.contains("a row selected"),
         "j" | "<C-d>" => [
