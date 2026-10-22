@@ -797,23 +797,12 @@ fn group_members(
     if !editor.group_laid(g) || lay.debug_h <= lay.slot_head || lay.slot_w == 0 {
         return None;
     }
-    use crate::pane::GroupKind;
-    let left_w = match g.kind {
-        GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, lay.slot_w),
-        GroupKind::Task => places_list_w(editor, editor.session.task_run.as_ref()?, lay.slot_w),
-        GroupKind::Preflight => steps_list_w(crate::grouplist::preflight(editor)?, lay.slot_w),
-        GroupKind::Procs => PROCS_TABLE_W.min(lay.slot_w.saturating_sub(PROCS_DETAIL_MIN + 1)),
-        _ => return None,
-    };
-    let (list_min, detail_min) = match g.kind {
-        GroupKind::Procs => (PROCS_TABLE_MIN, PROCS_DETAIL_MIN),
-        _ => (LIST_MIN, DETAIL_MIN),
-    };
+    let (left_w, stacked) = group_list_w(editor, g, lay.slot_w)?;
     let (y, h) = (lay.slot_y() + lay.slot_head, lay.debug_h - lay.slot_head);
     let list = crate::split::Rect { x: lay.slot_x, y, w: left_w, h };
     let detail =
         crate::split::Rect { x: lay.slot_x + left_w + 1, y, w: lay.slot_w.saturating_sub(left_w + 1), h };
-    if list.w < list_min || detail.w < detail_min {
+    if stacked {
         let all = crate::split::Rect { x: lay.slot_x, y, w: lay.slot_w, h };
         let none = crate::split::Rect { w: 0, ..all };
         return Some(match g.front {
@@ -822,6 +811,39 @@ fn group_members(
         });
     }
     Some((list, detail))
+}
+
+/// Group `g`'s list's width in a slot `slot_w` wide, and whether its members are stacked there — one of them would
+/// get less than its least (`LIST_MIN`, `DETAIL_MIN`; `:procs`' own).
+fn group_list_w(editor: &Editor, g: &crate::pane::Group, slot_w: usize) -> Option<(usize, bool)> {
+    use crate::pane::GroupKind;
+    let left_w = match g.kind {
+        GroupKind::Tests => tests_list_w(editor.session.test_run.as_ref()?, slot_w),
+        GroupKind::Task => places_list_w(editor, editor.session.task_run.as_ref()?, slot_w),
+        GroupKind::Preflight => steps_list_w(crate::grouplist::preflight(editor)?, slot_w),
+        GroupKind::Procs => PROCS_TABLE_W.min(slot_w.saturating_sub(PROCS_DETAIL_MIN + 1)),
+        _ => return None,
+    };
+    let (list_min, detail_min) = match g.kind {
+        GroupKind::Procs => (PROCS_TABLE_MIN, PROCS_DETAIL_MIN),
+        _ => (LIST_MIN, DETAIL_MIN),
+    };
+    Some((left_w, left_w < list_min || slot_w.saturating_sub(left_w + 1) < detail_min))
+}
+
+/// The rows of the task's or the preflight's list while its group is stacked with the list in sight (`Group.front`),
+/// in a slot `slot_w()` wide — None when the output is in sight, or both side by side (asked only then: it lays the
+/// tree out once).
+fn stacked_list_rows(editor: &Editor, slot_w: impl FnOnce() -> Option<usize>) -> Option<usize> {
+    use crate::pane::GroupKind;
+    let g = editor.slot_group().filter(|g| matches!(g.kind, GroupKind::Task | GroupKind::Preflight))?;
+    if g.front != crate::pane::Member::List || !group_list_w(editor, &g, slot_w()?)?.1 {
+        return None;
+    }
+    match g.kind {
+        GroupKind::Preflight => Some(crate::grouplist::preflight(editor)?.steps.len()),
+        _ => Some(editor.session.task_run.as_ref()?.place_rows().len()),
+    }
 }
 
 /// `:procs`' table as wide as its columns want (pid, a name, what it's for, up, CPU, both memories), the detail the
@@ -908,33 +930,6 @@ impl Layout {
         // A card stepped aside to a bar while its text is read (U8): the row over the status line is its
         let bar = usize::from(editor.offer_bar() && all > 6);
         let total = all - bar;
-        // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1); its header
-        // in the line over it: the same body in a row less, the code keeping the row a rule took
-        let natural = match editor.slot() {
-            _ if zoom_shows.is_some_and(|z| z != Shows::Slot) => 0,
-            Some(Slot::Procs) => procs_panel_h(editor, total, slot_head),
-            Some(Slot::Terminal) => terminal_panel_h(total, slot_head),
-            Some(Slot::Task) => match editor.session.task_run.as_ref() {
-                Some(r) => {
-                    let queued = queued_h(editor, crate::queued::Slot::Task);
-                    // (a row over the output: a preflight's steps, or its group's titles)
-                    let over = preflight_of(editor, r).is_some()
-                        || crate::grouplist::listed(editor, crate::pane::GroupKind::Task);
-                    task_panel_h(r, over, queued, total, slot_head)
-                }
-                None => 0,
-            },
-            Some(_) => {
-                let h = (total / 3).clamp(8, 15) - (crate::chrome::HEAD - slot_head);
-                h.min(total.saturating_sub(4))
-            }
-            None => 0,
-        };
-        let debug_h = match zoom_shows {
-            Some(Shows::Slot) => total,
-            _ if natural == 0 => 0,
-            _ => crate::sizes::bottom(total, editor.sizes.bottom, natural),
-        };
         // The sign column (breakpoints, diagnostics) right after the gutter, the numbers after it
         let doc = editor.doc();
         let gutter = crate::chrome::SIGNS + num_w(doc);
@@ -981,17 +976,56 @@ impl Layout {
         };
         // The session's tree laid out in the frame (panes P2b): each surface its own size (`Share::Auto` — the
         // sizes above, `sizes.rs`'s rules), the code the rest under the path bar; the fields below are its rects
-        let room = Surfaces {
+        let room = |slot: usize| Surfaces {
             session: &editor.session,
             left: rail_w,
             rail: editor.review_rail_up() && zoom_shows != Some(Shows::Side),
             chat: widths.chat,
-            slot: debug_h,
+            slot,
             over: text_top as usize,
             column: code_column(&editor.session),
         };
         let body = crate::split::Rect { x: 0, y: 0, w: w as usize, h: text_top as usize + total };
-        let mut leaves = editor.session.split.layout(body, &room);
+        // What the slot's panel wants — unless you set its size (`C-w +`/`-`, a drag): that wins (U1); its header
+        // in the line over it: the same body in a row less, the code keeping the row a rule took
+        let natural = match editor.slot() {
+            _ if zoom_shows.is_some_and(|z| z != Shows::Slot) => 0,
+            Some(Slot::Procs) => procs_panel_h(editor, total, slot_head),
+            Some(Slot::Terminal) => terminal_panel_h(total, slot_head),
+            Some(Slot::Task) => match editor.session.task_run.as_ref() {
+                Some(r) => {
+                    let queued = queued_h(editor, crate::queued::Slot::Task);
+                    // (its group stacked with its list in sight: the list's rows, never the hidden output's — the
+                    // slot's width from the tree laid out once at any height: its width doesn't follow it)
+                    let slot_w = || {
+                        let id = editor.session.leaf(Shows::Slot)?;
+                        let probe = editor.session.split.layout(body, &room((total / 2).max(1)));
+                        probe.iter().find(|l| l.0 == id).map(|l| l.1.w)
+                    };
+                    match stacked_list_rows(editor, slot_w) {
+                        Some(n) => task_list_h(r, n, queued, total, slot_head),
+                        None => {
+                            // (a row over the output: a preflight's steps, or its group's titles)
+                            let over = preflight_of(editor, r).is_some()
+                                || crate::grouplist::listed(editor, crate::pane::GroupKind::Task);
+                            task_panel_h(r, over, queued, total, slot_head)
+                        }
+                    }
+                }
+                None => 0,
+            },
+            Some(_) => {
+                let h = (total / 3).clamp(8, 15) - (crate::chrome::HEAD - slot_head);
+                h.min(total.saturating_sub(4))
+            }
+            None => 0,
+        };
+        let debug_h = match zoom_shows {
+            Some(Shows::Slot) => total,
+            _ if natural == 0 => 0,
+            _ => crate::sizes::bottom(total, editor.sizes.bottom, natural),
+        };
+        let mut leaves = editor.session.split.layout(body, &room(debug_h));
         // (filling the screen: that pane alone — a code pane in the code's whole column, under the path bar)
         if let Some(z) = zoom {
             leaves.retain(|l| l.0 == z.0);
@@ -1936,8 +1970,8 @@ fn preflight_of<'a>(editor: &'a Editor, r: &crate::task::Run) -> Option<&'a crat
     editor.session.preflight.as_ref().filter(|p| p.generation == r.generation())
 }
 
-/// A preflight's steps in a row: `● fmt 0.4s   ▲ clippy 12s   ▂▅▇ test 3.2s   ◦ perf` — passed in the plus
-/// color (a note's pass in warning), failed in the error color, the one running with the wave, the ones to
+/// A preflight's steps in a row: `● fmt 0.4s   ▲ clippy 12s   ▅ test 3.2s   ◦ perf` — passed in the plus
+/// color (a note's pass in warning), failed in the error color, the one running with the wave's cell, the ones to
 /// come faint. Too wide: the times go, then names are cut from the end. Each piece with its step (a click
 /// there scrolls to its output — #72; the gaps between: none).
 fn preflight_row(
@@ -1957,7 +1991,7 @@ fn preflight_row(
                 out.push(("   ".to_string(), card, None));
             }
             let time = |d: Option<std::time::Duration>| match d {
-                Some(d) if timed => format!(" {}", crate::preflight::long_duration(d)),
+                Some(d) if timed => format!(" {}", run_duration(d)),
                 _ => String::new(),
             };
             let (glyph, gs, name) = step_mark(editor, s, card, ui, colors);
@@ -2000,8 +2034,8 @@ fn preflight_row(
 }
 
 /// A preflight step's mark, its colour and its name's style: passed `●` in the plus colour (a note's pass in
-/// warning), failed `▲` in the error colour and bold, the one running the wave in the accent, the ones to come `◦`
-/// faint.
+/// warning), failed `▲` in the error colour and bold, the one running the wave's one cell (`pulse`) in the accent,
+/// the ones to come `◦` faint — every mark one cell, so a row's name and time stay where the others' are.
 fn step_mark(
     editor: &Editor,
     s: &crate::preflight::StepRun,
@@ -2013,7 +2047,7 @@ fn step_mark(
     let faint = Style { fg: ui.linenr.fg, ..card };
     match s.state {
         State::Waiting => ("◦".to_string(), faint, faint),
-        State::Running => (wave(editor), Style { fg: ui.accent.fg, ..card }, Style { bold: true, ..card }),
+        State::Running => (pulse(editor), Style { fg: ui.accent.fg, ..card }, Style { bold: true, ..card }),
         State::Passed if s.note.is_some() => ("●".into(), Style { fg: warn, ..card }, card),
         State::Passed => ("●".into(), Style { fg: good, ..card }, card),
         State::Failed(_) => ("▲".into(), Style { fg: bad, ..card }, Style { bold: true, ..card }),
@@ -2028,13 +2062,26 @@ const TASK_PANEL_MIN: usize = 2;
 /// rows of code always). It never shrinks while the run is up (`Run.tall`, which a rerun of the same task starts
 /// from). (A size you set will win over this — U1.)
 fn task_panel_h(r: &crate::task::Run, steps: bool, queued: usize, total: usize, head: usize) -> usize {
-    let running = matches!(r.state, crate::task::State::Running);
-    let sandbox = crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some();
-    let want = head + usize::from(steps) + r.output.len().max(1) + queued + usize::from(sandbox);
+    let want = head + usize::from(steps) + r.output.len().max(1) + queued + task_panel_foot(r);
     let cap = (total / 2).min(total.saturating_sub(4));
     let h = want.max(head + TASK_PANEL_MIN).max(r.tall.get()).min(cap);
     r.tall.set(r.tall.get().max(h));
     h
+}
+
+/// The task panel's height while its group is stacked with its list in sight (`stacked_list_rows`): the list's `n`
+/// rows under the header, what waits for the panel and the sandbox's row — never the hidden output's lines; its
+/// least and most as `task_panel_h`'s. `Run.tall` stays the output's: the output comes back as tall as it was last
+/// seen this run, taller only by what it printed since — a switch moves the line by what the two show, no more.
+fn task_list_h(r: &crate::task::Run, n: usize, queued: usize, total: usize, head: usize) -> usize {
+    let cap = (total / 2).min(total.saturating_sub(4));
+    (head + n + queued + task_panel_foot(r)).max(head + TASK_PANEL_MIN).min(cap)
+}
+
+/// The sandbox's row under the task panel's body, when it blocked something: 1, else 0.
+fn task_panel_foot(r: &crate::task::Run) -> usize {
+    let running = matches!(r.state, crate::task::State::Running);
+    usize::from(crate::sandbox::panel_line(r.guard.as_ref(), running, r.last_output).is_some())
 }
 
 /// The terminal panel's height for `total` rows of editing area — more than the other panels (a shell wants
@@ -2236,25 +2283,21 @@ fn draw_task_panel(
     let running = matches!(r.state, State::Running);
     // (waiting on what isn't its own — another session's cargo, likely — not stuck: #10, `waits.rs`)
     let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
+    // (printing nothing for minutes: said after its time — #157)
+    let silent = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten();
+    let follows = wait.is_some() || silent.is_some();
     let when = match (&r.state, r.took, steps) {
         (State::Running, _, Some(p)) => {
             let at = p.steps.iter().filter(|s| s.state != crate::preflight::State::Waiting).count();
             format!("   step {} of {}", at.max(1), p.steps.len())
         }
-        (State::Running, _, None) if wait.is_some() => String::new(),
-        (State::Running, _, None) => format!("   {}", wave(editor)),
-        (_, Some(d), Some(_)) => format!("   {}", crate::preflight::long_duration(d)),
-        (_, Some(d), None) => format!("   {}", duration(d.as_secs_f32())),
+        // (under way is said by the wave by its name — the badge; here, the time it has run, which becomes its whole)
+        (State::Running, _, None) => format!("   {}", run_time(crate::clock::since(r.started), follows)),
+        (_, Some(d), _) => format!("   {}", run_duration(d)),
         _ => String::new(),
     };
-    // The wave in the accent, as everywhere something is under way — a wait isn't, and is said dim
-    let waving = running && steps.is_none() && wait.is_none();
-    summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
-    if let Some(w) = wait {
-        summary.push((format!("   {w}"), dim));
-    }
-    // (printing nothing for minutes: said after its wave — #157)
-    if let Some(s) = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten() {
+    summary.push((when, dim));
+    for s in [wait, silent].into_iter().flatten() {
         summary.push((format!("   {s}"), dim));
     }
     // (`space m m` runs the user's task again — not an install, not Claude's command, not tarae's git)
@@ -2463,7 +2506,7 @@ fn draw_task_group(
                     State::Running => s.started.map(crate::clock::since),
                     _ => s.took,
                 };
-                let time = took.map(crate::preflight::long_duration).unwrap_or_default();
+                let time = took.map(run_duration).unwrap_or_default();
                 (glyph, gs, s.name.clone(), ns, String::new(), time)
             }
             None => {
@@ -3205,17 +3248,18 @@ fn draw_test_panel(
         }
     }
     let running = matches!(r.state, RunState::Running);
-    // (waiting on what isn't its own — another session's cargo, likely — said in the wave's place: #10)
+    // (under way is said by the wave by its name — the badge; here, the time it has run, which becomes its whole —
+    // then what it waits on that isn't its own: another session's cargo, likely, #10)
     let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
-    let when = match (&r.state, r.took, &wait) {
-        (RunState::Running, _, Some(w)) => format!("   {w}"),
-        (RunState::Running, _, None) => format!("   {}", wave(editor)),
-        (_, Some(d), _) => format!("   {}", duration(d.as_secs_f32())),
+    let silent = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten();
+    let follows = wait.is_some() || silent.is_some();
+    let when = match (&r.state, r.took) {
+        (RunState::Running, _) => format!("   {}", run_time(crate::clock::since(r.started), follows)),
+        (_, Some(d)) => format!("   {}", run_duration(d)),
         _ => String::new(),
     };
-    let waving = running && wait.is_none();
-    summary.push((when, if waving { Style { fg: ui.accent.fg, ..card } } else { dim }));
-    if let Some(s) = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten() {
+    summary.push((when, dim));
+    for s in [wait, silent].into_iter().flatten() {
         summary.push((format!("   {s}"), dim));
     }
     let slot_keys = slot_hints(editor);
@@ -9928,10 +9972,52 @@ pub fn duration(s: f32) -> String {
 /// A step a `TICK` on the animation's clock (`editor::anim_step`): every wave on screen moves together, a
 /// step a frame — held still at its first where nothing moves on a clock (`editor.motion`, `Editor::moving`).
 fn wave(editor: &Editor) -> String {
-    const W: [char; 10] = ['▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃'];
+    let f = wave_step(editor);
+    (0..3).map(|k| WAVE[(f + k * 3) % WAVE.len()]).collect()
+}
+
+/// The wave's blocks, rising and falling.
+const WAVE: [char; 10] = ['▂', '▃', '▄', '▅', '▆', '▇', '▆', '▅', '▄', '▃'];
+
+/// Where the wave is in `WAVE` this frame.
+fn wave_step(editor: &Editor) -> usize {
     let step = if editor.moving() { crate::editor::anim_step() } else { 0 };
-    let f = (step % W.len() as u128) as usize;
-    (0..3).map(|k| W[(f + k * 3) % W.len()]).collect()
+    (step % WAVE.len() as u128) as usize
+}
+
+/// The wave in one cell, for a list row's mark (`●`, `▲`, `◦` are one): its middle block, rising and falling on
+/// the same clock — held still at `▅` where nothing moves. The three-cell wave stays where there's room (a header's
+/// badge, a card).
+fn pulse(editor: &Editor) -> String {
+    WAVE[(wave_step(editor) + 3) % WAVE.len()].to_string()
+}
+
+/// A run's time so far in a panel's header, where its whole goes once it ends — `run_duration`'s; with something
+/// said after it (`follows`: a wait, a silence) filled out to `RUN_TIME_W` cells on its right (a header's details drop
+/// their leading blanks: `fold_details`) so that never slides as it counts — else the line runs on right after it,
+/// no gap in it.
+fn run_time(d: std::time::Duration, follows: bool) -> String {
+    match follows {
+        true => pad_right(&run_duration(d), RUN_TIME_W),
+        false => run_duration(d),
+    }
+}
+
+/// `59m 59s` — the widest `run_duration` is under ten hours: a run's time keeps this width (`run_time`).
+const RUN_TIME_W: usize = 7;
+
+/// How long a run took, or has run, the one way it's written — a task's, a preflight's and its steps', the tests':
+/// `duration`'s under a minute (`412ms`, `8.3s`), then minutes and seconds (`7m 12s`), then hours and minutes
+/// (`1h 32m`) — never wider than `RUN_TIME_W` under ten hours.
+pub fn run_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs_f32();
+    // (what `duration` would round up to `60.0s` reads as the minute it is)
+    let whole = d.as_secs().max(60);
+    match s {
+        _ if s < 59.95 => duration(s),
+        _ if whole < 3600 => format!("{}m {:02}s", whole / 60, whole % 60),
+        _ => format!("{}h {:02}m", whole / 3600, whole / 60 % 60),
+    }
 }
 
 /// While an ask answer streams: last few lines being written, in a card at the editing area's bottom right

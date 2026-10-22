@@ -2410,7 +2410,8 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     };
     let mut r = crate::task::Run::for_test(task);
     (r.state, r.by_claude) = (crate::task::State::Running, true);
-    r.started = Instant::now() - Duration::from_millis(432_500);
+    // (its time so far in its header: the clock held still while the frame is drawn)
+    r.started = crate::clock::hold() - Duration::from_millis(432_500);
     r.last_output = Instant::now();
     s.ed.session.task_run = Some(r);
     let mut chat = crate::chat::Chat::new();

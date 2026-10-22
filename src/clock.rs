@@ -12,9 +12,10 @@ pub fn now() -> Instant {
     if let Some(t) = crate::sim::now() {
         return t;
     }
-    let now = Instant::now();
     #[cfg(test)]
-    let now = now + AHEAD.get();
+    let now = HELD.get().unwrap_or_else(Instant::now) + AHEAD.get();
+    #[cfg(not(test))]
+    let now = Instant::now();
     now
 }
 
@@ -22,6 +23,17 @@ pub fn now() -> Instant {
 thread_local! {
     /// How far `advance` moved this thread's clock on.
     static AHEAD: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    /// Where `hold` stopped this thread's clock.
+    static HELD: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests outside a simulation: this thread's clock held still from now on (`advance` still moves it) — a frame with a
+/// live time in it (a run's time so far) draws the same at every read, however long the drawing takes. Its now.
+#[cfg(test)]
+pub fn hold() -> Instant {
+    let t = now();
+    HELD.set(Some(t - AHEAD.get()));
+    t
 }
 
 /// Tests outside a simulation: this thread's clock moved on by `d` — what `now` and `since` read here from now on (a

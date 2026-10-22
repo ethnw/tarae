@@ -248,16 +248,19 @@ configs carry over as they are.
     line between them lit while either has them. A click on a name gives that pane the keys. Too narrow for both
     (the list under 24 columns or the detail under 40), they're stacked, as zellij stacks panes: one open, both
     named in its line (`results · failure`); `tab` or `C-w h`/`l` open the other, and the one that had the keys last
-    stays open. Narrow, the line folds what the run says (its time, then its counts) before the names.
+    stays open. Narrow, the line folds what the run says (its time, then its counts) before the names. A run under
+    way says so once, by its name (the wave); where its details go, the time it has run so far, which becomes its
+    whole when it ends.
   - **A task's places and a preflight's steps are lists too** — a run that pointed at two places or more lists them
     beside its output (`▲ src/main.rs:31  mismatched types`, the errors first, each as found); a preflight of two
-    steps or more lists its steps (`● fmt 6ms`, `▲ test`, `◦` not run yet, the wave on the one running). The same
+    steps or more lists its steps (`● fmt 6ms`, `▲ test`, `◦` not run yet, the wave's one cell on the one running). The same
     keys as the tests' list: a place picked puts the output at the line that printed it, on the cursor line's band
     (`tab` lands the keys there); a step picked, its heading at the top. `enter` goes to the place in the code — on
     a step, its first place, else its output from its heading. On the steps' list `o` opens the step's whole output
     in a buffer; `o` on the output selects the step in view in the list. The list grows as the run prints, the
     selection staying on its place. A place whose line the panel no longer keeps says `cut`. One place, or one
-    step, is the output alone, as before.
+    step, is the output alone, as before. Stacked, the panel is as tall as the one open: the list its rows, the
+    output as tall as it has printed (never shrinking while it's open, back as tall as you last saw it).
   - **The output is a document** — a run panel's output (the task's, a preflight's, the tests' failure picked, else
     their output) is a read-only document, and with the keys on it (`C-w j`, a click — the cursor on that row) it's
     the code's normal mode on that document: every move, selection, search and count — `j` `k` `w` `x` `v` `/` `n`

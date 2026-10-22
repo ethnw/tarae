@@ -686,6 +686,185 @@ fn the_failures_keys_are_said_beside_the_failure() {
     }
 }
 
+/// `editor_of(root, "preflight")` with its preflight under way: fmt passed in 6ms, clippy running for 13.9s, test to
+/// come — the thread's clock held still (`clock::hold`), so every frame reads the same time.
+fn running_preflight(root: &std::path::Path) -> Editor {
+    use crate::preflight::State;
+    let step = |n: &str| crate::preflight::Step {
+        name: n.into(),
+        cmd: String::new(),
+        note: None,
+        from: String::new(),
+        full: false,
+    };
+    let mut ed = editor_of(root, "preflight");
+    let steps = [step("fmt"), step("clippy"), step("test")];
+    let mut p = crate::preflight::Preflight::new(0, &steps, crate::preflight::Set::Full, "k".into());
+    p.steps[0].state = State::Passed;
+    p.steps[0].took = Some(std::time::Duration::from_millis(6));
+    p.steps[1].state = State::Running;
+    p.steps[1].started = Some(crate::clock::hold() - std::time::Duration::from_millis(13_920));
+    ed.session.preflight = Some(p);
+    ed.session.task_run.as_mut().unwrap().state = crate::task::State::Running;
+    ed
+}
+
+/// The bottom slot's height in a frame: from its line to the status line.
+fn slot_h(ed: &Editor, p: &vt100::Parser, kind: GroupKind) -> usize {
+    (H - 1 - slot_line(ed, p, kind).0) as usize
+}
+
+/// Panes polish: a stacked group is as tall as the member in sight — its list its rows, while the output grows
+/// hidden behind it (the task panel's "as tall as its output" is the output's rule); the output its own height, back as
+/// tall as it was last seen though it would want less now (`Run.tall`); side by side, the output's rule whichever
+/// member is in front.
+#[test]
+fn a_stacked_groups_height_follows_the_member_in_sight() {
+    const N: u16 = 60;
+    let dir = crate::scratch::Scratch::new("group-height");
+    let mut ed = running_preflight(dir.path());
+    let print = |ed: &mut Editor, n: usize| {
+        let r = ed.session.task_run.as_mut().unwrap();
+        (0..n).for_each(|i| r.push_line(false, format!("line {i}"), false));
+    };
+    print(&mut ed, 2);
+    let h = |ed: &mut Editor, w: u16| {
+        let p = cells(ed, w);
+        slot_h(ed, &p, GroupKind::Preflight)
+    };
+    let list = crate::chrome::SLOT_HEAD + 3;
+    assert_eq!(h(&mut ed, N), list, "the list's three rows under the line");
+    print(&mut ed, 40);
+    assert_eq!(h(&mut ed, N), list, "the output grew hidden: still the list's rows");
+    // The output in sight: as tall as it is (up to half the room)
+    ed.list_focus(GroupKind::Preflight);
+    feed_at(&mut ed, "<tab>", N);
+    let seen = h(&mut ed, N);
+    assert!(seen > list + 8, "the output's height: {seen}");
+    // Back to the list: its rows; the output, now two lines, again as tall as it was seen
+    feed_at(&mut ed, "<C-w>h", N);
+    assert_eq!(region(&ed), "list:preflight");
+    assert_eq!(h(&mut ed, N), list);
+    ed.session.task_run.as_mut().unwrap().output = (0..2).map(|i| (false, format!("line {i}"))).collect();
+    feed_at(&mut ed, "<C-w>l", N);
+    assert_eq!(h(&mut ed, N), seen, "as tall as it was seen, not two lines' height");
+    // Side by side, the list with the keys: the output's rule
+    feed_at(&mut ed, "<C-w>h", W);
+    assert_eq!(region(&ed), "list:preflight");
+    assert_eq!(h(&mut ed, W), seen, "both in sight: the output's height");
+}
+
+/// Panes polish: every list row's mark is one cell — the running step's too, the wave's one cell — so its name starts
+/// where the others' do and its time is whole, right-aligned with theirs (the three-cell wave pushed it two cells and
+/// cut `13.9s` to `13.9`). Side by side and stacked.
+#[test]
+fn the_running_steps_row_keeps_its_columns() {
+    let dir = crate::scratch::Scratch::new("group-mark");
+    for w in [W, 60] {
+        let mut ed = running_preflight(dir.path());
+        // (side by side the panel is as tall as the output: enough of it for the three rows)
+        let r = ed.session.task_run.as_mut().unwrap();
+        (0..6).for_each(|i| r.push_line(false, format!("line {i}"), false));
+        ed.list_focus(GroupKind::Preflight);
+        let p = cells(&mut ed, w);
+        let shown = p.screen().contents();
+        // (each step's row, cut at the line between the members)
+        let row = |name: &str| {
+            let head = |l: &str| l.chars().skip(1).take(8 + name.len()).collect::<String>();
+            let l = shown.lines().find(|l| head(l).contains(&format!(" {name}")));
+            l.map(|l| l.chars().take_while(|&c| c != '│').collect::<String>()).expect(name)
+        };
+        let (fmt, clippy, test) = (row("fmt"), row("clippy"), row("test"));
+        let col = |r: &str, name: &str| r.find(name).map(|b| r[..b].chars().count());
+        assert_eq!(
+            col(&fmt, "fmt"),
+            col(&clippy, "clippy"),
+            "{w}: the names in one column:\n{fmt}\n{clippy}"
+        );
+        assert_eq!(col(&fmt, "fmt"), col(&test, "test"), "{w}");
+        let mark = clippy.chars().nth(col(&clippy, "clippy").unwrap() - 2).unwrap();
+        assert!("▂▃▄▅▆▇".contains(mark), "{w}: the wave's one cell: {clippy}");
+        assert!(
+            clippy.trim_end().ends_with(" 13.9s") && fmt.trim_end().ends_with(" 6ms"),
+            "{w}:\n{fmt}\n{clippy}"
+        );
+        let end = |r: &str| r.trim_end().chars().count();
+        assert_eq!(end(&fmt), end(&clippy), "{w}: the times right-aligned");
+    }
+}
+
+/// A run's time is written one way (`term::run_duration`), a task's, a preflight's and the tests' alike: tenths
+/// under a minute, then minutes and seconds, then hours and minutes — never wider than `RUN_TIME_W` (7) under ten
+/// hours.
+#[test]
+fn a_runs_time_is_written_one_way() {
+    use std::time::Duration;
+    let ms = |n: u64| crate::term::run_duration(Duration::from_millis(n));
+    let said = [412, 8_340, 59_960, 432_500, 1_000_000, 3_599_000, 5_400_000, 35_999_000].map(ms);
+    assert_eq!(said, ["412ms", "8.3s", "1m 00s", "7m 12s", "16m 40s", "59m 59s", "1h 30m", "9h 59m"]);
+    assert!(said.iter().all(|s| s.len() <= 7), "{said:?}");
+}
+
+/// Panes polish: a run under way is said once in its header — the wave by its name (the badge); the details' place
+/// the time it has run, a fixed width (`run_time`) past 1000 s and past an hour too, which becomes its whole when it
+/// ends. The tests' header the same. The clock held still: a frame reads one time.
+#[test]
+fn a_running_runs_header_says_its_wave_once_and_its_time() {
+    use std::time::Duration;
+    let dir = crate::scratch::Scratch::new("group-header");
+    let now = crate::clock::hold();
+    let ago = |ms: u64| now - Duration::from_millis(ms);
+    let waves = |l: &str| l.chars().filter(|c| "▂▃▄▅▆▇".contains(*c)).count();
+    let line = |ed: &mut Editor, name: &str| {
+        let shown = cells(ed, W).screen().contents();
+        shown.lines().find(|l| l.starts_with(&format!("─ {name} "))).map(str::to_string).expect(name)
+    };
+    // (where what's said after the time starts)
+    let end = |l: &str, t: &str| {
+        let b = l.find(t)? + t.len();
+        Some(l[..b].chars().count() + l[b..].chars().take_while(|&c| c == ' ').count())
+    };
+    let mut ed = editor(dir.path());
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.state = crate::task::State::Running;
+    r.took = None;
+    r.started = ago(2_520);
+    r.push_line(false, "building".into(), false);
+    let l = line(&mut ed, "check");
+    assert_eq!(waves(&l), 3, "one wave: {l}");
+    assert!(l.contains(" 2.5s ─"), "nothing after it: the line runs on, no gap: {l}");
+    // Quiet past `waits::SILENT`: said after the time, which keeps its width from then on
+    ed.session.task_run.as_mut().unwrap().last_output = std::time::Instant::now() - Duration::from_secs(200);
+    let l = line(&mut ed, "check");
+    let at = end(&l, " 2.5s").unwrap_or_else(|| panic!("its time so far: {l}"));
+    assert_eq!(l.chars().skip(at).take(9).collect::<String>(), "no output", "{l}");
+    // (past 1000 s and past an hour: minutes, then hours — the same width)
+    for (ms, said) in [(12_320, " 12.3s"), (1_234_000, " 20m 34s"), (5_400_000, " 1h 30m")] {
+        ed.session.task_run.as_mut().unwrap().started = ago(ms);
+        let l = line(&mut ed, "check");
+        assert_eq!((waves(&l), end(&l, said)), (3, Some(at)), "counting, in its place: {l}");
+    }
+    let r = ed.session.task_run.as_mut().unwrap();
+    r.state = crate::task::State::Passed;
+    r.took = Some(Duration::from_millis(5_412_000));
+    let l = line(&mut ed, "check");
+    assert!(waves(&l) == 0 && l.contains(" 1h 30m"), "ended: its whole time, the same way: {l}");
+    // The tests' run
+    let mut ed = editor(dir.path());
+    ed.session.task_run = None;
+    let mut run = crate::testing::TestRun::finished("t", Vec::new(), vec!["ok".into()]);
+    run.state = crate::testing::RunState::Running;
+    run.took = None;
+    run.started = ago(3_020);
+    ed.session.test_run = Some(run);
+    let l = line(&mut ed, "tests");
+    assert!(waves(&l) == 3 && l.contains(" 3.0s ─"), "the tests' header: {l}");
+    let r = ed.session.test_run.as_mut().unwrap();
+    (r.state, r.took) = (crate::testing::RunState::Passed, Some(Duration::from_millis(432_500)));
+    let l = line(&mut ed, "tests");
+    assert!(l.contains(" 7m 12s"), "the tests' whole time, the same way: {l}");
+}
+
 /// §2.3: narrower than the list's and the detail's least, a group is stacked — one member in sight, the slot's
 /// width, both named in the line (`places · output`, no `┬`); `tab` brings the other; the one that had the keys last
 /// stays in sight once they go (`Group.front`); a click on a member's name gives it the keys.

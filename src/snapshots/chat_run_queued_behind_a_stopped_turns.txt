@@ -26,7 +26,7 @@
 23                                                                         │
 24                                                                         │
 25                                                                         │
-26 ─ grep -rn TODO src ▂▅▆ ── ▂▅▆ ──────────────────────── space m c stop ─┤  ────────────────────────────────────────────
+26 ─ grep -rn TODO src ▂▅▆ ── 7m 12s ───────────────────── space m c stop ─┤  ────────────────────────────────────────────
 27   grep -rn TODO src                                                     │  › Ask about demo.rs…
 28   claude · cargo tes…   queued · 1st · behind grep -rn TODO src · 0:00  │  C-c stop  esc normal  C-f follow
 29  ● chat                                                                                          rust   utf-8 LF   1:1
@@ -88,7 +88,7 @@
 23                                                                         a
 24                                                                         a
 25                                                                         a
-26 f TTTT TTT TTTT TTT aaa ff aaa ffffffffffffffffffffffff DDDDD D D ffff fa  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+26 f TTTT TTT TTTT TTT aaa ff dd ddd fffffffffffffffffffff DDDDD D D ffff fa  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 27   ffff fff ffff fff                                                     a  A fff fffff ffffffff
 28   dddddd d ddddd dddd   ffffff f fff f ffffff ffff fff ffff fff f ffff  a  DDD ffff  DDD ffffff  DDD ffffff
 29  a TTTT                                                                                          dddd   ddddd dd   TTT

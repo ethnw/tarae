@@ -365,7 +365,7 @@ impl Preflight {
             }
         }
         if let Some(t) = self.took {
-            out.push_str(&format!(" · {}", long_duration(t)));
+            out.push_str(&format!(" · {}", crate::term::run_duration(t)));
         }
         out
     }
@@ -619,12 +619,6 @@ pub fn failure_block(lines: &[String]) -> Vec<String> {
         Some((_, block)) => block.iter().take(FAILURE_SHOWN).cloned().collect(),
         None => lines[lines.len().saturating_sub(FAILURE_SHOWN)..].to_vec(),
     }
-}
-
-/// `412ms` · `8.3s` · `4m 12s` — a run of minutes reads in minutes.
-pub fn long_duration(d: Duration) -> String {
-    let s = d.as_secs_f32();
-    if s < 60.0 { crate::term::duration(s) } else { format!("{}m {:02}s", s as u64 / 60, s as u64 % 60) }
 }
 
 /// Where the packs' default preflights told on their card are kept (`$state/preflight-told`, a key a line —

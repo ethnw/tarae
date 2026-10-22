@@ -644,6 +644,66 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (panes polish: a preflight under way, its test step printing — the side panel up, so at 80 its group is
+    // stacked, at 160 side by side; the steps' list with the keys: the running row's mark one cell, its time whole)
+    Scene {
+        name: "polish-preflight-list",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "preflight",
+            "\r",
+            "@30?tests::knot_5 ",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            "@1",
+            "\x17",
+            "j",
+            "@4",
+        ],
+    },
+    // (…its output in front: stacked at 80, as tall as the output)
+    Scene {
+        name: "polish-preflight-output",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@?Trust this",
+            "@1",
+            "y",
+            "@1",
+            ":",
+            "preflight",
+            "\r",
+            "@30?tests::knot_5 ",
+            "@1",
+            " ",
+            "e",
+            "@1",
+            "\x1b",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\t",
+            "@3",
+        ],
+    },
+    // (…a task under way: the wave once, by its name; the time it has run in the details)
+    Scene {
+        name: "polish-task-running",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@?Trust this", "@1", "y", "@1", ":", "task watch", "\r", "@20?knot 12 tied", "@1"],
+    },
     // (a floating frame over the tests group — which-key's top line beside the slot's)
     Scene {
         name: "panes-float",
@@ -2108,7 +2168,7 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
             ("check.sh", CHECK_SH.into()),
         ],
         // (a run still printing: a line every 0.2 s for a minute)
-        "output-live" => vec![
+        "output-live" | "polish-task-running" => vec![
             (".tarae.toml", "[task.watch]\ncmd = \"sh watch.sh\"\n".into()),
             (
                 "watch.sh",
@@ -2126,6 +2186,21 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
             (
                 "test.sh",
                 "echo 'running 2 tests'\necho 'test tests::length_sums_the_knots ... ok'\necho 'test tests::a_tied_knot_lengthens_it ... FAILED'\necho\necho \"thread 'tests::a_tied_knot_lengthens_it' panicked at src/main.rs:30:9:\"\necho 'assertion `left == right` failed: the knot at 4 adds its gap'\necho '  left: 7'\necho ' right: 8'\necho\necho 'test result: FAILED. 1 passed; 1 failed; 0 ignored'\nexit 101\n"
+                    .into(),
+            ),
+        ],
+        // (a preflight whose test step prints a line every 0.1 s for a minute)
+        "polish-preflight-list" | "polish-preflight-output" => vec![
+            (
+                ".tarae.toml",
+                "[preflight]\nsteps = [\n  { name = \"fmt\", cmd = \"sh fmt.sh\" },\n  { name = \"clippy\", cmd = \"sh check.sh\" },\n  { name = \"test\", cmd = \"sh test.sh\" },\n]\n"
+                    .into(),
+            ),
+            ("fmt.sh", "exit 0\n".into()),
+            ("check.sh", CHECK_SH.into()),
+            (
+                "test.sh",
+                "echo 'running 600 tests'\ni=0\nwhile [ $i -lt 600 ]; do echo \"test tests::knot_$i ... ok\"; i=$((i+1)); sleep 0.1; done\n"
                     .into(),
             ),
         ],
