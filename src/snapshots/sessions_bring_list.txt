@@ -1,22 +1,22 @@
 # sessions_bring_list · 112x30 · theme meok · cursor hidden
 ## text
-00
-01  ╭─ sessions ─────────────────────────────────────────────────────────────────────────────────────────────────╮
-02  │   letters are keys here, nothing is typed · 1–4 switch                                                 4/4 │
-03  │ ────────────────────────────────────────────────────────────────────────────────────────────────────────── │
-04  │▎ main                                                                                                 here │
-05  │  fix-login                                                                                                 │
-06  │  docs                                                                                                      │
-07  │  parser                                                                                                    │
-08  │                                                                                                            │
-09  │                                                                                                            │
-10  │                                                                                                            │
-11  │                                                                                                            │
-12  │                                                                                                            │
-13  │                                                                                                            │
-14  │                                                                                                            │
-15  │                                                                                                            │
-16  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+00 ─ tarae › [scratch] ────────────────────────────────────────────────────────────────────────────────────────────
+01   1
+02
+03
+04
+05
+06
+07                       ╭─ sessions ── 4 sessions ──────── enter switch  / search  o new ─╮
+08                       │▎ main                                                           │
+09                       │  fix-login                                                      │
+10                       │  docs                                                           │
+11                       │  parser                                                         │
+12                       ╰─────────────────────────────────────────────────────────────────╯
+13
+14
+15
+16
 17
 18
 19
@@ -29,17 +29,17 @@
 26
 27
 28
-29  ● picker   enter switch  n new  w keep warm  $ billing  esc close  main                        utf-8 LF   1:1
+29  ● sessions   main                                                                              utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 02
 03
-04   PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+04
 05
 06
 07
-08
+08                        PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 09
 10
 11
@@ -62,23 +62,23 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00
-01  ff TTTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02  f   fffffff fff ffff fffff fffffff ff fffff f fff ffffff                                                 fff f
-03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff f
-04  fa BBBB                                                                                                 dddd f
-05  f                                                                                                            f
-06  f                                                                                                            f
-07  f                                                                                                            f
-08  f                                                                                                            f
-09  f                                                                                                            f
-10  f                                                                                                            f
-11  f                                                                                                            f
-12  f                                                                                                            f
-13  f                                                                                                            f
-14  f                                                                                                            f
-15  f                                                                                                            f
-16  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+00 f ddddd f TTTTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01   A
+02
+03
+04
+05
+06
+07                       aa TTTTTTTT aa d dddddddd aaaaaaaa DDDDD ffffff  D ffffff  D fff aa
+08                       aa BBBB                                                           a
+09                       a                                                                 a
+10                       a                                                                 a
+11                       a                                                                 a
+12                       aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+13
+14
+15
+16
 17
 18
 19
@@ -91,7 +91,7 @@
 26
 27
 28
-29  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff  BBBB                        ddddd dd   TTT
+29  a TTTTTTTT   BBBB                                                                              ddddd dd   TTT
 ## legend
-bg: P=ui.menu.selected
+bg: c=ui.cursorline.primary  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

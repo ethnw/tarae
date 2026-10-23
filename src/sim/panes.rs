@@ -7,6 +7,10 @@
 //! — the place is part of the layout written, so the newest place wins the file. After every step a docked group's
 //! leaf is in the tree exactly while its run is there, once; the slot's tabs never list a group docked in sight; the
 //! keys are a docked group's (`Session.hand`) only while they're in it.
+//!
+//! P3 step 7: floated and back (`C-w e`), moved (`C-w m`, `l`, `j`), its run's `q` racing its end and a card coming
+//! over it. After every step a floating group's own pane is out of the tree, once, while it floats; drawn, its frame is
+//! on the screen whole; the slot's tabs never list it while it floats in sight; `C-w m` moves only a pane there.
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
@@ -104,9 +108,9 @@ fn tests() -> crate::testing::TestRun {
 }
 
 fn step(sim: &mut Sim, ed: &mut Editor, world: &World, key: &str) -> String {
-    // (by arm: a window key 6, another file in the pane 2, a frame 2, time passing 1, a docking key from the tests'
-    // list 3, the run ending or a new one 2)
-    match sim.choices.weighted(&[6, 2, 2, 1, 3, 2]) {
+    // (by arm: a window key 6, another file in the pane 2, a frame 2, time passing 1, a docking or floating key from the
+    // tests' list 3, the run ending or a new one 2, a card coming 1)
+    match sim.choices.weighted(&[6, 2, 2, 1, 3, 2, 1]) {
         0 => {
             let k = *sim.choices.pick(&[
                 "<C-w>v", "<C-w>s", "<C-w>q", "<C-w>o", "<C-w>H", "<C-w>L", "<C-w>t", "<C-w>w", "<C-w>>",
@@ -127,7 +131,19 @@ fn step(sim: &mut Sim, ed: &mut Editor, world: &World, key: &str) -> String {
             format!("a frame, {w} columns")
         }
         4 => {
-            let k = *sim.choices.pick(&["<C-w>L", "<C-w>H", "<C-w>K", "<C-w>J", "j", "<tab>"]);
+            let k = *sim.choices.pick(&[
+                "<C-w>L",
+                "<C-w>H",
+                "<C-w>K",
+                "<C-w>J",
+                "j",
+                "<tab>",
+                "<C-w>e",
+                "<C-w>e",
+                "<C-w>ml<ret>",
+                "<C-w>mj",
+                "q",
+            ]);
             ed.list_focus(crate::pane::GroupKind::Tests);
             keys(sim, ed, world, key, k);
             format!("the tests' list, {k}")
@@ -145,6 +161,22 @@ fn step(sim: &mut Sim, ed: &mut Editor, world: &World, key: &str) -> String {
                 "a new run".into()
             }
         },
+        // (a card over it — its `n` the next key half the time)
+        6 => {
+            let o = crate::offer::Offer::new(
+                "End the review?".into(),
+                "2 files not viewed.",
+                "",
+                String::new(),
+                crate::offer::What::ReviewEnd { session: 0, started: std::time::Instant::now() },
+            );
+            ed.push_offer(o);
+            sim.batch(ed, Event::Resize);
+            if sim.choices.weighted(&[1, 1]) == 0 {
+                keys(sim, ed, world, key, "n");
+            }
+            "a card".into()
+        }
         _ => {
             let ms = *sim.choices.pick(&[100, 3000]);
             sim.wait(Duration::from_millis(ms));
@@ -183,23 +215,35 @@ fn docked_held(ed: &Editor) -> Result<(), String> {
     let hosts: Vec<_> =
         ed.session.panes.iter().filter(|p| p.shows == Shows::Group(GroupKind::Tests)).collect();
     let in_tree = hosts.iter().filter(|p| leaves.contains(&p.id)).count();
-    let want = usize::from(matches!(g.place, Place::Docked(_)) && ed.session.test_run.is_some());
-    if in_tree != want || hosts.len() != want {
+    let docked = matches!(g.place, Place::Docked(_)) && ed.session.test_run.is_some();
+    let floating = matches!(g.place, Place::Floating(_));
+    // (floating: its own pane, out of the tree — kept while it floats, its run there or not)
+    let want = (usize::from(docked), usize::from(docked || floating));
+    if (in_tree, hosts.len()) != want {
         return Err(format!(
-            "{} leaves and {} panes of the docked group, want {want} ({:?})",
-            in_tree,
+            "{in_tree} leaves and {} panes of the group, want {want:?} ({:?})",
             hosts.len(),
             g.place
         ));
     }
-    if ed.docked_in_sight(GroupKind::Tests)
-        && ed.slot_tabs().iter().any(|t| t.slot == crate::sizes::Slot::Test)
-    {
-        return Err("the slot's tabs list the group docked in sight".into());
+    if ed.out_of_slot(GroupKind::Tests) && ed.slot_tabs().iter().any(|t| t.slot == crate::sizes::Slot::Test) {
+        return Err("the slot's tabs list the group out of the slot".into());
+    }
+    // (drawn floating: whole on the screen the last frame had)
+    if let (Some(w), Some(h)) = (ed.screen.width, ed.screen.height) {
+        for (k, r) in ed.screen.floating.borrow().iter() {
+            if r.x + r.w > w || r.y + r.h > h {
+                return Err(format!("{k:?}'s frame {r:?} past the screen {w}×{h}"));
+            }
+        }
+    }
+    if ed.float_moving.is_some_and(|k| !ed.floating_in_sight(k)) {
+        return Err("C-w m moving a pane not floating in sight".into());
     }
     let keys =
         ed.session.is_at(crate::session::At::Slot) || ed.session.is_at(crate::session::At::List(g.list));
-    if ed.session.hand.is_some() && !keys {
+    // (a card over it: the hand stays under it)
+    if ed.session.hand.is_some() && !keys && !matches!(ed.session.at, crate::session::At::Float(_)) {
         return Err(format!("the hand {:?} with the keys at {:?}", ed.session.hand, ed.session.at));
     }
     Ok(())

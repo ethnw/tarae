@@ -135,7 +135,7 @@ pub struct Session {
     pub reviewer: Option<crate::reviewer::Reviewer>,
     /// The side panel — files or outline (`sidebar.rs`).
     pub sidebar: Option<crate::sidebar::Sidebar>,
-    /// The tab it last showed (`C-w e` opens it again).
+    /// The tab it last showed (`focus_side_panel` opens it again).
     pub side_last: crate::sidebar::Mode,
     /// The built-in terminal (terminal.rs) · the run that's this session's latest (a replaced one's late
     /// output is dropped).
@@ -950,11 +950,10 @@ impl Editor {
         mine.into_iter().chain(servers).flatten().collect()
     }
 
-    /// Every event: the session list says what's so now; with sessions behind, their servers rest while
-    /// their Claude is idle (and stop after a while — `lsp_rest`), and wake when it starts a turn. A server
-    /// one of the front session's files uses never rests.
+    /// Every event: with sessions behind, their servers rest while their Claude is idle (and stop after a while —
+    /// `lsp_rest`), and wake when it starts a turn. A server one of the front session's files uses never rests. (The
+    /// session list's rows are built as it's drawn — `sessionpane.rs`.)
     pub(crate) fn sessions_sync(&mut self) {
-        self.session_list_sync();
         self.inbox_sync();
         self.asking_sync();
         self.waiting_sync();
@@ -2387,6 +2386,9 @@ mod tests {
             billing: Default::default(),
             build: None,
             queue: None,
+            waits: (0, 0),
+            report: String::new(),
+            context: None,
         };
         let row = &crate::worktree::items(&[shown(doing)])[0];
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);

@@ -138,8 +138,6 @@ impl Editor {
             (true, _) => format!("{name} marked to bring {} — B brings the {n} in turn", nth(n)),
         };
         self.set_status(said);
-        // (its row says its place at once)
-        self.session_list_sync();
     }
 
     /// `B` in the list: the marked ones asked about on one card — one marked is a bring of its own.

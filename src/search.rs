@@ -10,7 +10,7 @@ use crate::commands::Context;
 use crate::editor::{Editor, Mode, PromptKind};
 use crate::selection::{Range, Selection};
 
-fn compile(pat: &str) -> Result<Regex, String> {
+pub(crate) fn compile(pat: &str) -> Result<Regex, String> {
     if pat.is_empty() {
         return Err("empty pattern".into());
     }
@@ -181,6 +181,7 @@ impl Editor {
     /// The code's `/`·`?` being typed — not a view mode's (its prompt searches its own rows, `view::refresh_search`).
     fn code_search_prompt(&self) -> Option<&crate::editor::Prompt> {
         let viewing = self.session.view.as_ref().is_some_and(|v| v.prompt)
+            || self.sessions_pane.as_ref().is_some_and(|p| p.prompt.is_some())
             || crate::chatdoc::transcript(self).is_some_and(|t| t.keyed && t.pane.prompt)
             || crate::rundoc::keyed(self).is_some_and(|(_, o)| o.prompt);
         self.prompt.as_ref().filter(|p| !viewing && matches!(p.kind, PromptKind::Search { .. }))

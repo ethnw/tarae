@@ -353,6 +353,9 @@ fn a_groups_kind_names_it_and_says_what_its_detail_is() {
             GroupKind::Git | GroupKind::Review => {
                 assert_eq!((g.detail, Group::ids(k), g.member(21)), (Detail::Code, 1, None));
             }
+            GroupKind::Sessions => {
+                assert_eq!((g.detail, Group::ids(k), g.member(21)), (Detail::None, 1, None));
+            }
             _ => assert_eq!(
                 (g.detail, Group::ids(k), g.member(21)),
                 (Detail::Pane(21), 2, Some(Shows::Detail(k)))

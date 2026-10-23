@@ -80,6 +80,8 @@ pub enum Region {
     Output(crate::rundoc::Run),
     /// A woven view in the code (`weave.rs`): `enter` goes to that change's workspace.
     Weave,
+    /// `C-w m` moving a floating pane (`float.rs`): its moves, `enter`/`esc` end it, the rest said.
+    Move,
 }
 
 impl Region {
@@ -104,6 +106,7 @@ impl Region {
             Region::View(s) => format!("view:{}", s.name()),
             Region::Output(r) => format!("output:{}", r.name()),
             Region::Weave => "weave".into(),
+            Region::Move => "move".into(),
         }
     }
 
@@ -132,6 +135,7 @@ impl Region {
             Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
             Region::Output(_) => Handler::Output,
             Region::Weave => Handler::Weave,
+            Region::Move => Handler::Move,
         }
     }
 }
@@ -181,6 +185,7 @@ pub enum Handler {
     List,
     Prompt,
     Weave,
+    Move,
     Code,
 }
 
@@ -206,6 +211,7 @@ impl Handler {
             Handler::List => "list",
             Handler::Prompt => "prompt",
             Handler::Weave => "weave",
+            Handler::Move => "move",
             Handler::Code => "code",
         }
     }
@@ -421,6 +427,10 @@ impl Editor {
         if self.picker.is_some() {
             v.push(layer(Region::Picker, Filter::All));
         }
+        // `float_move_key`: `C-w m` moving a floating pane — every key its but the window prefix (`C-w m` ends it)
+        if self.float_moving.is_some() && !modal && !pending {
+            v.push(layer(Region::Move, Filter::Except(vec![ctrl('w')])));
+        }
         // `chatdoc::key`, `view::key`: a surface's view mode — a prompt it opened (`/`) takes them all; with nothing
         // under way `C-w` goes on, and from the chat's `:` and its chords (to `chat::key`'s, which takes only the
         // chords then)
@@ -505,6 +515,10 @@ impl Editor {
             }
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
+            }
+            // (`sessionpane::key`: the session list, a floating pane)
+            if self.sessions_list_keys() {
+                v.push(layer(Region::List(crate::pane::GroupKind::Sessions), editors(&[ctrl('w')])));
             }
             if let Some(g) = self.list_focused() {
                 v.push(layer(Region::List(g.kind), editors(&[ctrl('w')])));
@@ -644,11 +658,7 @@ impl Editor {
             to: self.element_id(region),
             chain,
             shuttle: crate::shuttle::keys_said(self),
-            waiting: self
-                .offers
-                .first()
-                .filter(|_| self.card_waits_quiet())
-                .map(|o| format!("card#{}", o.id)),
+            waiting: self.offers.first().filter(|_| self.card_waits()).map(|o| format!("card#{}", o.id)),
         }
     }
 
@@ -672,6 +682,7 @@ impl Editor {
             Region::Slot(Slot::Terminal) | Region::Program => s.terminal_rows.is_some(),
             Region::Slot(Slot::Test) => s.test_panel.get().is_some(),
             Region::List(k) => crate::grouplist::drawn(self, k),
+            Region::Move => s.floating.borrow().iter().any(|f| Some(f.0) == self.float_moving),
             Region::Slot(Slot::Task) => s.task_panel.get().is_some(),
             Region::Slot(Slot::Procs) => s.procs_panel.get().is_some(),
             Region::Slot(Slot::Plugin) => s.plugin_panel.get().is_some(),
@@ -699,6 +710,9 @@ impl Editor {
                 "terminal".into()
             }
             Region::Slot(s) => slot_name(s).into(),
+            Region::List(crate::pane::GroupKind::Sessions) if let Some(p) = &self.sessions_pane => {
+                format!("pane#{}", p.list)
+            }
             Region::List(k) => match self.session.group(k) {
                 Some(g) => format!("pane#{}", g.list),
                 None => r.name(),
@@ -1051,16 +1065,20 @@ impl Editor {
         use crate::pane::Shows;
         let floats_keys = matches!(l.at, At::Float(_));
         // (a session behind: its docked group in hand as it was left)
-        let mut at = l.at_pane(|k| !is_front || self.docked_in_sight(k)).filter(|_| !floats_keys);
+        let mut at = l.at_pane(|k| !is_front || self.out_of_slot(k)).filter(|_| !floats_keys);
         // (a group on screen: its members after its host, the host's keys its detail's)
         let mut ids = l.split.leaves();
-        // (a docked group's members name their host)
+        // (the floating groups' own panes after the tree's, bottom first — the front's)
+        if is_front {
+            ids.extend(self.floats_up().iter().map(|g| g.host));
+        }
+        // (a docked or floating group's members name their host)
         let mut docked: Vec<(crate::split::PaneId, String)> = Vec::new();
         for g in l.groups.iter().filter(|g| is_front && self.screen.leaves.iter().any(|r| r.0 == g.list)) {
             let host = self.group_host(g).unwrap_or(g.host);
             let Some(i) = ids.iter().position(|&id| id == host) else { continue };
             ids.splice(i + 1..i + 1, std::iter::once(g.list).chain(g.detail_pane()));
-            if host == g.host && self.dock_leaf(g) {
+            if host == g.host && (self.dock_leaf(g) || self.floating_in_sight(g.kind)) {
                 docked.extend(
                     std::iter::once(g.list).chain(g.detail_pane()).map(|m| (m, format!("pane#{host}"))),
                 );
@@ -1087,11 +1105,17 @@ impl Editor {
                     }
                     s => s.name(),
                 };
+                // (a floating group's own pane: its frame, as drawn)
+                let floated = || match l.shows(id) {
+                    Some(Shows::Group(k)) => {
+                        self.screen.floating.borrow().iter().find(|f| f.0 == k).map(|f| f.1)
+                    }
+                    _ => None,
+                };
                 let rect = is_front
-                    .then(|| {
-                        self.screen.leaves.iter().find(|r| r.0 == id).map(|r| (r.1.x, r.1.y, r.1.w, r.1.h))
-                    })
-                    .flatten();
+                    .then(|| self.screen.leaves.iter().find(|r| r.0 == id).map(|r| r.1).or_else(floated))
+                    .flatten()
+                    .map(|r| (r.x, r.y, r.w, r.h));
                 let group = docked.iter().find(|d| d.0 == id).map(|d| d.1.clone());
                 Some(PaneState {
                     id: format!("pane#{id}"),
@@ -1104,6 +1128,25 @@ impl Editor {
                 })
             })
             .collect();
+        // The session list, floating — the viewer's: listed with the front session's panes
+        if let Some(p) = self.sessions_pane.as_ref().filter(|_| is_front) {
+            let rect = self
+                .screen
+                .floating
+                .borrow()
+                .iter()
+                .find(|f| f.0 == crate::pane::GroupKind::Sessions)
+                .map(|f| f.1);
+            out.push(PaneState {
+                id: format!("pane#{}", p.list),
+                shows: Shows::List(crate::pane::GroupKind::Sessions).name(),
+                rect: rect.map(|r| (r.x, r.y, r.w, r.h)),
+                at: l.at == At::List(p.list),
+                float: false,
+                place: Some("floating"),
+                group: None,
+            });
+        }
         if is_front {
             for f in self.floating() {
                 let pane = l.floats.iter().find(|x| x.0 == f).map(|x| x.1);
@@ -1460,7 +1503,8 @@ pub struct CardState {
     /// It stepped aside for what its `h` went to (`Offer.aside`): its letters are the code's, `C-q` answers it.
     pub aside: bool,
     /// What it waits for before it takes the keys: `keys quiet` — it came while they were coming in (friction 60;
-    /// the keys' `waiting` names it); its letters are the code's meanwhile, `C-q` answers it.
+    /// the keys' `waiting` names it) — or `session list` — the list has the keys, its letters keys (`card_waits_for`);
+    /// its letters are the code's or the list's meanwhile, `C-q` answers it.
     pub waits: Option<&'static str>,
     /// The front card's last key it didn't take, and why — what it says on itself (`offer_refused`; a `y` before
     /// it was seen whole: `y — see it whole first (v)`) — until it changes (frictions29 #69: a driver's two `y`s
@@ -1702,7 +1746,7 @@ impl Editor {
                 held: o.held.clone(),
                 withheld,
                 aside: o.aside,
-                waits: (is_front && self.card_waits_quiet()).then_some("keys quiet"),
+                waits: self.card_waits_for().filter(|_| is_front),
             }
         };
         let mut cards: Vec<CardState> = self

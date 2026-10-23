@@ -181,7 +181,6 @@ pub const PICKERS: &[&str] = &[
     "replace",
     "search",
     "session-base",
-    "sessions",
     "symbols",
     "tasks",
     "text-matches",

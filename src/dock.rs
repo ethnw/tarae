@@ -31,6 +31,7 @@ impl Editor {
             GroupKind::Task => self.session.task_run.is_some() && !preflight,
             GroupKind::Preflight => self.session.task_run.is_some() && preflight,
             GroupKind::Procs => self.procs_up(),
+            GroupKind::Sessions => self.sessions_pane.is_some(),
             GroupKind::Git | GroupKind::Review => false,
         }
     }
@@ -64,12 +65,12 @@ impl Editor {
 
     /// Slot panel `slot`'s group is docked in sight — the slot leaves it out (`slot_shown`, `slot_tabs`).
     pub fn slot_docked(&self, slot: Slot) -> bool {
-        self.kind_of(slot).is_some_and(|k| self.docked_in_sight(k))
+        self.kind_of(slot).is_some_and(|k| self.out_of_slot(k))
     }
 
-    /// The leaf group `g` is laid out in: its own while it's docked in sight, else the slot's.
+    /// The pane group `g` is laid out in: its own while it's docked or floating in sight, else the slot's leaf.
     pub fn group_host(&self, g: &Group) -> Option<PaneId> {
-        match self.docked_in_sight(g.kind) {
+        match self.out_of_slot(g.kind) {
             true => Some(g.host),
             false => self.session.leaf(Shows::Slot),
         }
@@ -203,10 +204,10 @@ impl Editor {
         let Some(kind) = self.session.hand else { return };
         let Some(g) = self.session.group(kind) else { return self.session.hand = None };
         let keys = self.session.is_at(At::Slot) || self.session.is_at(At::List(g.list));
-        if !keys || !matches!(g.place, Place::Docked(_)) {
+        if !keys || g.place == Place::Slot {
             return self.session.hand = None;
         }
-        if !self.docked_in_sight(kind) && self.screen.docked.borrow().iter().any(|d| d.0 == kind) {
+        if !self.out_of_slot(kind) && self.screen.docked.borrow().iter().any(|d| d.0 == kind) {
             self.session.slot_front = kind.slot();
         }
     }
@@ -216,13 +217,13 @@ impl Editor {
     pub fn hand_of(&self, slot: Option<Slot>) -> Option<GroupKind> {
         let kind = self.kind_of(slot?)?;
         let g = self.session.group(kind)?;
-        matches!(g.place, Place::Docked(_)).then_some(kind)
+        (g.place != Place::Slot).then_some(kind)
     }
 
     /// The pane the keys are in (`Session::at_pane`): a docked group's own leaf only while it's in sight — folded into
     /// the slot, its detail is the slot's there (`slot_in_hand`, `focused_area`).
     pub fn at_pane(&self) -> Option<PaneId> {
-        self.session.at_pane(|k| self.docked_in_sight(k))
+        self.session.at_pane(|k| self.out_of_slot(k))
     }
 
     /// `C-w t` from group `kind`'s member: its members turned as `C-w t` turns a split — side by side ↔ over and under,
@@ -264,6 +265,10 @@ impl Editor {
     /// `C-w H J K L` (`swap_view_*`) from a group's member: docked on that side — left, above, right; below is the slot
     /// (`C-w J`). False: the keys aren't in a group (the code's panes trade places, `swap_view`).
     pub fn dock_key(&mut self, dx: i32, dy: i32) -> bool {
+        if self.sessions_list_keys() {
+            self.set_status("the session list floats — C-w m moves it, C-w < > - + size it");
+            return true;
+        }
         let Some(kind) = self.group_in_hand() else {
             // (the slot's other panels stay in it: said)
             if self.bottom_has_keys() || self.session.is_at(At::Program) {
@@ -421,14 +426,14 @@ impl Editor {
 
     /// The keys to run panel `slot`'s output: a docked group's detail, else the slot's (`bottom_take_keys`).
     pub fn panel_take_keys(&mut self, slot: Slot) {
-        match self.kind_of(slot).filter(|&k| self.docked_in_sight(k)) {
+        match self.kind_of(slot).filter(|&k| self.out_of_slot(k)) {
             Some(kind) => self.detail_focus(kind),
             None => self.bottom_take_keys(),
         }
     }
 
     /// Which of group `g`'s members has the keys.
-    fn group_keys(&self, g: &Group) -> Option<crate::pane::Member> {
+    pub(crate) fn group_keys(&self, g: &Group) -> Option<crate::pane::Member> {
         if self.session.is_at(At::List(g.list)) {
             return Some(crate::pane::Member::List);
         }
@@ -437,7 +442,7 @@ impl Editor {
     }
 
     /// The keys back to group `g`'s member `keys` had, where it is now.
-    fn keys_back(&mut self, g: &Group, keys: Option<crate::pane::Member>) {
+    pub(crate) fn keys_back(&mut self, g: &Group, keys: Option<crate::pane::Member>) {
         match keys {
             Some(crate::pane::Member::List) => self.list_focus(g.kind),
             Some(crate::pane::Member::Detail) => self.detail_focus(g.kind),
@@ -445,7 +450,7 @@ impl Editor {
         }
     }
 
-    fn group_set(&mut self, g: Group) {
+    pub(crate) fn group_set(&mut self, g: Group) {
         if let Some(at) = self.session.groups.iter_mut().find(|x| x.kind == g.kind) {
             *at = g;
         }

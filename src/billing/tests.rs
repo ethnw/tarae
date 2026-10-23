@@ -505,7 +505,7 @@ fn dollar_in_the_list_asks_first_on_a_conversation_saying_what_it_costs() {
     assert_eq!(place.starts()[1].0.as_deref(), Some("conv-1"));
     assert!(!toasts(&ed).contains(WEAKNESS), "the card said it — not again as a toast");
     ed.session_list();
-    let row = ed.picker.as_ref().unwrap().items()[0].hint.clone();
+    let row = ed.session_items()[0].hint.clone();
     assert!(row.split("  ").any(|c| c.trim() == "api"), "the list's row says who pays: {row}");
     // Back to the plan: tokens, toward its limits
     ed.session_list_key('$');

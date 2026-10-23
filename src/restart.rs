@@ -1130,9 +1130,9 @@ fn session_json(l: &crate::session::Session, docs: &[&crate::document::Document]
         "docs": files,
         "current": index(current),
         "views": views,
-        "panes": l.panes.iter().map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect::<Vec<_>>(),
+        "panes": panes_json(l),
         "split": split_json(&l.split),
-        "groups": groups_json(&l.groups),
+        "groups": groups_json(l),
         "focus": l.focus,
         "sidebar": sidebar,
         "chat": chat,
@@ -1447,9 +1447,9 @@ pub(crate) fn layout(ed: &mut Editor, v: &Value, ids: &[Option<crate::document::
             let mut next = first + ids.len() as u64;
             let groups = groups
                 .iter()
-                .map(|&(kind, host, place, laid)| {
+                .map(|&(kind, host, place, back, laid)| {
                     let mut g = crate::pane::Group::new(kind, new(host), next);
-                    (g.place, g.laid) = (place, laid);
+                    (g.place, g.back, g.laid) = (place, back, laid);
                     next += crate::pane::Group::ids(kind);
                     g
                 })
@@ -1515,35 +1515,55 @@ pub(crate) fn split_json(s: &Split) -> Value {
     }
 }
 
-/// A session's linked groups as kept: each one's kind and the leaf that holds it — its members' ids are made anew.
-pub(crate) fn groups_json(groups: &[crate::pane::Group]) -> Value {
+/// A session's panes as kept: the tree's — a floating group's own pane is made anew (`float_groups_sync`).
+pub(crate) fn panes_json(l: &crate::session::Session) -> Vec<Value> {
+    let kept = l.panes.iter().filter(|p| l.split.holds(p.id));
+    kept.map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect()
+}
+
+/// A session's linked groups as kept: each one's kind and the leaf that holds it — its members' ids are made anew; a
+/// floating one's, the slot's (its own pane is out of the tree), with its frame and where `C-w e` docks it back.
+pub(crate) fn groups_json(l: &crate::session::Session) -> Value {
+    let slot = l.leaf(crate::pane::Shows::Slot);
     json!(
-        groups
+        l.groups
             .iter()
             .map(|g| {
-                json!({ "kind": g.kind.name(), "host": g.host, "place": g.place.name(), "laid": g.laid.name() })
+                let host = if l.split.holds(g.host) { Some(g.host) } else { slot };
+                let mut v = json!({
+                    "kind": g.kind.name(), "host": host, "place": g.place.name(), "laid": g.laid.name(),
+                });
+                if let Some(f) = g.place.frame() {
+                    (v["frame"], v["back"]) = (f.json(), json!(g.back.name()));
+                }
+                v
             })
             .collect::<Vec<_>>()
     )
 }
 
-/// The groups kept (kind, host, place, how its members are laid) — None unless each kind is there once and the tests'
-/// is (every session has it). A docked one's host is its own leaf while its kind had something to show, the slot's
-/// while not (`dock_sync`).
-#[allow(clippy::type_complexity)]
-pub(crate) fn groups_of(
-    v: &Value,
-) -> Option<Vec<(crate::pane::GroupKind, crate::split::PaneId, crate::pane::Place, crate::pane::Laid)>> {
-    use crate::pane::{GroupKind, Laid, Place};
+/// A group as kept: its kind, host, place, where a floating one docks back, how its members are laid.
+pub(crate) type KeptGroup =
+    (crate::pane::GroupKind, crate::split::PaneId, crate::pane::Place, crate::pane::Place, crate::pane::Laid);
+
+/// The groups kept (kind, host, place, where a floating one docks back, how its members are laid) — None unless each
+/// kind is there once and the tests' is (every session has it). A docked one's host is its own leaf while its kind had
+/// something to show, the slot's while not (`dock_sync`); a floating one's the slot's.
+pub(crate) fn groups_of(v: &Value) -> Option<Vec<KeptGroup>> {
+    use crate::pane::{Frame, GroupKind, Laid, Place};
     let groups: Vec<_> = v
         .as_array()?
         .iter()
         .map(|g| {
             let kind = GroupKind::of_name(g["kind"].as_str()?)?;
-            let place = Place::of_name(g["place"].as_str()?)?;
+            let place = Place::of_name(g["place"].as_str()?, Frame::of_json(&g["frame"]))?;
+            let back = match g["back"].as_str().and_then(|b| Place::of_name(b, None)) {
+                Some(Place::Floating(_)) | None => Place::Slot,
+                Some(p) => p,
+            };
             let host = g["host"].as_u64()?;
             let laid = Laid::of_name(g["laid"].as_str()?)?;
-            (place == Place::Slot || kind.dockable()).then_some((kind, host, place, laid))
+            (place == Place::Slot || kind.dockable()).then_some((kind, host, place, back, laid))
         })
         .collect::<Option<_>>()?;
     let once = GroupKind::ALL.iter().all(|k| groups.iter().filter(|g| g.0 == *k).count() <= 1);

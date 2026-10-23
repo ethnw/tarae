@@ -458,7 +458,9 @@ main that has what it waits for, and the user says go:
   format; step 6 (`e864ba15`): a group docked beside the code — `C-w H L K`, `C-w J` back to the slot, its size its
   kind's, its members laid by its pane's shape (`C-w t`), folded into the slot when narrow, kept across `:restart`;
   one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); step 6b (`345f0b09`): every pane's top one line with its
-  name, `editor.header` gone (user, 2026-10-23); step 7 adds the asks' bottom-right corner and the
+  name, `editor.header` gone (user, 2026-10-23); step 7a: a group floating in a frame of its own (`C-w e`, `C-w m`,
+  sizes, the mouse; the whole screen its frame, user 2026-10-23) and the session list a floating pane, the manager's
+  overview; step 7b/7c add the focus rule, toasts as panes, the asks' bottom-right corner and the
   follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it

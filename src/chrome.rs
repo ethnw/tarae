@@ -160,6 +160,7 @@ impl Keys {
                 crate::pane::GroupKind::Procs => "PROCS",
                 crate::pane::GroupKind::Git => "GIT",
                 crate::pane::GroupKind::Review => "REVIEW",
+                crate::pane::GroupKind::Sessions => "SESSIONS",
             },
         })
     }
@@ -250,8 +251,10 @@ impl Editor {
             R::EditReview => Keys::Change,
             R::Side(m) => Keys::Side(m),
             R::Slot(s) => Keys::Slot(s),
+            // (moving a floating pane: its keys, its frame lit)
+            R::Move => Keys::List(self.float_moving.unwrap_or(crate::pane::GroupKind::Sessions)),
             R::List(k) => match (k.slot(), k) {
-                (Some(_), _) => Keys::List(k),
+                (Some(_), _) | (None, crate::pane::GroupKind::Sessions) => Keys::List(k),
                 (None, crate::pane::GroupKind::Git) => Keys::Side(crate::sidebar::Mode::Git),
                 (None, _) => Keys::Review,
             },

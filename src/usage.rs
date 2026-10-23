@@ -1328,7 +1328,7 @@ fn woke(ed: &mut Editor) {
             crate::uistate::watch::usage(ed, "cold");
             view_sync(ed);
             // (behind, nothing on screen says it unless the list is open)
-            if ed.background() && !ed.picker.as_ref().is_some_and(|p| p.kind == "sessions") {
+            if ed.background() && ed.sessions_pane.is_none() {
                 ed.unchanged = true;
             }
         }

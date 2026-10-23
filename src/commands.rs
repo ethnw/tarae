@@ -271,6 +271,8 @@ commands! {
         transpose_view => "Turn the split around",
         jump_view_left => "Window to the left",
         focus_side_panel => "To the side panel and back",
+        float_toggle => "Float or dock the pane",
+        float_move => "Move a floating pane",
         jump_view_right => "Window to the right",
         jump_view_up => "Window above",
         jump_view_down => "Window below",
@@ -2265,6 +2267,15 @@ fn transpose_view(cx: &mut Context) {
 
 fn focus_side_panel(cx: &mut Context) {
     cx.editor.side_toggle_focus();
+}
+
+/// `C-w e`: a group in hand floats, a floating one docks back — one meaning; anywhere else it says so.
+fn float_toggle(cx: &mut Context) {
+    cx.editor.float_key();
+}
+
+fn float_move(cx: &mut Context) {
+    cx.editor.float_move_toggle();
 }
 
 fn jump_view_left(cx: &mut Context) {

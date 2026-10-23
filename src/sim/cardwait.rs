@@ -156,7 +156,7 @@ fn held(ed: &Editor, wrong: &Cell<Option<String>>) -> Result<(), String> {
         .and_then(|f| crate::screen::text(f.0.as_slice(), 100, 24))
         .and_then(|t| t.lines().last().map(str::to_string))
         .unwrap_or_default();
-    if !ed.keys_waking && !ed.card_waits_quiet() && status.contains("waiting · C-q") {
+    if !ed.keys_waking && !ed.card_waits() && status.contains("waiting · C-q") {
         return Err(format!("the screen says a card waits, none does: {}", status.trim()));
     }
     // (read here, not through `cards_typing`: the check mustn't share what it checks)

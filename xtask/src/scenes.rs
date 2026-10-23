@@ -223,6 +223,48 @@ macro_rules! overlap_keys {
 }
 // (the toast, once)
 const OVERLAP: &[&str] = overlap_keys!();
+// (…then fix's Claude at work, a third checkout whose Claude asks for a run outside the sandbox, main's change
+// committed — fix and docs a commit behind —, main's chat open and the session list over it)
+const SESSIONS_FLOAT: &[&str] = overlap_keys!(
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@20?knots\", t.k",
+    "\x1b",
+    ":",
+    "sh git worktree add -q ../docs",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../docs",
+    "\r",
+    "@3",
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "@?Its reason",
+    "@1",
+    "\x1b",
+    ":",
+    "session-switch 0",
+    "\r",
+    "@2",
+    ":",
+    "sh git commit -qam main",
+    "\r",
+    "@2",
+    " ",
+    "l",
+    "@1",
+    "\x1b",
+    " ",
+    "W",
+    "@3"
+);
 // (…the strip over fix's chat: `fix ≈ main`, `main ≈ fix`, each name in its colour)
 const OVERLAP_STRIP: &[&str] = overlap_keys!(" ", "l", "@2");
 // (…the list: `≈ main` on fix's row, `≈ fix` on main's)
@@ -852,6 +894,66 @@ const SCENES: &[Scene] = &[
         claude: "idle",
         files: MAIN,
         keys: &["@1", " ", "x", "f", "@90?right: 8", "@1", "\x17", "j", "@1", "\x1b[Z", "@1"],
+    },
+    // (panes P3 step 7: the tests group floating over the code, from its list — `C-w e` —, centred, its keys lit)
+    Scene {
+        name: "float-tests",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "x",
+            "f",
+            "@90?right: 8",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "\x17",
+            "e",
+            "@1",
+        ],
+    },
+    // (…moved by `C-w m` — left and up —, then wider and taller by `C-w > +`; the code's cursor under it hidden)
+    Scene {
+        name: "float-tests-moved",
+        claude: "idle",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "x",
+            "f",
+            "@90?right: 8",
+            "@1",
+            "\x17",
+            "j",
+            "@1",
+            "\x1b[Z",
+            "@1",
+            "\x17",
+            "e",
+            "@1",
+            "\x17",
+            "m",
+            "h",
+            "h",
+            "h",
+            "k",
+            "k",
+            "@1",
+            "\r",
+            "\x17",
+            ">",
+            "\x17",
+            ">",
+            "\x17",
+            "+",
+            "@1",
+        ],
     },
     Scene {
         name: "group-tests-detail",
@@ -1887,6 +1989,9 @@ const SCENES: &[Scene] = &[
     Scene { name: "overlap", claude: "writemid", files: MAIN, keys: OVERLAP },
     Scene { name: "overlapstrip", claude: "writemid", files: MAIN, keys: OVERLAP_STRIP },
     Scene { name: "overlaplist", claude: "writemid", files: MAIN, keys: OVERLAP_LIST },
+    // (panes P3 step 7: the session list floating over the code with main's chat open — the manager's overview: fix
+    // working, overlapping main and a commit behind it; docs waiting on its card, behind too)
+    Scene { name: "sessions-float", claude: "manager", files: MAIN, keys: SESSIONS_FLOAT },
     Scene { name: "overlapfiles", claude: "writemid", files: MAIN, keys: OVERLAP_FILES },
     // (collab C2b: the woven view — a conflict side by side and stacked, a clean weave of three in their colours, and a
     // removal's head where its lines went)
@@ -2526,7 +2631,7 @@ fn run_files(scene: &str) -> Vec<(&'static str, String)> {
             ),
         ],
         "output-tests" | "panes-tests-code" | "panes-float" | "group-tests-list" | "group-tests-detail"
-        | "group-tests-stacked" => vec![
+        | "group-tests-stacked" | "float-tests" | "float-tests-moved" => vec![
             ("src/main.rs", format!("{MAIN_RS}{MAIN_TESTS}")),
             (".cargo/config.toml", "[build]\nbuild-dir = \"target/build\"\n".into()),
         ],
@@ -2580,6 +2685,9 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "midlist" => turn.explain_listed()?,
             "ask" => turn.rewrite()?,
             "card" => turn.ask_outside()?,
+            // (the session list's scene: a run asked for where the tests are asked, else an edit held mid-line)
+            "manager" if line.contains("run the tests") => turn.ask_outside()?,
+            "manager" => turn.explain_held(true, true, Some("nots.len());\\n\"}"))?,
             "samebinary" => turn.same_binary()?,
             "searchcard" => turn.search_outside()?,
             "grants" => turn.grants()?,

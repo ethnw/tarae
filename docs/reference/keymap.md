@@ -237,7 +237,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w <` | `panel_narrower` | Narrower: chat or side panel |
 | `C-w =` | `sizes_auto` | Sizes back to automatic |
 | `C-w >` | `panel_wider` | Wider: chat or side panel |
-| `C-w e` | `focus_side_panel` | To the side panel and back |
+| `C-w e` | `float_toggle` | Float or dock the pane |
 | `C-w h` | `jump_view_left` | Window to the left |
 | `C-w H` | `swap_view_left` | Swap left · dock a group |
 | `C-w j` | `jump_view_down` | Window below |
@@ -246,6 +246,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `C-w K` | `swap_view_up` | Swap up · dock a group on top |
 | `C-w l` | `jump_view_right` | Window to the right |
 | `C-w L` | `swap_view_right` | Swap right · dock a group |
+| `C-w m` | `float_move` | Move a floating pane |
 | `C-w o` | `wonly` | Close all other windows |
 | `C-w q` | `wclose` | Close this window or panel |
 | `C-w s` | `hsplit` | Split the window top / bottom |
@@ -359,7 +360,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w <` | `panel_narrower` | Narrower: chat or side panel |
 | `space w =` | `sizes_auto` | Sizes back to automatic |
 | `space w >` | `panel_wider` | Wider: chat or side panel |
-| `space w e` | `focus_side_panel` | To the side panel and back |
+| `space w e` | `float_toggle` | Float or dock the pane |
 | `space w h` | `jump_view_left` | Window to the left |
 | `space w H` | `swap_view_left` | Swap left · dock a group |
 | `space w j` | `jump_view_down` | Window below |
@@ -368,6 +369,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `space w K` | `swap_view_up` | Swap up · dock a group on top |
 | `space w l` | `jump_view_right` | Window to the right |
 | `space w L` | `swap_view_right` | Swap right · dock a group |
+| `space w m` | `float_move` | Move a floating pane |
 | `space w o` | `wonly` | Close all other windows |
 | `space w q` | `wclose` | Close this window or panel |
 | `space w s` | `hsplit` | Split the window top / bottom |

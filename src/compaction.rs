@@ -569,9 +569,8 @@ mod tests {
         assert_eq!((toasts[0].kind, toasts[0].of), (ToastKind::Warning, Some(back)));
         let listed = |ed: &mut Editor| {
             ed.session_list();
-            let p = ed.picker.as_ref().expect("the list");
-            let row = p.items().iter().find(|i| i.label == "back").map(|i| i.hint.clone()).unwrap();
-            feed(ed, "<esc>");
+            let row = ed.session_items().iter().find(|i| i.label == "back").map(|i| i.hint.clone()).unwrap();
+            feed(ed, "q");
             row
         };
         let row = listed(&mut ed);

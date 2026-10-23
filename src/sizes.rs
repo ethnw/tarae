@@ -60,6 +60,8 @@ pub struct Sizes {
     pub bottom: Option<u16>,
     /// A docked group's, per kind (`GroupKind::dock_index`): its width beside the code, its rows above it.
     pub docked: [Option<u16>; 4],
+    /// The session list's frame (`sessionpane.rs`) — where you put it, the viewer's (None: centred).
+    pub sessions: Option<crate::pane::Frame>,
 }
 
 /// The dockable kinds by `GroupKind::dock_index`, as `sizes.json` names them.
@@ -85,7 +87,8 @@ impl Sizes {
         };
         let n = |v: &Value| v.as_u64().and_then(|n| u16::try_from(n).ok());
         let docked = DOCKED.map(|k| n(&v["docked"][k.name()]));
-        Sizes { chat: n(&v["chat"]), side: n(&v["side"]), bottom: n(&v["bottom"]), docked }
+        let sessions = crate::pane::Frame::of_json(&v["sessions"]);
+        Sizes { chat: n(&v["chat"]), side: n(&v["side"]), bottom: n(&v["bottom"]), docked, sessions }
     }
 
     pub fn to_json(self) -> String {
@@ -93,7 +96,9 @@ impl Sizes {
             .iter()
             .filter_map(|k| Some((k.name().to_string(), json!(self.docked[k.dock_index()]?))))
             .collect();
-        json!({ "chat": self.chat, "side": self.side, "bottom": self.bottom, "docked": docked }).to_string()
+        let sessions = self.sessions.map(crate::pane::Frame::json);
+        json!({ "chat": self.chat, "side": self.side, "bottom": self.bottom, "docked": docked, "sessions": sessions })
+            .to_string()
     }
 }
 
@@ -533,7 +538,8 @@ impl crate::editor::Editor {
     /// `C-w >` / `C-w <` — the chat or the side panel `STEP_COLS` wider/narrower, from its width on screen;
     /// as far as leaves the code its room. Kept (global) — `C-w =` makes it automatic again.
     pub fn size_width(&mut self, wider: bool) {
-        if self.size_own(crate::split::Dir::Vertical, wider)
+        if self.float_size(crate::split::Dir::Vertical, wider)
+            || self.size_own(crate::split::Dir::Vertical, wider)
             || self.size_dock(crate::split::Dir::Vertical, wider)
         {
             return;
@@ -573,7 +579,8 @@ impl crate::editor::Editor {
 
     /// `C-w +` / `C-w -` — the bottom slot `STEP_ROWS` taller/shorter (the code keeping `BOTTOM_CODE`).
     pub fn size_height(&mut self, taller: bool) {
-        if self.size_own(crate::split::Dir::Horizontal, taller)
+        if self.float_size(crate::split::Dir::Horizontal, taller)
+            || self.size_own(crate::split::Dir::Horizontal, taller)
             || self.size_dock(crate::split::Dir::Horizontal, taller)
         {
             return;
@@ -617,7 +624,11 @@ impl crate::editor::Editor {
 
     /// `C-w =` — every size automatic again, and how each group lays its members (`C-w t`'s).
     pub fn sizes_auto(&mut self) {
-        self.sizes = Sizes::default();
+        // (from a floating pane: it alone, back in the middle)
+        if self.float_auto() {
+            return;
+        }
+        self.sizes = Sizes { sessions: self.sizes.sessions, ..Sizes::default() };
         self.session.split.even();
         for g in &mut self.session.groups {
             g.laid = crate::pane::Laid::Auto;
@@ -639,7 +650,7 @@ impl crate::editor::Editor {
         let kind = self.session.hand?;
         let g = self.session.group(kind)?;
         let keys = self.session.is_at(At::Slot) || self.session.is_at(At::List(g.list));
-        keys.then_some(()).filter(|_| self.docked_in_sight(kind)).and(kind.slot())
+        keys.then_some(()).filter(|_| self.out_of_slot(kind)).and(kind.slot())
     }
 
     /// What the bottom slot shows, if anything: the panel put in front (`chrome.rs` — a tab, one just
@@ -723,6 +734,8 @@ impl crate::editor::Editor {
             Shows::Side
         } else if let Some(g) = self.slot_in_hand().and(s.hand).and_then(|k| s.group(k)) {
             return Some(Zoom(g.host));
+        } else if let Some(p) = self.sessions_pane.as_ref().filter(|_| self.sessions_list_keys()) {
+            return Some(Zoom(p.list));
         } else if self.bottom_has_keys() {
             Shows::Slot
         } else {
@@ -769,6 +782,9 @@ impl crate::editor::Editor {
         self.slot_sync();
         self.groups_sync();
         self.dock_sync();
+        // (a floating group's own pane, out of the tree; the one in hand on top; `C-w m` ends with its pane)
+        self.float_groups_sync();
+        self.float_raise();
         // (a docked group folded into the slot puts its panel in front first, while the keys are still in it — judged
         // against an older front, its list or output wasn't there and they fell to the code)
         self.hand_sync();
@@ -778,7 +794,10 @@ impl crate::editor::Editor {
             At::Chat => s.chat.is_some(),
             At::Program => s.terminal.as_ref().is_some_and(|t| t.visible && t.exited.is_none()),
             At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task | Slot::Procs)),
-            At::List(id) => s.groups.iter().any(|g| g.list == id && self.group_laid(g)),
+            At::List(id) => {
+                s.groups.iter().any(|g| g.list == id && self.group_laid(g))
+                    || self.sessions_pane.as_ref().is_some_and(|p| p.list == id)
+            }
             At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
             At::Side => s.sidebar.is_some(),
             At::Rail => s.code_review.is_some(),
@@ -788,6 +807,8 @@ impl crate::editor::Editor {
             // (the keys gone from its group: the hand let go)
             self.hand_sync();
         }
+        // (`C-w m` ends with its pane, or once the keys leave it — a hop, a click elsewhere)
+        self.float_move_sync();
         self.groups_front();
         // `:procs`' panel gives the slot to the terminal given the keys (`C-\`), which it covered
         if self.procs_up() && self.session.program_has_keys() {
@@ -817,7 +838,7 @@ impl crate::editor::Editor {
 mod tests {
     use super::*;
 
-    const AUTO: Sizes = Sizes { chat: None, side: None, bottom: None, docked: [None; 4] };
+    const AUTO: Sizes = Sizes { chat: None, side: None, bottom: None, docked: [None; 4], sessions: None };
 
     /// Panes P2a: where the keys are is one value (`Session.at`) — once what it names is gone (the chat closed,
     /// the side panel closed, the terminal hidden, the slot showing nothing that takes them) the next event
@@ -923,7 +944,7 @@ mod tests {
         assert_eq!(chat_beside(140, 36, AUTO), CHAT_MIN);
         assert_eq!(chat_beside(200, 36, AUTO), 64, "200: the code keeps 100");
         assert_eq!(chat_beside(260, 36, AUTO), CHAT_AUTO_MAX, "wide: no wider than without the rail");
-        let kept = Sizes { chat: Some(70), side: None, bottom: None, docked: [None; 4] };
+        let kept = Sizes { chat: Some(70), side: None, bottom: None, docked: [None; 4], sessions: None };
         assert_eq!(chat_beside(160, 36, kept), 70, "yours stays");
         assert_eq!(chat_beside(70, 36, AUTO), 70, "narrow: the chat takes it all, as without the rail");
     }
@@ -932,7 +953,7 @@ mod tests {
     /// touched (it's the caller's, unchanged), so a bigger screen gets it whole again.
     #[test]
     fn kept_widths_are_clamped_not_changed() {
-        let kept = Sizes { chat: Some(90), side: Some(40), bottom: None, docked: [None; 4] };
+        let kept = Sizes { chat: Some(90), side: Some(40), bottom: None, docked: [None; 4], sessions: None };
         assert_eq!(widths(200, true, true, kept), Widths { chat: 90, side: 40 });
         // 150: the chat keeps its 90; the panel's 40 would leave the code 20 — it gives way
         assert_eq!(widths(150, true, true, kept), Widths { chat: 90, side: 0 });
@@ -945,7 +966,7 @@ mod tests {
             "the bigger screen: whole again"
         );
         // Out of bounds kept values (an edited file): within them
-        let odd = Sizes { chat: Some(5), side: Some(500), bottom: None, docked: [None; 4] };
+        let odd = Sizes { chat: Some(5), side: Some(500), bottom: None, docked: [None; 4], sessions: None };
         assert_eq!(widths(240, true, true, odd), Widths { chat: CHAT_MIN, side: SIDE_MAX });
     }
 
@@ -964,7 +985,7 @@ mod tests {
         let dir = crate::scratch::Scratch::new("sizes");
         let path = dir.join("sizes.json");
         assert_eq!(Sizes::read(Some(&path)), Sizes::default(), "missing: automatic");
-        let s = Sizes { chat: Some(70), side: None, bottom: Some(12), docked: [None; 4] };
+        let s = Sizes { chat: Some(70), side: None, bottom: Some(12), docked: [None; 4], sessions: None };
         save(&path, s, 1);
         assert_eq!(Sizes::read(Some(&path)), s);
         save(&path, Sizes::default(), 0);

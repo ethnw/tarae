@@ -6262,7 +6262,7 @@ fn the_panels_follow_one_set_of_rules() {
     s.keys(" l");
     assert_eq!(keys(&mut s), (vec![false, false, true, false], "● chat".into()), "the chat");
     // (an empty conversation: nothing to view — `esc` is the code's)
-    s.keys("<esc><C-w>e");
+    s.keys("<esc> e");
     assert_eq!(keys(&mut s), (vec![true, false, false, false], "● files".into()), "the side panel");
     s.keys("<esc><C-w>j");
     assert_eq!(keys(&mut s), (vec![false, false, false, true], "● normal · task".into()), "the bottom slot");
@@ -6345,8 +6345,8 @@ fn the_edges_light_with_the_keys() {
     assert!(lit(&side, 0..slot_y) && dark(&side, slot_y..end), "the code's: {side:?}");
     assert!(lit(&chat, 0..slot_y) && dark(&chat, slot_y..end), "the code's, the chat's side");
     assert!(rule.iter().all(|c| !c.1), "the slot's edge without the keys");
-    // A hop to the side panel: its line whole, nothing else
-    s.keys("<C-w>e");
+    // To the side panel: its line whole, nothing else
+    s.keys(" e");
     let (side, chat, rule, ..) = lines(&mut s);
     assert!(lit(&side, 0..end) && dark(&chat, 0..end) && rule.iter().all(|c| !c.1), "the side panel's");
     // …to the chat
@@ -6557,7 +6557,7 @@ fn a_group_names_its_members_one_lit() {
         cells(&s.ed.last_frame.as_ref().unwrap().0, w, h).screen().rows(0, w).nth(at).unwrap()
     };
     // The side panel's views
-    s.keys("<C-w>e");
+    s.keys("<esc> e");
     assert!(row(&s, 0).contains("files · outline · git"), "{:?}", row(&s, 0));
     assert_eq!(named(&mut s, 0, &["files", "outline", "git"]), [true, false, false]);
     s.keys("<tab>");

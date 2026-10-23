@@ -254,7 +254,7 @@ prod-eks`), live; the status line says which cluster (`k8s` and the kubeconfig's
 `k8s` tab is the file in front's, as the outline is (`shown`): its objects by kind, names under each — briefly: a number when it's fine (`3/3`,
 `3 pods`; its pods' restarts are beside the code, `3/3 ready · 2 restarts`), and when it isn't, why on a line of its own, under the pods that say it
 (newest first, `2m` if new). Below them, the other open files that aren't fine, to go to (`enter`); a file with
-none says so. `C-w e` takes the keys to the tab and back. `enter` goes to where one is defined (a pod: its logs), `d` describes a pod (its
+none says so. `C-w h` takes the keys to the tab, `esc` gives them back. `enter` goes to where one is defined (a pod: its logs), `d` describes a pod (its
 containers, how they last ended, conditions, events), `e` its events (a workload's with its pods'), `y` its live
 YAML (a Secret's values masked), `a` all of that in a pick. `:kubernetes-here` does the same for the object under the
 cursor. `:kubernetes` turns it on (the tab opens the first time) and then takes you to the tab;

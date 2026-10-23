@@ -39,9 +39,9 @@ pub fn of(
     if views.iter().all(|v| v["path"].is_null()) {
         return None;
     }
-    let panes: Vec<Value> = l.panes.iter().map(|p| json!({ "id": p.id, "shows": p.shows.name() })).collect();
+    let panes = crate::restart::panes_json(l);
     Some(
-        json!({ "split": crate::restart::split_json(&l.split), "panes": panes, "groups": crate::restart::groups_json(&l.groups),
+        json!({ "split": crate::restart::split_json(&l.split), "panes": panes, "groups": crate::restart::groups_json(l),
                 "views": views, "focus": l.focus }),
     )
 }

@@ -590,6 +590,57 @@ const SCENES: &[Scene] = &[
         frame(ed);
         feed(ed, &["<tab>"]);
     }),
+    // (P3 step 7: floating — the same keys reach the same handler; a card over it; `C-w m` moving it)
+    ("list:tests floating, a task in the slot", |ed| {
+        task_panel(ed);
+        tests_group_list(ed);
+        frame(ed);
+        ed.float(crate::pane::GroupKind::Tests);
+    }),
+    ("detail:tests floating (the run's output), by tab from its list", |ed| {
+        tests_group_list(ed);
+        frame(ed);
+        ed.float(crate::pane::GroupKind::Tests);
+        frame(ed);
+        feed(ed, &["<tab>"]);
+    }),
+    ("a card over the floating tests' list", |ed| {
+        tests_group_list(ed);
+        frame(ed);
+        ed.float(crate::pane::GroupKind::Tests);
+        frame(ed);
+        light_card(ed);
+    }),
+    ("C-w m moving the floating tests", |ed| {
+        tests_group_list(ed);
+        frame(ed);
+        ed.float(crate::pane::GroupKind::Tests);
+        frame(ed);
+        feed(ed, &["<C-w>", "m"]);
+    }),
+    ("C-w m moving the floating tests, the window prefix taken", |ed| {
+        tests_group_list(ed);
+        frame(ed);
+        ed.float(crate::pane::GroupKind::Tests);
+        frame(ed);
+        feed(ed, &["<C-w>", "m", "<C-w>"]);
+    }),
+    ("list:sessions, the session list floating", |ed| ed.session_list()),
+    ("the session list, a prompt opened over it (its own `/`)", |ed| {
+        ed.session_list();
+        frame(ed);
+        feed(ed, &["/"]);
+    }),
+    ("the code, the session list floating without the keys", |ed| {
+        ed.session_list();
+        frame(ed);
+        feed(ed, &["<esc>"]);
+    }),
+    ("a card over the session list", |ed| {
+        ed.session_list();
+        frame(ed);
+        light_card(ed);
+    }),
     ("the task's output in the slot, the tests docked over the code", |ed| {
         task_panel(ed);
         tests_group_list(ed);

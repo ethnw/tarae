@@ -466,6 +466,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     // (this frame's width first: what's docked beside the code and what folds into the slot are judged by it,
     // here and in the editor alike — `Editor::docked_in_sight`)
     editor.screen.width = Some(w as usize);
+    // (the floating panes placed on the screen above the status line — `float.rs`)
+    editor.screen.height = Some((h as usize).saturating_sub(1));
     // (and a group docked over the code, by the rows this frame leaves it)
     over_fold(editor, w, h);
     // (a group this width folds into the slot: its panel in front in this frame, while its keys are in it)
@@ -564,6 +566,8 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         run_rows: Default::default(),
         run_cols: Default::default(),
         docked: Default::default(),
+        floating: Default::default(),
+        height: Some((h as usize).saturating_sub(1)),
         slot_w: lay.slot_w,
         review_change: Default::default(),
         review_rows: Default::default(),
@@ -783,9 +787,14 @@ struct Layout {
     leaves: Vec<(crate::split::PaneId, crate::split::Rect)>,
     /// The rows under the path bar's and over the status line's: the code's, the slot's, a group's docked over the code.
     rows: usize,
-    /// A docked group's layout (`Layout::docked`): its panel drawn in its own rect, not the slot's — its kind, the
-    /// side it's on, its first row (`slot_y`).
-    docked: Option<(crate::pane::GroupKind, crate::pane::Side, usize)>,
+    /// A docked or floating group's layout (`Layout::docked`, `Layout::floated`): its panel drawn in its own rect, not
+    /// the slot's — its kind, its first row (`slot_y`).
+    docked: Option<(crate::pane::GroupKind, usize)>,
+    /// …floating: in a frame — its top line the frame's (`╭─ … ─╮`), its sides and bottom drawn round it.
+    framed: bool,
+    /// The floating panes in sight this frame, bottom first (P3 step 7): each one's kind, its host pane (the session
+    /// list's: its list) and its frame's rect on the screen — the whole screen its frame, never the code area.
+    floats: Vec<(crate::pane::GroupKind, crate::split::PaneId, crate::split::Rect)>,
     /// The code panes' top lines and the dividers between them (`code_lines`, `code_dividers`), worked out once a frame:
     /// every edge that meets them asks.
     code: std::cell::OnceCell<CodeEdges>,
@@ -806,7 +815,7 @@ impl Layout {
     /// The bottom slot's first row (its tabs), under the code — a docked group's, its rect's first.
     fn slot_y(&self) -> usize {
         match self.docked {
-            Some((.., y)) => y,
+            Some((_, y)) => y,
             None => self.text_top as usize + self.text_rows,
         }
     }
@@ -821,7 +830,48 @@ impl Layout {
             // (over the code: its bottom is the code's top line — no edge row of its own)
             Side::Top => (r.x, r.w, r.h),
         };
-        Layout { slot_x: x, slot_w: w, debug_h: h, docked: Some((kind, side, r.y)), ..self.clone() }
+        Layout { slot_x: x, slot_w: w, debug_h: h, docked: Some((kind, r.y)), ..self.clone() }
+    }
+
+    /// Kind `kind`'s panel floating in the frame `r`: its top line the frame's, its body inside the frame's sides,
+    /// over its bottom line.
+    fn floated(&self, kind: crate::pane::GroupKind, r: crate::split::Rect) -> Layout {
+        Layout {
+            slot_x: r.x + 1,
+            slot_w: r.w.saturating_sub(2),
+            debug_h: r.h.saturating_sub(1),
+            docked: Some((kind, r.y)),
+            framed: true,
+            ..self.clone()
+        }
+    }
+}
+
+/// The floating panes in sight, bottom first, and their frames' rects: the floating groups by their turn in the stack,
+/// the session list over them unless one of them has the keys (the one in hand on top) — placed on the whole screen
+/// above the status line (`Frame::rect`). Filling the screen (`C-w z`) one of them: it alone, the screen its rect;
+/// another pane: none.
+fn floats(
+    editor: &Editor,
+    w: usize,
+    rows: usize,
+) -> Vec<(crate::pane::GroupKind, crate::split::PaneId, crate::split::Rect)> {
+    use crate::pane::GroupKind;
+    let mut out: Vec<_> = (editor.floats_up().into_iter())
+        .filter_map(|g| Some((g.kind, g.host, g.place.frame()?.rect(w, rows))))
+        .collect();
+    if let (Some(p), Some(r)) = (&editor.sessions_pane, editor.sessions_rect(w, rows)) {
+        let top = editor.float_in_hand().filter(|&k| k != GroupKind::Sessions).is_some();
+        let at = if top { out.len().saturating_sub(1) } else { out.len() };
+        out.insert(at, (GroupKind::Sessions, p.list, r));
+    }
+    match editor.zoomed() {
+        None => out,
+        Some(z) => out
+            .into_iter()
+            .filter(|f| f.1 == z.0)
+            .map(|(k, id, _)| (k, id, crate::split::Rect { x: 0, y: 0, w, h: rows }))
+            .collect(),
     }
 }
 
@@ -829,6 +879,9 @@ impl Layout {
 /// replaced by its members while it lays them out (`group_members`).
 fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, crate::split::Rect)> {
     let mut leaves: Vec<_> = lay.leaves.iter().filter(|l| l.1.w > 0 && l.1.h > 0).copied().collect();
+    // (the floating ones after the docked, bottom first — `C-w w` goes round them last; a group's members in its
+    // frame's place below)
+    leaves.extend(lay.floats.iter().map(|f| (f.1, f.2)));
     for g in &editor.session.groups {
         if let Some((list, detail)) = group_members(editor, lay, g)
             && let Some(host) = editor.group_host(g)
@@ -846,17 +899,20 @@ fn screen_leaves(editor: &Editor, lay: &Layout) -> Vec<(crate::split::PaneId, cr
 /// lays out its members.
 fn lay_group(editor: &Editor, lay: &Layout, slot: crate::sizes::Slot) -> Option<crate::pane::Group> {
     let g = editor.session.groups.iter().find(|g| g.kind.slot() == Some(slot) && editor.group_laid(g))?;
-    (editor.docked_in_sight(g.kind) == lay.docked.is_some()).then_some(*g)
+    (editor.out_of_slot(g.kind) == lay.docked.is_some()).then_some(*g)
 }
 
 /// Group `g`'s layout: a docked one's own (its leaf's rect in `lay`), else the slot's — None where `lay` is another
 /// docked group's.
 fn group_lay(editor: &Editor, lay: &Layout, g: &crate::pane::Group) -> Option<Layout> {
-    if let Some((kind, ..)) = lay.docked {
+    if let Some((kind, _)) = lay.docked {
         return (kind == g.kind).then(|| lay.clone());
     }
-    if !editor.docked_in_sight(g.kind) {
+    if !editor.out_of_slot(g.kind) {
         return Some(lay.clone());
+    }
+    if let Some(f) = lay.floats.iter().find(|f| f.0 == g.kind) {
+        return Some(lay.floated(g.kind, f.2));
     }
     let crate::pane::Place::Docked(side) = g.place else { return None };
     let r = lay.leaves.iter().find(|l| l.0 == g.host)?.1;
@@ -918,7 +974,7 @@ fn group_shape(editor: &Editor, g: &crate::pane::Group, w: usize, h: usize) -> O
     let tall = h >= OVER_ROWS && w >= list_min.max(detail_min);
     // (by itself only where the pane's height isn't the group's own making — docked, or a slot size you set: the slot's
     // own follows the member in sight, and a shape it made would change the next frame's height)
-    let own = editor.docked_in_sight(g.kind) || editor.sizes.bottom.is_some();
+    let own = editor.out_of_slot(g.kind) || editor.sizes.bottom.is_some();
     let shape = match (g.laid, !narrow, tall) {
         (Laid::Auto | Laid::Beside, true, _) => Shape::Beside,
         (Laid::Auto, _, true) if own => Shape::Over,
@@ -936,12 +992,18 @@ fn group_shape(editor: &Editor, g: &crate::pane::Group, w: usize, h: usize) -> O
 pub(crate) fn group_shape_now(editor: &Editor, g: &crate::pane::Group) -> Option<Shape> {
     use crate::pane::Side;
     let s = &editor.screen;
-    let (w, h) = match editor.dock_rect(g.kind).filter(|_| editor.docked_in_sight(g.kind)) {
-        // (over the code: the whole rect, its bottom the code's line — as `Layout::docked` lays it)
-        Some((Side::Top, r)) => (r.w, r.h),
-        Some((_, r)) => (r.w.saturating_sub(1), r.h),
-        None => (s.slot_w, s.bottom_h),
-    };
+    let floating = editor
+        .floating_in_sight(g.kind)
+        .then(|| s.floating.borrow().iter().find(|f| f.0 == g.kind).map(|f| f.1));
+    let (w, h) =
+        match (floating.flatten(), editor.dock_rect(g.kind).filter(|_| editor.docked_in_sight(g.kind))) {
+            // (floating: inside its frame's sides, over its bottom line — as `Layout::floated` lays it)
+            (Some(r), _) => (r.w.saturating_sub(2), r.h.saturating_sub(1)),
+            // (over the code: the whole rect, its bottom the code's line — as `Layout::docked` lays it)
+            (None, Some((Side::Top, r))) => (r.w, r.h),
+            (None, Some((_, r))) => (r.w.saturating_sub(1), r.h),
+            (None, None) => (s.slot_w, s.bottom_h),
+        };
     let h = h.checked_sub(crate::chrome::SLOT_HEAD).filter(|&h| h > 0 && w > 0)?;
     group_shape(editor, g, w, h).map(|s| s.0)
 }
@@ -970,7 +1032,7 @@ fn group_list_rows(editor: &Editor, g: &crate::pane::Group) -> usize {
         GroupKind::Task => editor.session.task_run.as_ref().map_or(0, |r| r.place_rows().len()),
         GroupKind::Preflight => crate::grouplist::preflight(editor).map_or(0, |p| p.steps.len()),
         GroupKind::Procs => 1 + editor.procs.rows.len() + 1 + editor.procs.checks.len().clamp(1, 4),
-        GroupKind::Git | GroupKind::Review => 0,
+        GroupKind::Git | GroupKind::Review | GroupKind::Sessions => 0,
     }
 }
 
@@ -1005,7 +1067,7 @@ fn stacked_list_rows(editor: &Editor, slot_w: impl FnOnce() -> Option<usize>) ->
     let g = editor.session.groups.iter().copied().find(|g| {
         matches!(g.kind, GroupKind::Task | GroupKind::Preflight)
             && editor.group_laid(g)
-            && !editor.docked_in_sight(g.kind)
+            && !editor.out_of_slot(g.kind)
     })?;
     if g.front != crate::pane::Member::List || !group_list_w(editor, &g, slot_w()?)?.1 {
         return None;
@@ -1212,6 +1274,13 @@ impl Layout {
             if matches!(zoom_shows, Some(Shows::Group(_))) {
                 leaves = vec![(z.0, body)];
             }
+            // (a floating one: in its frame, the whole screen — `floats`)
+            let list = editor.sessions_pane.as_ref().map(|p| p.list);
+            if list == Some(z.0)
+                || editor.session.groups.iter().any(|g| g.host == z.0 && editor.floating_in_sight(g.kind))
+            {
+                leaves = Vec::new();
+            }
         }
         // The code's column, as laid out: the path bar over it, its first row under that (a group docked over it
         // takes the rows above)
@@ -1271,6 +1340,8 @@ impl Layout {
             zoom_shows,
             leaves,
             docked: None,
+            framed: false,
+            floats: floats(editor, w as usize, (h as usize).saturating_sub(1)),
             code: std::cell::OnceCell::new(),
         }
     }
@@ -1926,7 +1997,12 @@ fn slot_header(
         ups: &ups,
         ..TopLine::default()
     };
-    let cols = top_line(out, stretches.0, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
+    // (floating: the frame's top line, its corners round the panel's width)
+    let (at, ends) = match lay.framed {
+        true => ((x0.saturating_sub(1), y0, w + 2), ("╭", "╮", "┬")),
+        false => ((x0, y0, w), ("", "", "┬")),
+    };
+    let cols = top_line(out, stretches.0, card, at, ends, splits, true, &head)?;
     // (a tab's spot from its label's first cell to its badge's last; a member's its name's)
     for (slot, (a, b)) in owner.iter().zip(&cols).filter_map(|(o, c)| o.map(|s| (s, *c))) {
         match spots.last_mut() {
@@ -4248,6 +4324,10 @@ impl Region {
             Keys::Code | Keys::Change => Some(Region::Code),
             Keys::Side(_) | Keys::Review => Some(Region::Side),
             k if k.chat() => Some(Region::Chat),
+            // (the session list: its frame's own lines)
+            Keys::List(crate::pane::GroupKind::Sessions) => {
+                Some(Region::Dock(crate::pane::GroupKind::Sessions))
+            }
             Keys::Slot(_) | Keys::List(_) | Keys::Program | Keys::View(_) | Keys::Output(_) => {
                 match editor.slot_in_hand().and(editor.session.hand) {
                     Some(kind) => Some(Region::Dock(kind)),
@@ -4610,6 +4690,19 @@ fn draw(
         }
         _ => None,
     };
+    // The floating panes over all that's docked, under the cards (the chat's cursor under one is hidden with it)
+    draw_floating(editor, ui, lay, out)?;
+    let under_float = |at: Option<(u16, u16)>| {
+        at.filter(|&(x, y)| {
+            !lay.floats.iter().any(|f| {
+                (f.2.x..f.2.x + f.2.w).contains(&(x as usize))
+                    && (f.2.y..f.2.y + f.2.h).contains(&(y as usize))
+            })
+        })
+    };
+    let chat_cursor = under_float(chat_cursor);
+    let text_cursor = under_float(text_cursor);
+    let terminal_cursor = under_float(terminal_cursor);
     let ask_rect = match editor.session.review.as_ref().filter(|r| !r.ready) {
         Some(rev) => draw_ask_stream(rev, editor, ui, lay, out)?,
         None => None,
@@ -4755,6 +4848,217 @@ fn draw_docked(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         editor.screen.docked.borrow_mut().push((g.kind, r));
     }
     Ok(())
+}
+
+/// The floating panes (P3 step 7), bottom first, over everything docked and under the cards: each in a D3 frame —
+/// its top line the slot's header drawn as the frame's (`Layout::floated`: the names, the details, the keys while it
+/// has them), its sides and its bottom line round it, lit in the accent while it has the keys, the faint wash else;
+/// inside, a group's panel as the slot draws it, the session list's rows (`draw_sessions_pane`). What's under a frame
+/// isn't seen through it: its cells cleared first.
+fn draw_floating(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
+    use crate::pane::GroupKind;
+    use crate::sizes::Slot;
+    for &(kind, _, r) in &lay.floats {
+        if r.w < crate::pane::FLOAT_MIN_W.min(lay.width) || r.h < 3 {
+            continue;
+        }
+        let has = ui.lit == Some(Region::Dock(kind));
+        let card = panel_style(ui, editor);
+        apply(out, card)?;
+        for y in r.y..r.y + r.h {
+            queue!(out, MoveTo(r.x as u16, y as u16), Spaces(r.w))?;
+        }
+        let own = Ui { lit: has.then_some(Region::Slot), ..ui.clone() };
+        let line = edge_style(&own, card, Region::Slot);
+        if kind == GroupKind::Sessions {
+            let _fade = Fade::unless(has, &own);
+            draw_sessions_pane(editor, &own, card, line, r, out)?;
+        } else {
+            let floated = lay.floated(kind, r);
+            let _fade = Fade::unless(has, &own);
+            match kind.slot() {
+                Some(Slot::Test) if let Some(t) = &editor.session.test_run => {
+                    draw_test_panel(t, editor, &own, &floated, out)?
+                }
+                Some(Slot::Task) if let Some(k) = &editor.session.task_run => {
+                    draw_task_panel(k, editor, &own, &floated, out)?
+                }
+                Some(Slot::Procs) => draw_procs_panel(editor, &own, &floated, out)?,
+                _ => {}
+            }
+        }
+        // (over and under: its detail's top line meets the sides; side by side, the line between them its bottom)
+        let members = editor.session.group(kind).and_then(|g| group_members(editor, lay, &g));
+        let (middle, split) = (members.and_then(|m| over_under(&m)), members.and_then(|m| side_by_side(&m)));
+        float_sides(out, line, r, (middle, split), editor.float_moving == Some(kind))?;
+        editor.screen.floating.borrow_mut().push((kind, r));
+    }
+    Ok(())
+}
+
+/// A floating frame's sides and bottom line round `r` (its top line is its header's): `│` down both sides (`├ ┤`
+/// where a detail's top line inside meets them, `middle`), `╰─ … ─╯` (`┴` under the line between members side by
+/// side, `split`) — while `C-w m` moves it, its keys in it.
+fn float_sides(
+    out: &mut impl Write,
+    line: Style,
+    r: crate::split::Rect,
+    (middle, split): (Option<usize>, Option<usize>),
+    moving: bool,
+) -> io::Result<()> {
+    let mut buf = Vec::new();
+    for y in r.y + 1..r.y + r.h - 1 {
+        let (l, rr) = if Some(y) == middle { ("├", "┤") } else { ("│", "│") };
+        queue!(buf, MoveTo(r.x as u16, y as u16))?;
+        put_line(&mut buf, line, l)?;
+        queue!(buf, MoveTo((r.x + r.w - 1) as u16, y as u16))?;
+        put_line(&mut buf, line, rr)?;
+    }
+    let keys: &[(&str, &str)] = if moving { &[("h j k l", "move"), ("enter", "done")] } else { &[] };
+    let key = Style { fg: line.fg, bold: true, ..line };
+    let head = TopLine { keys, key, faint: line, plain: true, ..TopLine::default() };
+    let splits: Vec<usize> = split.into_iter().collect();
+    top_line(&mut buf, line, line, (r.x, r.y + r.h - 1, r.w), ("╰", "╯", "┴"), &splits, true, &head)?;
+    out.write_all(&buf)
+}
+
+/// The session list in its frame `r` (§3.6, `sessionpane.rs`): `╭─ sessions ── 1 working · 1 waits ── …keys ─╮`, then
+/// a row a session — the bar `▎` and `ui.menu.selected` on the one selected, its name in its colour (the front's bold),
+/// its columns as `sessionpane::lay` folds them to the frame's width, each as wide as its widest; the report cut.
+fn draw_sessions_pane(
+    editor: &Editor,
+    ui: &Ui,
+    card: Style,
+    line: Style,
+    r: crate::split::Rect,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use crate::sessionpane::{Col, Ink};
+    let rows = editor.sessions_rows();
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let strong =
+        card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
+    let warn = Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg), ..card };
+    // Its top line: its name, how many work and wait, its keys while it has them
+    let working = rows.iter().filter(|r| r.text(Col::State) == "working").count();
+    let waiting = rows.iter().filter(|r| r.text(Col::State).contains("▲")).count();
+    // (what needs you first: the details fold from the last)
+    let mut details = vec![(crate::nav::count(rows.len(), "session"), dim)];
+    if waiting > 0 {
+        details.push((format!(" · {waiting} waiting"), warn));
+    }
+    if working > 0 {
+        details.push((format!(" · {working} working"), faint));
+    }
+    let has = ui.lit == Some(Region::Slot);
+    // (its keys only while it has them: what applies to the row in hand)
+    let pairs = if has { crate::sessionpane::hints(editor) } else { Vec::new() };
+    let keys: Vec<(&str, &str)> = pairs.iter().map(|(k, d)| (*k, d.as_str())).collect();
+    let names = [("sessions".to_string(), strong)];
+    let head = TopLine {
+        names: &names,
+        details: &details,
+        keys: &keys,
+        key: Style { bold: true, ..dim },
+        faint,
+        ..TopLine::default()
+    };
+    top_line(out, line, card, (r.x, r.y, r.w), ("╭", "╮", "┬"), &[], true, &head)?;
+    // The rows: `▎ ` (the bar's cell and a blank), the name, its columns, a cell before the side
+    let (x0, y0, inner) = (r.x + 1, r.y + 1, r.h.saturating_sub(2));
+    let room = r.w.saturating_sub(2 + 2 + 1);
+    let (name_w, cols) = crate::sessionpane::lay(&rows, room);
+    let here = editor.sessions_here();
+    let selected = rows.iter().position(|row| Some(row.id) == here).unwrap_or(0);
+    let p = editor.sessions_pane.as_ref();
+    let top = p.map_or(0, |p| p.top.get());
+    let top = crate::key::in_sight(0, top, selected, rows.len(), inner, 0).0;
+    if let Some(p) = p {
+        p.top.set(top);
+    }
+    editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Sessions, (y0, inner, top)));
+    let sel = selected_row(ui, editor, card);
+    let ink = |i: Ink, base: Style| match i {
+        Ink::Text => Style { fg: ui.virt.fg, ..base },
+        Ink::Faint => Style { fg: ui.linenr.fg, ..base },
+        Ink::Warn => Style { fg: warn.fg, ..base },
+        Ink::Accent => Style { fg: ui.accent.fg, ..base },
+        Ink::Participant(c) => Style { fg: ui.participant(c, true), ..base },
+    };
+    // Its search's matches (its own `/`), as the code's: a faint accent ground, the selected row's stronger
+    let re = crate::sessionpane::lit(editor);
+    let hit = |on: bool, st: Style| match on {
+        false => Style { bg: blend(ui.accent.fg, ui.tint, 0.22).or(st.bg), ..st },
+        true => Style { bg: blend(ui.accent.fg, ui.tint, 0.5).or(st.bg), bold: true, ..st },
+    };
+    let hits_in = |text: &str| -> Vec<(usize, usize)> {
+        re.as_ref().map_or(Vec::new(), |re| {
+            re.find_iter(text).filter(|m| !m.is_empty()).map(|m| (m.start(), m.end())).collect()
+        })
+    };
+    for (k, row) in rows.iter().enumerate().skip(top).take(inner) {
+        let y = y0 + k - top;
+        let on = k == selected;
+        let base = if on { sel } else { card };
+        queue!(out, MoveTo(x0 as u16, y as u16))?;
+        apply(out, Style { fg: ui.accent.fg, ..base })?;
+        queue!(out, Print(if on { "▎ " } else { "  " }))?;
+        let mut used = 2;
+        let name = Style { fg: ui.participant(row.colour, true), bold: row.front || on, ..base };
+        let shown = fit_ellipsis(&row.name, name_w);
+        print_lit(out, (&shown, &row.name), (name, hit(on, name)), &hits_in(&row.name))?;
+        apply(out, name)?;
+        queue!(out, Spaces(name_w.saturating_sub(shown.width())))?;
+        used += name_w;
+        for &(c, w) in &cols {
+            apply(out, base)?;
+            queue!(out, Print("  "))?;
+            used += 2;
+            let mut left = w;
+            // (a column's parts searched as one text: each part lit where a match falls in it)
+            let hits = hits_in(&row.text(c));
+            let mut off = 0;
+            for (text, i) in row.cell(c) {
+                let t = fit_ellipsis(text, left);
+                let mine: Vec<(usize, usize)> = (hits.iter())
+                    .filter(|h| h.1 > off && h.0 < off + text.len())
+                    .map(|h| (h.0.max(off) - off, h.1.min(off + text.len()) - off))
+                    .collect();
+                let st = ink(*i, base);
+                print_lit(out, (&t, text), (st, hit(on, st)), &mine)?;
+                left -= t.width();
+                off += text.len();
+            }
+            apply(out, base)?;
+            queue!(out, Spaces(left))?;
+            used += w;
+        }
+        apply(out, base)?;
+        queue!(out, Spaces((r.w - 2).saturating_sub(used)))?;
+    }
+    Ok(())
+}
+
+/// `text` shown as `t` (cut or not) in `st`, the bytes of `hits` in it in `lit` (a list's search's matches).
+fn print_lit(
+    out: &mut impl Write,
+    (t, text): (&str, &str),
+    (st, lit): (Style, Style),
+    hits: &[(usize, usize)],
+) -> io::Result<()> {
+    let kept = if t == text { t.len() } else { t.len().saturating_sub('…'.len_utf8()) };
+    let mut at = 0;
+    for &(a, b) in hits.iter().filter(|h| h.0 < kept) {
+        let (a, b) = (a.max(at), b.min(kept));
+        apply(out, st)?;
+        queue!(out, Print(&t[at..a]))?;
+        apply(out, lit)?;
+        queue!(out, Print(&t[a..b]))?;
+        at = b;
+    }
+    apply(out, st)?;
+    queue!(out, Print(&t[at..]))
 }
 
 /// A docked group's edge, in its leaf's cell on the code's side: a `│` from its own top line down beside the code —
@@ -7697,7 +8001,6 @@ fn draw_picker(
             | Action::Theme(_)
             | Action::Message
             | Action::Branch { .. }
-            | Action::Session(_)
             | Action::Inbox(_)
             | Action::Plugin { .. }
             | Action::Heading
@@ -8754,7 +9057,8 @@ fn draw_statusline(
     let waiting = inbox.iter().filter(|e| e.asks_answer()).count();
     // (a card only when this frame draws it — on a screen too small for it, the count says what it needs: #201)
     // (nor while it waits for the keys to go quiet — it came as they were coming in: friction 60)
-    let held = editor.card_waits_quiet();
+    // (or while the session list holds it back: its letters are keys)
+    let held = editor.card_waits();
     let only_in_sight = waiting == 1
         && !held
         && match editor.next_up() {
@@ -16213,71 +16517,6 @@ fn key_hints(editor: &Editor) -> Option<Vec<(&'static str, String)>> {
             }
             _ => hints(&[("j k", "move"), ("esc", "close")]),
         }
-    } else if let Some(p) = editor.picker.as_ref().filter(|p| p.keys) {
-        // The sessions: the checkout tarae started in can't be ended or brought in
-        // (`B` once some are marked — the bring queue, `bringqueue.rs`: first after `enter`, it's what's next)
-        let marked = editor.bring_queue.marks.len();
-        let bring = format!("bring the {marked} in turn");
-        let marks: &[(&'static str, &str)] = if marked > 0 { &[("B", bring.as_str())] } else { &[] };
-        // (`f`: the row's Claude at work — followed there, `presence.rs`)
-        let working = match p.current().map(|i| &i.action) {
-            Some(Action::Session(id)) => editor
-                .sessions_in_order()
-                .iter()
-                .any(|l| l.id == *id && matches!(editor.doing(l), crate::session::Doing::Working)),
-            _ => false,
-        };
-        let follow: &[(&'static str, &str)] = if working { &[("f", "follow")] } else { &[] };
-        // (`v`: its changes woven with the rest — where it would conflict first, `weave.rs`)
-        let woven: &[(&'static str, &str)] = match p.current().map(|i| &i.action) {
-            Some(Action::Session(id))
-                if !editor.sessions.is_empty() && crate::overlap::file_of(editor, *id).is_some() =>
-            {
-                &[("v", "woven")]
-            }
-            _ => &[],
-        };
-        let with = |rest: &[(&'static str, &str)]| {
-            let (enter, rest) = rest.split_at(1);
-            hints(&[enter, woven, follow, marks, rest].concat())
-        };
-        match p.current().map(|i| &i.action) {
-            None => with(&[("enter", "switch"), ("n", "new"), ("esc", "close")]),
-            // (`$`: who pays for its Claude — every session, the one tarae started in too)
-            Some(Action::Session(0)) => with(&[
-                ("enter", "switch"),
-                ("n", "new"),
-                ("w", "keep warm"),
-                ("$", "billing"),
-                ("esc", "close"),
-            ]),
-            // (`x`: only on a session whose own build folder was measured — what it would drop, #219)
-            Some(Action::Session(id))
-                if *id != editor.session.id && editor.session_store.build_dirs.contains_key(id) =>
-            {
-                with(&[
-                    ("enter", "switch"),
-                    ("n", "new"),
-                    ("d", "end"),
-                    ("b", "bring into its base"),
-                    ("m", "mark to bring"),
-                    ("x", "drop its build"),
-                    ("w", "keep warm"),
-                    ("$", "billing"),
-                    ("esc", "close"),
-                ])
-            }
-            Some(_) => with(&[
-                ("enter", "switch"),
-                ("n", "new"),
-                ("d", "end"),
-                ("b", "bring into its base"),
-                ("m", "mark to bring"),
-                ("w", "keep warm"),
-                ("$", "billing"),
-                ("esc", "close"),
-            ]),
-        }
     } else if let Some(p) = editor.picker.as_ref().filter(|p| p.title == crate::picker::BUFFERS) {
         // (one with unsaved changes asked about: what the next `C-x` does)
         match (p.current().map(|i| &i.action), p.closing) {
@@ -18278,7 +18517,8 @@ mod tests {
     /// (the tree laid out every frame, the dividers lit for the one with the keys) — moves, edits and the window
     /// keys between them (each hop a layout kept: no write here, `layouts_path` is None in tests) within a frame.
     /// P3 step 6: with the tests group docked right of them (a run of 300 results, side by side), 200 columns wide —
-    /// at 160 beside the side panel and the chat it would fold into the slot.
+    /// at 160 beside the side panel and the chat it would fold into the slot. Step 7: a task's group and the session list
+    /// floating over them.
     #[test]
     fn perf_budget_key_to_frame_with_four_panes() {
         if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_with_four_panes") {
@@ -18313,6 +18553,32 @@ mod tests {
             ed.sizes.docked[crate::pane::GroupKind::Tests.dock_index()] = Some(90);
             ed.focus_sync();
             ed.dock(crate::pane::GroupKind::Tests, crate::pane::Side::Right);
+            // (P3 step 7: a task's places floating over them — its 2,000 lines of output, 100 places — and the session
+            // list floating too, without the keys)
+            let task =
+                crate::task::Task { name: "t".into(), cmd: "cargo check".into(), cwd: std::env::temp_dir() };
+            let mut r = crate::task::Run::for_test(task);
+            for i in 0..2_000 {
+                r.push_line(true, format!("src/a.rs:{i}: error: e{i}"), false);
+                if i % 20 == 0 {
+                    let path = std::path::PathBuf::from("src/a.rs");
+                    let it = crate::quickfix::Item {
+                        path,
+                        line: i,
+                        col: 0,
+                        message: "e".into(),
+                        severity: 1,
+                        mark: None,
+                    };
+                    r.place(it, None);
+                }
+            }
+            r.state = crate::task::State::Failed(Some(1));
+            ed.session.task_run = Some(r);
+            ed.focus_sync();
+            ed.float(crate::pane::GroupKind::Task);
+            ed.session_list();
+            ed.session.at = crate::session::At::Code;
             let mut buf = Vec::with_capacity(1 << 16);
             for (i, split) in
                 [crate::split::Dir::Vertical, crate::split::Dir::Horizontal, crate::split::Dir::Horizontal]
@@ -18328,6 +18594,8 @@ mod tests {
             assert_eq!(ed.session.views.len(), 4);
             render(&mut ed, &mut buf, 200, 48).unwrap();
             assert!(ed.docked_in_sight(crate::pane::GroupKind::Tests), "the tests group docked beside them");
+            assert!(ed.floating_in_sight(crate::pane::GroupKind::Task), "the task's floating over them");
+            assert_eq!(ed.screen.floating.borrow().len(), 2, "and the session list");
             keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 200, 48)).collect()
         });
         measured("key_to_frame_with_four_panes", worst, budget);

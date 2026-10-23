@@ -316,7 +316,7 @@ fn inside_zellij_c_qs_twin_reaches_what_c_q_goes_to() {
     assert_eq!(ed.key_said("C-q"), "space W");
     assert_eq!(ed.c_q_place(crate::zellij::Reach::Sessions), "space W");
     feed(&mut ed, "<space>W");
-    assert!(ed.picker.is_some(), "the session list");
+    assert!(ed.sessions_list_keys(), "the session list");
     std::fs::remove_dir_all(&dir).ok();
 }
 

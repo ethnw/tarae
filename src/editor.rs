@@ -73,7 +73,7 @@ pub enum PromptKind {
     Note(Option<u64>),
     /// A plugin's line (its token; its label is the prompt's `label`).
     Plugin(u64),
-    /// `space W n`: a new session's name (`worktree.rs`; the label says what it's made from).
+    /// `space W o`: a new session's name (`worktree.rs`; the label says what it's made from).
     Session,
 }
 
@@ -368,6 +368,11 @@ pub struct Screen {
     pub run_cols: std::cell::RefCell<Vec<(crate::sizes::Slot, usize)>>,
     /// The groups docked in sight as drawn: their kind and their leaf's rect (P3 step 6) — the mouse finds them.
     pub docked: std::cell::RefCell<Vec<(crate::pane::GroupKind, crate::split::Rect)>>,
+    /// The floating panes as drawn, bottom first: their kind (the session list's `Sessions`) and their frame's rect
+    /// (P3 step 7) — the mouse finds the topmost, the code's cursor under one is hidden.
+    pub floating: std::cell::RefCell<Vec<(crate::pane::GroupKind, crate::split::Rect)>>,
+    /// The rows above the status line (None before the first frame): floating panes are placed on them and the width.
+    pub height: Option<usize>,
     /// The groups docked over the code folded into the slot this frame, by `dock_index` — the code and the slot under
     /// them leave them too few rows (`term::over_fold`).
     pub over_folded: [bool; 4],
@@ -849,6 +854,13 @@ pub struct Editor {
     pub reviews_dir: Option<PathBuf>,
     /// The border the mouse is dragging (pressed on it, not let go yet).
     pub dragging: Option<crate::sizes::Border>,
+    /// A floating frame the mouse holds (its top line: moving it; an edge: sizing it) until it's let go (`float.rs`).
+    pub float_dragging: Option<(crate::pane::GroupKind, crate::float::Grip)>,
+    /// `C-w m` under way: the floating pane its keys move (`Handler::Move`).
+    pub float_moving: Option<crate::pane::GroupKind>,
+    /// The session list, a floating pane while it's up (`space W`, `sessionpane.rs`) — the viewer's, across
+    /// sessions: switching to one keeps it in sight.
+    pub sessions_pane: Option<crate::sessionpane::SessionsPane>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
     pub picker_click: Option<(u64, usize, std::time::Instant)>,
     /// The last click on the git tab's or the review rail's row (which list, row, when) — `clicked_again`.
@@ -1122,6 +1134,9 @@ impl Editor {
                 crate::config::state_dir().map(|d| d.join(crate::features::FILE))
             }),
             dragging: None,
+            float_dragging: None,
+            float_moving: None,
+            sessions_pane: None,
             picker_click: None,
             list_click: None,
             card_keys: false,
@@ -1373,7 +1388,7 @@ impl Editor {
 
     /// A click on row `row` of list `what` (the git tab's, the review rail's): whether it's the same row again within
     /// `DOUBLE_CLICK` — a double-click.
-    fn clicked_again(&mut self, what: &'static str, row: usize) -> bool {
+    pub(crate) fn clicked_again(&mut self, what: &'static str, row: usize) -> bool {
         let again = self
             .list_click
             .is_some_and(|(w, r, at)| (w, r) == (what, row) && crate::clock::since(at) < DOUBLE_CLICK);
@@ -1767,7 +1782,31 @@ impl Editor {
         if self.screen.width.is_some() && from != self.session.focus && !leaves.iter().any(|l| l.0 == from) {
             return self.focus_pane(self.session.focus);
         }
-        match crate::split::neighbor_from(leaves, from, dx, dy, self.session.focus) {
+        // (floating panes are over the docked, not beside them: a hop between docked ones never lands in one; from one,
+        // to its own frame's other member, else from its frame's centre to the nearest docked pane that way — P3 §3.3)
+        let floats: Vec<crate::split::Rect> = self.screen.floating.borrow().iter().map(|f| f.1).collect();
+        let inside = |f: &crate::split::Rect, r: &crate::split::Rect| {
+            f.x <= r.x && r.x + r.w <= f.x + f.w && f.y <= r.y && r.y + r.h <= f.y + f.h
+        };
+        let docked: Vec<_> =
+            leaves.iter().filter(|l| !floats.iter().any(|f| inside(f, &l.1))).copied().collect();
+        let own =
+            leaves.iter().find(|l| l.0 == from).and_then(|l| floats.iter().rev().find(|f| inside(f, &l.1)));
+        let to = match own {
+            None => crate::split::neighbor_from(&docked, from, dx, dy, self.session.focus),
+            Some(f) => {
+                let mates: Vec<_> = leaves.iter().filter(|l| inside(f, &l.1)).copied().collect();
+                crate::split::neighbor_from(&mates, from, dx, dy, self.session.focus).or_else(|| {
+                    let centre = crate::split::Rect { x: f.x + f.w / 2, y: f.y + f.h / 2, w: 1, h: 1 };
+                    let mut v = docked.clone();
+                    v.push((from, centre));
+                    // (none wholly that way: the docked pane under its centre — it floats over it)
+                    let under = docked.iter().find(|l| inside(&l.1, &centre)).map(|l| l.0);
+                    crate::split::neighbor_from(&v, from, dx, dy, self.session.focus).or(under)
+                })
+            }
+        };
+        match to {
             Some(to) => self.focus_pane(to),
             // (below the code with nothing in the slot: it says what shows there)
             None if dy > 0 && self.session.is_at(At::Code) => self.bottom_take_keys(),
@@ -1786,6 +1825,10 @@ impl Editor {
     /// The keys to pane `id`, landing where its surface takes them.
     pub fn focus_pane(&mut self, id: crate::split::PaneId) {
         use crate::pane::Shows;
+        // (the session list, a floating pane of the viewer's)
+        if self.sessions_pane.as_ref().is_some_and(|p| p.list == id) {
+            return self.sessions_focus();
+        }
         let Some(shows) = self.session.shows(id) else { return };
         if !matches!(shows, Shows::Slot | Shows::List(_) | Shows::Detail(_) | Shows::Group(_)) {
             self.plugin_panel_unfocus();
@@ -1805,6 +1848,7 @@ impl Editor {
             // (a detail in the slot is the slot's view mode on it)
             Shows::Detail(k) => self.detail_focus(k),
             // (a docked group's leaf: the member it had last — its output alone while it lists nothing)
+            Shows::Group(k) if self.floating_in_sight(k) => self.float_focus(k),
             Shows::Group(k) => {
                 if let Some(s) = k.slot() {
                     self.slot_show(s);
@@ -1831,8 +1875,8 @@ impl Editor {
         crate::split::neighbor(&panes, self.session.focus, dx, dy)
     }
 
-    /// `C-w e`: to the side panel from wherever the keys are — or back to the code from it. A closed panel
-    /// opens at the tab it last showed.
+    /// `focus_side_panel` (the palette's): to the side panel from wherever the keys are — or back to the code from
+    /// it. A closed panel opens at the tab it last showed.
     pub fn side_toggle_focus(&mut self) {
         match self.session.sidebar.as_ref() {
             Some(_) if self.session.is_at(At::Side) => self.session.at = At::Code,
@@ -2459,8 +2503,45 @@ impl Editor {
             }
             return;
         }
+        // A floating frame held (P3 step 7): its top line moves it, its edges size it; let go, kept
+        if let Some((kind, grip)) = self.float_dragging {
+            match m.kind {
+                K::Drag => self.float_drag(kind, grip, x, y),
+                K::Up => {
+                    self.float_dragging = None;
+                    self.float_drag_done(kind, grip);
+                }
+                _ => self.float_dragging = None,
+            }
+            return;
+        }
+        // (what's under a floating pane isn't pressed through it: the topmost there takes it)
+        let floated = self.float_at(x, y).map(|f| f.0).filter(|_| self.picker.is_none());
+        if m.kind == K::Down
+            && floated.is_some()
+            && let Some((kind, grip)) = self.float_grip(x, y)
+        {
+            self.float_dragging = Some((kind, grip));
+            self.float_focus(kind);
+            return;
+        }
+        // The session list: a press on a row selects it (again: switches), the wheel moves through it
+        if floated == Some(crate::pane::GroupKind::Sessions) {
+            match m.kind {
+                K::Down => match s.list(crate::pane::GroupKind::Sessions) {
+                    Some((y0, rows, top)) if (y0..y0 + rows).contains(&y) => {
+                        self.sessions_click(top + y - y0)
+                    }
+                    _ => self.float_focus(crate::pane::GroupKind::Sessions),
+                },
+                K::ScrollDown | K::ScrollUp => crate::sessionpane::wheel(self, m.kind == K::ScrollUp),
+                _ => {}
+            }
+            return;
+        }
         if m.kind == K::Down
             && self.picker.is_none()
+            && floated.is_none()
             && let Some(b) = self.border_at(x, y)
         {
             self.dragging = Some(b);
@@ -2469,16 +2550,18 @@ impl Editor {
         // The sessions' tabs, dropdown, chip
         if m.kind == K::Down
             && self.picker.is_none()
+            && floated.is_none()
             && let Some(&(.., spot)) =
                 s.session_spots.borrow().iter().find(|l| l.0 == y && (l.1..l.2).contains(&x))
         {
             return self.session_spot(spot);
         }
         // The bottom slot's tabs: that panel in front
+        // (the last drawn first: a floating frame's names over what's under it)
         if m.kind == K::Down
             && self.picker.is_none()
             && let Some(&(.., slot)) =
-                s.slot_tabs.borrow().iter().find(|t| t.0 == y && (t.1..t.2).contains(&x))
+                s.slot_tabs.borrow().iter().rev().find(|t| t.0 == y && (t.1..t.2).contains(&x))
         {
             return self.slot_show(slot);
         }
@@ -2486,7 +2569,7 @@ impl Editor {
         if m.kind == K::Down
             && self.picker.is_none()
             && let Some(&(.., id)) =
-                s.member_names.borrow().iter().find(|t| t.0 == y && (t.1..t.2).contains(&x))
+                s.member_names.borrow().iter().rev().find(|t| t.0 == y && (t.1..t.2).contains(&x))
         {
             return self.focus_pane(id);
         }
@@ -2575,13 +2658,13 @@ impl Editor {
                 return;
             }
         }
-        // A group docked beside the code (P3 step 6): what's under the pointer in its rect is its panel's
-        let docked = s
-            .docked
-            .borrow()
-            .iter()
-            .find(|d| (d.1.x..d.1.x + d.1.w).contains(&x) && (d.1.y..d.1.y + d.1.h).contains(&y))
-            .map(|d| d.0);
+        // A group docked beside the code (P3 step 6) or floating (step 7): what's under the pointer in its rect is its
+        // panel's
+        let docked = floated.or_else(|| {
+            (s.docked.borrow().iter())
+                .find(|d| (d.1.x..d.1.x + d.1.w).contains(&x) && (d.1.y..d.1.y + d.1.h).contains(&y))
+                .map(|d| d.0)
+        });
         // The bottom slot's columns: under the code, between the side panel (or a group docked left) and the chat
         // (or one docked right) — or a docked group's
         let in_slot = docked.is_some() || (x >= s.slot_x && x < s.slot_end());
@@ -2736,6 +2819,13 @@ impl Editor {
                     None => self.panel_take_keys(crate::sizes::Slot::Task),
                 },
                 _ => {}
+            }
+            return;
+        }
+        // (the rest of a floating frame: the keys to it, nothing under it pressed)
+        if let Some(kind) = floated {
+            if m.kind == K::Down {
+                self.float_focus(kind);
             }
             return;
         }
@@ -3453,13 +3543,8 @@ impl Editor {
                 self.qlist_from_picker();
                 return;
             }
-            // The session list, `:granted`: their letters act on the row, a digit picks one (nothing is typed)
-            (Code::Char(c), false) if p.keys && !key.alt => {
-                return match p.kind {
-                    crate::granted::KIND => self.granted_key(c),
-                    _ => self.session_list_key(c),
-                };
-            }
+            // `:granted`: its letters act on the row, a digit picks one (nothing is typed)
+            (Code::Char(c), false) if p.keys && !key.alt => return self.granted_key(c),
             (Code::Backspace, _) if p.keys => return,
             // Global search results: replace what's listed
             (Code::Char('r'), true) if p.grep.is_some() => return self.replace_ask(),
@@ -3641,10 +3726,6 @@ impl Editor {
             // (one checked out in another worktree: refused there, naming it)
             Action::Branch { name, .. } => {
                 self.git_switch(&name);
-                Ok(())
-            }
-            Action::Session(id) => {
-                self.session_switch(id);
                 Ok(())
             }
             Action::Inbox(id) => {
@@ -3957,6 +4038,25 @@ impl Editor {
         !self.card_keys && self.card_keys_free() && self.offer_waits_keys()
     }
 
+    /// The front card waits for `C-q` — for the keys to go quiet, or while the session list has them (its letters
+    /// are keys: `card_keys_free`): the status line's `▲1 waiting · C-q`, the state's `keys.waiting`.
+    pub fn card_waits(&self) -> bool {
+        self.card_waits_for().is_some()
+    }
+
+    /// What the front card waits for before it takes the keys, said as the state's card `waits` says it: `keys
+    /// quiet`, or `session list` while the list has them.
+    pub fn card_waits_for(&self) -> Option<&'static str> {
+        let list = !self.card_keys
+            && self.sessions_list_keys()
+            && self.offers.first().is_some_and(|o| !o.installing() && !o.yours);
+        match () {
+            _ if self.card_waits_quiet() => Some("keys quiet"),
+            _ if list => Some("session list"),
+            _ => None,
+        }
+    }
+
     /// Nothing else holds the keys from the front card (`card_has_keys` but the wait for the keys to go quiet).
     fn card_keys_free(&self) -> bool {
         self.mode == Mode::Normal
@@ -3965,6 +4065,10 @@ impl Editor {
             && self.pending.is_empty()
             && self.prompt.is_none()
             && self.picker.is_none()
+            // (the session list floats with its letters as keys — a card that came by itself held as the picker held
+            // it, until 7b's focus rule: reviewer, 7a — `n` dismissed a card, `v` opened its view; the one its own
+            // letter asked for, `b`'s or `B`'s, takes them)
+            && !(self.sessions_list_keys() && !self.offers.first().is_some_and(|o| o.yours))
             && self.session.review.is_none()
             && !self.session.chat_has_keys()
             && !self.session.program_has_keys()
@@ -4257,6 +4361,10 @@ impl Editor {
             self.picker_key(key);
             return;
         }
+        // `C-w m` moving a floating pane: its keys (the window prefix goes on — `C-w m` again ends it)
+        if self.pending.is_empty() && self.prompt.is_none() && self.float_move_key(key) {
+            return took(Handler::Move);
+        }
         // The chat's view mode: normal mode on its transcript, the chat's table over it
         if let Some(h) = crate::chatdoc::key(self, key) {
             return took(h);
@@ -4284,7 +4392,7 @@ impl Editor {
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);
         }
-        if crate::grouplist::key(self, key) {
+        if crate::sessionpane::key(self, key) || crate::grouplist::key(self, key) {
             return took(Handler::List);
         }
         // Start screen: `r` = the files last open here
@@ -4309,7 +4417,10 @@ impl Editor {
         }
         if self.prompt.is_some() {
             took(Handler::Prompt);
-            self.handle_prompt_key(key);
+            // (the session list's own `/`, else the code's)
+            if !crate::sessionpane::prompt_key(self, key) {
+                self.handle_prompt_key(key);
+            }
             return;
         }
         // A loading buffer ignores edit keys (`:` commands and buffer moves are allowed — :q·:bn while
@@ -12300,9 +12411,10 @@ mod tests {
         assert!(session_by(ed, id).parked.iter().any(crate::offer::Offer::claudes), "parked");
     }
 
-    /// `space W`: the sessions, one row each, the one in front in hand — what git says of each against
-    /// its base, what its Claude does (`▲` waits for you); letters are keys, not a query: `j` and Enter or a
-    /// digit switch, `n` asks a new one's name, `d` on the checkout tarae started in is refused.
+    /// `space W` (P3 step 7): the session list floats in a named frame with the keys, the one in front selected — what
+    /// git says of each against its base, what its Claude does (`▲ waits`, what waits counted); letters are keys, not
+    /// a query: `j` and Enter or a digit switch — the list staying, the keys to the code —, `esc` gives the keys back
+    /// (it stays), `q` closes it, `n` asks a new one's name, `d` on the checkout tarae started in is refused.
     #[test]
     fn the_session_list_shows_and_switches() {
         let repo = git_repo("session-list", &[("a.txt", "a\n")]);
@@ -12322,64 +12434,57 @@ mod tests {
         ed.session_switch(0);
         feed(&mut ed, "<space>W");
         let rows = |ed: &Editor| -> Vec<(String, String)> {
-            let p = ed.picker.as_ref().expect("the list");
-            p.items().iter().map(|i| (i.label.clone(), i.hint.trim().to_string())).collect()
+            ed.session_items().iter().map(|i| (i.label.clone(), i.hint.trim().to_string())).collect()
         };
-        let p = ed.picker.as_ref().expect("the list");
-        assert!(p.keys && p.current().unwrap().action == Action::Session(0), "the one in front in hand");
-        // Drawn: nothing to type into — what a digit does instead of `›`
+        assert_eq!(ed.keys_to().region, crate::uistate::Region::List(crate::pane::GroupKind::Sessions));
+        assert_eq!(ed.sessions_here(), Some(0), "the one in front in hand");
+        // Drawn: a floating frame named in its top line, its keys there; no cursor (nothing to type into)
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 120, 20).unwrap();
         let mut parser = vt100::Parser::new(20, 120, 0);
         parser.process(&bytes);
-        // (uxaudit 5: and that its letters are keys — typing to filter it made `n` ask for a new session)
         let s = parser.screen().contents();
-        assert!(s.contains("letters are keys here, nothing is typed · 1–3 switch"), "{s}");
+        assert!(s.contains("╭─ sessions ── 3 sessions"), "{s}");
+        assert!(s.contains("enter switch"), "{s}");
         assert!(parser.screen().hide_cursor(), "no cursor");
-        // Narrower: the digits fold first, whole — never cut
-        for w in (50..120).step_by(3) {
-            let mut bytes = Vec::new();
-            crate::term::render(&mut ed, &mut bytes, w, 20).unwrap();
-            let mut narrow = vt100::Parser::new(20, w, 0);
-            narrow.process(&bytes);
-            let s = narrow.screen().contents();
-            let row = s.lines().find(|l| l.contains("letters")).unwrap_or_else(|| panic!("at {w}:\n{s}"));
-            assert!(!row.contains('·') || row.contains("1–3 switch"), "at {w}: {row}");
-        }
         // A letter that isn't one of its keys is said, the list kept
         feed(&mut ed, "t");
         let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();
         assert!(said.starts_with("t does nothing in the session list"), "{said}");
-        assert!(ed.picker.as_ref().is_some_and(|p| p.query.is_empty()));
+        assert!(ed.sessions_list_keys());
         settle_until(&mut ed, |ed| rows(ed)[1].1.contains("changed"));
         let r = rows(&ed);
         // (the checkout tarae started in by its branch, as the sessions are)
         assert_eq!(r.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["main", "feat", "other"]);
-        assert!(r[1].1.starts_with("↑1  1 changed  ▲ waits for you"), "{r:?}");
-        assert!(r[0].1.starts_with("here"), "{r:?}");
-        // (no glyph: each row's name in its session's colour, what needs you in warning)
-        let (id, colour) = (ed.sessions_in_order()[1].id, ed.sessions_in_order()[1].colour as usize);
-        let p = ed.picker.as_ref().unwrap();
-        assert_eq!(p.items()[1].glyph, None);
-        let paint = p.paints.iter().find(|(a, _)| *a == Action::Session(id)).map(|(_, p)| p).unwrap();
-        assert_eq!(paint.label, Some(crate::session::PARTICIPANTS[colour]));
-        let (range, scope) = &paint.hint[0];
-        assert_eq!((&r[1].1[range.clone()], *scope), ("▲ waits for you", "warning"));
+        assert!(r[1].1.starts_with("▲ waits  1 card"), "{r:?}");
+        assert!(r[1].1.contains("↑1  1 changed"), "{r:?}");
+        // (each row's name in its session's colour, what needs you in warning)
+        let row = &ed.sessions_rows()[1];
+        let colour = ed.sessions_in_order()[1].colour;
+        assert_eq!(row.colour, colour);
+        use crate::sessionpane::{Col, Ink};
+        assert_eq!(row.cell(Col::State), [("▲ waits".to_string(), Ink::Warn)]);
+        // `esc` gives the keys back, the list stays; `space W` gives them to it again
+        feed(&mut ed, "<esc>");
+        assert!(ed.sessions_pane.is_some() && ed.session.is_at(At::Code));
+        feed(&mut ed, "<space>W");
+        assert!(ed.sessions_list_keys());
         // `q` closes it, as every list's (the tutor teaches it)
         feed(&mut ed, "q");
-        assert!(ed.picker.is_none(), "q closed it");
+        assert!(ed.sessions_pane.is_none(), "q closed it");
         feed(&mut ed, "<space>W");
-        // Letters don't type: `j` moves, Enter switches
+        // Letters don't type: `j` moves, Enter switches — the list stays, the keys there to the code
         feed(&mut ed, "j");
-        assert_eq!(ed.picker.as_ref().unwrap().query, "");
+        assert_eq!(ed.sessions_here(), Some(feat));
         feed(&mut ed, "j<ret>");
-        assert_eq!((ed.session.id, ed.picker.is_none()), (two, true));
+        assert_eq!((ed.session.id, ed.sessions_pane.is_some()), (two, true));
+        assert!(ed.session.is_at(At::Code), "the keys to its code");
         // A digit: that row's
         feed(&mut ed, "<space>W1");
         assert_eq!(ed.session.id, 0);
         assert!(ed.offers.is_empty(), "feat's card waits in feat");
         // n: the new one's name
-        feed(&mut ed, "<space>Wn");
+        feed(&mut ed, "<space>Wo");
         assert!(matches!(ed.prompt.as_ref().map(|p| &p.kind), Some(PromptKind::Session)));
         feed(&mut ed, "<esc><space>Wd");
         assert!(ed.messages.iter().any(|m| m.2.contains("is the checkout tarae started in — it stays")));
@@ -12440,8 +12545,8 @@ mod tests {
         assert!(r[status].contains("● normal   fix-login-everywhere ▲1 waiting"), "{}", r[status]);
         let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
-        assert!(ed.picker.as_ref().is_some_and(|p| p.keys), "the list");
-        ed.picker = None;
+        assert!(ed.sessions_list_keys(), "the list");
+        ed.session_list_close();
         // A name folded to its prefix is clicked as the name is
         ed.session_switch(0);
         let r = rows(&mut ed, 100);
@@ -15234,18 +15339,21 @@ mod tests {
         assert_eq!(ed.session.views.len(), 1, "only this pane");
     }
 
-    /// `C-w e` takes the keys to the side panel and back from wherever they are; a closed panel opens at the
-    /// tab it last showed. `C-w h/j/k/l` are the code's windows' — in the panel they leave it be.
+    /// `focus_side_panel` (the palette's) takes the keys to the side panel and back from wherever they are; a closed
+    /// panel opens at the tab it last showed. `C-w h/j/k/l` are the code's windows' — in the panel they leave it be.
+    /// `C-w e` isn't the side panel's (user, 2026-10-23: it floats and docks, one meaning).
     #[test]
-    fn c_w_e_to_the_side_panel_and_back() {
+    fn focus_side_panel_to_the_side_panel_and_back() {
         use crate::sidebar::Mode;
         let mut ed = editor("x\n");
         feed(&mut ed, "<C-w>v");
         let came = ed.session.focus;
         let focus = |ed: &Editor| ed.session.sidebar.as_ref().map(|s| (s.mode, ed.session.is_at(At::Side)));
         feed(&mut ed, "<C-w>e");
+        assert_eq!(focus(&ed), None, "C-w e: not the side panel's");
+        ed.side_toggle_focus();
         assert_eq!(focus(&ed), Some((Mode::Files, true)), "closed: opens, at files the first time");
-        feed(&mut ed, "<C-w>e");
+        ed.side_toggle_focus();
         assert_eq!(focus(&ed), Some((Mode::Files, false)), "back to the code");
         assert_eq!(ed.session.focus, came, "the window it came from");
         feed(&mut ed, " o");
@@ -15253,7 +15361,7 @@ mod tests {
         assert_eq!(focus(&ed), Some((Mode::Outline, true)), "in the panel: a window move doesn't leave it");
         feed(&mut ed, "q");
         assert!(ed.session.sidebar.is_none());
-        feed(&mut ed, "<C-w>e");
+        ed.side_toggle_focus();
         assert_eq!(focus(&ed), Some((Mode::Outline, true)), "reopens at the tab it last showed");
     }
 

@@ -424,10 +424,10 @@ fn the_lists_v_opens_the_overlaps_file_at_that_sessions_conflict() {
         other_lines: Some(8..9),
     });
     let to_row = |ed: &mut Editor, id: SessionId| {
-        press(ed, " W");
+        // (from its first row: a list's moves stop at its ends)
+        press(ed, " Wg");
         for _ in 0..4 {
-            let p = ed.picker.as_ref().unwrap();
-            if matches!(p.current().map(|i| &i.action), Some(crate::picker::Action::Session(s)) if *s == id) {
+            if ed.sessions_here() == Some(id) {
                 break;
             }
             press(ed, "j");
@@ -435,7 +435,7 @@ fn the_lists_v_opens_the_overlaps_file_at_that_sessions_conflict() {
     };
     to_row(&mut ed, ids[0]);
     let p = frame(&mut ed, 160);
-    assert!(rows(&p)[29].contains("v woven"), "the hint: {}", rows(&p)[29]);
+    assert!(rows(&p).iter().any(|r| r.contains("v woven")), "the hint: {:#?}", rows(&p));
     press(&mut ed, "v");
     woven_to(&mut ed, 1);
     let m = shown(&ed);
@@ -578,11 +578,8 @@ fn space_v_w_and_the_lists_v_open_it() {
     assert!(shown(&ed).sides.is_empty(), "no session changed it");
     // (the list's `v`: docs's file — where it is, else the first it changed; none yet: said)
     let _ = docs;
-    press(&mut ed, " W");
-    let on = |ed: &Editor| {
-        let p = ed.picker.as_ref().unwrap();
-        matches!(p.current().map(|i| &i.action), Some(crate::picker::Action::Session(s)) if *s == ids[2])
-    };
+    press(&mut ed, " Wg");
+    let on = |ed: &Editor| ed.sessions_here() == Some(ids[2]);
     for _ in 0..4 {
         if !on(&ed) {
             press(&mut ed, "j");

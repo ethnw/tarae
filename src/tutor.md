@@ -115,9 +115,9 @@ the code in its header. Every list moves alike:
   `j` `k` move   `enter` open   `q` close   `esc` code
 `esc` gives the keys back to the code and leaves the panel up.
 `C-w` then `h` `j` `k` `l` goes between the code and the panels around it;
-`C-w e` to the side panel and back; `C-w q` closes the one you're in.
+`C-w h` to the side panel on the left; `C-w q` closes the one you're in.
 
-  → `space e`, move with `j` `k`, `esc` back here. `C-w e` to the panel
+  → `space e`, move with `j` `k`, `esc` back here. `C-w h` to the panel
     again, then `q` closes it.
 
 ────────────────────────────────────────────────────────────────
@@ -193,8 +193,8 @@ unviewed.
 
 A session is a branch in a checkout of its own, with its own buffers,
 chat, terminal and tests. `space W` lists them. Nothing is typed in that
-list — its letters are keys:
-  `n` new   `enter` or `1`–`9` switch   `d` end   `b` bring it in
+list — its letters are keys, and `/` searches it as it does the code:
+  `o` new   `enter` or `1`–`9` switch   `d` end   `b` bring it in
 "Bring it in" moves its base branch up to the session's work.
 
 ────────────────────────────────────────────────────────────────

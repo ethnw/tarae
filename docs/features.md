@@ -227,8 +227,7 @@ configs carry over as they are.
   `C-f`/`C-b` all of them, `g`/`G` the ends: the review's rail, `:procs`, the test, task and terminal panels, a
   plugin's), `h`/`l` fold and unfold, Enter
   opens (the code gets the keys back), Tab steps files → outline → list → git, Esc leaves it showing, `q` or the same key again closes it; `space` and `:` still
-  work. `C-w e` goes to it from whichever window you're in, whatever tab it shows (closed, it opens at the tab it
-  last showed), and back again; `C-w h`/`j`/`k`/`l` go to the pane that way, the side panel among them. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
+  work. `C-w h`/`j`/`k`/`l` go to the pane that way, the side panel among them. Folders you scroll past stay pinned at its top. A name too long for it loses its middle, not its end
   (`user_prof…model.ts`), and the selected one shows whole, over the code. A wide terminal makes it wider (up to
   12 columns, the code keeping 100). A click opens a row, the wheel scrolls. It folds away
   when the terminal leaves the code fewer than 80 columns ([files](screenshots/ux-side-panel.png) ·
@@ -336,7 +335,13 @@ configs carry over as they are.
   its top line, its keys the ones it has in the slot; its size its kind's own (`C-w < >`, `C-w - +` over the code, a
   drag of its line, `C-w =`); closed, the code takes the room and its next run lands there again; too narrow for the
   code beside it (or, over it, too short for the code and the slot under it), it folds back into the slot's tabs until
-  there's room · `C-w t` turn the code's
+  there's room · `C-w e` floats a group in a frame of its own over everything docked (the whole screen its frame:
+  first in the middle, 3/5 × 1/2 of it, its top at 1/4 of the screen's height — centred instead once it's
+  taller than half (`min(H/4, (H − h)/2)`, the two meeting at half: nothing jumps) —, then where you put it — kept across `:restart`, held on the screen as it's
+  resized), `C-w e` again docks it back where it came from, `C-w H J K L` on that side; `C-w m` and `h j k l` move it,
+  `C-w < > - +` size it, `C-w =` puts it back in the middle, the mouse drags its top line and sizes it by its edges; the
+  one with the keys on top; `C-w e` has that one meaning — where nothing in hand floats it says so (the side panel
+  has its own keys, `space e`, `space g`…) · `C-w t` turn the code's
   split (side by side ↔ stacked) — from a group, its members (side by side ↔ over and under) · `C-w q` close — the window, or the panel that has the keys (side panel, the
   review's rail, `:procs`, a test, task or terminal panel, as its own `q` does; the chat closes with `space L`, so a
   slip can't cut Claude's turn off) · `C-w o` only this one (`space w` works too); `:vsplit file`, `:hsplit file`.
@@ -520,7 +525,13 @@ your `PATH`.
 ## Sessions, review and the sandbox
 
 - **Sessions** `space W` — several branches of work side by side, each a checkout of its own with its own Claude,
-  chat, terminal and tests; brought back into main, a rebase's conflicts resolved by that session's Claude
+  chat, terminal and tests; the session list a floating pane that stays while you work (`esc` gives the keys back,
+  `q` closes it), 3/5 of the screen wide and as tall as its rows up to half of it, its top at 1/4 of the screen's
+  height as every floating pane's (growing downward as sessions come, its top never moving), searched with `/` as every pane is (`n`/`N`, its matches lit; its
+  letters are keys: `o` new, `d` end, `b` bring, …) — the overview for whoever watches them: each row a session's name in its colour, its state
+  (`working` · `▲ waits` · `◦ stuck?` · `done` · `queued 2nd`), what waits for you counted, `≈` whom it would
+  conflict with, `↓N` behind its base, its context, its Claude's last sentence, then the rest (branch, changes, cost,
+  build folder, processes) as the frame's width allows; brought back into main, a rebase's conflicts resolved by that session's Claude
   ([rebasing a session](claude-integration.md#rebasing-a-session)); its git-ignored notes (`session.keep`:
   `target/sb`) moved to the main checkout's `target/sb/sessions/<name>/` when it ends; where each session's Claude
   is reading and writing shown wherever that file is, in any checkout (`▎` and a name tag, each session its own

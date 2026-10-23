@@ -543,13 +543,14 @@ fn the_strip_the_list_and_the_tree_say_it() {
     assert_eq!(others(&ed, fix_id), [("main".to_string(), Some(ed.sessions[0].colour))]);
     assert_eq!(others(&ed, 0), [("fix".to_string(), Some(ed.session.colour))], "both sides");
     // The list
-    let rows = ed.session_rows();
-    let (item, paint) = rows.iter().find(|(i, _)| i.label == "fix").unwrap();
-    assert!(item.hint.starts_with("≈ main"), "{}", item.hint);
-    let main_scope = crate::session::PARTICIPANTS[ed.sessions[0].colour as usize];
-    assert_eq!(paint.hint[..2], [(0.."≈".len(), "warning"), ("≈ ".len().."≈ main".len(), main_scope)]);
-    let (item, _) = rows.iter().find(|(i, _)| i.label == "main").unwrap();
-    assert!(item.hint.starts_with("≈ fix"), "{}", item.hint);
+    let rows = ed.sessions_rows();
+    let fix_row = rows.iter().find(|r| r.name == "fix").unwrap();
+    use crate::sessionpane::{Col, Ink};
+    let main_colour = ed.sessions[0].colour;
+    let overlap = fix_row.cell(Col::Overlap);
+    assert_eq!(overlap, [("≈ ".to_string(), Ink::Warn), ("main".to_string(), Ink::Participant(main_colour))]);
+    let main_row = rows.iter().find(|r| r.name == "main").unwrap();
+    assert_eq!(main_row.text(Col::Overlap), "≈ fix");
     // The strip over a chat
     ed.session.chat = Some(crate::chat::Chat::new());
     ed.session.at = crate::session::At::Chat;

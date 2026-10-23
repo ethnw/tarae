@@ -274,7 +274,10 @@ side git · 4 rows · in hand git:src/term.rs
     detail's), then the floating ones up (`card#N`, `picker`, `prompt`, `which-key`, `float: true`); `at` is true on
     exactly the one with the keys. A group docked beside the code (panes P3 step 6) is a leaf of its own, `shows:
     group:<kind>` with `place: left | right | top`, its members after it with `group: pane#N` (its host); while it
-    has the keys `keys.region` is its member's as in the slot (`list:tests`, `output:tests`).
+    has the keys `keys.region` is its member's as in the slot (`list:tests`, `output:tests`). One floating (step 7)
+    is listed after the tree's leaves, bottom first: `shows: group:<kind>`, `place: floating`, its frame's rect, its
+    members after it naming it; the session list floating is `{shows: list:sessions, place: floating}` with the front
+    session's panes, `keys.region` `list:sessions` while it has the keys; `C-w m` moving one is `keys.region` `move`.
 - **`runs`** — task, tests, preflight steps, Claude's runs, and queued ones (`runs_next`).
   - State: `queued` · `running` · `waiting` (with `Waiting::shown`) · `quiet` (cardburden 5: a run of
     Claude's printing nothing, held from the stuck card — under its own time limit still to come, or its work

@@ -1,5 +1,5 @@
 //! Sessions' checkouts: work beside the rest — a branch of its own in a checkout of its own (a git
-//! worktree), opened as a session (`session.rs`). `space W n` · `:session-new <name> [<base>]` makes one:
+//! worktree), opened as a session (`session.rs`). `space W o` · `:session-new <name> [<base>]` makes one:
 //! the name is the branch, made from the front session's HEAD (`C-b` in the prompt picks another base); a
 //! card says where its checkout goes and what it costs on disk before anything is made. `:session-end`
 //! removes one — at once when nothing would be lost (no changes, merged into its base), else a card says
@@ -242,7 +242,7 @@ struct Linked {
 }
 
 /// `2.3 GB` · `over 1.2 GB` when counting stopped first.
-fn size_text((bytes, whole): (u64, bool)) -> String {
+pub(crate) fn size_text((bytes, whole): (u64, bool)) -> String {
     match whole {
         true => crate::procs::mem(bytes),
         false => format!("over {}", crate::procs::mem(bytes)),
@@ -1162,9 +1162,14 @@ pub struct Shown {
     pub at: String,
     /// Its participant colour (`Session.colour`): its name on its row, always.
     pub colour: u8,
-    /// Whom its changes would conflict with (`overlap::others`): each one's name and colour — `≈ main`, first after
-    /// the name.
+    /// Whom its changes would conflict with (`overlap::others`): each one's name and colour — `≈ main`.
     pub overlap: Vec<(String, Option<u8>)>,
+    /// What of it waits for your answer (the inbox's): its cards, its edits (a review, a change set, a read).
+    pub waits: (usize, usize),
+    /// Its Claude's last report line (`sessionpane::report`) — empty before an answer.
+    pub report: String,
+    /// How full its Claude's context is, in percent (None: not reported).
+    pub context: Option<u64>,
 }
 
 impl Shown {
@@ -1207,148 +1212,20 @@ impl Shown {
     }
 }
 
-/// The list's rows: its `●` in its participant colour (every row, whatever its state — collab C1), the name, and the
-/// rest in columns — what its Claude does in words (`working`, `waits for you`, `stuck? symbols 42s`, `done — not
-/// looked at`, `here`) — branch, `↑ahead ↓behind`, what's changed, files reloaded behind (`• 2 reloaded`), its
-/// Claude compacted behind (`≈ compacted`), what it's doing and where (`src/term.rs:3614 · writing`), its reviewer (`¶ reviewing`), `api` when your key
-/// pays for its Claude, its Claude's cache and cost so far, CPU and memory — each column as wide as its widest and empty ones left out, so the
-/// hints (right-aligned) line up row under row.
+/// The list's rows as one line each (`sessionpane::Row::line`): its name, its cells' text.
 #[cfg(test)]
 pub fn items(sessions: &[Shown]) -> Vec<crate::picker::Item> {
-    painted(sessions).into_iter().map(|(item, _)| item).collect()
+    sessions.iter().map(|l| item(&crate::sessionpane::row(l))).collect()
 }
 
-/// `items`, each with its paint (`picker::Paint`, collab C1 — the user, 2026-10-22: who it is is its name in its
-/// colour, its state after it): the name in its participant colour, no glyph before it; what needs you in its state
-/// column as the strip says it — `▲ waits for you`, `◦ stuck? …` in warning, `done — not looked at` in the accent — the
-/// calm states as the rest of the row.
-pub fn painted(sessions: &[Shown]) -> Vec<(crate::picker::Item, crate::picker::Paint)> {
-    use crate::session::Doing;
-    use unicode_width::UnicodeWidthStr as _;
-    // (what needs you, said and its scope: the state column's words that stand out)
-    let needs = |d: Doing| match d {
-        Doing::Waiting => Some(("▲ waits for you".to_string(), "warning")),
-        Doing::Done => Some(("done — not looked at".to_string(), "ui.accent")),
-        d @ Doing::Stuck { .. } => Some((format!("◦ stuck? {}", d.said()), "warning")),
-        _ => None,
-    };
-    let cols: Vec<[String; 14]> = sessions
-        .iter()
-        .map(|l| {
-            let overlap = match l.overlap.is_empty() {
-                true => String::new(),
-                false => {
-                    format!("≈ {}", l.overlap.iter().map(|o| o.0.as_str()).collect::<Vec<_>>().join(", "))
-                }
-            };
-            let branch = l.branch.clone().filter(|b| *b != l.name).unwrap_or_default();
-            let f = l.facts.clone().unwrap_or_default();
-            let ahead = (f.ahead > 0).then(|| format!("↑{}", f.ahead));
-            let behind = (f.behind > 0).then(|| format!("↓{}", f.behind));
-            let moved: Vec<String> = ahead.into_iter().chain(behind).collect();
-            let changed = if f.changed > 0 { format!("{} changed", f.changed) } else { String::new() };
-            let doing = match (l.doing, l.front) {
-                (d @ (Doing::Waiting | Doing::Done | Doing::Stuck { .. }), _) => needs(d).unwrap().0,
-                (d @ Doing::Queued { .. }, _) => format!("working · {}", d.said()),
-                (Doing::Working, _) => "working".to_string(),
-                (Doing::Idle, true) => "here".to_string(),
-                (Doing::Idle, false) => String::new(),
-            };
-            let doing = match (&l.rebasing, doing.is_empty()) {
-                (Some(r), true) => r.clone(),
-                (Some(r), false) => format!("{r} · {doing}"),
-                (None, _) => doing,
-            };
-            let doing = match (&l.queue, doing.is_empty()) {
-                (Some(q), true) => q.clone(),
-                (Some(q), false) => format!("{q} · {doing}"),
-                (None, _) => doing,
-            };
-            let usage = l
-                .usage
-                .map(|(cpu, bytes)| format!("{cpu:>3.0}%  {:>6}", crate::procs::mem(bytes)))
-                .unwrap_or_default();
-            let reloaded =
-                if l.reloaded > 0 { format!("• {} reloaded", l.reloaded) } else { String::new() };
-            let compacted = if l.compacted { "≈ compacted".to_string() } else { String::new() };
-            let (cache, cost) = l.claude.clone().unwrap_or_default();
-            let reviewer = l.reviewer.clone();
-            // (who pays: `api` — the plan, the calm default, says nothing — D5)
-            let billing = if l.billing == crate::billing::Billing::Api { "api" } else { "" }.to_string();
-            let build = l.build.map(|s| format!("build {}", size_text(s))).unwrap_or_default();
-            [
-                overlap,
-                branch,
-                moved.join(" "),
-                changed,
-                reloaded,
-                compacted,
-                doing,
-                l.at.clone(),
-                reviewer,
-                billing,
-                cache,
-                cost,
-                build,
-                usage,
-            ]
-        })
-        .collect();
-    let widths: Vec<usize> = (0..14).map(|c| cols.iter().map(|r| r[c].width()).max().unwrap_or(0)).collect();
-    // (counts right-aligned, words left)
-    let right = [false, false, true, true, true, false, false, false, false, false, false, true, true, true];
-    sessions
-        .iter()
-        .zip(cols)
-        .map(|(l, row)| {
-            let parts: Vec<String> = row
-                .iter()
-                .enumerate()
-                .filter(|&(c, _)| widths[c] > 0)
-                .map(|(c, s)| {
-                    let pad = " ".repeat(widths[c] - s.width());
-                    if right[c] { format!("{pad}{s}") } else { format!("{s}{pad}") }
-                })
-                .collect();
-            // (the state column's place in the hint: the shown columns before it, two cells between each)
-            let before: usize =
-                (0..6).filter(|&c| widths[c] > 0).map(|c| parts_len(&row, c, &widths) + 2).sum();
-            let mut hint_ranges = Vec::new();
-            // (the overlap's column first: `≈` in warning, each name in its colour — a branch no session has, plain)
-            if !l.overlap.is_empty() {
-                hint_ranges.push((0.."≈".len(), "warning"));
-                let mut at = "≈ ".len();
-                for (name, c) in &l.overlap {
-                    if let Some(c) = c {
-                        let scope = crate::session::PARTICIPANTS[*c as usize % crate::session::COLOURS];
-                        hint_ranges.push((at..at + name.len(), scope));
-                    }
-                    at += name.len() + ", ".len();
-                }
-            }
-            hint_ranges.extend(needs(l.doing).and_then(|(said, scope)| {
-                row[6].find(&said).map(|at| (before + at..before + at + said.len(), scope))
-            }));
-            let paint = crate::picker::Paint {
-                label: Some(crate::session::PARTICIPANTS[l.colour as usize % crate::session::COLOURS]),
-                hint: hint_ranges,
-                bold: Vec::new(),
-            };
-            let item = crate::picker::Item {
-                label: l.name.clone(),
-                action: crate::picker::Action::Session(l.id),
-                hint: parts.join("  "),
-                glyph: None,
-            };
-            (item, paint)
-        })
-        .collect()
-}
-
-/// Column `c`'s bytes as `painted` lays it: its text padded to the column's width.
-fn parts_len(row: &[String; 14], c: usize, widths: &[usize]) -> usize {
-    use unicode_width::UnicodeWidthStr as _;
-    row[c].len() + (widths[c] - row[c].width())
+#[cfg(test)]
+fn item(r: &crate::sessionpane::Row) -> crate::picker::Item {
+    crate::picker::Item {
+        label: r.name.clone(),
+        action: crate::picker::Action::Message,
+        hint: r.line(),
+        glyph: None,
+    }
 }
 
 // ── Kept ─────────────────────────────────────────────────────────────────────
@@ -1781,7 +1658,7 @@ impl Editor {
 
     // ── Making ───────────────────────────────────────────────────────────────
 
-    /// `space W n` — the name of a new session, made from the repository's main branch — its card says, and
+    /// `space W o` — the name of a new session, made from the repository's main branch — its card says, and
     /// `b` there steps to the front session's branch (#85); `C-b` here picks any.
     pub fn session_prompt(&mut self) {
         self.open_prompt(crate::editor::PromptKind::Session, "");
@@ -2117,19 +1994,9 @@ impl Editor {
 
     // ── The list ─────────────────────────────────────────────────────────────
 
-    /// `space W` — the sessions, one row each: what its Claude does, its branch against its base, what's
-    /// changed, what its processes use. Enter brings one to the front, a digit the one on that row; `d` ends
-    /// it, `b` brings it into its base, `n` makes a new one. Git's part is read on a worker (the last read
-    /// shown meanwhile); the processes are looked at once.
-    pub fn session_list(&mut self) {
-        let (items, paints): (Vec<_>, Vec<_>) = self.session_rows().into_iter().unzip();
-        let paints = items.iter().map(|i| i.action.clone()).zip(paints).collect();
-        let mut p = crate::picker::Picker::of("sessions", "sessions", items, false).without_preview();
-        p.keys = true;
-        p.paints = paints;
-        let front = self.session.id;
-        p.select_where(|a| *a == crate::picker::Action::Session(front));
-        self.open_picker(p, None);
+    /// The session list's facts read again (`space W`, `sessionpane.rs`): git's part of each row on a worker (the
+    /// last read shown meanwhile), the build folders measured, the processes looked at once.
+    pub(crate) fn session_facts(&mut self) {
         self.procs_wake(crate::procs::Wake::Now);
         let start = self.start_root();
         let asks: Vec<(SessionId, PathBuf, Option<String>)> =
@@ -2224,17 +2091,26 @@ impl Editor {
         });
     }
 
-    /// The list's rows as things are now.
+    /// The list's rows as things are now, one line each.
     #[cfg(test)]
     pub(crate) fn session_items(&self) -> Vec<crate::picker::Item> {
-        self.session_rows().into_iter().map(|(item, _)| item).collect()
+        self.sessions_rows().iter().map(item).collect()
     }
 
-    /// The list's rows as things are now, each with its paint (`painted`).
-    pub(crate) fn session_rows(&self) -> Vec<(crate::picker::Item, crate::picker::Paint)> {
+    /// Each session as the list says it, in its order.
+    pub(crate) fn session_shown(&self) -> Vec<Shown> {
         let now_ms = crate::usage::now_ms();
-        let shown: Vec<Shown> = self
-            .sessions_in_order()
+        // (what waits for your answer, the inbox's: each session's cards and edits)
+        let inbox = self.inbox();
+        let waits = |id: SessionId| {
+            let asks = inbox.iter().filter(|e| e.asks_answer() && e.session_id() == id);
+            asks.fold((0, 0), |(c, e), x| if x.card().is_some() { (c + 1, e) } else { (c, e + 1) })
+        };
+        let context = |u: &crate::usage::Usage| match u.context() {
+            Some((n, Some(w))) if w > 0 => Some(n * 100 / w),
+            _ => None,
+        };
+        self.sessions_in_order()
             .into_iter()
             .map(|l| Shown {
                 id: l.id,
@@ -2259,54 +2135,39 @@ impl Editor {
                 at: crate::presence::at(self, l.id).unwrap_or_default(),
                 colour: l.colour,
                 overlap: crate::overlap::others(self, l.id),
+                waits: waits(l.id),
+                report: crate::sessionpane::report(l.chat.as_ref()),
+                context: context(&l.usage),
             })
-            .collect();
-        painted(&shown)
+            .collect()
     }
 
-    /// Every event: the list, while it's open, says what's so now (the row in hand stays).
-    pub(crate) fn session_list_sync(&mut self) {
-        if !self.picker.as_ref().is_some_and(|p| p.kind == "sessions") {
+    /// A letter in the session list (`sessionpane.rs`): a digit brings that row's session to the front, `o` makes a
+    /// new one, `d` ends the one in hand, `b` brings it into its base, `m` marks it for the bring queue (`B` brings
+    /// the marked ones in turn — `bringqueue.rs`), `x` drops its build folder, `w` marks its conversation to be
+    /// kept warm (or not), `$` switches who pays for its Claude, `f` follows it (`follow::follow_session`), `v` its
+    /// changes woven. The list stays; what takes you elsewhere (a switch, follow, the woven view) gives the keys there.
+    pub(crate) fn session_list_key(&mut self, c: char) {
+        if self.sessions_pane.is_none() {
             return;
         }
-        let (items, paints): (Vec<_>, Vec<_>) = self.session_rows().into_iter().unzip();
-        let paints: Vec<_> = items.iter().map(|i| i.action.clone()).zip(paints).collect();
-        if let Some(p) = self.picker.as_mut()
-            && (p.items().iter().map(|i| &i.hint).ne(items.iter().map(|i| &i.hint)) || p.paints != paints)
-        {
-            p.paints = paints;
-            p.set_found(items);
-        }
-    }
-
-    /// A letter in the list: `j`/`k` move, a digit brings that row's session to the front, `n` makes a new
-    /// one, `d` ends the one in hand, `b` brings it into its base, `m` marks it for the bring queue (`B` brings
-    /// the marked ones in turn — `bringqueue.rs`), `x` drops its build folder, `w` marks its conversation to be
-    /// kept warm (or not), `$` switches who pays for its Claude, `f` follows it (`follow::follow_session`).
-    pub(crate) fn session_list_key(&mut self, c: char) {
-        use crate::picker::Action;
-        let Some(p) = self.picker.as_mut() else { return };
-        let here = match p.current().map(|i| &i.action) {
-            Some(Action::Session(id)) => Some(*id),
-            _ => None,
-        };
+        let here = self.sessions_here();
         match c {
-            'j' => p.move_by(1),
-            'k' => p.move_by(-1),
             '1'..='9' => {
                 let row = c as usize - '1' as usize;
-                if let Some(Action::Session(id)) = p.items().get(row).map(|i| i.action.clone()) {
-                    self.picker = None;
-                    self.session_switch(id);
+                let Some(id) = self.sessions_in_order().get(row).map(|l| l.id) else {
+                    let n = self.sessions_in_order().len();
+                    return self.set_status(format!("no session on row {c} — the list has {n}"));
+                };
+                if let Some(p) = self.sessions_pane.as_mut() {
+                    p.selected = id;
                 }
+                self.sessions_enter();
             }
-            'n' => {
-                self.picker = None;
-                self.session_prompt();
-            }
+            // (`n` is the list's search's next, as every pane's)
+            'o' => self.session_prompt(),
             'd' | 'b' => {
                 let Some(id) = here else { return };
-                self.picker = None;
                 let which = id.to_string();
                 let done = if c == 'd' { self.session_end(&which) } else { self.session_bring(&which) };
                 if let Err(e) = done {
@@ -2323,7 +2184,6 @@ impl Editor {
                 if self.bring_queue.marks.is_empty() {
                     return self.set_status("nothing marked — m marks the sessions to bring in turn, then B");
                 }
-                self.picker = None;
                 if let Err(e) = self.bring_queue_ask() {
                     self.set_error(e);
                 }
@@ -2355,7 +2215,7 @@ impl Editor {
                 let Some((path, land)) = file else {
                     return self.set_status("nothing of it to weave yet — it changed no file");
                 };
-                self.picker = None;
+                self.sessions_list_leave();
                 if let Err(e) = crate::weave::open(self, Some(path), land) {
                     self.set_status(e);
                 }
@@ -2363,12 +2223,11 @@ impl Editor {
             // Followed: into its checkout, the editor where its Claude is (`follow::follow_session`)
             'f' => {
                 let Some(id) = here else { return };
-                self.picker = None;
+                self.sessions_list_leave();
                 crate::follow::follow_session(self, id);
             }
             '$' => {
                 let Some(id) = here else { return };
-                self.picker = None;
                 if let Err(e) = self.billing_toggle(id) {
                     self.set_error(e);
                 }
@@ -2377,7 +2236,7 @@ impl Editor {
             _ => self.key_unused(
                 crate::key::Key::plain(crate::key::Code::Char(c)),
                 "the session list",
-                "letters are keys here",
+                "letters are keys here — / searches, esc code",
             ),
         }
     }
@@ -2707,7 +2566,8 @@ mod tests {
             } else {
                 crate::key::Key::plain(crate::key::Code::Char(c))
             };
-            ed.handle_key(key);
+            // (as the main loop hands it in: what it asks is asked by this input — a card its job brings is yours)
+            ed.handle_event(crate::event::Event::Key(key));
         }
     }
 
@@ -2781,7 +2641,7 @@ mod tests {
         })
     }
 
-    /// `space W n`: the prompt says what it's made from; the card says where its checkout goes and what's
+    /// `space W o`: the prompt says what it's made from; the card says where its checkout goes and what's
     /// big and ignored here — and nothing is made before `y`. Then: its branch from main's tip, its session in
     /// front with the chat open and focused, its name and base kept on the session. A name taken (here, a
     /// branch checked out in another worktree) or not a branch name is refused.
@@ -2791,7 +2651,7 @@ mod tests {
         std::fs::create_dir_all(repo.join("target")).unwrap();
         std::fs::write(repo.join("target/build.bin"), vec![7u8; 21 << 20]).unwrap();
         let mut ed = editor(&repo, &dir);
-        feed(&mut ed, "<space>Wn");
+        feed(&mut ed, "<space>Wo");
         let p = ed.prompt.as_ref().expect("the name's prompt");
         assert_eq!(p.label.as_deref(), Some("new session from the main branch (C-b another base):"));
         feed(&mut ed, "fix-login<ret>");
@@ -2892,7 +2752,7 @@ mod tests {
         git_in(&repo, &["branch", "side"]);
         git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "on main only"]);
         let mut ed = editor(&repo, &dir);
-        feed(&mut ed, "<space>Wntopic<C-b>");
+        feed(&mut ed, "<space>Wotopic<C-b>");
         settle_until(&mut ed, |ed| ed.picker.as_ref().is_some_and(|p| !p.loading));
         feed(&mut ed, "side<ret>");
         settle_until(&mut ed, |ed| !ed.offers.is_empty() || says(ed, "new session:"));
@@ -3349,14 +3209,10 @@ mod tests {
         ed.session_list();
         settle_until(&mut ed, |ed| ed.session_store.build_dirs.contains_key(&own_id));
         assert!(!ed.session_store.build_dirs.contains_key(&shared_id), "shared with the main checkout");
-        let row = |ed: &Editor, id| {
-            let p = ed.picker.as_ref().unwrap();
-            p.items().iter().find(|i| i.action == crate::picker::Action::Session(id)).unwrap().hint.clone()
-        };
-        ed.session_list_sync();
+        let row = |ed: &Editor, id| ed.sessions_rows().iter().find(|r| r.id == id).unwrap().line();
         assert!(row(&ed, own_id).contains("build 2 MB"), "{}", row(&ed, own_id));
         // The first `x` says what goes; the second drops it
-        ed.picker.as_mut().unwrap().select_where(|a| *a == crate::picker::Action::Session(own_id));
+        ed.sessions_pane.as_mut().unwrap().selected = own_id;
         ed.session_list_key('x');
         assert!(says(&ed, "x again drops own's build folder"), "{}", said(&ed));
         assert!(own.join("debug/marker").is_file(), "not yet");
@@ -3793,7 +3649,10 @@ mod tests {
         let tip = git_in(&wt, &["rev-parse", "HEAD"]);
         let main_was = git_in(&repo, &["rev-parse", "main"]);
         ed.session_list();
-        let row = |ed: &Editor| ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
+        let row = |ed: &Editor| {
+            let id = ed.sessions_here()?;
+            ed.sessions_in_order().iter().find(|l| l.id == id).map(|l| l.label().to_string())
+        };
         for _ in 0..3 {
             if !row(&ed).is_some_and(|l| l.contains("feat")) {
                 feed(&mut ed, "j");
@@ -5656,91 +5515,6 @@ mod tests {
         assert!(worktrees_dir("wt", common).unwrap_err().contains("a full path"));
     }
 
-    /// The list's rows: the glyph says what its Claude does; the rest in columns as wide as their widest
-    /// (counts right-aligned, empty columns left out), so every hint is as wide as the others — right-aligned
-    /// in the list, they line up row under row. A session's branch is its name, so it isn't said twice.
-    #[test]
-    fn the_list_lines_its_columns_up() {
-        use crate::session::Doing;
-        let shown = |id, name: &str, branch: Option<&str>, f: Option<Facts>, doing, usage| Shown {
-            id,
-            name: name.into(),
-            branch: branch.map(str::to_string),
-            facts: f,
-            doing,
-            front: id == 0,
-            usage,
-            rebasing: None,
-            reloaded: 0,
-            compacted: false,
-            reviewer: String::new(),
-            claude: None,
-            billing: Default::default(),
-            build: None,
-            queue: None,
-            at: String::new(),
-            colour: 0,
-            overlap: Vec::new(),
-        };
-        let f = |ahead, behind, changed| Some(Facts { ahead, behind, changed });
-        let rows = items(&[
-            shown(0, "tarae", Some("main"), f(0, 0, 0), Doing::Idle, Some((3.0, 40 << 20))),
-            shown(1, "fix-login", Some("fix-login"), f(12, 1, 3), Doing::Working, Some((104.0, 1 << 30))),
-            shown(2, "parser", Some("parser"), None, Doing::Waiting, None),
-        ]);
-        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
-        assert_eq!(
-            hints,
-            [
-                "main                     here               3%   40 MB",
-                "      ↑12 ↓1  3 changed  working          104%  1.0 GB",
-                "                         ▲ waits for you              ",
-            ]
-        );
-        assert!(rows.iter().all(|i| i.glyph.is_none()), "no glyph: who it is is its name");
-        // (the painted rows: the name in its colour, what needs you — parser's waiting — in warning, at its place)
-        let painted = painted(&[
-            shown(1, "fix-login", Some("fix-login"), f(12, 1, 3), Doing::Working, None),
-            Shown { colour: 2, ..shown(2, "parser", Some("parser"), None, Doing::Waiting, None) },
-        ]);
-        assert_eq!(painted[0].1.hint, [], "working is calm");
-        let (item, paint) = &painted[1];
-        assert_eq!(paint.label, Some(crate::session::PARTICIPANTS[2]));
-        let (range, scope) = &paint.hint[0];
-        assert_eq!((&item.hint[range.clone()], *scope), ("▲ waits for you", "warning"));
-        assert_eq!(rows[2].action, crate::picker::Action::Session(2));
-        // Its Claude's cache and cost so far: a column each, the costs right-aligned
-        let claude = |cache: &str, cost: &str| Some((cache.to_string(), cost.to_string()));
-        let rows = items(&[
-            Shown {
-                claude: claude("● warm until 14:32", "$0.020"),
-                ..shown(0, "tarae", None, None, Doing::Idle, None)
-            },
-            Shown {
-                claude: claude("◦ cold", "$1.23"), ..shown(1, "fix", None, None, Doing::Working, None)
-            },
-            shown(2, "parser", None, None, Doing::Idle, None),
-        ]);
-        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
-        assert_eq!(
-            hints,
-            [
-                "here     ● warm until 14:32  $0.020",
-                &format!("working  ◦ cold{}$1.23", " ".repeat(15)),
-                &" ".repeat(35),
-            ]
-        );
-        // Its own build folder (#219): a column, right-aligned before the processes', `over` when counting
-        // stopped first
-        let rows = items(&[
-            Shown { build: Some((12 << 30, true)), ..shown(1, "fix", None, None, Doing::Idle, None) },
-            Shown { build: Some((900 << 20, false)), ..shown(2, "parser", None, None, Doing::Idle, None) },
-            shown(3, "docs", None, None, Doing::Idle, None),
-        ]);
-        let hints: Vec<&str> = rows.iter().map(|i| i.hint.as_str()).collect();
-        assert_eq!(hints, ["    build 12.0 GB", "build over 900 MB", &" ".repeat(17)]);
-    }
-
     /// The column from a session's usage: its cache, warm until when (by the clock — true however long
     /// nothing redraws) or cold, and its total — a session whose Claude reported nothing has none.
     #[test]
@@ -6095,15 +5869,14 @@ mod tests {
         ed.session_switch(0);
         // The list: `m` on each, in turn — each row says its place
         feed(&mut ed, "<space>W");
-        assert_eq!(ed.picker.as_ref().map(|p| p.kind), Some("sessions"));
+        assert!(ed.sessions_list_keys());
         feed(&mut ed, "jmjmjm");
-        let hints: Vec<String> = ed.picker.as_ref().unwrap().items().iter().map(|i| i.hint.clone()).collect();
+        let hints: Vec<String> = ed.session_items().iter().map(|i| i.hint.clone()).collect();
         for (row, place) in [(1, "bring 1st"), (2, "bring 2nd"), (3, "bring 3rd")] {
             assert!(hints[row].contains(place), "row {row}: {hints:?}");
         }
         assert!(says(&ed, "two marked to bring 3rd — B brings the 3 in turn"), "{}", said(&ed));
         feed(&mut ed, "B");
-        assert!(ed.picker.is_none());
         let q = card(&ed, "Bring 3 into main")
             .map(|o| o.question.clone())
             .unwrap_or_else(|| panic!("{}", said(&ed)));

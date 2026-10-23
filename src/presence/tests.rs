@@ -374,7 +374,7 @@ fn every_session_is_named_one_way_in_the_chrome() {
         let at = rows[y].find(s).unwrap_or_else(|| panic!("{s:?} in {}", rows[y]));
         p.screen().cell(y as u16, rows[y][..at].chars().count() as u16).unwrap().fgcolor()
     };
-    // The list: each row's name in its colour, no glyph; what needs you (docs' `▲ waits for you`) in warning
+    // The list: each row's name in its colour, no glyph; what needs you (docs' `▲ waits`) in warning
     press(&mut ed, "<space>W");
     let p = frame(&mut ed, 160);
     let r = rows(&p);
@@ -385,9 +385,9 @@ fn every_session_is_named_one_way_in_the_chrome() {
             "{name} in the list: {r:#?}"
         );
     }
-    let docs_row = row_of(&r, "▲ waits for you");
+    let docs_row = row_of(&r, "▲ waits ");
     assert_eq!(fg_of(&p, &r, docs_row, "▲"), warning, "what needs you, in warning: {}", r[docs_row]);
-    press(&mut ed, "<esc>");
+    press(&mut ed, "q");
     // The strip over a chat: each name in its colour, its state after it — docs' `▲ waits` in warning (the chat with
     // the keys: a surface without them fades all its text alike)
     ed.session.chat = Some(crate::chat::Chat::new());
@@ -457,14 +457,14 @@ fn a_click_on_the_tag_or_f_in_the_list_follows() {
     // Back in fix; the list's `f`
     assert!(ed.session_switch(fix));
     press(&mut ed, "<space>W");
-    let main_row = ed.picker.as_ref().unwrap().items().iter().position(|i| i.label == "main").unwrap();
-    let here = ed.picker.as_ref().unwrap().items().iter().position(|i| i.label == "fix").unwrap();
+    let main_row = ed.session_items().iter().position(|i| i.label == "main").unwrap();
+    let here = ed.session_items().iter().position(|i| i.label == "fix").unwrap();
     let down = if main_row > here { "j" } else { "k" };
     press(&mut ed, down);
     let r = rows(&frame(&mut ed, 160));
-    assert!(r.last().unwrap().contains("f follow"), "the list says it: {}", r.last().unwrap());
+    assert!(r.iter().any(|r| r.contains("f follow")), "the list says it: {r:#?}");
     press(&mut ed, "f");
-    assert!(ed.picker.is_none());
+    assert!(!ed.sessions_list_keys(), "the keys there");
     assert_eq!((ed.session.id, followed(&ed)), (0, Some(0)), "followed from the list");
 }
 

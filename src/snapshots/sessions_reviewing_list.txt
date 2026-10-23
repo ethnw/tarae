@@ -1,28 +1,28 @@
 # sessions_reviewing_list · 160x16 · theme meok · cursor hidden
 ## text
-00 ╭─ sessions ───────────────────────────────────────────────────────────────────────────────────╮┌─ main · fix-login working ¶ reviewing · docs • · + ─── ready ─
-01 │  letters are keys here, nothing is typed · 1–3 switch                                     3/3││  ▎ Ask Claude
-02 │──────────────────────────────────────────────────────────────────────────────────────────────││
-03 │ main                                                                 here     ¶ reviewing    ││  It reads the whole project,
-04 │ fix-login                                                            working  ¶ reviewing    ││  starting from [scratch].
-05 │ docs                                                                          ¶ reviewer done││
-06 │                                                                                              ││  tab for a suggestion
-07 │                                                                                              ││  › Explain what this file does
-08 │                                                                                              ││  › Where is this used across the project?
-09 │                                                                                              ││  › Why is this diagnostic happening?
-10 │                                                                                              ││
-11 │                                                                                              ││  C-t for another model
-12 │                                                                                              ││  ────────────────────────────────────────────────────────────
-13 │                                                                                              ││  › Ask about [scratch]…
-14 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯│  space l focus  space L close
-15  ● picker   enter switch  n new  w keep warm  $ billing  esc close  ¶ reviewing · 0 reads                                                       utf-8 LF   1:1
+00 ─ tarae › [scratch] ────────────────────────────────────────────────────────────────────────────┬─ main · fix-login working ¶ reviewing · docs • · + ─── ready ─
+01   1                                                                                             │  ▎ Ask Claude
+02                                                                                                 │
+03                                                                                                 │  It reads the whole project,
+04                                 ╭─ sessions ── 3 sessions · 1 working ──────────── enter switch  / search  o new  w keep warm ─╮
+05                                 │▎ main                ¶ reviewing                                                             │
+06                                 │  fix-login  working  ¶ reviewing                                                             │
+07                                 │  docs                ¶ reviewer done                                                         │
+08                                 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯he project?
+09                                                                                                 │  › Why is this diagnostic happening?
+10                                                                                                 │
+11                                                                                                 │  C-t for another model
+12                                                                                                 │  ────────────────────────────────────────────────────────────
+13                                                                                                 │  › Ask about [scratch]…
+14                                                                                                 │  space l focus  space L close
+15  ● sessions   ¶ reviewing · 0 reads                                                                                                             utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 02
-03  PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+03
 04
-05
+05                                  PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
 06
 07
 08
@@ -34,22 +34,22 @@
 14
 15
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00 ff TTTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff BBBB f           fffffff             f      d f d fff fffff f
-01 f  fffffff fff ffff fffff fffffff ff fffff f fff ffffff                                     fffff  a TTT TTTTTT
-02 fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-03 f BBBB                                                                 dddd     d ddddddddd    ff  dd ddddd ddd ddddd dddddddd
-04 f                                                                      ddddddd  d ddddddddd    ff  dddddddd dddd dddddddddd
-05 f                                                                               d dddddddd ddddff
-06 f                                                                                              ff  DDD fff f ffffffffff
-07 f                                                                                              ff  f ddddddd dddd dddd dddd dddd
-08 f                                                                                              ff  f ddddd dd dddd dddd dddddd ddd dddddddd
-09 f                                                                                              ff  f ddd dd dddd dddddddddd dddddddddd
-10 f                                                                                              ff
-11 f                                                                                              ff  DDD fff fffffff fffff
-12 f                                                                                              ff  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-13 f                                                                                              ff  f fff fffff ffffffffff
-14 fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  DDDDD D fffff  DDDDD D fffff
-15  a TTTTTT   DDDDD ffffff  D fff  D ffff ffff  D fffffff  DDD fffff              d d ddddd                                                       ddddd dd   TTT
+00 f ddddd f TTTTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff BBBB f           fffffff             f      d f d fff fffff f
+01   A                                                                                             f  a TTT TTTTTT
+02                                                                                                 f
+03                                                                                                 f  dd ddddd ddd ddddd dddddddd
+04                                 aa TTTTTTTT aa d dddddddd f f fffffff aaaaaaaaaaaa DDDDD ffffff  D ffffff  D fff  D ffff ffff aa
+05                                 aa BBBB                d ddddddddd                                                             a
+06                                 a             fffffff  d ddddddddd                                                             a
+07                                 a                      d dddddddd dddd                                                         a
+08                                 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadd dddddddd
+09                                                                                                 f  f ddd dd dddd dddddddddd dddddddddd
+10                                                                                                 f
+11                                                                                                 f  DDD fff fffffff fffff
+12                                                                                                 f  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+13                                                                                                 f  f fff fffff ffffffffff
+14                                                                                                 f  DDDDD D fffff  DDDDD D fffff
+15  a TTTTTTTT               d d ddddd                                                                                                             ddddd dd   TTT
 ## legend
-bg: P=ui.menu.selected
+bg: c=ui.cursorline.primary  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

@@ -74,16 +74,20 @@ pub enum GroupKind {
     Procs,
     Git,
     Review,
+    /// The session list (step 7, `sessionpane.rs`): a list alone (`Detail::None`), floating — the viewer's, not a
+    /// session's: it's no member of `Session.groups`, its kind names it where the keys go and where it's drawn.
+    Sessions,
 }
 
 impl GroupKind {
-    pub const ALL: [GroupKind; 6] = [
+    pub const ALL: [GroupKind; 7] = [
         GroupKind::Tests,
         GroupKind::Task,
         GroupKind::Preflight,
         GroupKind::Procs,
         GroupKind::Git,
         GroupKind::Review,
+        GroupKind::Sessions,
     ];
 
     /// Its name in the state (`list:tests`, `keys.region`) and the restart's file (`groups: [{kind}]`).
@@ -95,6 +99,7 @@ impl GroupKind {
             GroupKind::Procs => "procs",
             GroupKind::Git => "git",
             GroupKind::Review => "review",
+            GroupKind::Sessions => "sessions",
         }
     }
 
@@ -111,7 +116,7 @@ impl GroupKind {
     /// It can leave the slot and dock beside the code (§3.1): the slot's groups. The git tab and the review's rail
     /// are the left column's (§3.7: how you move, not what you look at) — their detail is the code itself.
     pub fn dockable(self) -> bool {
-        !self.detail_is_code()
+        !self.detail_is_code() && self != GroupKind::Sessions
     }
 
     /// Its index among the dockable kinds (`Sizes.docked`).
@@ -120,19 +125,120 @@ impl GroupKind {
             GroupKind::Tests => 0,
             GroupKind::Task => 1,
             GroupKind::Preflight => 2,
-            GroupKind::Procs | GroupKind::Git | GroupKind::Review => 3,
+            GroupKind::Procs | GroupKind::Git | GroupKind::Review | GroupKind::Sessions => 3,
         }
     }
 }
 
-/// Where a group is (§3.1): a tab of the slot, or docked beside the code on a side — a leaf of the tree
-/// (`Shows::Group`). Kept per kind (`Group.place`) while the group comes and goes: a run of a kind you docked comes
-/// back docked.
+/// Where a group is (§3.1): a tab of the slot, docked beside the code on a side — a leaf of the tree
+/// (`Shows::Group`) —, or floating over the docked panes in a frame of its own (step 7: its host pane is
+/// `Shows::Group` too, out of the tree — `float.rs`). Kept per kind (`Group.place`) while the group comes and goes: a
+/// run of a kind you docked or floated comes back there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Place {
     #[default]
     Slot,
     Docked(Side),
+    Floating(Frame),
+}
+
+/// A floating pane's frame (§3.1): its left, top, width and height as thousandths of the screen above the status
+/// line — the whole screen its frame, never the code area (user, 2026-10-23) — clamped onto the screen every frame
+/// (`rect`), so a resize keeps it in sight and in proportion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// A floating pane is this wide and tall at least (its frame's lines in it) while the screen has room — narrower
+/// screens, the whole width (§3.7).
+pub const FLOAT_MIN_W: usize = 40;
+pub const FLOAT_MIN_H: usize = 8;
+
+impl Frame {
+    const PER: usize = 1000;
+
+    /// A top placed by the rule (`placed_y`), not set: where one is first placed, `C-w =`, a list's rows.
+    pub const PLACED: u16 = u16::MAX;
+
+    /// Where one is first placed: 3/5 × 1/2 of the screen, its top by the rule (user, 2026-10-23: every floating
+    /// pane's top at 1/4 — a full one centred), centred across.
+    pub const CENTRED: Frame = Frame { x: 200, y: Self::PLACED, w: 600, h: 500 };
+
+    /// A placed top (user, 2026-10-23): `min(H/4, (H − h)/2)` — at 1/4 of the screen's height while the pane is at
+    /// most half of it tall (a list, capped at 1/2, never moves), centred with equal margins once it's taller, the two
+    /// meeting at h = H/2 (the centre rounded up, so on an odd height they meet too: nothing jumps).
+    fn placed_y(h: usize, sh: usize) -> usize {
+        let quarter = (Self::PER / 4 * sh + Self::PER / 2) / Self::PER;
+        quarter.min(sh.saturating_sub(h).div_ceil(2))
+    }
+
+    /// Its top on a screen `sh` rows tall, `h` rows tall itself: the rule's where placed, else its share.
+    fn top(self, h: usize, sh: usize) -> usize {
+        let y = match self.y {
+            Self::PLACED => Self::placed_y(h, sh),
+            y => (y as usize * sh + Self::PER / 2) / Self::PER,
+        };
+        y.min(sh - h)
+    }
+
+    /// Its cells on a screen `sw` wide with `sh` rows above the status line: as wide and tall as its share, at least
+    /// `FLOAT_MIN_W` × `FLOAT_MIN_H` (the screen's whole where it's smaller), its top placed by the rule or its share,
+    /// moved back onto the screen where its share would put it past an edge.
+    pub fn rect(self, sw: usize, sh: usize) -> crate::split::Rect {
+        let of = |f: u16, n: usize| (f as usize * n + Self::PER / 2) / Self::PER;
+        let w = of(self.w, sw).clamp(FLOAT_MIN_W.min(sw), sw);
+        let h = of(self.h, sh).clamp(FLOAT_MIN_H.min(sh), sh);
+        let x = of(self.x, sw).min(sw - w);
+        crate::split::Rect { x, y: self.top(h, sh), w, h }
+    }
+
+    /// The frame whose cells on that screen are `r` (`rect`'s other way: a move or a size by keys or the mouse).
+    pub fn of_rect(r: crate::split::Rect, sw: usize, sh: usize) -> Frame {
+        let of = |n: usize, of: usize| ((n * Self::PER + of / 2) / of.max(1)).min(Self::PER) as u16;
+        Frame { x: of(r.x, sw), y: of(r.y, sh), w: of(r.w, sw), h: of(r.h, sh) }
+    }
+
+    /// A list's frame (user, 2026-10-23): 3/5 wide and centred across, as tall as its rows up to half the screen — `h`
+    /// 0, no height set (`rect_rows`) —, its top placed by the rule as every floating pane's: at most half the screen
+    /// tall, at 1/4 of its height — it grows and shrinks downward from there, its top never moving.
+    pub const LIST: Frame = Frame { x: 200, y: Self::PLACED, w: 600, h: 0 };
+
+    /// A list of `n` rows this tall on a screen with `sh` rows: its rows and its frame's two lines, up to half of it.
+    fn list_h(n: usize, sh: usize) -> usize {
+        (n.max(1) + 2).min((sh / 2).max(3)).min(sh)
+    }
+
+    /// A list's cells (`n` rows): as `rect`, but with no height set (`h` 0) as tall as its rows (`list_h`), its top
+    /// line staying — moved up only where the screen ends.
+    pub fn rect_rows(self, sw: usize, sh: usize, n: usize) -> crate::split::Rect {
+        if self.h != 0 {
+            return self.rect(sw, sh);
+        }
+        let h = Self::list_h(n, sh);
+        let r = Frame { h: Self::PER as u16, ..self }.rect(sw, sh);
+        crate::split::Rect { y: self.top(h, sh), h, ..r }
+    }
+
+    /// Its four thousandths, as the restart's file and `layouts.json` keep them — a top placed by the rule `null`.
+    pub fn json(self) -> serde_json::Value {
+        let y = (self.y != Self::PLACED).then_some(self.y);
+        serde_json::json!([self.x, y, self.w, self.h])
+    }
+
+    pub fn of_json(v: &serde_json::Value) -> Option<Frame> {
+        let n: Vec<u16> = (v.as_array()?.iter().enumerate())
+            .map(|(i, n)| match (i, n) {
+                (1, serde_json::Value::Null) => Some(Self::PLACED),
+                (_, n) => n.as_u64().map(|n| n.min(Self::PER as u64) as u16),
+            })
+            .collect::<Option<_>>()?;
+        let [x, y, w, h] = n[..] else { return None };
+        Some(Frame { x, y, w, h })
+    }
 }
 
 /// The side a group docks on (`C-w H/L/K`): left of the code (right of the side panel or the rail), right of it
@@ -169,22 +275,35 @@ impl Place {
         match self {
             Place::Slot => "slot",
             Place::Docked(s) => s.name(),
+            Place::Floating(_) => "floating",
         }
     }
 
-    pub fn of_name(s: &str) -> Option<Self> {
+    /// A place by its name — a floating one at its frame `frame` (the file's `frame`), centred without one.
+    pub fn of_name(s: &str, frame: Option<Frame>) -> Option<Self> {
         match s {
             "slot" => Some(Place::Slot),
+            "floating" => Some(Place::Floating(frame.unwrap_or(Frame::CENTRED))),
             s => Side::of_name(s).map(Place::Docked),
+        }
+    }
+
+    /// Its frame, floating.
+    pub fn frame(self) -> Option<Frame> {
+        match self {
+            Place::Floating(f) => Some(f),
+            _ => None,
         }
     }
 }
 
-/// A group's detail: a pane of its own, or the code pane last focused, which the list drives (git, review).
+/// A group's detail: a pane of its own, the code pane last focused, which the list drives (git, review), or none —
+/// a list alone (the session list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Detail {
     Pane(PaneId),
     Code,
+    None,
 }
 
 /// A linked group (§2.1): a list and its detail, two panes laid out side by side in their host's rect — the slot's,
@@ -197,14 +316,18 @@ pub enum Detail {
 pub struct Group {
     pub kind: GroupKind,
     /// The leaf that holds it: the slot's, or its own docked leaf's (`Shows::Group`, `place` docked) — the slot's
-    /// again for a frame it folds into the slot (`Editor::group_host`). (A floating frame's comes with step 7.)
+    /// again for a frame it folds into the slot (`Editor::group_host`) —, or floating its own pane out of the tree.
     pub host: PaneId,
     pub list: PaneId,
     pub detail: Detail,
     /// The member that had the keys last — the one in sight while the group is stacked (§2.3); the list at first.
     pub front: Member,
-    /// Where it is: the slot, or docked on a side (§3.1) — kept when it closes, for its kind's next run.
+    /// Where it is: the slot, docked on a side, floating (§3.1) — kept when it closes, for its kind's next run.
     pub place: Place,
+    /// Floating: where `C-w e` docks it back — the slot or the side it came from (never floating).
+    pub back: Place,
+    /// Floating: its turn in the stack — the highest drawn on top (the one with the keys raised, `float_raise`).
+    pub raised: u32,
     /// How its members are laid in its pane: by the pane's shape, or as `C-w t` chose — kept as its place is.
     pub laid: Laid,
 }
@@ -266,20 +389,34 @@ impl Group {
     /// Kind `kind`'s group in leaf `host`, its members' ids from `first` on — one, the list's, when its detail is the
     /// code.
     pub fn new(kind: GroupKind, host: PaneId, first: PaneId) -> Self {
-        let detail = if kind.detail_is_code() { Detail::Code } else { Detail::Pane(first + 1) };
-        Group { kind, host, list: first, detail, front: Member::List, place: Place::Slot, laid: Laid::Auto }
+        let detail = match kind {
+            GroupKind::Sessions => Detail::None,
+            k if k.detail_is_code() => Detail::Code,
+            _ => Detail::Pane(first + 1),
+        };
+        Group {
+            kind,
+            host,
+            list: first,
+            detail,
+            front: Member::List,
+            place: Place::Slot,
+            back: Place::Slot,
+            raised: 0,
+            laid: Laid::Auto,
+        }
     }
 
     /// The ids it takes from `first` (`new`).
     pub fn ids(kind: GroupKind) -> u64 {
-        if kind.detail_is_code() { 1 } else { 2 }
+        if kind.detail_is_code() || kind == GroupKind::Sessions { 1 } else { 2 }
     }
 
     /// Its detail's pane, when it has one of its own.
     pub fn detail_pane(&self) -> Option<PaneId> {
         match self.detail {
             Detail::Pane(id) => Some(id),
-            Detail::Code => None,
+            Detail::Code | Detail::None => None,
         }
     }
 

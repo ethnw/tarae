@@ -1214,7 +1214,7 @@ pub fn key(ed: &mut Editor, key: Key) -> bool {
     let rows = ed.screen.sidebar.borrow().len();
     let Some(s) = ed.session.sidebar.as_mut() else { return false };
     match (key.code, key.ctrl) {
-        // Still the editor's: the space menu, the command line, the windows (`C-w e` back to the code)
+        // Still the editor's: the space menu, the command line, the windows (`C-w l` back to the code)
         (Code::Char(' ') | Code::Char(':'), false) | (Code::Char('w'), true) => return false,
         _ if let Some(m) = crate::key::list_move(key, rows) => match m {
             crate::key::ListMove::By(by) => s.move_by(by, &lines),

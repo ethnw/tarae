@@ -21,7 +21,7 @@ impl GroupKind {
             GroupKind::Tests => Some(Slot::Test),
             GroupKind::Task | GroupKind::Preflight => Some(Slot::Task),
             GroupKind::Procs => Some(Slot::Procs),
-            GroupKind::Git | GroupKind::Review => None,
+            GroupKind::Git | GroupKind::Review | GroupKind::Sessions => None,
         }
     }
 
@@ -34,6 +34,7 @@ impl GroupKind {
             GroupKind::Procs => "the processes",
             GroupKind::Git => "the git tab",
             GroupKind::Review => "the review's files",
+            GroupKind::Sessions => "the session list",
         }
     }
 }
@@ -209,7 +210,7 @@ impl Editor {
         match g.kind {
             GroupKind::Tests | GroupKind::Task | GroupKind::Preflight | GroupKind::Procs => {
                 // (docked in sight: its own leaf; else the slot's, its panel the one in front there)
-                let there = self.docked_in_sight(g.kind)
+                let there = self.out_of_slot(g.kind)
                     || (g.kind.slot().is_some_and(|s| self.slot_shown() == Some(s))
                         && self.session.leaf(crate::pane::Shows::Slot).is_some());
                 there && listed(self, g.kind)
@@ -323,10 +324,9 @@ impl Editor {
     /// The keys go to a member of kind `kind`'s group: docked, it's in hand (`Session.hand` — folded into the slot
     /// too, for when it's back); in the slot, its panel comes to the slot's front.
     fn hand_to(&mut self, kind: GroupKind) {
-        let docked =
-            self.session.group(kind).is_some_and(|g| matches!(g.place, crate::pane::Place::Docked(_)));
-        self.session.hand = docked.then_some(kind);
-        if !self.docked_in_sight(kind) {
+        let apart = self.session.group(kind).is_some_and(|g| g.place != crate::pane::Place::Slot);
+        self.session.hand = apart.then_some(kind);
+        if !self.out_of_slot(kind) {
             self.session.slot_front = kind.slot();
         }
     }
