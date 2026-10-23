@@ -51,24 +51,24 @@
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00
-01  ff TTTT TTT TTTTTTT TTTTTTT ffffffffffffffffffffffffffffff
-02  f A                                                  fff f
-03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f
-04  f  BBBB fff  BBBBBBBB fff fff  BBBBBB fffffff            f
-05  f                                                        f
-06  f  fff fffffff fffffff fffffff ff ffff fff               f
-07  f                                                        f
-08  f                                                        f
-09  f                                                        f
-10  f                                                        f
-11  f                                                        f
-12  f                                                        f
-13  f                                                        f
-14  f                                                        f
-15  f                                                        f
-16  f                                                        f
-17  f                                                        f
-18  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01  aa TTTT TTT TTTTTTT TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02  a A                                                  fff a
+03  a ffffffffffffffffffffffffffffffffffffffffffffffffffffff a
+04  a  BBBB fff  BBBBBBBB fff fff  BBBBBB fffffff            a
+05  a                                                        a
+06  a  fff fffffff fffffff fffffff ff ffff fff               a
+07  a                                                        a
+08  a                                                        a
+09  a                                                        a
+10  a                                                        a
+11  a                                                        a
+12  a                                                        a
+13  a                                                        a
+14  a                                                        a
+15  a                                                        a
+16  a                                                        a
+17  a                                                        a
+18  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 19
 20
 21

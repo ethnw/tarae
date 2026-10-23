@@ -58,10 +58,10 @@ fn input(sim: &mut Sim, ed: &mut Editor, ids: &[(u64, PathBuf)]) -> String {
             Ok(()) => format!("session {sid}'s card up"),
             Err(e) => format!("session {sid}'s card: {e}"),
         },
-        // (drawn and settled first: a weighty card takes no key as it appears)
+        // (drawn and focused first — a press on it: a card that came on its own takes no key until then)
         1 => {
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
-            sim.wait(crate::offer::SETTLE + Duration::from_millis(100));
+            ed.card_focus_front();
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
             ed.handle_key(Key::plain(Code::Char('m')));
             "m".into()

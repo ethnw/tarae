@@ -475,10 +475,12 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
     let lay = Layout::new(editor, w, h);
     let ui = Ui::new(editor);
     let mut offer = OfferCard::new(editor, &lay);
-    // The front card in sight since when (a new one, or new text, starts it over)
     let front = offer.as_ref().and(editor.offers.first()).map(|o| (o.id, o.rev));
-    if front != editor.offer_seen.get().map(|(id, rev, _)| (id, rev)) {
-        editor.offer_seen.set(front.map(|(id, rev)| (id, rev, crate::clock::now())));
+    // (drawn as it is now: a weighty card's answers count for it, and the keys an answer handed on reach it —
+    // after this frame, the one the user sees it in)
+    editor.offer_drawn.set(front);
+    if front.is_some() && editor.card_next == front {
+        editor.card_focus = editor.card_next.take();
     }
     // (first drawn: its `card` line counts the answer's time from here — `cards.rs`)
     if let Some(o) = editor.offers.first().filter(|_| front.is_some())
@@ -10387,18 +10389,18 @@ impl OfferCard {
                             ));
                         }
                     }
-                    // Where its answers go (#24/#25): the keys elsewhere (the chat's input, insert mode, a
-                    // review) — `C-q` brings them here, what's being typed stays; brought here — Esc goes back
+                    // Where its answers go (#24/#25, P3 §3.8): not focused, the keys where they are (the code, the
+                    // chat's input, a review) — `C-q` brings them here, what's being typed stays; focused — Esc goes back
+                    // (one short row: every card that waits says it — the status line's `▲1 waiting · C-q` too)
                     let typing;
-                    let whose = if editor.card_keys {
-                        Some("esc goes back, unanswered")
-                    } else if !editor.card_has_keys() {
-                        typing =
-                            format!("{} to answer it — what you're typing stays", editor.key_said("C-q"));
-                        Some(typing.as_str())
-                    } else {
-                        None
+                    let whose = match editor.card_has_keys() {
+                        true => "esc goes back, unanswered",
+                        false => {
+                            typing = format!("{} to answer it", editor.key_said("C-q"));
+                            typing.as_str()
+                        }
                     };
+                    let whose = Some(whose);
                     // What waits behind it, and where (frictions15 #5: `C-q` takes the oldest here — the rest
                     // were a queue the card didn't name)
                     let behind = editor.cards_behind_said();
@@ -10463,7 +10465,7 @@ impl OfferCard {
             let said = editor.offer_said_now().filter(|_| matches!(o.state, OfferState::Asking));
             let how = match &o.state {
                 _ if said.is_some() => said.unwrap_or_default().to_string(),
-                OfferState::Asking if o.aside && !editor.card_keys => {
+                OfferState::Asking if o.aside && !editor.card_has_keys() => {
                     format!("aside while you look — {} answers it", editor.key_said("C-q"))
                 }
                 OfferState::Asking if o.aside => "esc goes back, unanswered".into(),
@@ -10472,7 +10474,7 @@ impl OfferCard {
                     format!("{} answers it", editor.key_said("C-q"))
                 }
                 // (held: shorter, so Esc's way back fits beside the answers)
-                OfferState::Asking => match (editor.offer_seen_whole(), editor.card_keys) {
+                OfferState::Asking => match (editor.offer_seen_whole(), editor.card_has_keys()) {
                     (true, false) => "read to its end — y answers".to_string(),
                     (true, true) => "y answers · esc goes back".to_string(),
                     (false, false) => format!("{} to its end, then y answers", editor.end_key()),
@@ -10756,10 +10758,10 @@ impl OfferCard {
         let card = card_style(ui, editor, "ui.popup");
         // (the back cards keep the cards' own surface, whatever the front's ground)
         let surface = card;
-        // (framed while it has the keys — on the ground; without them its own surface, the same name and answers
-        // where the lines would be)
+        // (framed on the ground, a pane that can take the keys: its lines faint while it waits, lit in the accent once
+        // focused — P3 §3.8, as a docked pane's lit line)
         let held = !self.bar && editor.card_has_keys();
-        let card = if held { on_ground(ui, card) } else { card };
+        let card = if self.bar { card } else { on_ground(ui, card) };
         let body = Style { fg: card.fg, bg: card.bg, ..Style::default() };
         let dim = Style { fg: ui.virt.fg.or(card.fg), bg: card.bg, ..Style::default() };
         let bar = Style {
@@ -10953,9 +10955,13 @@ impl OfferCard {
         if !self.badge.is_empty() {
             named.push((format!("  {}", self.badge), dim));
         }
-        let answers = match self.keys_in_line {
-            true => self.answer_spans(key, body, dim, warning, frame_line(ui, card)),
-            false => Vec::new(),
+        // (its answers as its frame: in the faint frame's ink while it waits, the key in the accent once focused — user,
+        // 2026-10-23)
+        let faint = frame_line(ui, card);
+        let answers = match (self.keys_in_line, held) {
+            (true, true) => self.answer_spans(key, body, dim, warning, faint),
+            (true, false) => self.answer_spans(Style { bold: true, ..faint }, faint, faint, warning, faint),
+            (false, _) => Vec::new(),
         };
         draw_frame(out, ui, card, (self.x, self.y, width, self.rows()), &named, &answers, &[], held)?;
         Ok(())
@@ -14160,7 +14166,7 @@ fn draw_chat(
     } else if c.busy() {
         // (a card up asks mid-turn: the chat keeps the keys, `C-q` hands them over — frictions26)
         // (not while it holds them already: given by `C-q`, its answers answer it)
-        if !editor.card_keys && editor.offers.first().is_some_and(|o| !o.installing()) {
+        if !editor.card_has_keys() && editor.offers.first().is_some_and(|o| !o.installing()) {
             c_q = editor.key_said("C-q");
             hints.push((c_q.as_str(), "answer card"));
         }
@@ -15794,7 +15800,8 @@ const MEMBERS_SEP: &str = " › ";
 /// first and last columns padding): `╭─ name ─╮` — the name in place of a title row — `│` down both sides,
 /// `╰─ y run · n no ─╯` — the answer keys (`keys`: spans, `OfferCard::answer_spans`) in the bottom line: top
 /// says what, bottom says how. `splits`: columns where two leaves of one group meet inside it, a line down with `┬`/`┴`
-/// where it meets the frame. The lines in the faint wash (`ui.window`), unfaded; the name as `frame_name` styles it.
+/// where it meets the frame. The lines unfaded: `lit` — it has the keys — in the accent, else the faint wash
+/// (`ui.window`) of a pane that could take them (P3 §3.8, as a docked pane's line); the name as `frame_name` styles it.
 #[allow(clippy::too_many_arguments)]
 fn draw_frame(
     out: &mut impl Write,
@@ -15804,14 +15811,15 @@ fn draw_frame(
     name: &[(String, Style)],
     keys: &[(String, Style)],
     splits: &[usize],
-    drawn: bool,
+    lit: bool,
 ) -> io::Result<()> {
     if w < 8 || h < 2 {
         return Ok(());
     }
-    // (not `drawn`: the same name and keys where they'd be, no line — a card that hasn't the keys keeps its place
-    // and size, only its lines come and go with them)
-    let line = frame_line(ui, card);
+    let line = match lit {
+        true => Style { fg: ui.accent.fg, ..frame_line(ui, card) },
+        false => frame_line(ui, card),
+    };
     // Its top and bottom lines are top lines (`top_line`, the slot's header's drawer): the spans set in after `─ `
     let across = |out: &mut Vec<u8>, yy: usize, ends: (&str, &str, &str), spans: &[(String, Style)]| {
         let head = TopLine {
@@ -15823,17 +15831,14 @@ fn draw_frame(
             plain: true,
             ..TopLine::default()
         };
-        top_line(out, line, card, (x, yy, w), ends, splits, drawn, &head).map(|_| ())
+        top_line(out, line, card, (x, yy, w), ends, splits, true, &head).map(|_| ())
     };
     let mut buf = Vec::new();
     across(&mut buf, y, ("╭", "╮", "┬"), name)?;
     for yy in y + 1..y + h - 1 {
         for xx in [x, x + w - 1].into_iter().chain(splits.iter().copied()) {
             queue!(buf, MoveTo(xx as u16, yy as u16))?;
-            match drawn {
-                true => put_line(&mut buf, line, "│")?,
-                false => apply_put(&mut buf, line, " ")?,
-            }
+            put_line(&mut buf, line, "│")?;
         }
     }
     across(&mut buf, y + h - 1, ("╰", "╯", "┴"), keys)?;
@@ -16816,7 +16821,11 @@ mod tests {
             for k in ['y', 'r', 'v', 'n'] {
                 assert!(buttons.iter().any(|b| b.3 == k), "{cols} columns: {k} not drawn\n{s}");
             }
-            assert!(s.contains("Decline all") && !s.contains("waiting"), "{cols} columns, in sight:\n{s}");
+            // (in sight, waiting to be focused: the status line says `C-q`, nothing about where it is)
+            assert!(
+                s.contains("Decline all") && !s.contains("shows its card"),
+                "{cols} columns, in sight:\n{s}"
+            );
         }
         // The chat taking all 50 columns: not drawn, and said where the user looks — and `C-q` brings it up
         let (buttons, s) = shown(50, true);
@@ -17682,7 +17691,6 @@ mod tests {
                 aside: false,
                 like: Vec::new(),
                 came: 0,
-                typing: false,
                 yours: false,
                 output: None,
             });
@@ -21336,8 +21344,8 @@ mod tests {
             ("back", 1),
             // a card's line, and the change's, for the same act: esc leaves it there, unanswered
             ("goes back", 4),
-            // a card given the keys (`C-q`): esc gives them back where they came from — the code or the chat
-            ("gives them back", 2),
+            // a card given the keys (`C-q`, a press on it): esc gives them back where they came from — the code or the chat
+            ("gives them back", 3),
             // the stale notes' list goes back to the card it came from, not the code
             ("back to the card", 1),
             // Claude's answer streaming: esc stops it

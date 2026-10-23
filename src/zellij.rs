@@ -92,11 +92,11 @@ impl Editor {
     }
 
     /// `C-q` as said once the keys are back in the code's normal mode — for a line that tells the way back itself
-    /// (the prompt's `esc close — then …`). None: inside zellij the card in front takes them there by itself.
-    pub fn c_q_from_code(&self) -> Option<String> {
+    /// (the prompt's `esc close — then …`).
+    pub fn c_q_from_code(&self) -> String {
         match self.twinned("C-q") {
             true => c_q_tail(self, Reach::Next),
-            false => Some("C-q".into()),
+            false => "C-q".into(),
         }
     }
 }
@@ -130,12 +130,12 @@ fn bound(node: &Node, command: &str, like: &str) -> String {
 }
 
 /// The keys back to the code's normal mode from where they go now (`keys_to`), each as bound: a card holding them
-/// (`C-q` gave them, `card_keys` — it swallows what isn't its answer) lets go first with its `esc`, back to what it
-/// took them from; then the way from there (`from`).
+/// (focused — it says what isn't its answer) lets go first with its `esc`, back to what it took them from; then the
+/// way from there (`from`).
 fn way_back(ed: &Editor) -> Vec<String> {
     let keys = ed.keys_to();
     match keys.region {
-        Region::Card(_) if ed.card_keys => {
+        Region::Card(_) if ed.card_has_keys() => {
             let mut back = vec!["esc".to_string()];
             back.extend(from(ed, keys.under.unwrap_or(Region::Code)));
             back
@@ -176,20 +176,12 @@ fn from(ed: &Editor, region: Region) -> Vec<String> {
     }
 }
 
-/// `C-q`'s twin. `C-q` goes to the inbox's first, any session's (`next_up`); with the keys back in the code's normal
-/// mode the card in front takes them itself — so when that's where `C-q` goes (this session's, not stepped aside, no
-/// edit review open, its text not the buffer in sight: `card_keys_free`'s), the way back is the twin. Anything
-/// else — a card in a session behind, an edit, the edit review — is the inbox's, from the code (`space I`, `enter`
-/// goes to it); a turn that ended, the session list's (`space W`); nothing waiting, the inbox too — it says nothing
-/// waits, as `C-q` does. Each key as bound.
+/// `C-q`'s twin. `C-q` goes to the inbox's first, any session's (`next_up`), and focuses it; from the code the inbox
+/// does the same (`space I`, `enter` goes to it and focuses it — P3 §3.8: no card takes the keys by itself, the one in
+/// front too); a turn that ended, the session list's (`space W`); nothing waiting, the inbox too — it says nothing
+/// waits, as `C-q` does. The way back first. Each key as bound.
 fn c_q_twin(ed: &Editor, reach: Reach) -> String {
-    let back = way_back(ed);
-    match c_q_tail(ed, reach) {
-        Some(tail) => then(back, tail),
-        // (the card in front: the way back alone — already there, the inbox)
-        None if back.is_empty() => inbox(ed),
-        None => back.join(" "),
-    }
+    then(way_back(ed), c_q_tail(ed, reach))
 }
 
 /// A command's shortest key as bound none of whose keys zellij takes (`Keymaps::untaken`) — its `:` command when
@@ -203,28 +195,20 @@ fn inbox(ed: &Editor) -> String {
     bound_key(ed, "inbox", ":inbox")
 }
 
-/// What follows the way back to reach what `C-q` reaches, from the code (`c_q_twin`) — None: the card in front, which
-/// takes the keys there by itself.
-fn c_q_tail(ed: &Editor, reach: Reach) -> Option<String> {
+/// What follows the way back to reach what `C-q` reaches, from the code (`c_q_twin`).
+fn c_q_tail(ed: &Editor, reach: Reach) -> String {
     use crate::inbox::Next;
     let reach = match reach {
         Reach::Next => match ed.next_up() {
-            Next::Card(id)
-                if ed.offers.first().is_some_and(|o| o.id == id && !o.aside)
-                    && ed.session.review.is_none()
-                    && !ed.offer_reading() =>
-            {
-                return None;
-            }
             Next::Done(_) => Reach::Sessions,
             Next::Card(_) | Next::Review | Next::Go(_) | Next::None => Reach::Inbox,
         },
         r => r,
     };
-    Some(match reach {
+    match reach {
         Reach::Sessions => bound_key(ed, "session_list", ":session-switch"),
         _ => inbox(ed),
-    })
+    }
 }
 
 #[cfg(test)]

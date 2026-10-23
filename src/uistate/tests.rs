@@ -102,44 +102,52 @@ fn older_card_behind(ed: &mut Editor) {
     light_card(ed);
 }
 
-/// A key, then a light card right after it: it waits for the keys to go quiet (friction 60).
-fn card_as_keys_came(ed: &mut Editor) {
-    ed.keys_hold = true;
-    feed(ed, &["j"]);
-    light_card(ed);
+/// A card your own key asked for (`:features-reset`'s): focused as it comes (P3 §3.8).
+fn yours_card(ed: &mut Editor) {
+    let was = ed.events.set_asked(Some(ed.input_seq));
+    ed.push_offer(Offer::new(
+        "Empty the feature counts?".into(),
+        "?",
+        "",
+        String::new(),
+        What::FeaturesReset,
+    ));
+    ed.events.set_asked(was);
 }
 
-/// The state says a card waits for the keys to go quiet — the keys line names it, the card says what it waits
-/// for, both forms — and stops saying it once they've been quiet, when the keys are its; given them by `C-q`, it
-/// has them and waits for nothing.
+/// The state says a card waits to be focused — the keys line names it, the card says it waits, both forms — and
+/// stops saying it once focused (`C-q`), the keys its own; let go with `esc`, it waits again. Your own card waits
+/// for nothing: focused as it came.
 #[test]
-fn the_state_says_a_card_waits_for_the_keys_to_go_quiet() {
+fn the_state_says_a_card_waits_to_be_focused() {
     let mut ed = editor();
-    card_as_keys_came(&mut ed);
+    light_card(&mut ed);
     frame(&mut ed);
-    // (keys just came: the frame drawn never eats into the window, however slow the machine)
-    ed.last_input = Some(crate::clock::now());
     let s = ed.ui_state();
     let id = format!("card#{}", ed.offers[0].id);
     assert_eq!(s.json()["keys"]["region"], "code", "the keys are the code's meanwhile");
     assert_eq!(s.json()["keys"]["waiting"], id.as_str());
-    assert_eq!(s.json()["cards"][0]["waits"], "keys quiet");
+    assert_eq!(
+        (&s.json()["cards"][0]["waits"], &s.json()["cards"][0]["focused"]),
+        (&json!("focus"), &json!(false))
+    );
     let text = s.text();
-    assert!(text.contains(&format!("· {id} takes them once the keys are quiet")), "{text}");
-    assert!(text.contains(" · waits for the keys quiet, C-q answers it"), "{text}");
-    // Given the keys: its own, waiting for nothing
+    assert!(text.contains(&format!("· {id} waits — C-q focuses it")), "{text}");
+    assert!(text.contains(" · waits, C-q focuses it"), "{text}");
+    // Focused: its own, waiting for nothing
     feed(&mut ed, &["<C-q>"]);
     let s = ed.ui_state();
     assert_eq!(s.json()["keys"]["to"], id.as_str());
     assert!(s.json()["keys"]["waiting"].is_null() && s.json()["cards"][0]["waits"].is_null());
-    // Let go, then quiet: the keys are its, nothing waits
+    assert_eq!(s.json()["cards"][0]["focused"], true);
+    // Let go: it waits again
     feed(&mut ed, &["<esc>"]);
-    assert_eq!(ed.ui_state().json()["keys"]["waiting"], id.as_str(), "let go as keys came: waits again");
-    ed.last_input = ed.last_input.map(|t| t - crate::offer::KEYS_QUIET);
+    assert_eq!(ed.ui_state().json()["keys"]["waiting"], id.as_str(), "let go: waits again");
+    // Yours: focused as it came, waiting for nothing
+    ed.offers.clear();
+    yours_card(&mut ed);
     let s = ed.ui_state();
-    assert_eq!(s.json()["keys"]["to"], id.as_str(), "quiet: the card's");
-    assert!(s.json()["keys"]["waiting"].is_null() && s.json()["cards"][0]["waits"].is_null());
-    assert!(!s.text().contains("quiet"), "{}", s.text());
+    assert!(s.json()["keys"]["waiting"].is_null() && s.json()["cards"][0]["focused"] == true, "{}", s.text());
 }
 
 /// frictions29 #69, #70, #76: a weighty card's `y` before it was seen whole is said in its state entry
@@ -154,7 +162,7 @@ fn the_state_says_a_refused_y_whose_card_it_is_and_where_an_answer_leaves_a_sess
     ed.push_offer(Offer::new("Claude changes 30 files".into(), &q, "", String::new(), what));
     ed.focus_sync();
     crate::term::render(&mut ed, &mut Vec::new(), 100, 16).unwrap();
-    settle(&mut ed);
+    focus(&mut ed);
     let front = |ed: &Editor| ed.ui_state().json()["cards"][0].clone();
     assert_eq!(front(&ed)["answers"][0]["key"], "v", "v first while y waits: {}", front(&ed));
     assert!(front(&ed)["refused"].is_null());
@@ -221,7 +229,7 @@ fn a_long_carry_out_card_waits_to_be_read() {
     ed.push_offer(b.card());
     ed.focus_sync();
     crate::term::render(&mut ed, &mut Vec::new(), 100, 24).unwrap();
-    settle(&mut ed);
+    focus(&mut ed);
     feed(&mut ed, &["y"]);
     assert_eq!(ed.offers.len(), 1, "not carried");
     assert_eq!(ed.ui_state().json()["cards"][0]["refused"], "y — see it whole first (v)");
@@ -248,11 +256,9 @@ fn settings_card(ed: &mut Editor) {
     ed.push_offer(Offer::new(crate::claudetrust::TITLE.into(), q, "", String::new(), what));
 }
 
-/// The front card in sight long enough for its answers to count.
-fn settle(ed: &mut Editor) {
-    if let Some(o) = ed.offers.first() {
-        ed.offer_seen.set(Some((o.id, o.rev, Instant::now() - crate::offer::SETTLE * 2)));
-    }
+/// The front card focused — as a press on it does (P3 §3.8).
+fn focus(ed: &mut Editor) {
+    ed.card_focus_front();
 }
 
 fn chat(ed: &mut Editor, draft: &str) {
@@ -354,10 +360,10 @@ const SCENES: &[Scene] = &[
         ed.open_prompt(crate::editor::PromptKind::Command, "");
     }),
     ("a light card", light_card),
-    ("a weighty card, settled", |ed| {
+    ("a weighty card, focused by a press", |ed| {
         weighty_card(ed);
         frame(ed);
-        settle(ed);
+        focus(ed);
     }),
     ("a weighty card, just up", weighty_card),
     ("a card over the chat's draft", |ed| {
@@ -379,7 +385,6 @@ const SCENES: &[Scene] = &[
         chat(ed, "");
         settings_card(ed);
         frame(ed);
-        settle(ed);
     }),
     // (frictions26: a run card coming mid-turn leaves the empty input the keys — the `a` of a message typed next
     // was a grant; `C-q` hands them over)
@@ -387,20 +392,17 @@ const SCENES: &[Scene] = &[
         chat(ed, "");
         weighty_card(ed);
         frame(ed);
-        settle(ed);
     }),
     ("a weighty card given the keys from the empty chat (C-q)", |ed| {
         chat(ed, "");
         weighty_card(ed);
         frame(ed);
-        settle(ed);
         feed(ed, &["<C-q>"]);
     }),
     ("the Claude settings card given the keys from the chat (C-q)", |ed| {
         chat(ed, "");
         settings_card(ed);
         frame(ed);
-        settle(ed);
         feed(ed, &["<C-q>"]);
     }),
     // (a held card's `h` went to what it waits on: its letters are the code's, `C-q` answers it)
@@ -413,11 +415,17 @@ const SCENES: &[Scene] = &[
         ed.offers[0].aside = true;
         feed(ed, &["<C-q>"]);
     }),
-    // (it came right after a key: it waits for the keys to go quiet — friction 60)
-    ("a card that came as keys came in", card_as_keys_came),
-    ("a card that came as keys came in, given the keys (C-q)", |ed| {
-        card_as_keys_came(ed);
-        feed(ed, &["<C-q>"]);
+    // (P3 §3.8: what your own key asked for is focused as it comes)
+    ("a card you asked for", yours_card),
+    // (focused, `C-w` gives the keys back and goes on as the window prefix)
+    ("a card focused, then C-w", |ed| {
+        light_card(ed);
+        feed(ed, &["<C-q>", "<C-w>"]);
+    }),
+    ("a card focused by C-w w", |ed| {
+        light_card(ed);
+        frame(ed);
+        feed(ed, &["<C-w>", "w"]);
     }),
     ("a card in insert mode", |ed| {
         light_card(ed);
@@ -777,7 +785,7 @@ fn mismatches(scenes: &[Scene], model: impl Fn(&Editor) -> KeysTo) -> Vec<String
             frame(&mut ed);
             // (a scene that settles its card did so after its frame — again, after this one)
             if name.contains("settled") {
-                settle(&mut ed);
+                focus(&mut ed);
             }
             ed.focus_sync();
             let said = model(&ed).route(key(probe)).handler();
@@ -831,7 +839,7 @@ fn shuttle_mismatches(scenes: &[Scene]) -> Vec<String> {
         setup(&mut ed);
         frame(&mut ed);
         if name.contains("settled") {
-            settle(&mut ed);
+            focus(&mut ed);
         }
         ed
     };
@@ -888,7 +896,7 @@ fn shuttle_sequence_mismatches(scenes: &[Scene]) -> Vec<String> {
         setup(&mut ed);
         frame(&mut ed);
         if name.contains("settled") {
-            settle(&mut ed);
+            focus(&mut ed);
         }
         ed.focus_sync();
         ed
@@ -994,6 +1002,21 @@ fn the_routing_test_sees_each_case_broken() {
         }
     }
     assert!(leaves >= 5, "scenes whose place leaves keys to the editor: {leaves}");
+    // A card that waits taking its answers (the free keys of before P3 §3.8): `y` the code's yank, never its yes —
+    // the test says so
+    let takes_answers = |ed: &Editor| {
+        let mut k = ed.keys_to();
+        if let Some(o) = ed.offers.first().filter(|_| !ed.card_has_keys()) {
+            let layer =
+                Layer { region: Region::Card(o.id), filter: Filter::Only(vec![ch('y')]), shortcut: false };
+            let at = main(&k);
+            k.chain.insert(at, layer);
+        }
+        k
+    };
+    let waiting: Vec<Scene> = SCENES.iter().filter(|s| s.0 == "a light card").copied().collect();
+    assert_eq!(waiting.len(), 1);
+    assert!(!mismatches(&waiting, takes_answers).is_empty(), "a card that waits took y, and the test passes");
     // The shuttle's entrance, its check skipped: a step written for another place lands — and the test says so
     crate::shuttle::SKIP_EXPECT.set(true);
     let off = shuttle_mismatches(&SCENES[..2]);
@@ -1015,14 +1038,7 @@ fn silent() -> Vec<String> {
         for probe in PROBES {
             let mut ed = editor();
             setup(&mut ed);
-            if name.contains("settled") {
-                frame(&mut ed);
-                settle(&mut ed);
-            }
             let (before, said) = (shown(&mut ed), ed.said);
-            if name.contains("settled") {
-                settle(&mut ed);
-            }
             ed.handle_key(key(probe));
             if shown(&mut ed) == before && ed.said == said {
                 out.push(format!("{name} · {probe:?}"));
@@ -1344,7 +1360,6 @@ fn the_claude_settings_card_and_the_chat_input_each_keep_their_keys() {
     chat(&mut ed, "");
     settings_card(&mut ed);
     frame(&mut ed);
-    settle(&mut ed);
     assert_eq!(ed.keys_to().region, Region::Chat);
     feed(&mut ed, &["n"]);
     assert_eq!(ed.session.chat.as_ref().unwrap().input, "n", "typed, not an answer");
@@ -1367,7 +1382,6 @@ fn a_card_come_mid_turn_leaves_the_empty_chat_its_keys() {
     chat(&mut ed, "");
     weighty_card(&mut ed);
     frame(&mut ed);
-    settle(&mut ed);
     assert_eq!(ed.keys_to().region, Region::Chat);
     feed(&mut ed, &["a", "n", "d"]);
     frame(&mut ed);
@@ -1578,6 +1592,7 @@ fn the_text_form_and_the_json_agree() {
     let mut ed = editor();
     light_card(&mut ed);
     frame(&mut ed);
+    feed(&mut ed, &["<C-q>"]);
     let s = ed.ui_state();
     let v = s.json();
     assert_eq!(v["v"], V);
@@ -1805,7 +1820,7 @@ fn a_shuttle_types_over_the_socket_once_you_said_yes() {
         }
     }
     frame(&mut ed);
-    settle(&mut ed);
+    focus(&mut ed);
     assert_eq!(got.lock().unwrap().len(), 1, "the hello waits on you");
     let card = ed.offers.iter().find(|o| o.kind() == "shuttle").unwrap();
     let pid = std::process::id();
@@ -1884,17 +1899,15 @@ fn a_card_says_why_y_waits_and_lets_its_text_be_read_from_it() {
         crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), w, h).unwrap()
     };
     shown(&mut ed);
-    settle(&mut ed);
     assert!(!ed.offer_seen_whole(), "cut to fit");
     feed(&mut ed, &["<C-q>", "v"]);
     shown(&mut ed);
-    settle(&mut ed);
     assert!(ed.offer_bar(), "its text in its buffer, the card a bar over the status line");
     feed(&mut ed, &["y"]);
     let s = shown(&mut ed);
     assert!(!ed.offers.is_empty() && s.contains("ge to its end first — y waits"), "said on the bar:\n{s}");
     feed(&mut ed, &["g", "e"]);
-    assert!(ed.card_keys, "the card still holds the keys");
+    assert!(ed.card_has_keys(), "the card still holds the keys");
     let s = shown(&mut ed);
     assert!(ed.offer_seen_whole(), "read to its end from the card:\n{s}");
     assert!(s.contains("echo step 60"), "{s}");
@@ -1920,10 +1933,12 @@ fn reading_a_tall_card(keys: &[&str]) -> Editor {
     };
     ed.push_offer(Offer::new("Claude wants to run a script".into(), &q, "", String::new(), what));
     bar_frame(&mut ed);
-    settle(&mut ed);
+    // (focused by `C-q` in `keys`, else by a press on it)
+    if keys.first() != Some(&"<C-q>") {
+        focus(&mut ed);
+    }
     feed(&mut ed, keys);
     bar_frame(&mut ed);
-    settle(&mut ed);
     assert!(ed.offer_reading(), "its text is the buffer in sight");
     ed
 }
@@ -1954,11 +1969,11 @@ fn one_c_q_gives_a_card_being_read_its_keys_whatever_held_them() {
         feed(&mut ed, keys);
         bar_frame(&mut ed);
         feed(&mut ed, &["<C-q>"]);
-        assert!(ed.card_keys, "{keys:?}: one C-q, the card has the keys");
+        assert!(ed.card_has_keys(), "{keys:?}: one C-q, the card has the keys");
         let s = bar_frame(&mut ed);
         assert!(s.contains("esc goes back"), "{keys:?}: the bar says whose keys they are:\n{s}");
         feed(&mut ed, &["<C-q>"]);
-        assert!(ed.card_keys, "{keys:?}: C-q again keeps them the card's");
+        assert!(ed.card_has_keys(), "{keys:?}: C-q again keeps them the card's");
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("the card has the keys")), "said");
         feed(&mut ed, &["n"]);
         assert!(ed.offers.is_empty(), "{keys:?}: its answer answered it");
@@ -1972,17 +1987,17 @@ fn one_c_q_gives_a_card_being_read_its_keys_whatever_held_them() {
 fn esc_in_a_cards_buffer_only_gives_the_keys_back() {
     let mut ed = reading_a_tall_card(&["<C-q>", "v"]);
     feed(&mut ed, &["<esc>"]);
-    assert!(!ed.card_keys, "held: Esc gives them back (#25)");
+    assert!(!ed.card_has_keys(), "held: Esc gives them back (#25)");
     // (a view key pending: the code's keys — the bar says how to answer)
     feed(&mut ed, &["z"]);
     let s = bar_frame(&mut ed);
     assert!(s.contains("C-q answers it"), "the code has them, said on the bar:\n{s}");
     for _ in 0..3 {
         feed(&mut ed, &["<esc>"]);
-        assert!(!ed.card_keys, "Esc again: still the code's — no turns taken");
+        assert!(!ed.card_has_keys(), "Esc again: still the code's — no turns taken");
     }
     feed(&mut ed, &["<C-q>"]);
-    assert!(ed.card_keys && bar_frame(&mut ed).contains("esc goes back"));
+    assert!(ed.card_has_keys() && bar_frame(&mut ed).contains("esc goes back"));
     feed(&mut ed, &["n"]);
     assert!(ed.offers.is_empty());
 }
@@ -1995,13 +2010,13 @@ fn esc_in_a_cards_buffer_only_gives_the_keys_back() {
 fn esc_then_y_in_a_cards_buffer_doesnt_answer_it() {
     for opened in [&["v"][..], &["<C-q>", "v"]] {
         let mut ed = reading_a_tall_card(opened);
-        assert!(ed.card_keys, "{opened:?}: the card holds the keys while it's read");
+        assert!(ed.card_has_keys(), "{opened:?}: the card holds the keys while it's read");
         feed(&mut ed, &["g", "e"]);
         bar_frame(&mut ed);
         assert!(ed.offer_seen_whole(), "read to its end: `y` would answer it");
         let id = ed.offers[0].id;
         feed(&mut ed, &["<esc>", "y"]);
-        assert!(!ed.card_keys, "{opened:?}: Esc gave them back");
+        assert!(!ed.card_has_keys(), "{opened:?}: Esc gave them back");
         assert_eq!(ed.offers.first().map(|o| o.id), Some(id), "{opened:?}: still up, unanswered");
         assert!(matches!(ed.offers[0].state, crate::offer::OfferState::Asking), "not installing");
         let s = bar_frame(&mut ed);
@@ -2062,7 +2077,6 @@ fn a_long_cards_state_is_whole_and_says_what_has_been_seen() {
     assert!(cut > 0 && card["seen_whole"] == false && card["viewing"] == false, "{card}");
     assert!(line.ends_with(&format!(" · {cut} more lines, not seen whole")), "{line}");
     // `v`: its text open in its buffer — not yet read to its end
-    settle(&mut ed);
     feed(&mut ed, &["<C-q>", "v"]);
     let (card, line) = shown(&mut ed);
     assert!(card["viewing"] == true && card["seen_whole"] == false && card["cut"].is_null(), "{card}");
@@ -2304,7 +2318,7 @@ fn the_gone_ring_says_how_each_card_went() {
     let mut ed = editor();
     light_card(&mut ed);
     frame(&mut ed);
-    feed(&mut ed, &["n"]);
+    feed(&mut ed, &["<C-q>", "n"]);
     frame(&mut ed);
     weighty_card(&mut ed);
     frame(&mut ed);
@@ -2357,10 +2371,11 @@ fn a_watcher_is_told_what_changes() {
     frame(&mut ed);
     let e = events(&rx);
     let kinds: Vec<&str> = e.iter().filter_map(|v| v["event"].as_str()).collect();
+    // (the keys back on the code from the prompt; the card waits to be focused)
     assert_eq!(kinds, vec!["run", "keys", "card-up"], "{e:?}");
     assert_eq!(e[0]["said"], format!("run#{} task: check — spawned", trace.id()));
     assert!(e[2]["said"].as_str().unwrap().contains("End the review? — y end it · n keep reviewing"));
-    feed(&mut ed, &["y"]);
+    feed(&mut ed, &["<C-q>", "y"]);
     ed.set_warning("a.rs changed on disk");
     frame(&mut ed);
     let e = events(&rx);

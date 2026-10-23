@@ -61,7 +61,7 @@ fn hosts_cards(o: &[Offer]) -> Vec<&Ask> {
 fn settled(ed: &mut Editor) {
     crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
     let o = (ed.offers[0].id, ed.offers[0].rev);
-    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
 }
 
 /// A card's answer — `C-q` first when the chat has the keys (it keeps them as a card comes: frictions26).

@@ -150,8 +150,8 @@ fn on(event: Event, cx: Context) -> Vec<Action> {
 A plugin that needs more says so in `permissions()`. When it loads, a card lists what it asks for, in words (and how
 far it reaches: a program runs with any arguments, as you); until you press `y` it can do nothing beyond the buffer
 (its buffer-only commands still work). What it asks for while the card is up waits for your answer: `y` does it, in
-order, and the plugin goes on by itself; not now comes back as `failed`. The card takes `y` only once it has been in
-sight for half a second, so a key meant for the code can't approve it. What you approve is kept, by the plugin's
+order, and the plugin goes on by itself; not now comes back as `failed`. The card takes `y` only once you focus it
+(`C-q`, a click on it), so a key meant for the code can't approve it. What you approve is kept, by the plugin's
 name; if a new version asks for something else, the card asks again. Said no? The plugin can't bring the card back —
 `:plugin-approve <plugin>` does (what it asked for since was refused: ask again).
 

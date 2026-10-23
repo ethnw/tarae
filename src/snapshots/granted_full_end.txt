@@ -103,52 +103,52 @@
 49
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                             ff dddddd ff f fffffff fffffffff fffff f
-01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff f
-02  f   ffff ffffff fff fffffff                        fffff f f
-03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f f
-04  f  ff fffffff                                            f f
-05  f  f                                       dddd dddddddd f f
-06  f  f                                    ddddddd dddddddd f f
-07  f  f                                    ddd dddd ddddddd f f
-08  f  f                                   d ddddddddddd ddd f f
-09  f  f                                   d ddddddddddd ddd f f
-10  f  f                          ddd ddddddd dddddd ddddddd f f
-11  f                                                        f f
-12  f  ffffff f ffff ffffffff                                f f
-13  f  d                                        ddd d dd ddd f f
-14  f  d                                        ddd d dd ddd f f
-15  f                                                        f f
-16  f  ffff fffffff                                          f f
-17  f  d                                        ddd d dd ddd f f
-18  f  d                                ddd d ddddd ddd dddd f f  a TTT TTTTTT
-19  f  d                                ddd d ddddd ddd dddd f f
-20  f                                                        f f  dd ddddd ddd ddddd dddddddd
-21  f  ffff ffff                                             f f  dddddddd dddd dddddddd
-22  f  d                                       ddd d ddd ddd f f
-23  f  d                                       ddd d ddd ddd f f  DDD fff f ffffffffff
-24  f                                                        f f  f ddddddd dddd dddd dddd dddd
-25  f  fffffff fffffff ffffffff f fffff ffffffff             f f  f ddddd dd dddd dddd dddddd ddd dddd
-26  f  d                           ddd d dd ddd d d dddddddd f f  f ddd dd dddd dddddddddd dddddddddd
-27  f                                                        f f
-28  f  ffffffff ffffffff f fffff ffffffff                    f f  DDD fff fffffff fffff
-29  f  d                                        ddd d dd ddd f f
-30  f                                                        f f
-31  f  fffff fff ffffffff f fffff ffffffff                   f f
-32  f  d                                        ddd d dd ddd f f
-33  f                                                        f f
-34  f  fff fffff f fffff ffffffff                            f f
-35  f  d                                        ddd d dd ddd f f
-36  f  d                                        ddd d dd ddd f f
-37  f                                                        f f
-38  f  fffffff f ffffffffff                                  f f
-39  f  d                                                 ddd f f
-40  f                                                        f f
-41  f  fffffffff f fffff ffffffff                            f f
-42  fa d TTT TTT TTTTTT TTTTTTT TTTTT                    ddd f f
-43  f                                                        f f
-44  f  f ffff ffff fff fffff fffffffff f fff ffff ffff       f f
-45  f                                                        f f
-46  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff f  ffffffffffffffffffffffffffffffffffff
+01  aa TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f
+02  a   ffff ffffff fff fffffff                        fffff a f
+03  a ffffffffffffffffffffffffffffffffffffffffffffffffffffff a f
+04  a  ff fffffff                                            a f
+05  a  f                                       dddd dddddddd a f
+06  a  f                                    ddddddd dddddddd a f
+07  a  f                                    ddd dddd ddddddd a f
+08  a  f                                   d ddddddddddd ddd a f
+09  a  f                                   d ddddddddddd ddd a f
+10  a  f                          ddd ddddddd dddddd ddddddd a f
+11  a                                                        a f
+12  a  ffffff f ffff ffffffff                                a f
+13  a  d                                        ddd d dd ddd a f
+14  a  d                                        ddd d dd ddd a f
+15  a                                                        a f
+16  a  ffff fffffff                                          a f
+17  a  d                                        ddd d dd ddd a f
+18  a  d                                ddd d ddddd ddd dddd a f  a TTT TTTTTT
+19  a  d                                ddd d ddddd ddd dddd a f
+20  a                                                        a f  dd ddddd ddd ddddd dddddddd
+21  a  ffff ffff                                             a f  dddddddd dddd dddddddd
+22  a  d                                       ddd d ddd ddd a f
+23  a  d                                       ddd d ddd ddd a f  DDD fff f ffffffffff
+24  a                                                        a f  f ddddddd dddd dddd dddd dddd
+25  a  fffffff fffffff ffffffff f fffff ffffffff             a f  f ddddd dd dddd dddd dddddd ddd dddd
+26  a  d                           ddd d dd ddd d d dddddddd a f  f ddd dd dddd dddddddddd dddddddddd
+27  a                                                        a f
+28  a  ffffffff ffffffff f fffff ffffffff                    a f  DDD fff fffffff fffff
+29  a  d                                        ddd d dd ddd a f
+30  a                                                        a f
+31  a  fffff fff ffffffff f fffff ffffffff                   a f
+32  a  d                                        ddd d dd ddd a f
+33  a                                                        a f
+34  a  fff fffff f fffff ffffffff                            a f
+35  a  d                                        ddd d dd ddd a f
+36  a  d                                        ddd d dd ddd a f
+37  a                                                        a f
+38  a  fffffff f ffffffffff                                  a f
+39  a  d                                                 ddd a f
+40  a                                                        a f
+41  a  fffffffff f fffff ffffffff                            a f
+42  aa d TTT TTT TTTTTT TTTTTTT TTTTT                    ddd a f
+43  a                                                        a f
+44  a  f ffff ffff fff fffff fffffffff f fff ffff ffff       a f
+45  a                                                        a f
+46  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f  ffffffffffffffffffffffffffffffffffff
 47                                                             f  f fff fffff ffffffff
 48                                                             f  DDDDD D fffff  DDDDD D fffff
 49  a TTTTTT   D ffff ff ffff  D D ffff  DDD fffff                              dddd   ddddd dd   TTT

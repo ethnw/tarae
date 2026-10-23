@@ -117,8 +117,8 @@ fn preflight_failed(ed: &mut Editor, name: &str, root: &std::path::Path) -> Stri
     format!("{name}'s bring card: p, its preflight failed")
 }
 
-/// `space W`'s `m` on each session, `B`, and the card's `y` once it's drawn and settled.
-fn queue_asked(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)]) -> String {
+/// `space W`'s `m` on each session, `B`, and the card's `y` once it's drawn and focused.
+fn queue_asked(_sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::PathBuf)]) -> String {
     if ed.bring_queue.run.is_some() {
         return "(a queue is under way)".into();
     }
@@ -136,7 +136,8 @@ fn queue_asked(sim: &mut Sim, ed: &mut Editor, names: &[(String, std::path::Path
         return "B: its card behind another".into();
     }
     crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
-    sim.wait(crate::offer::SETTLE + Duration::from_millis(50));
+    // (focused — a press on it — then its `y`)
+    ed.card_focus_front();
     ed.handle_key(Key::plain(Code::Char('y')));
     "B, and y on its card".into()
 }

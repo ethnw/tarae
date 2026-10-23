@@ -86,7 +86,7 @@ JSON for programs, and a short text form for people and Claude, from the same st
       "title": "Claude wants to run a command", "asks": "cargo test -p tarae",
       "answers": [{ "key": "y", "does": "run it" }, { "key": "a", "does": "also `cargo test` unasked, this chat" },
                   { "key": "n", "does": "tell Claude no" }],
-      "state": "asking", "weighty": true, "settled": true, "rev": 0,
+      "state": "asking", "weighty": true, "focused": true, "rev": 0,
       "up": "front", "waited_ms": 4100, "in_sight_ms": 3900, "seen_whole": true, "at": [96, 30, 62, 9] }
   ],
   "inbox": [
@@ -109,7 +109,7 @@ The same state as text (`tarae state`; Claude's tool returns this form at its le
 tarae 4182 · frame 4812 · input 1033 · 160×48
 keys → card#12 (answers y a n v) · under it: chat
 session s1 uistate (front) · claude waiting · 1 card     s0 main · idle
-card#12 claude · run · "cargo test -p tarae" · y run it · a also `cargo test` unasked · n no · settled
+card#12 claude · run · "cargo test -p tarae" · y run it · a also `cargo test` unasked · n no · focused
 run#7 claude · cargo test · waiting for cargo's lock · 0:37
 side git · 4 rows · in hand git:src/term.rs
 ```
@@ -135,16 +135,15 @@ side git · 4 rows · in hand git:src/term.rs
 
     A driver about to send `y` checks `takes`.
   - `answers`: when a card has the keys (an edit's review: `y n a q`).
-  - `held`: `C-q` gave the card the keys — every key is its (else only its answers are, the rest go `under`).
+  - `held`: the card is focused (`C-q`, a click, `C-w w`, or your own key's card as it came) — every key is its but the
+    window prefix, which gives them back and goes on (P3 §3.8: a card not focused takes none).
   - `pending`: a key sequence under way, as which-key shows it (a count first). `char_next`: the next key is
     taken as a character (`f`, `r`, a `gw` label).
   - `drawn`: the region is on screen this frame.
   - `under`: what has the keys once a `C-q` card lets go.
-  - `waiting` (V 9, friction 60): the card that takes the keys once they've been quiet a second — it came while
-    keys were coming in; until then they go where `region` says (text form: `card#3 takes them once the keys are
-    quiet`). A driver about to answer it waits for the next state with `waiting` gone, or sends `C-q` first. A
-  shuttle's step frees a card whose quiet has come before it checks anything, and never between its check and its
-  key: a step checked as the code's lands in the code.
+  - `waiting` (V 13): the front card waiting to be focused — the keys go where `region` says (text form: `card#3
+    waits — C-q focuses it`). A driver about to answer it sends `C-q` first (or a click), and reads the next state's
+    `held`; a shuttle's step checked as the code's lands in the code.
 
   `keys` comes from one new `Editor::keys_to()`, and the routing test (phase 1) holds `handle_key` to it.
 - **`mode`, `prompt`** — mode, and the prompt's kind (`PromptKind::label`) and text (full level only).
@@ -207,14 +206,15 @@ side git · 4 rows · in hand git:src/term.rs
     the inbox picker's one-row label.
   - `answers`: from a new `Offer::answers()`, which the hint row is drawn from too — a weighty card in front not
     seen whole has `v` first (its `y` waits until it is; frictions29 #69).
-  - `settled`: in sight past `SETTLE`, so `y` would count.
+  - `focused` (V 13): the front card has the keys (`Editor::card_has_keys` — `C-q`, a click, `C-w w`, or your own
+    key's card as it came; P3 §3.8), so its answers answer it.
   - `seen_whole`: `offer_read`.
   - `refused` (frictions29 #69): the front card's last key it didn't take, and why — what it says on itself
     (`offer_refused`; a `y` before it was seen whole: `y — see it whole first (v)`) — null until one, and again
     once the card changes.
   - `session` is the session a card is about — a bring card's the session it brings (frictions29 #70) — and
     `shown_in` where it stands when that's another (else null).
-  - `waited_ms` / `in_sight_ms`: from `since` and `offer_seen`.
+  - `waited_ms` / `in_sight_ms`: from `since` and when it was first drawn in front (`Offer.drawn`).
   - `at`: its rect, as drawn.
   - (a run, in `runs`: `ran` — cardburden 4 — where Claude's command ran, from its run's record: `where`
     (`sandbox`, `sandbox own + Docker socket`, `outside`), `past` (past the sandbox), `why`, and `warned` — each
@@ -224,9 +224,9 @@ side git · 4 rows · in hand git:src/term.rs
     nothing changed since; `null` otherwise.
   - `held` (frictions25 R8): why its yes isn't among its answers (`Offer.held` — high-risk changes no one has
     looked at), `null` when it isn't held; the text form says it on the card's line, `y held: …`. `aside`: it
-    stepped aside for what its `h` went to (`Offer.aside`) — `aside, C-q answers it` on the line. `waits` (V 9):
-    `keys quiet` while it waits for the keys to go quiet (`keys.waiting` names it), else `null` — `waits for the keys
-    quiet, C-q answers it` on the line.
+    stepped aside for what its `h` went to (`Offer.aside`) — `aside, C-q answers it` on the line. `waits` (V 13):
+    `focus` while the front card waits to be focused (`keys.waiting` names it), else `null` — `waits, C-q focuses
+    it` on the line.
   - `text` (cardburden 5, full level only): the card's text whole, `[{ line, role }]` — `role` as the card draws
     the line: `warning` (what yes risks, the warning colour: `Offer.warning` and the data's `warnings`) over
     `diff` (what changed since a `y`, `sinceyes`) over `decided` (`decided_lines`, full strength) — the rest

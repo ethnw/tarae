@@ -453,13 +453,10 @@ mod tests {
         assert!(!ed.offer_key(y), "not drawn (too narrow, a picker over it): y isn't an answer");
         assert!(!ed.offers[0].installing());
         ed.screen.offer_buttons = vec![(20, 50, 59, 'y'), (20, 62, 71, 'n'), (20, 74, 81, 'N')];
-        // Just drawn: a y typed a moment ago (meant for the code) is swallowed, not an answer
+        // Drawn whole: its y answers it
         let o = (ed.offers[0].id, ed.offers[0].rev);
         ed.offer_whole.set(Some(o)); // (drawn uncut)
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now())));
-        assert!(ed.offer_key(y));
-        assert!(!ed.offers[0].installing());
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.offer_drawn.set(Some(o));
         assert!(ed.offer_key(y));
         assert!(ed.offers[0].installing());
     }

@@ -99,7 +99,7 @@ fn said(ed: &Editor) -> String {
 }
 
 /// The prompt's line for a key it doesn't take, a card up: its own `esc` is the way back — what reaches the card is
-/// said from the code (inside zellij the card in front takes the keys there), never the prompt's `esc` again.
+/// said from the code (inside zellij the inbox, `enter` on it), never the prompt's `esc` again.
 #[test]
 fn the_prompts_line_says_the_card_from_the_code() {
     for zellij in [false, true] {
@@ -107,11 +107,13 @@ fn the_prompts_line_says_the_card_from_the_code() {
         card(&mut ed);
         feed(&mut ed, ":<C-a>");
         let says = match zellij {
-            true => "esc close — then the card takes the keys",
+            true => "esc close — then space I reaches the card",
             false => "esc close — then C-q reaches the card",
         };
         assert!(said(&ed).contains(says), "{says}: {}", said(&ed));
         feed(&mut ed, "<esc>");
+        assert!(!ed.card_has_keys(), "back in the code: it waits to be focused");
+        feed(&mut ed, if zellij { "<space>I<ret>" } else { "<C-q>" });
         assert!(ed.card_has_keys(), "as it says");
     }
 }
@@ -126,9 +128,9 @@ fn a_card_holding_the_keys_lets_go_first() {
     // (Claude at work: the row where the chat says `answer card`)
     ed.session.chat.as_mut().unwrap().state = State::Thinking;
     card(&mut ed);
-    assert!(drawn(&mut ed, 160, 40).contains("esc esc answer card"), "the card not holding them yet");
+    assert!(drawn(&mut ed, 160, 40).contains("esc esc space I answer card"), "the card not holding them yet");
     keys(&mut ed, "C-q");
-    assert!(ed.card_keys, "the card holds them");
+    assert!(ed.card_has_keys(), "the card holds them");
     assert!(!drawn(&mut ed, 160, 40).contains("answer card"));
     let twin = ed.key_said("C-s");
     assert_eq!(twin, "esc esc esc :chat-screen");
@@ -140,8 +142,8 @@ fn a_card_holding_the_keys_lets_go_first() {
     // Given the keys again, then back: said the chat's way
     ed.session.at = crate::session::At::Chat;
     keys(&mut ed, "C-q C-q");
-    assert!(!ed.card_keys);
-    assert!(said(&ed).contains("keys back — the card waits, esc esc answers it"), "{}", said(&ed));
+    assert!(!ed.card_has_keys());
+    assert!(said(&ed).contains("keys back — the card waits, esc esc space I answers it"), "{}", said(&ed));
 }
 
 /// An edit's review in the buffer, one change of line 1 (`llm::review_with`), the keys in it.
@@ -225,7 +227,9 @@ fn the_chat_taking_the_screen_says_its_way_back_to_the_card() {
     ));
     let s = drawn(&mut ed, 50, 30);
     let status = s.lines().last().unwrap_or_default().to_string();
-    assert!(status.contains("▲1 waiting · esc shows its card"), "{status}\n{s}");
+    // (at 50 columns the key's words fold away: `esc` first, then the inbox)
+    assert!(status.contains("▲1 waiting"), "{status}\n{s}");
+    assert_eq!(ed.key_said("C-q"), "esc space I");
     feed(&mut ed, "<esc>");
     drawn(&mut ed, 50, 30);
     assert!(ed.screen.offer_buttons.iter().any(|b| b.3 == 'y'), "drawn, with its answers");
@@ -301,22 +305,22 @@ fn nothing_waiting_the_twin_is_the_inbox_saying_so() {
     assert!(said(&ed).contains("nothing waits for you"), "{}", said(&ed));
 }
 
-/// The chat's view mode: one `esc` is the way back to the code, where the card in front takes the keys.
+/// The chat's view mode: one `esc` is the way back to the code, then the inbox (`enter` focuses the card).
 #[test]
-fn from_the_chats_view_mode_the_twin_is_one_esc() {
+fn from_the_chats_view_mode_the_twin_is_one_esc_then_the_inbox() {
     let mut ed = editor(true);
     chatting(&mut ed);
     keys(&mut ed, "esc");
     assert!(crate::chatdoc::has_keys(&ed), "in its view mode");
     card(&mut ed);
     assert!(!ed.card_has_keys());
-    assert_eq!(ed.key_said("C-q"), "esc");
-    keys(&mut ed, "esc");
+    assert_eq!(ed.key_said("C-q"), "esc space I");
+    keys(&mut ed, "esc space I ret");
     assert!(ed.card_has_keys(), "{:?}", ed.messages.last());
 }
 
-/// The terminal's program holding the keys: `C-\ C-\` (its view mode, then the code) gives the card in front the
-/// keys — on a stand-in terminal (no pty, no program).
+/// The terminal's program holding the keys: `C-\ C-\` (its view mode, then the code), then the inbox, focus the card
+/// in front — on a stand-in terminal (no pty, no program).
 #[test]
 fn from_the_terminals_program_the_twin_is_its_round_to_the_code() {
     let mut ed = editor(true);
@@ -325,8 +329,8 @@ fn from_the_terminals_program_the_twin_is_its_round_to_the_code() {
     assert_eq!(ed.keys_to().region, crate::uistate::Region::Program);
     card(&mut ed);
     assert!(!ed.card_has_keys());
-    assert_eq!(ed.key_said("C-q"), "C-\\ C-\\");
-    keys(&mut ed, "C-\\ C-\\");
+    assert_eq!(ed.key_said("C-q"), "C-\\ C-\\ space I");
+    keys(&mut ed, "C-\\ C-\\ space I ret");
     assert!(ed.card_has_keys(), "{:?} {:?}", ed.keys_to().region, ed.messages.last());
     feed(&mut ed, "n");
     assert!(ed.offers.is_empty(), "its n answered it");
@@ -462,18 +466,18 @@ fn the_chats_twin_of_c_q_gives_the_card_the_keys() {
         ed.session.at = crate::session::At::Chat;
         card(&mut ed);
         let s = drawn(&mut ed, 160, 40);
-        let says = if zellij { "esc esc answer card" } else { "C-q answer card" };
+        let says = if zellij { "esc esc space I answer card" } else { "C-q answer card" };
         assert!(s.contains(says), "{says}:\n{s}");
         assert!(!ed.card_has_keys());
         feed(&mut ed, if zellij { "<esc>" } else { "<C-q>" });
         if zellij {
             drawn(&mut ed, 160, 40);
-            feed(&mut ed, "<esc>");
+            feed(&mut ed, "<esc><space>I<ret>");
         }
         assert!(ed.card_has_keys(), "the card has the keys: {:?}", ed.messages.last());
         if !zellij {
             // (outside zellij too: the card holding them, the row no longer offers to give it them)
-            assert!(ed.card_keys);
+            assert!(ed.card_has_keys());
             assert!(!drawn(&mut ed, 160, 40).contains("answer card"), "held: no `answer card`");
         }
         feed(&mut ed, "n");
@@ -482,16 +486,15 @@ fn the_chats_twin_of_c_q_gives_the_card_the_keys() {
     }
 }
 
-/// A card that came as keys were coming in waits for them to go quiet (`Offer.typing`): the status line's
-/// `▲1 waiting · C-q` says the twin — and `space I` `enter` gives it the keys at once, as `C-q` does.
+/// A card that came on its own waits to be focused (P3 §3.8): the status line's `▲1 waiting · C-q` says the twin —
+/// and `space I` `enter` focuses it, as `C-q` does.
 #[test]
-fn a_card_waiting_for_the_keys_to_go_quiet_says_the_twin() {
+fn a_card_waiting_to_be_focused_says_the_twin() {
     for zellij in [false, true] {
         let mut ed = editor(zellij);
-        ed.keys_hold = true;
         feed(&mut ed, "j");
         card(&mut ed);
-        assert!(ed.card_waits_quiet(), "it waits for the keys to go quiet");
+        assert!(ed.card_waits(), "it waits to be focused");
         let s = drawn(&mut ed, 160, 40);
         let status = s.lines().last().unwrap_or_default().to_string();
         let says = if zellij { "▲1 waiting · space I" } else { "▲1 waiting · C-q" };
@@ -517,10 +520,10 @@ fn the_chats_message_waiting_on_its_card_says_the_way_to_it() {
         assert!(crate::reads::pointing_asks(&ed), "its card");
         drawn(&mut ed, 160, 40);
         feed(&mut ed, "<ret>");
-        let key = if zellij { "esc" } else { "C-q" };
+        let key = if zellij { "esc space I" } else { "C-q" };
         let says = format!("not sent yet — answer the card about what you pointed at first ({key})");
         assert!(said(&ed).contains(&says), "{says}: {}", said(&ed));
-        feed(&mut ed, &format!("<{key}>"));
+        feed(&mut ed, if zellij { "<esc><space>I<ret>" } else { "<C-q>" });
         assert!(ed.card_has_keys(), "{zellij}: {}", said(&ed));
     }
 }
@@ -542,27 +545,27 @@ fn an_aside_cards_line_says_the_twin() {
     }
 }
 
-/// In insert mode a card waits, its line says `C-q to answer it` — inside zellij `esc to answer it`, and `esc`
-/// gives it the keys.
+/// In insert mode a card waits, its line says `C-q to answer it` — inside zellij `esc space I to answer it`, and
+/// that (with the inbox's `enter`) gives it the keys.
 #[test]
-fn insert_modes_twin_of_c_q_is_esc() {
+fn insert_modes_twin_of_c_q_is_esc_then_the_inbox() {
     for zellij in [false, true] {
         let mut ed = editor(zellij);
         feed(&mut ed, "i");
         card(&mut ed);
-        assert_eq!(ed.key_said("C-q"), if zellij { "esc" } else { "C-q" });
+        assert_eq!(ed.key_said("C-q"), if zellij { "esc space I" } else { "C-q" });
         let s = drawn(&mut ed, 160, 40);
         let says = format!("{} to answer it", ed.key_said("C-q"));
         assert!(s.contains(&says), "{says}:\n{s}");
-        feed(&mut ed, if zellij { "<esc>" } else { "<C-q>" });
+        feed(&mut ed, if zellij { "<esc><space>I<ret>" } else { "<C-q>" });
         assert!(ed.card_has_keys());
         feed(&mut ed, "n");
         assert!(ed.offers.is_empty(), "its n answered it");
-        // A prompt open: `esc` too — `space I` would be typed into it
+        // A prompt open: `esc` first — `space I` would be typed into it
         feed(&mut ed, ":");
         card(&mut ed);
-        assert_eq!(ed.key_said("C-q"), if zellij { "esc" } else { "C-q" });
-        feed(&mut ed, if zellij { "<esc>" } else { "<C-q>" });
+        assert_eq!(ed.key_said("C-q"), if zellij { "esc space I" } else { "C-q" });
+        feed(&mut ed, if zellij { "<esc><space>I<ret>" } else { "<C-q>" });
         assert!(ed.prompt.is_none(), "the prompt closed, as C-q closes it");
         assert!(ed.card_has_keys(), "{zellij}: {:?} {:?}", ed.offers.len(), ed.messages.last());
     }

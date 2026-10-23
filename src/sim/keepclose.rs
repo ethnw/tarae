@@ -187,7 +187,7 @@ fn step(sim: &mut Sim, ed: &mut Editor, w: &mut World) -> String {
             let key = if k == 4 { 'y' } else { 'n' };
             crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
             let o = card(ed).map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, crate::clock::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
             ed.handle_key(Key::plain(Code::Char(key)));
             if key == 'y' && w.tips.last() == Some(&to) {
                 w.yes = Some(to);

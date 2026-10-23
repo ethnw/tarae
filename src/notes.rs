@@ -1378,7 +1378,7 @@ mod tests {
     fn answer(ed: &mut Editor, keys: &str) {
         crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
         let o = (ed.offers[0].id, ed.offers[0].rev);
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         feed(ed, keys);
     }
 
@@ -1630,7 +1630,7 @@ mod tests {
             "{}",
             o.question
         );
-        feed(&mut ed, "n");
+        feed(&mut ed, "<C-q>n");
         assert_eq!(gists(&ed), ["found one", "found two", "mine", "the author's"], "kept");
         // A bare `:notes-clear` (every note): asked too, naming each that holds a draft; `n` keeps them all
         crate::typed::execute(&mut ed, "notes-clear").unwrap();
@@ -1643,7 +1643,7 @@ mod tests {
             "{}",
             o.question
         );
-        feed(&mut ed, "n");
+        feed(&mut ed, "<C-q>n");
         assert!(ed.offers.is_empty());
         assert_eq!(gists(&ed), ["found one", "found two", "mine", "the author's"], "kept, every one");
         // The notes list's `A-x`: the card has the keys, `y` closes them
@@ -1654,7 +1654,7 @@ mod tests {
         // Yours: asked too
         crate::typed::execute(&mut ed, "notes-clear you").unwrap();
         assert!(ed.offers.first().is_some_and(|o| o.question.contains("a.rs:4 · mine")));
-        feed(&mut ed, "y");
+        feed(&mut ed, "<C-q>y");
         assert_eq!(gists(&ed), ["the author's"]);
         // None of yours: at once, bare too
         crate::typed::execute(&mut ed, "notes-clear").unwrap();

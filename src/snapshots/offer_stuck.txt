@@ -10,26 +10,26 @@
 07   7     let mut counts = HashMap::new();
 08   8     for word in text.split_whitespace() {
 09   9     │   *counts.entry(word).or_insert(0) += 1;
-10  10     }
-11  11     counts
-12  12 }                                ╭─ Stuck? Claude's command ──────────────────────────────────╮
-13  13                                  │ No output for 12 min, 0% CPU — Claude's command cargo test │
-14  14 fn main() {                      │ --target aarch64-unknown-linux-gnu in the task panel.      │
-15  15     let text = "the quick brown f│ Claude's turn waits on it, and only you can stop it.       │
-16  16     let counts = word_counts(text│                                                            │
-17  17     println!("{} distinct words",│ What each of its threads waits in is in its output now     │
-18  18 }                                │ (w), kept if you stop it:                                  │
-19                                      │     pid 4242 · cargo test --target                         │
-20                                      │         aarch64-unknown-linux-gnu · 1 thread               │
-21                                      │       cargo — sleeping in do_wait · 0.84 s CPU             │
-22                                      │     pid 4250 · qemu-aarch64 target/debug/deps/tarae-1f2e · │
-23                                      │         3 threads                                          │
-24                                      │       3 × qemu-aarch64 — sleeping in futex_wait_queue ·    │
-25                                      │           0.02 s CPU                                       │
-26                                      │     …                                                      │
+10  10     }                            ╭─ Stuck? Claude's command ──────────────────────────────────╮
+11  11     counts                       │ No output for 12 min, 0% CPU — Claude's command cargo test │
+12  12 }                                │ --target aarch64-unknown-linux-gnu in the task panel.      │
+13  13                                  │ Claude's turn waits on it, and only you can stop it.       │
+14  14 fn main() {                      │                                                            │
+15  15     let text = "the quick brown f│ What each of its threads waits in is in its output now     │
+16  16     let counts = word_counts(text│ (w), kept if you stop it:                                  │
+17  17     println!("{} distinct words",│     pid 4242 · cargo test --target                         │
+18  18 }                                │         aarch64-unknown-linux-gnu · 1 thread               │
+19                                      │       cargo — sleeping in do_wait · 0.84 s CPU             │
+20                                      │     pid 4250 · qemu-aarch64 target/debug/deps/tarae-1f2e · │
+21                                      │         3 threads                                          │
+22                                      │       3 × qemu-aarch64 — sleeping in futex_wait_queue ·    │
+23                                      │           0.02 s CPU                                       │
+24                                      │     …                                                      │
+25                                      │                                                            │
+26                                      │ C-q to answer it                                           │
 27                                      ╰─ y Stop it · w What it waits on · n Keep waiting ──────────╯
 28
-29  ● normal                                                                    rust   utf-8 LF   1:1
+29  ● normal   ▲1 waiting · C-q                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -72,26 +72,26 @@
 07   f
 08   f
 09   f
-10  ff
-11  ff
-12  ff                                  ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffffffff
+10  ff                                  ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffffffff
+11  ff                                  f                                                            f
+12  ff                                  f                                                            f
 13  ff                                  f                                                            f
 14  ff                                  f                                                            f
-15  ff                gggg ggggg ggggg gf                                                            f
-16  ff                                  f                                                            f
-17  ff              ggg gggggggg gggggg f dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd     f
-18  ff                                  f dddd dddd dd ddd dddd ddd                                  f
-19                                      f     ddd dddd d ddddd dddd dddddddd                         f
-20                                      f         ddddddddddddddddddddddddd d d dddddd               f
-21                                      f       ddddd d dddddddd dd ddddddd d dddd d ddd             f
-22                                      f     ddd dddd d dddddddddddd dddddddddddddddddddddddddddd d f
-23                                      f         d ddddddd                                          f
-24                                      f       d d dddddddddddd d dddddddd dd dddddddddddddddd d    f
-25                                      f           dddd d ddd                                       f
-26                                      f     d                                                      f
-27                                      ff A         f A dddd dd ddddd dd f A dddd ddddddd fffffffffff
+15  ff                gggg ggggg ggggg gf dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd     f
+16  ff                                  f dddd dddd dd ddd dddd ddd                                  f
+17  ff              ggg gggggggg gggggg f     ddd dddd d ddddd dddd dddddddd                         f
+18  ff                                  f         ddddddddddddddddddddddddd d d dddddd               f
+19                                      f       ddddd d dddddddd dd ddddddd d dddd d ddd             f
+20                                      f     ddd dddd d dddddddddddd dddddddddddddddddddddddddddd d f
+21                                      f         d ddddddd                                          f
+22                                      f       d d dddddddddddd d dddddddd dd dddddddddddddddd d    f
+23                                      f           dddd d ddd                                       f
+24                                      f     d                                                      f
+25                                      f                                                            f
+26                                      f ddd dd dddddd dd                                           f
+27                                      ff F ffff ff f F ffff ff fffff ff f F ffff fffffff fffffffffff
 28
-29  a TTTTTT                                                                    dddd   ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww w www                                                 dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

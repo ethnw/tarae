@@ -74,11 +74,9 @@ pub struct Offer {
     pub like: Vec<u64>,
     /// The person's input count (`Editor.person_seq` — not a shuttle's keys) when it came (`push_offer`).
     pub came: u64,
-    /// It came while keys were coming in (within `KEYS_QUIET` of the last — a paste, a chord, a driver's
-    /// steps): it waits for them to go quiet before it takes them (`Editor::offer_waits_keys`, friction 60).
-    pub typing: bool,
     /// The user's own (`Offer::rank`, #205): a kind a command of theirs asks for, made by the input the user
-    /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since).
+    /// gave last (`Queue.asked` — the key, or a job it started; nothing typed since). Focused as it comes to the
+    /// front (P3 §3.8: what your own key opened takes the keys at once — `Editor.card_focus`).
     pub yours: bool,
     /// What its `v` opens in a buffer of its own, the card staying up: (title, lines) — a failed preflight's
     /// output on the bring card it stopped (frictions34 42).
@@ -114,29 +112,6 @@ pub fn same_run(root: &std::path::Path, a: &crate::tools::RunCard, b: &crate::to
 
 /// A card's text in a buffer of its own (`v`) is titled this, then the card's title.
 pub const CARD_VIEW: &str = "card · ";
-
-/// How long a card that runs something must have been in sight, as it is, before `y` answers it — a key
-/// pressed as it appears, or as its text changes, isn't an answer.
-pub const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// How long the keys must have been quiet before a card that came while they were coming in takes them
-/// (friction 60: a card came between a paste and its Enter, and a script's `space W` went to one). Above the
-/// gaps inside one act — a chord's keys (~0.1–0.3 s), a paste then its Enter (~0.3–0.7 s), a driver's steps
-/// (milliseconds) — and below a pause to read what came up. `card held`/`card free` log lines say each wait.
-pub const KEYS_QUIET: std::time::Duration = std::time::Duration::from_millis(1000);
-
-/// `KEYS_QUIET`, or `TARAE_KEYS_QUIET_MS` milliseconds instead — for e2e tests that read the state between keys
-/// and must stay inside the window however loaded the machine (as `TARAE_TREES_UNSEEN`); the constant in unit tests.
-pub fn keys_quiet() -> std::time::Duration {
-    static QUIET: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
-    if cfg!(test) {
-        return KEYS_QUIET;
-    }
-    *QUIET.get_or_init(|| {
-        let ms = std::env::var("TARAE_KEYS_QUIET_MS").ok().and_then(|v| v.parse::<u64>().ok());
-        ms.map_or(KEYS_QUIET, std::time::Duration::from_millis)
-    })
-}
 
 #[derive(Clone, Debug)]
 pub enum What {
@@ -372,8 +347,6 @@ pub const KINDS: &[&str] = &[
 /// What a letter does to the front card (`Offer::act`, done by `offer_key`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
-    /// A weighty card's answer pressed as it came up or changed: said, not taken.
-    CameWithIt,
     OneByOne(u64, crate::refactor::Whose),
     ViewAll(crate::refactor::Whose),
     View,
@@ -411,12 +384,12 @@ pub enum Act {
     KeepClose(char),
 }
 
-/// How the front card stands, for a weighty one's answers: drawn (its answers on screen), settled (not just
-/// come up or changed), seen whole (not cut, or `v`'s buffer read to its end).
+/// How the front card stands, for a weighty one's answers: drawn (its answers on screen), seen whole (not cut, or
+/// `v`'s buffer read to its end). Whether it has the keys isn't asked here: a card sees a key only once focused
+/// (`Editor::card_key`, P3 §3.8) — what the settle guarded against (a key pressed as it came up) never reaches it.
 #[derive(Clone, Copy, Debug)]
 pub struct Stands {
     pub drawn: bool,
-    pub settled: bool,
     pub whole: bool,
 }
 
@@ -607,7 +580,6 @@ impl Offer {
             aside: false,
             like: Vec::new(),
             came: 0,
-            typing: false,
             yours: false,
             output: None,
         }
@@ -875,10 +847,9 @@ impl Offer {
     pub fn acts_on(&self, c: char) -> bool {
         matches!(c, 'y' | 'n')
             || (c == 'v' && (self.weighty() || matches!(self.what, What::Instructions(_))))
-            // (its letters a weighty card takes while it settles or is cut — `offer_key`'s weighty part)
+            // (its letters a weighty card takes while it's cut — `offer_key`'s weighty part)
             || (self.weighty() && self.weighty_answer(c))
-            || (c == 'N'
-                && (self.weighty() || matches!(self.what, What::Install { .. } | What::Fetch { .. })))
+            || (c == 'N' && matches!(self.what, What::Install { .. } | What::Fetch { .. }))
             || (c == 'r'
                 && (self.change_set().is_some()
                     || self.made()
@@ -928,14 +899,10 @@ impl Offer {
     /// place a card's letters are decided (`Editor::offer_key` does what it says); nothing done here.
     pub fn act(&self, c: char, st: Stands) -> Option<Act> {
         use Act as A;
-        // One that runs something: only from a card in sight (one too big for the screen isn't drawn) — and
-        // settled: a key pressed as it appeared or changed is swallowed, not an answer
+        // One that runs something: only from a card in sight (one too big for the screen isn't drawn)
         if self.weighty() {
             if !st.drawn {
                 return None;
-            }
-            if !st.settled && (matches!(c, 'n' | 'N') || self.weighty_answer(c)) {
-                return Some(A::CameWithIt);
             }
             // A change set's card: `r` one by one, `v` every change in a buffer (not a cut card's text) — `r`
             // refused there when a move or delete is among them: decided on the card only
@@ -1542,9 +1509,6 @@ impl crate::editor::Editor {
         // or from work nobody's input started, waits its turn: #205)
         o.came = self.person_seq;
         o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
-        // (keys coming in: it waits for them to go quiet — but not one the last key itself asked for, which is
-        // what the hand waits on, nor one parked in a session behind: it comes up when you switch there)
-        o.typing = self.keys_hold && !o.yours && !self.background() && self.keys_coming();
         // One bring card a session: a new one takes the place of the one waiting for that checkout, wherever it
         // waits — its going said (the gone ring: one card replaced); one whose bring is under way stays
         if let Some(root) = o.bring_root().map(std::path::Path::to_path_buf) {
@@ -1595,7 +1559,9 @@ impl crate::editor::Editor {
                     | What::Instructions(_)
             );
         if let Some(old) = self.offers.iter_mut().find(|x| x.title == o.title).filter(|_| !own) {
-            // Replaced whole — what it says with what it does — and it settles again before `y` counts
+            // Replaced whole — what it says with what it does — its focus gone with its `rev` (`card_focus`): a key
+            // meant for what it said isn't an answer to what it says now. Asked again by your own key: yours again
+            let yours = o.yours;
             if !old.installing() {
                 (old.question, old.working, old.failed) = (o.question, o.working, o.failed);
                 (old.decided, old.warning, old.asked, old.diff) = (o.decided, o.warning, o.asked, o.diff);
@@ -1604,85 +1570,28 @@ impl crate::editor::Editor {
                 (old.what, old.state) = (o.what, OfferState::Asking);
                 old.rev += 1;
             }
+            if yours && self.offers.first().is_some_and(|f| f.title == o.title) {
+                self.card_focus_front();
+            }
             return;
         }
-        // A plugin asking something: its panel gives the keys back, so they reach the card
-        if matches!(o.what, What::PluginPermissions { .. } | What::PluginAsk { .. }) {
-            self.plugin_panel_unfocus();
-        }
-        // (the chat keeps its keys, its input empty or not: a card takes them there only by `C-q` — frictions26:
-        // a card that took them from an empty input took the `a` of a message typed next as a grant)
+        // (the chat keeps its keys, its input empty or not, and so does every surface: a card that came on its own
+        // takes them only by `C-q`, a click or `C-w w` — P3 §3.8; frictions26: one that took them from an empty
+        // input took the `a` of a message typed next as a grant)
         // (asked: counted once it's stacked — one asked again while it's up only refreshed the one there, above)
         self.count(crate::features::Area::Card, o.kind());
-        if o.typing {
-            let after = self.last_input.map_or(std::time::Duration::ZERO, crate::clock::since);
-            let after = crate::term::run_duration(after);
-            crate::log::line("tarae", "card", &format!("card held: came {after} after a key"));
-            self.keys_quiet_later();
-        }
-        let at = self.offer_place(&o);
+        let (at, yours) = (self.offer_place(&o), o.yours);
         self.offers.insert(at, o);
-    }
-
-    /// Whether keys are coming in: the last came within `KEYS_QUIET`.
-    pub fn keys_coming(&self) -> bool {
-        self.last_input.is_some_and(|t| crate::clock::since(t) < keys_quiet())
-    }
-
-    /// Whether the front card waits for the keys to go quiet before it takes them: it came while they were
-    /// coming in (`Offer.typing`) and they still are — drawn, `C-q` answering it, the status line saying it.
-    pub fn offer_waits_keys(&self) -> bool {
-        self.offers.first().is_some_and(|o| o.typing) && self.keys_coming()
-    }
-
-    /// Whether a card anywhere — up, or parked when its session went behind — waits for the keys to go quiet: its
-    /// wake stays armed while one does (the review of friction 60: a card parked as it waited came back to the
-    /// front with nothing to wake it).
-    pub fn cards_typing(&self) -> bool {
-        let parked = std::iter::once(&self.session).chain(&self.sessions).flat_map(|l| &l.parked);
-        self.offers.iter().chain(parked).any(|o| o.typing)
-    }
-
-    /// The keys quiet for `KEYS_QUIET`: the cards that came while they were coming in may take them, in every
-    /// session. True if one did.
-    pub fn keys_quiet_sync(&mut self) -> bool {
-        if self.keys_coming() {
-            return false;
+        // What your own key asked for is focused at once — in front, nothing else being answered there (P3 §3.8)
+        if yours && at == 0 {
+            self.card_focus_front();
         }
-        let parked = std::iter::once(&mut self.session).chain(&mut self.sessions).flat_map(|l| &mut l.parked);
-        let mut freed = 0;
-        for o in self.offers.iter_mut().chain(parked).filter(|o| o.typing) {
-            o.typing = false;
-            freed += 1;
-        }
-        if freed > 0 {
-            let quiet = self.last_input.map_or(std::time::Duration::ZERO, crate::clock::since);
-            let quiet = crate::term::run_duration(quiet);
-            crate::log::line("tarae", "card", &format!("card free: the keys quiet {quiet}"));
-        }
-        freed > 0
     }
 
-    /// One wake for when the keys will have been quiet for `KEYS_QUIET`, while a card waits on them: its frame
-    /// gives it the keys (and the status line stops saying it waits). Keys meanwhile: it sleeps on.
-    fn keys_quiet_later(&mut self) {
-        let Some(t) = self.last_input.filter(|_| !self.keys_waking) else { return };
-        self.keys_waking = true;
-        let wait = keys_quiet().saturating_sub(crate::clock::since(t));
-        // (every session's: a job of the session in front now would land as that one's, a frame owed for the card
-        // it frees in front marked unchanged once another session is in front — friction 60's review)
-        self.events.shared_jobs().spawn(move || {
-            crate::event::sleep(wait);
-            |ed: &mut crate::editor::Editor| {
-                ed.keys_waking = false;
-                if !ed.keys_quiet_sync() {
-                    ed.unchanged = true;
-                    if ed.cards_typing() {
-                        ed.keys_quiet_later();
-                    }
-                }
-            }
-        });
+    /// The front card takes the keys (focused — `C-q`, a click, `C-w w`, or your own key's card as it comes): its
+    /// answers answer it until it's answered, `esc` gives them back, or what it says changes (`Offer.rev`).
+    pub fn card_focus_front(&mut self) {
+        self.card_focus = self.offers.first().filter(|o| !o.installing()).map(|o| (o.id, o.rev));
     }
 
     /// Where a new card goes among those up: behind every one that ranks with it or before it
@@ -1690,25 +1599,23 @@ impl crate::editor::Editor {
     /// Claude's (#205) and a grammar's or a server's never in front of a turn's (#208). Never in front of the
     /// one at the front while it's being answered — its keys brought to it (`C-q`), its text open in its
     /// buffer — nor, for one of the user's, of a front card that came after the input that asked (it came while
-    /// the work ran: maybe being read now). One that comes to the front settles again before `y` counts
-    /// (`offer_settled`: by id).
+    /// the work ran: maybe being read now). The focus is the front's by id: one put in front of it doesn't inherit it.
     fn offer_place(&self, o: &Offer) -> usize {
         let came_since = |f: &Offer| o.yours && f.came >= o.came;
-        let held = self
-            .offers
-            .first()
-            .is_some_and(|f| self.card_keys || self.offer_viewing() || self.offer_bar() || came_since(f));
+        let held = self.offers.first().is_some_and(|f| {
+            self.card_has_keys() || self.offer_viewing() || self.offer_bar() || came_since(f)
+        });
         let rank = o.rank();
         let behind = self.offers.iter().enumerate().skip(usize::from(held)).find(|(_, x)| x.rank() > rank);
         behind.map_or(self.offers.len(), |(i, _)| i)
     }
 
-    /// A card's keys while it has them (`Editor::card_has_keys`) — true if handled (`y` yes · `n` no · `a`/`A`
-    /// for longer · `N` never, for an install, on the front card · `v` all of a cut one).
+    /// A card's keys while it has them (`Editor::card_has_keys`, from `card_key`) — true if handled (`y` yes · `n`
+    /// no · `a`/`A` for longer · `N` never, for an install, on the front card · `v` all of a cut one).
     pub fn offer_key(&mut self, key: crate::key::Key) -> bool {
         use crate::key::Code;
         let Some(o) = self.offers.first() else { return false };
-        if o.installing() || key.ctrl || key.alt || self.plugin_panel_focused() {
+        if o.installing() || key.ctrl || key.alt {
             return false;
         }
         let Code::Char(c) = key.code else { return false };
@@ -1718,25 +1625,23 @@ impl crate::editor::Editor {
         }
         // (how a weighty one stands: drawn — its answers on screen, a digit is a card stacked behind)
         let stands = match o.weighty() {
+            // (drawn as it is: this card at this rev in the last frame, its answers there — not the buttons of
+            // the one an answer took away)
             true => Stands {
-                drawn: self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()),
-                settled: self.offer_settled(),
+                drawn: self.offer_drawn.get() == Some((o.id, o.rev))
+                    && self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()),
                 whole: self.offer_seen_whole(),
             },
-            false => Stands { drawn: true, settled: true, whole: true },
+            false => Stands { drawn: true, whole: true },
         };
         let Some(act) = o.act(c, stands) else { return false };
-        self.offer_do(act, key);
+        self.offer_do(act);
         true
     }
 
     /// What `offer_key` chose for the front card, done.
-    fn offer_do(&mut self, act: Act, key: crate::key::Key) {
+    fn offer_do(&mut self, act: Act) {
         match act {
-            // (a key pressed as it came up isn't an answer — said, not swallowed in silence)
-            Act::CameWithIt => {
-                self.offer_refused(format!("{key} came as the card did — not taken; press it again"))
-            }
             Act::OneByOne(id, whose) => crate::refactor::one_by_one(self, id, whose),
             Act::ViewAll(whose) => crate::refactor::view_all(self, whose),
             Act::View => self.offer_view(),
@@ -2352,13 +2257,10 @@ impl crate::editor::Editor {
         }
     }
 
-    /// `r` on a change set's card: one by one — on a protected-made card: remove them (settled, as `y`).
+    /// `r` on a change set's card: one by one — on a protected-made card: remove them (as `y`).
     pub fn offer_one_by_one(&mut self) {
         if self.offers.first().is_some_and(Offer::made) {
-            if self.offer_settled() {
-                self.offer_accept_by('r');
-            }
-            return;
+            return self.offer_accept_by('r');
         }
         if let Some((id, whose)) = self.offers.first().and_then(|o| Some((o.id, o.change_set()?))) {
             crate::refactor::one_by_one(self, id, whose);
@@ -2423,7 +2325,7 @@ impl crate::editor::Editor {
         // The card keeps the keys while it's read: the keys that read reach the buffer through it (`card_reads`),
         // its answers answer it. In its buffer those are the card's only while it holds them — Esc gives them
         // back, and then `y` is a yank, not a yes; `C-q` gives them again (frictions15 review)
-        self.card_keys = true;
+        self.card_focus_front();
         // (in the focused pane now, not at the next event: its keys go through the card, past the code's
         // path that would put it there — `track_doc_switch`)
         self.sync_focus_view();
@@ -2615,21 +2517,12 @@ impl crate::editor::Editor {
         }
     }
 
-    /// Whether the front card has been in sight, as it is, long enough for `y` (always, for a light one).
-    pub fn offer_settled(&self) -> bool {
-        let Some(o) = self.offers.first() else { return false };
-        !o.weighty()
-            || self
-                .offer_seen
-                .get()
-                .is_some_and(|(id, rev, at)| (id, rev) == (o.id, o.rev) && crate::clock::since(at) >= SETTLE)
-    }
-
-    /// Brings the `i`-th stacked card to the front (when a back card is clicked).
+    /// Brings the `i`-th stacked card to the front, focused (a back card clicked).
     pub fn offer_to_front(&mut self, i: usize) {
         if i > 0 && i < self.offers.len() {
             let o = self.offers.remove(i);
             self.offers.insert(0, o);
+            self.card_focus_front();
         }
     }
 

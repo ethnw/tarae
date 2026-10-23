@@ -122,8 +122,11 @@ fn input(sim: &mut Sim, ed: &mut Editor, ids: &[SessionId]) -> String {
             )
         }
         _ => {
-            let d =
-                *c.pick(&[Duration::from_millis(300), crate::offer::SETTLE * 2, crate::session::NUDGE_AFTER]);
+            let d = *c.pick(&[
+                Duration::from_millis(300),
+                Duration::from_millis(1000),
+                crate::session::NUDGE_AFTER,
+            ]);
             sim.wait(d);
             return format!("{} ms pass", d.as_millis());
         }

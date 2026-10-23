@@ -1394,6 +1394,9 @@ impl Editor {
         // kept)
         crate::view::leave(self);
         crate::chatdoc::leave(self);
+        // (a card focused here lets go: in the other session nothing has the keys until something focuses it there —
+        // `C-q` focuses the card it switched for, after this)
+        (self.card_focus, self.card_next) = (None, None);
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         if waits {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));
@@ -1543,7 +1546,7 @@ mod tests {
         // (drawn and settled — a weighty card's key as it appears isn't an answer)
         crate::term::render(&mut ed, &mut Vec::new(), 120, 30).unwrap();
         let o = &ed.offers[0];
-        ed.offer_seen.set(Some((o.id, o.rev, std::time::Instant::now() - crate::offer::SETTLE * 2)));
+        ed.card_focus = Some((o.id, o.rev));
         feed(&mut ed, "n");
         assert_eq!(titles(&ed), ["Claude asks", "Lua syntax colors"], "yours answered, Claude's still up");
         assert_eq!(first(&ed), claudes_id, "answered: the oldest first again");
@@ -1570,7 +1573,7 @@ mod tests {
             }),
             // Asked, but the card up is being answered — its keys brought to it
             ("being answered", &|ed: &mut Editor| {
-                ed.card_keys = true;
+                ed.card_focus_front();
                 asked(ed, yours());
                 land(ed);
             }),
@@ -1584,7 +1587,7 @@ mod tests {
                 "{why}: Claude's card keeps the front"
             );
             assert_eq!(first(&ed), id_of(&ed, "Claude asks"), "{why}: and the inbox's first");
-            ed.card_keys = false;
+            ed.card_focus = None;
         }
     }
 
@@ -1615,18 +1618,18 @@ mod tests {
         assert!(s.contains("Claude asks 2") && s.contains("1/2 here · 1 elsewhere"), "{s}");
         // C-q with cards up here — back's came first, but this session's own go first (#198): the keys
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys && ed.session.id == 0, "this session's own first");
+        assert!(ed.card_has_keys() && ed.session.id == 0, "this session's own first");
         ed.offers.clear();
-        ed.card_keys = false;
+        ed.card_focus = None;
         // None up here: C-q goes to back's, its card up there
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, back_id, "then the one that waited longest");
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
         // …with the keys (frictions29 19: they took a second C-q)
-        assert!(ed.card_keys && ed.session.id == back_id);
+        assert!(ed.card_has_keys() && ed.session.id == back_id);
         // Nothing waits anywhere: said
         ed.offers.clear();
-        ed.card_keys = false;
+        ed.card_focus = None;
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, back_id);
         assert!(ed.status.as_ref().is_some_and(|s| s.0 == crate::inbox::NOTHING), "{:?}", ed.status);
@@ -1857,7 +1860,7 @@ mod tests {
         let is_run = |ed: &Editor| is(ed, 0, false);
         // C-q, a `y` before it settled (swallowed), Esc: the keys back, the card still up
         feed(&mut ed, "<C-q>y<esc>");
-        assert!(is_run(&ed) && !ed.card_keys, "Esc gives the keys back, never drops the card");
+        assert!(is_run(&ed) && !ed.card_has_keys(), "Esc gives the keys back, never drops the card");
         // Another session's Claude ends a turn behind
         let back_log = back.join("claude-heard.log");
         claude_calls(&mut ed, &back_log, &[]);
@@ -1873,9 +1876,8 @@ mod tests {
         assert!(is(&ed, 1, true), "and the Read's under it");
         assert!(answered(&log, "run").is_none(), "its call still waits for the card");
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys, "C-q finds it");
+        assert!(ed.card_has_keys(), "C-q finds it");
         // …and it's answered from there
-        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
         ed.offer_accept();
         let end = Instant::now() + Duration::from_secs(10);
         while answered(&log, "run").is_none() {
@@ -1892,9 +1894,9 @@ mod tests {
             ed.offers.iter().map(|o| &o.title).collect::<Vec<_>>()
         );
         assert!(answered(&log, "Read").is_none());
-        ed.card_keys = false;
+        ed.card_focus = None;
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys, "C-q finds it");
+        assert!(ed.card_has_keys(), "C-q finds it");
         ed.offer_accept();
         let end = Instant::now() + Duration::from_secs(10);
         while answered(&log, "Read").is_none() {
@@ -1944,12 +1946,12 @@ mod tests {
         // C-q: to back, its card up with the keys (frictions29 19) · C-q: back · C-q: the keys again
         feed(&mut ed, "<C-q>");
         assert!(ed.session.id == id && runs(&ed.offers), "C-q goes to the card");
-        assert!(ed.card_keys, "the card has the keys");
+        assert!(ed.card_has_keys(), "the card has the keys");
         assert_eq!(ed.keys_at().label(), Some("CARD"));
         feed(&mut ed, "<C-q>");
-        assert!(!ed.card_keys && runs(&ed.offers), "keys back, the card still up");
+        assert!(!ed.card_has_keys() && runs(&ed.offers), "keys back, the card still up");
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys && runs(&ed.offers), "C-q brings them to it again");
+        assert!(ed.card_has_keys() && runs(&ed.offers), "C-q brings them to it again");
         // Front's turn ends behind: the card stays, with the keys
         let end = Instant::now() + Duration::from_secs(10);
         while session_by(&ed, 0).chat.as_ref().unwrap().busy() {
@@ -1959,11 +1961,9 @@ mod tests {
                 ed.handle_event(ev);
             }
         }
-        assert!(runs(&ed.offers) && ed.card_keys, "still up, still with the keys");
+        assert!(runs(&ed.offers) && ed.card_has_keys(), "still up, still with the keys");
         // …and it's answered
         let mut out = Vec::new();
-        crate::term::render(&mut ed, &mut out, 140, 30).unwrap();
-        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
         crate::term::render(&mut ed, &mut out, 140, 30).unwrap();
         feed(&mut ed, "y");
         pump(&mut ed, &|_| answered(&back_log, "run").is_some(), "back's Claude hears how it ran");
@@ -2003,7 +2003,6 @@ mod tests {
         pump(&mut ed, &|ed| runs(&session_by(ed, id).parked), "back's own card, parked");
         assert!(answered(&back_log, "run").is_none(), "not refused: {:?}", answered(&back_log, "run"));
         // Front's answered (no): C-q goes to back's, up there
-        std::thread::sleep(crate::offer::SETTLE);
         ed.offer_dismiss();
         assert!(!runs(&ed.offers));
         feed(&mut ed, "<C-q>");

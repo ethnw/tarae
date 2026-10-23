@@ -331,7 +331,7 @@ fn a_stuck_run_is_captured_then_asked_about() {
     // `w`: its panel, at those lines — the card stays
     crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
     let o = (ed.offers[0].id, ed.offers[0].rev);
-    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
     ed.handle_key(Key::plain(Code::Char('w')));
     assert_eq!(ed.slot(), Some(Slot::Task));
     assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, Some(at));
@@ -426,7 +426,7 @@ fn a_stop_from_the_card_ends_what_left_the_runs_group() {
         card.question
     );
     let o = (card.id, card.rev);
-    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
     ed.handle_key(Key::plain(Code::Char('y')));
     assert!(ed.offers.iter().all(|o| o.stuck().is_none()));
     let said = "── stopped with it: 1 process it started in a session of its own ──";
@@ -701,7 +701,7 @@ fn a_stuck_card_goes_when_its_run_prints() {
     // `n`: kept waiting, said — not asked again at the next look
     crate::term::render(&mut ed, &mut Vec::new(), 120, 40).unwrap();
     let o = (ed.offers[0].id, ed.offers[0].rev);
-    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
     ed.handle_key(Key::plain(Code::Char('n')));
     assert!(ed.offers.is_empty());
     let said = ed.messages.last().map(|m| m.2.clone()).unwrap_or_default();

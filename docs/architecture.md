@@ -178,8 +178,8 @@ tarae's release build (wasmi's and wasmtime's without a host).
   thread; a plugin has at most 16 programs, 16 connections and 256 timers. Everything a plugin started ends with it.
   What comes back while it's busy waits and goes in one call; past 4 MB waiting, its readers pause (backpressure,
   not memory). Each load has a generation, so nothing meant for one reaches the next.
-- **Cards that ask** (a permission, a file, a host) answer `y` only after half a second in sight, and only while
-  they're still the card that was drawn — a key typed for the code can't approve them.
+- **Cards that ask** (a permission, a file, a host) take keys only once you focus them (`C-q`, a click, `C-w w`), and
+  only while they say what they said then — a key typed for the code can't approve them.
 - **Nothing a plugin answers is trusted**: pointers, lengths and UTF-8 are checked, and reading an answer is capped
   at 64 MB (entries can alias the same memory). `run` reaches movement commands only, so a plugin has no way to
   `:sh` or `:w`. Text is shown without control characters, so there are no terminal escapes.

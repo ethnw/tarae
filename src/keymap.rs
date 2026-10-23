@@ -699,14 +699,16 @@ mod tests {
     /// panel) — where, which, what.
     const ON_SCREEN: &[(&str, &str, &str)] = &[
         (
-            "A card",
+            "A card, focused",
             "`y` `n`",
             "Yes · no (some take `a` this chat, `s` this session, `A` always here); Esc never answers one",
         ),
         (
             "A card",
             "`C-q`",
-            "Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered",
+            "Focus it from wherever the keys are — one that came on its own waits in a faint frame (`▲1 waiting · \
+             C-q`), one your key asked for is focused as it comes; a click or `C-w w` focuses it too (the status line \
+             says CARD); Esc or `C-w` goes back, unanswered",
         ),
         (
             "No card here",
@@ -796,10 +798,10 @@ mod tests {
         (
             "A card waiting",
             "`C-q`",
-            "The card in front: the way back to the code, where it takes the keys — `esc` from insert mode, a \
-             prompt, a picker, a panel, a view mode or a chat with nothing said yet · `esc esc` from the chat's input \
-             · `C-\\ C-\\` from the terminal's program. A card in a session behind, an edit, the edit review: the way \
-             back, then `space I` (the inbox, `enter` goes to it). A turn that ended: the way back, then `space W`",
+            "The way back to the code — `esc` from insert mode, a prompt, a picker, a panel, a view mode or a chat \
+             with nothing said yet · `esc esc` from the chat's input · `C-\\ C-\\` from the terminal's program — then \
+             `space I` (the inbox, `enter` goes to it and focuses it), for the card in front too. A turn that ended: \
+             the way back, then `space W`",
         ),
         (
             "The chat's input",

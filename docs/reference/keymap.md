@@ -522,8 +522,8 @@ Keys of what's up on the screen — not rebindable, so not in `default_keys.toml
 
 | Where | Key | What it does |
 |---|---|---|
-| A card | `y` `n` | Yes · no (some take `a` this chat, `s` this session, `A` always here); Esc never answers one |
-| A card | `C-q` | Give it the keys from wherever they are (the status line says CARD); Esc goes back, unanswered |
+| A card, focused | `y` `n` | Yes · no (some take `a` this chat, `s` this session, `A` always here); Esc never answers one |
+| A card | `C-q` | Focus it from wherever the keys are — one that came on its own waits in a faint frame (`▲1 waiting · C-q`), one your key asked for is focused as it comes; a click or `C-w w` focuses it too (the status line says CARD); Esc or `C-w` goes back, unanswered |
 | No card here | `C-q` | To the session whose Claude waits for you — its card comes up there; nothing waiting, to a session whose turn ended (`done`) |
 | A card cut to fit | `v` | All of it in a buffer — `y` waits until its end was on screen |
 | A run card listing others like it | `Y` | Run it and the cards it lists — the same run each, read whole first |
@@ -562,7 +562,7 @@ zellij's default normal mode takes `C-g` `C-q` `C-p` `C-n` `C-s` `C-t` `C-h` `C-
 | normal mode | `C-s` (`save_selection`) | none |
 | insert mode | `C-h` (`delete_char_backward`) | `backspace` |
 | insert mode | `C-s` (`commit_undo_checkpoint`) | none |
-| A card waiting | `C-q` | The card in front: the way back to the code, where it takes the keys — `esc` from insert mode, a prompt, a picker, a panel, a view mode or a chat with nothing said yet · `esc esc` from the chat's input · `C-\ C-\` from the terminal's program. A card in a session behind, an edit, the edit review: the way back, then `space I` (the inbox, `enter` goes to it). A turn that ended: the way back, then `space W` |
+| A card waiting | `C-q` | The way back to the code — `esc` from insert mode, a prompt, a picker, a panel, a view mode or a chat with nothing said yet · `esc esc` from the chat's input · `C-\ C-\` from the terminal's program — then `space I` (the inbox, `enter` goes to it and focuses it), for the card in front too. A turn that ended: the way back, then `space W` |
 | The chat's input | `C-t` · `C-p` · `C-s` · `C-o` | The way back to the code (`esc esc`, `esc` with nothing said yet), then `:model` · `:chat-resume` · `:chat-screen` · `:chat-point` — in the input `:` is a character |
 | A list or output panel | `C-n` `C-p` · `C-b` | `j` `k` · `PageUp` |
 | A picker | `C-n` `C-p` · `C-b` · `C-t` | `↓` `↑` · the wheel over the preview · none (the preview away) |

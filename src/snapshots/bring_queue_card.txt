@@ -7,7 +7,7 @@
 04
 05
 06
-07                       ╭─ sessions ── 4 sessions ─────────────── enter switch  / search ─╮
+07                       ╭─ sessions ── 4 sessions ────────────────────────────────────────╮
 08                       │  main                  1 card                                   │
 09                       │  fix-login  bring 1st                                           │
 10                       │  docs                                                           │
@@ -17,19 +17,19 @@
 14
 15
 16
-17
-18
-19                                                    ╭─ Bring 2 into main ──────────────────────────────────────╮
-20                                                    │ Bring 2 sessions into main, one after another?           │
-21                                                    │ fix-login, then parser.                                  │
-22                                                    │                                                          │
-23                                                    │ Each in turn: rebased onto main's tip if it moved, its   │
-24                                                    │ quick preflight run there, then brought — the next       │
-25                                                    │ starts once it lands. A conflict or a failed preflight   │
-26                                                    │ stops only that one; the rest go on.                     │
+17                                                    ╭─ Bring 2 into main ──────────────────────────────────────╮
+18                                                    │ Bring 2 sessions into main, one after another?           │
+19                                                    │ fix-login, then parser.                                  │
+20                                                    │                                                          │
+21                                                    │ Each in turn: rebased onto main's tip if it moved, its   │
+22                                                    │ quick preflight run there, then brought — the next       │
+23                                                    │ starts once it lands. A conflict or a failed preflight   │
+24                                                    │ stops only that one; the rest go on.                     │
+25                                                    │                                                          │
+26                                                    │ esc goes back, unanswered                                │
 27                                                    ╰─ y Bring them in turn · n Not now ───────────────────────╯
 28
-29  ● sessions   main   ▎ parser marked to bring 2nd — B brings the 2 in turn · +…                 utf-8 LF   1:1
+29  ● card   main   ▎ parser marked to bring 2nd — B brings the 2 in turn · +…                     utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -69,29 +69,29 @@
 04
 05
 06
-07                       aa TTTTTTTT aa d dddddddd aaaaaaaaaaaaaaa DDDDD ffffff  D ffffff aa
-08                       a  BBBB                  w wwww                                   a
-09                       a             ddddd ddd                                           a
-10                       a                                                                 a
-11                       aa BBBBBB     ddddd ddd                                           a
-12                       aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+07                       ff TTTTTTTT ff d dddddddd fffffffffffffffffffffffffffffffffffffffff
+08                       f  BBBB                  w wwww                                   f
+09                       f             ddddd ddd                                           f
+10                       f                                                                 f
+11                       fa BBBBBB     ddddd ddd                                           f
+12                       fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 13
 14
 15
 16
-17
-18
-19                                                    ff TTTTT T TTTT TTTT fffffffffffffffffffffffffffffffffffffff
-20                                                    f                                                          f
-21                                                    f                                                          f
-22                                                    f                                                          f
-23                                                    f dddd dd ddddd ddddddd dddd dddddd ddd dd dd dddddd ddd   f
-24                                                    f ddddd ddddddddd ddd dddddd dddd ddddddd d ddd dddd       f
-25                                                    f dddddd dddd dd dddddd d dddddddd dd d dddddd ddddddddd   f
-26                                                    f ddddd dddd dddd dddd ddd dddd dd ddd                     f
-27                                                    ff A                    f A ddd ddd ffffffffffffffffffffffff
+17                                                    aa TTTTT T TTTT TTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+18                                                    a                                                          a
+19                                                    a                                                          a
+20                                                    a                                                          a
+21                                                    a dddd dd ddddd ddddddd dddd dddddd ddd dd dd dddddd ddd   a
+22                                                    a ddddd ddddddddd ddd dddddd dddd ddddddd d ddd dddd       a
+23                                                    a dddddd dddd dd dddddd d dddddddd dd d dddddd ddddddddd   a
+24                                                    a ddddd dddd dddd dddd ddd dddd dd ddd                     a
+25                                                    a                                                          a
+26                                                    a ddd dddd ddddd dddddddddd                                a
+27                                                    aa A                    f A ddd ddd aaaaaaaaaaaaaaaaaaaaaaaa
 28
-29  a TTTTTTTT   BBBB   a                                                                          ddddd dd   TTT
+29  a TTTT   BBBB   a                                                                              ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  P=ui.menu.selected
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  B=bold

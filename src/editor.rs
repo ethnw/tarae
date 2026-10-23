@@ -615,13 +615,6 @@ pub struct Editor {
     /// The person's own keys, clicks and pastes — the terminal's input, not a shuttle's steps (`shuttle.rs`): what
     /// only a person's look may do goes by it (follow's pause, a card's place among yours).
     pub person_seq: u64,
-    /// When the last key, click or paste came, anyone's — a card that comes within `offer::KEYS_QUIET` of it
-    /// waits for the keys to go quiet (`Offer.typing`).
-    pub last_input: Option<std::time::Instant>,
-    /// That wait is on: off in tests (their keys come within milliseconds of any card) but where they test it.
-    pub keys_hold: bool,
-    /// A wake for the keys gone quiet is under way (`Editor::keys_quiet_later`) — one at a time.
-    pub keys_waking: bool,
     /// A program typing over the UI socket, its grants, the step under way (`shuttle.rs`).
     pub shuttles: crate::shuttle::Shuttles,
     /// Debug run · breakpoints (kept without a debug run) · debug run generation (drops late messages).
@@ -640,8 +633,6 @@ pub struct Editor {
     pub offer_seq: u64,
     /// Git-tab actions waiting on their hooks card (`hooks.rs`): the card's id, the session, the action.
     pub hook_waits: Vec<crate::hooks::Wait>,
-    /// The front card as drawn: (its id, its rev, since when) — `y` waits for it to settle.
-    pub offer_seen: std::cell::Cell<Option<(u64, u64, std::time::Instant)>>,
     /// The card (id, rev) last in sight whole — drawn uncut, or read to its end in its `v` buffer (a weighty
     /// `y` waits for it).
     pub offer_whole: std::cell::Cell<Option<(u64, u64)>>,
@@ -865,9 +856,20 @@ pub struct Editor {
     pub picker_click: Option<(u64, usize, std::time::Instant)>,
     /// The last click on the git tab's or the review rail's row (which list, row, when) — `clicked_again`.
     pub list_click: Option<(&'static str, usize, std::time::Instant)>,
-    /// The front card has the keys, given with `C-q` from wherever they were (#24) — the chat's draft, insert
-    /// mode, a review stay as they were; an answer or Esc gives them back.
-    pub card_keys: bool,
+    /// The card that has the keys — focused (P3 §3.8): by `C-q` from wherever they were (#24), a click on it,
+    /// `C-w w`, or as it came when your own key asked for it (`Offer.yours`) — by its id and `rev`: what it said
+    /// when it got them (one rewritten, or another in front, has them only once focused itself). The chat's draft,
+    /// insert mode, a review stay as they were; an answer, `esc` or `C-w` gives them back.
+    pub card_focus: Option<(u64, u64)>,
+    /// The card an answer handed the keys on to (id, `rev`): focused once a frame has drawn it as it is
+    /// (`term::render_frame`) — a key typed on after the answer (`y y`, a repeat) never answers one not yet in sight.
+    pub card_next: Option<(u64, u64)>,
+    /// The front card as the last frame drew it (id, `rev`) — a weighty card's answers count only for it
+    /// (`Stands.drawn`).
+    pub offer_drawn: std::cell::Cell<Option<(u64, u64)>>,
+    /// The card a window prefix just took the keys from (`card_key`): `C-w w` from it goes on round the panes, not
+    /// back to it.
+    pub card_left: Option<u64>,
     /// The terminal said its focus went elsewhere (CSI ?1004 — tmux passes it on only with `focus-events
     /// on`), and no input came since: the waiting animation rests (`tick_wanted`). A terminal that never
     /// says keeps it going.
@@ -986,9 +988,6 @@ impl Editor {
             goto_after_load: None,
             input_seq: 0,
             person_seq: 0,
-            last_input: None,
-            keys_hold: !cfg!(test),
-            keys_waking: false,
             shuttles: Default::default(),
             dap: None,
             breakpoints: Default::default(),
@@ -997,7 +996,6 @@ impl Editor {
             cmd_lists: Default::default(),
             grammar_hinted: Default::default(),
             offers: Vec::new(),
-            offer_seen: Default::default(),
             offer_whole: Default::default(),
             offer_early: Default::default(),
             offer_view: Default::default(),
@@ -1139,7 +1137,10 @@ impl Editor {
             sessions_pane: None,
             picker_click: None,
             list_click: None,
-            card_keys: false,
+            card_focus: None,
+            card_next: None,
+            offer_drawn: Default::default(),
+            card_left: None,
             screen_sends: Vec::new(),
             frames: 0,
             ui_asks: Vec::new(),
@@ -1509,7 +1510,7 @@ impl Editor {
         );
         self.push_offer(card);
         // (asked for by you, over the review: its y and n are the card's, as after `C-q`)
-        self.card_keys = true;
+        self.card_focus_front();
         true
     }
 
@@ -1708,6 +1709,18 @@ impl Editor {
         let mut order: Vec<_> = self.screen.leaves.iter().map(|l| l.0).collect();
         if order.is_empty() {
             order = self.code_leaves();
+        }
+        // A card waiting in sight is the round's last stop (P3 §3.8): `C-w w` from the last pane focuses it
+        // (not the card a window prefix just took the keys from: from it the round goes on round the panes)
+        let left = self.card_left.take();
+        let card = self.screen.offer_card.is_some()
+            && self.card_waits()
+            && left.is_none_or(|l| self.offers.first().is_none_or(|o| o.id != l));
+        if card && delta > 0 && self.at_pane().is_some_and(|h| order.last() == Some(&h)) {
+            return self.card_focus_front();
+        }
+        if card && delta < 0 && self.at_pane().is_some_and(|h| order.first() == Some(&h)) {
+            return self.card_focus_front();
         }
         let mut here = self.at_pane().unwrap_or(self.session.focus);
         // (the slot's keys on a group: its detail's)
@@ -2461,32 +2474,43 @@ impl Editor {
         {
             return;
         }
-        if m.kind == K::Down
-            && let Some(&(_, _, _, k)) = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x))
-        {
-            let weighty = self.offers.first().is_some_and(|o| o.weighty_answer(k));
-            match k {
-                _ if weighty && !self.offer_seen_whole() => self.offer_see_all_first(),
-                'y' if self.offer_settled() => self.offer_accept(),
-                'v' => self.offer_view(),
-                'r' => self.offer_one_by_one(),
-                'a' if self.offer_settled() => self.offer_for_chat(),
-                's' if self.offer_settled()
-                    && self.offers.first().is_some_and(crate::offer::Offer::for_session) =>
-                {
-                    self.offer_for_session()
+        // A card: a press on one that waits focuses it (P3 §3.8 — its answers answer it from then on, a press on
+        // one as it came up never one), a stacked one brought to the front with the keys; focused, its answers
+        let button = s.offer_buttons.iter().find(|b| b.0 == y && (b.1..b.2).contains(&x)).map(|b| b.3);
+        let on_card = s
+            .offer_card
+            .is_some_and(|(cx, cy, cw, ch)| (cx..cx + cw).contains(&x) && (cy..cy + ch).contains(&y));
+        if m.kind == K::Down && (button.is_some() || on_card) {
+            let has = self.card_has_keys();
+            match button {
+                Some(d) if d.is_ascii_digit() => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
+                Some(k) if has => {
+                    let weighty = self.offers.first().is_some_and(|o| o.weighty_answer(k));
+                    match k {
+                        _ if weighty && !self.offer_seen_whole() => self.offer_see_all_first(),
+                        'y' => self.offer_accept(),
+                        'v' => self.offer_view(),
+                        'r' => self.offer_one_by_one(),
+                        'a' => self.offer_for_chat(),
+                        's' if self.offers.first().is_some_and(crate::offer::Offer::for_session) => {
+                            self.offer_for_session()
+                        }
+                        'A' => self.offer_always(),
+                        'D' => self.offer_remove(true),
+                        'R' => self.offer_remove(false),
+                        'c' => self.offer_commit_first(),
+                        'p' => self.offer_preflight_first(),
+                        'X' => self.offer_abort(),
+                        'n' => self.offer_dismiss(),
+                        'N' => self.offer_never(),
+                        _ => {}
+                    }
                 }
-                'A' if self.offer_settled() => self.offer_always(),
-                'D' if self.offer_settled() => self.offer_remove(true),
-                'R' if self.offer_settled() => self.offer_remove(false),
-                'c' if self.offer_settled() => self.offer_commit_first(),
-                'p' if self.offer_settled() => self.offer_preflight_first(),
-                'X' if self.offer_settled() => self.offer_abort(),
-                // (clicked as it came up: not an answer — said on the card, not dropped in silence)
-                _ if weighty => self.offer_refused(format!("{k} came as the card did — not taken; again")),
-                'n' => self.offer_dismiss(),
-                'N' => self.offer_never(),
-                d => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
+                _ if !has && self.offers.first().is_some_and(|o| !o.installing()) => {
+                    self.card_focus_front();
+                    self.set_status("the card has the keys — its answers answer it, esc gives them back");
+                }
+                _ => {}
             }
             return;
         }
@@ -4022,83 +4046,64 @@ impl Editor {
         }
     }
 
-    /// Whether the front card takes the keys: given it with `C-q`, or in normal mode with nothing else
-    /// holding them (no prefix key, prompt, picker, review, the chat's input or the terminal) — and it hasn't
-    /// stepped aside for what its `h` went to (`Offer.aside`), nor is its text the buffer in sight: there
-    /// only `C-q` gives them (frictions15 review: Esc then `y`, a yank out of habit, answered the card) — nor did
-    /// it come while keys were coming in that haven't gone quiet yet (`offer_waits_keys`, friction 60: a card came
-    /// between a paste and its Enter).
+    /// Whether the front card has the keys: focused (`card_focus` — P3 §3.8) as it says now, asking. One that came
+    /// on its own waits in its faint frame until `C-q`, a click or `C-w w` focuses it, so no key meant for anything
+    /// else is ever its answer — nothing guesses at what a key meant (the settle and the typing quiet went with it).
     pub fn card_has_keys(&self) -> bool {
-        self.card_keys || (self.card_keys_free() && !self.offer_waits_keys())
+        self.card_focus.is_some()
+            && self.offers.first().filter(|o| !o.installing()).map(|o| (o.id, o.rev)) == self.card_focus
     }
 
-    /// The front card would have the keys but for keys coming in: it takes them once they've been quiet
-    /// `offer::KEYS_QUIET` — the status line's `▲1 waiting · C-q`, the state's `keys.waiting` and its `waits`.
-    pub fn card_waits_quiet(&self) -> bool {
-        !self.card_keys && self.card_keys_free() && self.offer_waits_keys()
-    }
-
-    /// The front card waits for `C-q` — for the keys to go quiet, or while the session list has them (its letters
-    /// are keys: `card_keys_free`): the status line's `▲1 waiting · C-q`, the state's `keys.waiting`.
+    /// The front card waits to be focused: up, asking, without the keys — the status line's `▲1 waiting · C-q`, the
+    /// state's `keys.waiting`.
     pub fn card_waits(&self) -> bool {
-        self.card_waits_for().is_some()
-    }
-
-    /// What the front card waits for before it takes the keys, said as the state's card `waits` says it: `keys
-    /// quiet`, or `session list` while the list has them.
-    pub fn card_waits_for(&self) -> Option<&'static str> {
-        let list = !self.card_keys
-            && self.sessions_list_keys()
-            && self.offers.first().is_some_and(|o| !o.installing() && !o.yours);
-        match () {
-            _ if self.card_waits_quiet() => Some("keys quiet"),
-            _ if list => Some("session list"),
-            _ => None,
-        }
-    }
-
-    /// Nothing else holds the keys from the front card (`card_has_keys` but the wait for the keys to go quiet).
-    fn card_keys_free(&self) -> bool {
-        self.mode == Mode::Normal
-            && !self.offer_reading()
-            && !self.offers.first().is_some_and(|o| o.aside)
-            && self.pending.is_empty()
-            && self.prompt.is_none()
-            && self.picker.is_none()
-            // (the session list floats with its letters as keys — a card that came by itself held as the picker held
-            // it, until 7b's focus rule: reviewer, 7a — `n` dismissed a card, `v` opened its view; the one its own
-            // letter asked for, `b`'s or `B`'s, takes them)
-            && !(self.sessions_list_keys() && !self.offers.first().is_some_and(|o| o.yours))
-            && self.session.review.is_none()
-            && !self.session.chat_has_keys()
-            && !self.session.program_has_keys()
+        !self.card_has_keys() && self.offers.first().is_some_and(|o| !o.installing())
     }
 
     /// `C-q` while a card is up — this session's first, then the one that has waited longest (`inbox.rs`) —
-    /// gives it the keys from wherever they are (#24); while it has them, its answers answer it and Esc — or
-    /// `C-q` again — gives them back unanswered (#25, #94), the card staying up — other keys are swallowed,
-    /// saying what it asks. True if the key was the card's.
+    /// focuses it from wherever the keys are (#24); while it has them, its answers answer it and Esc — or
+    /// `C-q` again — gives them back unanswered (#25, #94), the card staying up, and the window prefix (`C-w`) goes
+    /// on from where they were — other keys are said on it, what it asks. True if the key was the card's.
     fn card_key(&mut self, key: Key) -> bool {
-        let up = self.offers.first().filter(|o| !o.installing()).map(|o| o.id);
-        let Some(id) = up.filter(|_| self.picker.is_none() && self.prompt.is_none()) else {
-            self.card_keys = false;
+        // (a sequence's first key: the card a window prefix left is forgotten — `C-w w` reaches it again after)
+        if self.pending.is_empty() {
+            self.card_left = None;
+        }
+        let up = self.offers.first().filter(|o| !o.installing()).map(|o| (o.id, o.rev));
+        // (handed on to a card no longer in front as it was: nothing to hand)
+        if self.card_next.is_some() && self.card_next != up {
+            self.card_next = None;
+        }
+        let Some(id) = up.map(|u| u.0).filter(|_| self.picker.is_none() && self.prompt.is_none()) else {
+            self.card_focus = None;
             return false;
         };
+        let has = self.card_has_keys();
+        // Handed the keys by an answer but not drawn yet: an answer of its typed on is refused, said on it (a `y y`
+        // never approves a card never in sight); the rest go where the keys are
+        if !has
+            && self.card_next.is_some()
+            && let Some(c) = key.plain_char()
+            && self.offers.first().is_some_and(|o| o.acts_on(c))
+        {
+            self.offer_refused(format!("{key} came before this card was in sight — not taken"));
+            return true;
+        }
         if key.ctrl && !key.alt && key.code == Code::Char('q') {
             // Its text being read in its buffer: `C-q` gives the card the keys, never takes them (frictions15:
             // a toggle, it let go of a card that held them unseen — `j`/`k` read through it — and the `y`
             // after went to the code); Esc gives them back
             if self.offer_reading() {
-                let had = std::mem::replace(&mut self.card_keys, true);
+                self.card_focus_front();
                 self.pending.clear();
-                self.set_status(match had {
+                self.set_status(match has {
                     true => "the card has the keys — esc gives them back",
                     false => "the card has the keys — its answers answer it, esc gives them back",
                 });
                 return true;
             }
-            if self.card_keys {
-                self.card_keys = false;
+            if has {
+                self.card_focus = None;
                 self.set_status(format!("keys back — the card waits, {} answers it", self.key_said("C-q")));
                 return true;
             }
@@ -4107,18 +4112,25 @@ impl Editor {
             if self.next_up() != crate::inbox::Next::Card(id) {
                 return false;
             }
-            self.card_keys = true;
+            self.card_focus_front();
             return true;
         }
         // (Esc never gives a card the keys, only back: handing them over too, Esc after Esc took turns — the
         // toggle `C-q` lost, on the key pressed out of habit)
-        if !self.card_keys {
+        if !has {
             return false;
         }
         if key.code == Code::Esc {
-            self.card_keys = false;
+            self.card_focus = None;
             self.pending.clear();
             return true;
+        }
+        // The window prefix: the keys back where they were, the prefix going on from there — a hop out is one key,
+        // as from every pane (the card stays, waiting)
+        if self.pending.is_empty() && self.keymaps.window_prefix() == Some(key) {
+            self.card_focus = None;
+            self.card_left = Some(id);
+            return false;
         }
         // Its whole text open in its buffer, the one in sight (its bar): the keys that read it move it — `ge`
         // to its end, as the bar asks (they were swallowed, and `y` waited for a read nobody could do)
@@ -4128,17 +4140,22 @@ impl Editor {
             return true;
         }
         self.pending.clear();
-        let front = self.offers.first().map(|o| o.id);
+        let front = self.offers.first().map(|o| (o.id, o.yours));
         if !self.offer_key(key) {
             // (its answers are beside what it says — on the card, or its bar)
             // (short: a bar has room for little beside its title and answers; esc is on the card and
             // the status line says CARD)
             self.offer_refused(format!("{key} isn't an answer here"));
         }
-        // Answered (or gone): the keys go to the next card up here (#101 — card 2 of 3 waited for another
-        // `C-q`), else back where they were
-        if self.offers.first().map(|o| o.id) != front {
-            self.card_keys = self.offers.first().is_some_and(|o| !o.installing());
+        // Answered (or gone): the keys go to the next card up here when you were going through them (`C-q`'s round —
+        // #101: card 2 of 3 waited for another `C-q`), or when it's yours too; one of yours answered, Claude's next
+        // waits unfocused, the keys back where they were (P3 §3.8). Handed on once a frame has drawn it
+        // (`card_next`): until then it waits as any card that came on its own
+        if self.offers.first().map(|o| o.id) != front.map(|f| f.0) {
+            let round = front.is_some_and(|f| !f.1);
+            self.card_focus = None;
+            self.card_next =
+                self.offers.first().filter(|o| !o.installing() && (round || o.yours)).map(|o| (o.id, o.rev));
         }
         true
     }
@@ -4160,7 +4177,13 @@ fn card_reads(key: Key, pending: &[Key]) -> bool {
 impl Editor {
     pub fn handle_key(&mut self, key: Key) {
         let begun = crate::document::input_begin();
+        // (what it asks for — now, or through jobs it starts — was asked by this key, the count `input_came` is about
+        // to take: a card it asks for is yours, focused as it comes — #205, P3 §3.8; a shuttle's isn't the person's)
+        let asked = self.shuttles.stepping.is_none().then(|| self.events.set_asked(Some(self.input_seq + 1)));
         self.handle_key_now(key);
+        if let Some(was) = asked {
+            self.events.set_asked(was);
+        }
         self.typed(begun);
     }
 
@@ -4231,11 +4254,6 @@ impl Editor {
             took(Handler::Program);
             return self.focus_sync();
         }
-        // Cards: y·a·n in normal mode (something else open or a pending prefix key goes first) — not while
-        // the chat's input has the keys: a card took the `n`s of a message being typed (`C-q` reaches it)
-        if !self.offers.is_empty() && self.card_has_keys() && self.offer_key(key) {
-            return took(Handler::Card);
-        }
         // If the completion list is up, intercept selection keys first (as in Helix: Tab/C-n down,
         // S-Tab/C-p up; Enter inserts only when something is selected — otherwise a plain newline).
         if self.mode == Mode::Insert
@@ -4289,12 +4307,6 @@ impl Editor {
     /// shuttle typing pauses (`shuttle::person_typed`).
     fn input_came(&mut self) {
         self.input_seq += 1;
-        // (after a quiet the cards that came while keys were coming in take them — before this key counts; a
-        // shuttle's step did so before its check, and nothing frees one between the check and its key)
-        if self.shuttles.stepping.is_none() {
-            self.keys_quiet_sync();
-        }
-        self.last_input = Some(crate::clock::now());
         if self.shuttles.stepping.is_none() {
             self.person_seq += 1;
             self.review_input();
@@ -4866,10 +4878,7 @@ impl Editor {
                 let out = match self.offers.is_empty() {
                     true => "enter runs the line, esc close".to_string(),
                     // (the way back is this line's own `esc`: what reaches the card is said from the code)
-                    false => match self.c_q_from_code() {
-                        Some(key) => format!("esc close — then {key} reaches the card"),
-                        None => "esc close — then the card takes the keys".to_string(),
-                    },
+                    false => format!("esc close — then {} reaches the card", self.c_q_from_code()),
                 };
                 self.key_unused(key, "the command line", &out);
             }
@@ -7329,7 +7338,7 @@ mod tests {
         };
         let settled = |ed: &mut Editor| {
             let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
         };
         let answered = |ed: &Editor| {
             std::fs::read_to_string(dir.join("stdin.log")).is_ok_and(|s| s.contains("\"c7\""))
@@ -7727,7 +7736,7 @@ mod tests {
                 .contains("y Once · a This chat · s This session · A Always here · n No")
         );
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "a");
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(tool_answer(&log).contains("tarae-marker-content"), "{}", tool_answer(&log));
@@ -7845,7 +7854,7 @@ mod tests {
         let s = parser.screen().contents();
         assert!(s.contains("y Run") && !s.contains("This chat") && !s.contains("Always"), "{s}");
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "a");
         assert_eq!(ed.offers.len(), 1, "never kept: `a` isn't an answer");
         answer(&mut ed, "y");
@@ -8116,7 +8125,7 @@ mod tests {
         let label = |s: &str| s.lines().nth(39).unwrap_or_default().to_string();
         assert!(label(&draw(&mut ed)).contains("● chat "), "{}", label(&draw(&mut ed)));
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys);
+        assert!(ed.card_has_keys());
         let s = draw(&mut ed);
         assert!(s.contains("esc goes back, unanswered"));
         assert!(label(&s).contains("● card ") && !label(&s).contains("chat"), "{}", label(&s));
@@ -8124,16 +8133,14 @@ mod tests {
         // (said on the card, where the eyes are — it was a flash on the status line)
         assert!(draw(&mut ed).contains("x isn't an answer here"), "{:?}", ed.offer_said_now());
         feed(&mut ed, "<esc>");
-        assert!(!ed.card_keys && ed.offers.len() == 1 && ed.session.is_at(crate::session::At::Chat));
+        assert!(!ed.card_has_keys() && ed.offers.len() == 1 && ed.session.is_at(crate::session::At::Chat));
         assert_eq!(input(&ed), "my draft y", "back where it was");
         assert!(label(&draw(&mut ed)).contains("● chat "), "the chat's again");
-        // C-q, y (once the card has been in sight a moment): answered, the keys back in the draft
+        // C-q, y: answered, the keys back in the draft
         feed(&mut ed, "<C-q>");
         draw(&mut ed);
-        std::thread::sleep(crate::offer::SETTLE);
-        draw(&mut ed);
         feed(&mut ed, "y");
-        assert!(ed.offers.is_empty() && !ed.card_keys);
+        assert!(ed.offers.is_empty() && !ed.card_has_keys());
         settle_for(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert!(made.exists() && tool_answer(&log).contains("exit 0"));
         assert_eq!(input(&ed), "my draft y");
@@ -8154,9 +8161,12 @@ mod tests {
         assert!(!ed.card_has_keys(), "insert mode keeps its keys");
         feed(&mut ed, "<C-q>n");
         assert_eq!(ed.offers.len(), 1, "the first answered");
-        assert!(ed.card_keys, "the keys went on to the second");
+        // (handed on once it's drawn: the frame the user sees it in)
+        assert!(!ed.card_has_keys(), "not before it's in sight");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        assert!(ed.card_has_keys(), "the keys went on to the second");
         feed(&mut ed, "n");
-        assert!(ed.offers.is_empty() && !ed.card_keys);
+        assert!(ed.offers.is_empty() && !ed.card_has_keys());
         feed(&mut ed, "c");
         assert_eq!((ed.mode, text(&ed).as_str()), (Mode::Insert, "abc"), "back where they were");
     }
@@ -9439,7 +9449,7 @@ mod tests {
             assert_eq!(ed.offers.first().map(|o| o.title.clone()).as_deref(), Some(title));
             let s = screen(ed);
             let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
             s
         };
         let told = |ed: &Editor, what: &str| ed.session.checkpoints.tell.iter().any(|t| t.contains(what));
@@ -9532,7 +9542,7 @@ mod tests {
         // (drawn, and in sight long enough for an answer)
         crate::term::render(&mut ed, &mut Vec::new(), 160, 40).unwrap();
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         let before = crate::tools::USER_ADMITTED.with(|a| a.borrow().len());
         feed(&mut ed, "A");
         let ride = crate::tools::USER_ADMITTED.with(|a| a.borrow().get(before).cloned());
@@ -9773,7 +9783,7 @@ mod tests {
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 140, 40).unwrap();
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "n");
         let a = answered(&mut ed, "p1");
         assert_eq!(a["behavior"], "deny");
@@ -9842,7 +9852,7 @@ mod tests {
             settle_until(ed, |ed| ed.offers.iter().any(|o| o.title == TITLE));
             let s = screen(ed);
             let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
             (ed.offers[0].question.clone(), s)
         };
         feed(&mut ed, "<space>lread them<ret>");
@@ -9951,7 +9961,7 @@ mod tests {
             let mut parser = vt100::Parser::new(40, 140, 0);
             parser.process(&bytes);
             let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
             (ed.offers[0].question.clone(), parser.screen().contents())
         };
         feed(&mut ed, "<space>l");
@@ -10046,7 +10056,7 @@ mod tests {
         // (drawn, and in sight long enough for an answer)
         crate::term::render(&mut ed, &mut Vec::new(), 140, 40).unwrap();
         let o = (ed.offers[0].id, ed.offers[0].rev);
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "n");
         assert_eq!(answered(&mut ed, "p2")["behavior"], "deny");
         settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().state == crate::chat::State::Idle);
@@ -15528,7 +15538,7 @@ mod tests {
     }
 
     #[test]
-    fn grammar_offer_asks_once_and_answers_only_in_normal_mode() {
+    fn grammar_offer_asks_once_and_answers_only_once_focused() {
         use crate::offer::{OfferState, What};
         let mut ed = editor("fn main() {}\n");
         ed.offer_popups = true;
@@ -15545,21 +15555,22 @@ mod tests {
         assert_eq!(ed.offers.len(), 1);
         assert_eq!(ed.doc().text.to_string(), "nfn main() {}\n");
         feed(&mut ed, "<esc>");
-        // n in normal mode = not now; the same language isn't asked again
+        // In normal mode too, until it's focused (P3 §3.8: it came on its own) — `n` the code's
         feed(&mut ed, "n");
+        assert_eq!(ed.offers.len(), 1);
+        // Focused, n = not now; the same language isn't asked again
+        feed(&mut ed, "<C-q>n");
         assert!(ed.offers.is_empty());
         ed.offer_grammar(rust);
         assert!(ed.offers.is_empty(), "once until quit");
-        // A different language is asked — "Not now" via the mouse
+        // A different language is asked — "Not now" via the mouse: a press focuses it, the next answers
         ed.offer_grammar(syntax::spec("python").unwrap());
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Python syntax colors"));
         ed.screen.offer_buttons = vec![(20, 50, 59, 'y'), (20, 62, 71, 'n')];
-        ed.handle_mouse(crate::event::Mouse {
-            kind: crate::event::MouseKind::Down,
-            x: 65,
-            y: 20,
-            alt: false,
-        });
+        let press = crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 65, y: 20, alt: false };
+        ed.handle_mouse(press);
+        assert!(ed.offers.len() == 1 && ed.card_has_keys(), "focused, not answered");
+        ed.handle_mouse(press);
         assert!(ed.offers.is_empty());
     }
 
@@ -15586,7 +15597,7 @@ mod tests {
         };
         screen(&mut ed);
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "y");
         settle_until(&mut ed, |ed| ed.session.task_run.is_some());
         assert!(ed.session.task_run.as_ref().unwrap().output.is_empty(), "nothing printed yet");
@@ -15657,7 +15668,7 @@ mod tests {
         let y_at = |ed: &Editor| ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').map(|b| (b.0, b.1));
         let before = y_at(&ed);
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         answer(&mut ed, "y");
         assert_eq!(ed.offers.len(), 1, "y waits");
         let s = screen(&mut ed);
@@ -15694,7 +15705,7 @@ mod tests {
         };
         let settled = |ed: &mut Editor| {
             let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+            ed.card_focus = Some((o.0, o.1));
         };
         let question: String =
             (1..=80).map(|i| format!("line {i} of what it runs")).collect::<Vec<_>>().join("\n");
@@ -16070,18 +16081,13 @@ mod tests {
         let mut ed = editor("text\n");
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
-        let settle = |ed: &mut Editor| {
-            let mut bytes = Vec::new();
-            crate::term::render(ed, &mut bytes, 120, 30).unwrap();
-            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        };
+        let drawn = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 120, 30).unwrap();
         let card = |title: &str| {
             Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: [0; 32] })
         };
-        // A card up, in sight and settled — then the chat, and a message with `n`s in it
+        // A card up, in sight — then the chat, and a message with `n`s in it
         ed.push_offer(card("Trust this project's settings?"));
-        settle(&mut ed);
+        drawn(&mut ed);
         feed(&mut ed, "<space>l");
         assert!(ed.session.is_at(crate::session::At::Chat));
         feed(&mut ed, "guard_and_go no");
@@ -16101,7 +16107,7 @@ mod tests {
         ed.offers.clear();
         ed.push_offer(card("Claude wants to run"));
         assert!(ed.session.is_at(crate::session::At::Chat), "the chat keeps the keys");
-        settle(&mut ed);
+        drawn(&mut ed);
         feed(&mut ed, "a");
         assert_eq!(
             (ed.offers.len(), ed.session.chat.as_ref().unwrap().input.text().as_str()),
@@ -16113,118 +16119,210 @@ mod tests {
         assert!(ed.offers.is_empty(), "y answered it");
         // (in the code from here)
         ed.session.leave(crate::session::At::Chat);
-        // An answer letter the card doesn't take isn't the code's (`a` would start inserting, and the `y` after
-        // it would be typed)
+        // Focused, an answer letter the card doesn't take is said on it (`a` would start inserting in the code)
         ed.push_offer(card("Only y or n"));
-        settle(&mut ed);
-        feed(&mut ed, "aA");
+        drawn(&mut ed);
+        feed(&mut ed, "<C-q>aA");
         assert_eq!((ed.mode, ed.offers.len()), (Mode::Normal, 1), "a/A went nowhere");
         feed(&mut ed, "y");
         assert!(ed.offers.is_empty());
         assert_eq!(text(&ed), "text\n");
     }
 
-    /// A card that comes while keys are coming in (a paste, a chord, a driver's steps) waits for them to go quiet
-    /// before it takes them (friction 60): what's typed meanwhile is the code's, the status line says it waits,
-    /// `C-q` reaches it at once; the keys quiet for `KEYS_QUIET`, it takes them — and one nobody's keys were near
-    /// takes them as it comes.
+    /// A card that came on its own waits unfocused (P3 §3.8): every key is where the keys are — `y` the code's
+    /// yank, never its yes — the status line says `▲1 waiting · C-q` and the state names it; `C-q` focuses it,
+    /// `esc` gives the keys back with it still up. What your own key asked for is focused as it comes; answered, the
+    /// card that came on its own behind it waits unfocused — while one focused by `C-q` hands the keys on to the next
+    /// (#101: going through them).
     #[test]
-    fn a_card_waits_for_the_keys_to_go_quiet() {
-        use crate::offer::{KEYS_QUIET, Offer, What};
+    fn a_card_that_came_on_its_own_waits_to_be_focused() {
+        use crate::offer::{Offer, What};
+        use crate::uistate::Region;
         let mut ed = editor("one two\n");
-        ed.keys_hold = true;
         let status = |ed: &mut Editor| {
             crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
             let text = crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 100, 20).unwrap();
             text.lines().last().unwrap_or_default().to_string()
         };
-        let settle = |ed: &mut Editor| {
-            crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
-            let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-            ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
-        };
-        let quiet = |ed: &mut Editor| ed.last_input = ed.last_input.map(|t| t - KEYS_QUIET);
-        // (keys just came: the frames drawn between the steps never eat into the window, however slow the machine)
-        let coming = |ed: &mut Editor| ed.last_input = Some(crate::clock::now());
         let card = |title: &str| {
             Offer::new(title.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: [0; 32] })
         };
-        // A key, and a card right after it: drawn, waiting — the next keys are the code's
+        let yours = |ed: &mut Editor| {
+            let was = ed.events.set_asked(Some(ed.input_seq));
+            let end = What::ReviewEnd { session: 0, started: std::time::Instant::now() };
+            ed.push_offer(Offer::new(
+                "End the review?".into(),
+                "2 files not viewed.",
+                "",
+                String::new(),
+                end,
+            ));
+            ed.events.set_asked(was);
+        };
+        // It comes as you type in the code: drawn, waiting — the next keys are the code's, `y` a yank
         feed(&mut ed, "w");
         ed.push_offer(card("Trust this project's settings?"));
-        settle(&mut ed);
-        coming(&mut ed);
-        assert!(!ed.card_has_keys(), "it came as keys came in: it waits");
+        assert!(!ed.card_has_keys(), "it came on its own: it waits");
         assert!(status(&mut ed).contains("▲1 waiting · C-q"), "said: {}", status(&mut ed));
-        coming(&mut ed);
+        let to = ed.keys_to();
+        assert_eq!((to.route(Key::plain(Code::Char('y'))), to.waiting.is_some()), (Region::Code, true));
         feed(&mut ed, "bey");
         assert_eq!(ed.offers.len(), 1, "y was the code's: the card is still up");
         assert_eq!(ed.doc().selection().primary().head, 3, "b and e moved: on the end of `one`");
-        // `C-q` reaches it at once; Esc gives the keys back, and it waits again while they keep coming
+        assert_eq!(ed.registers.get(&'"').map(|r| r[0].as_str()), Some("one"), "yanked");
+        // `C-q` focuses it; Esc gives the keys back, the card up and waiting again
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_has_keys(), "C-q gave it the keys");
+        assert!(ed.card_has_keys() && !status(&mut ed).contains("waiting"), "focused, it says so itself");
         feed(&mut ed, "<esc>");
-        assert!(!ed.card_has_keys(), "keys still coming in");
-        // Quiet for `KEYS_QUIET`: it takes them, and its `y` answers it
-        quiet(&mut ed);
-        assert!(ed.card_has_keys(), "the keys went quiet");
-        assert!(!status(&mut ed).contains("waiting"), "in sight, it says so itself");
-        feed(&mut ed, "y");
-        assert!(ed.offers.is_empty(), "y answered it");
-        // A card that comes when the keys have been quiet takes them as it comes
-        quiet(&mut ed);
-        ed.push_offer(card("Again"));
-        settle(&mut ed);
-        assert!(ed.card_has_keys(), "nothing coming in: it has the keys");
-        // A card the last key itself asked for (the user's own) takes them as it comes, keys coming in or not
-        feed(&mut ed, "n");
-        ed.offers.clear();
-        let review_end = What::ReviewEnd { session: 0, started: std::time::Instant::now() };
-        let was = ed.events.set_asked(Some(ed.input_seq));
-        ed.push_offer(Offer::new(
-            "End the review?".into(),
-            "2 files not viewed.",
-            "",
-            String::new(),
-            review_end,
-        ));
-        ed.events.set_asked(was);
+        assert!(!ed.card_has_keys() && ed.offers.len() == 1, "keys back, unanswered");
+        // Your own card comes in front, focused at once; answered, Claude's behind it waits
+        yours(&mut ed);
         assert!(ed.offers[0].yours && ed.card_has_keys(), "the user's own: its keys at once");
+        feed(&mut ed, "n");
+        assert_eq!(ed.offers.len(), 1);
+        assert!(!ed.card_has_keys(), "Claude's next isn't handed the keys");
+        // Focused by `C-q`, answered: the keys go on to the next (going through them)
+        ed.push_offer(card("Another"));
+        feed(&mut ed, "<C-q>n");
+        assert_eq!(ed.offers.len(), 1, "the first answered");
+        status(&mut ed);
+        assert!(ed.card_has_keys(), "the keys went on to the second, drawn");
+        feed(&mut ed, "n");
+        assert!(ed.offers.is_empty() && !ed.card_has_keys());
         assert_eq!(text(&ed), "one two\n");
     }
 
-    /// The wake for the keys gone quiet is every session's (friction 60's review): a card that waits, still up after
-    /// a switch to another session, is freed by it and a frame is owed for it — the result is never taken for the
-    /// session in front when the card came (that one's, behind, is applied as "nothing in sight changed").
+    /// A focused card whose text changes (`Offer.rev` — asked again, joined, its group grown) lets go of the keys: a
+    /// key meant for what it said is never an answer to what it says now. Asked again by your own key, yours again.
     #[test]
-    fn a_waiting_card_is_freed_and_drawn_after_a_session_switch() {
-        use crate::offer::{KEYS_QUIET, Offer, What};
-        use std::time::Duration;
-        let dir = crate::scratch::Scratch::new("cardwait-switch");
+    fn a_focused_card_that_changes_lets_go_of_the_keys() {
+        use crate::offer::{Offer, What};
         let mut ed = editor("one\n");
-        ed.keys_hold = true;
+        let card =
+            |q: &str| Offer::new("Trust?".into(), q, "", String::new(), What::ProjectTrust { hash: [0; 32] });
+        ed.push_offer(card("x = 1"));
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_has_keys());
+        ed.push_offer(card("x = 2"));
+        assert_eq!((ed.offers.len(), ed.offers[0].question.as_str()), (1, "x = 2"), "replaced in place");
+        assert!(!ed.card_has_keys(), "changed: unfocused");
+        feed(&mut ed, "y");
+        assert_eq!(ed.offers.len(), 1, "y was the code's");
+        // (a weighty card answers only drawn — its answers in sight)
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        feed(&mut ed, "<C-q>y");
+        assert!(ed.offers.is_empty(), "focused again: y answered it");
+    }
+
+    /// The stray-key guard after an answer (the review of 7b): `y y` in one batch — a repeat, a yank typed on — answers
+    /// the first card and never the weighty one behind it before a frame has drawn it, its text new or the same as the
+    /// one answered (Claude's same command asked again): the second `y` is refused, said on the card; drawn, the keys
+    /// are its and `y` answers it. And a weighty card focused before any frame drew it takes no answer from the buttons
+    /// the last one left.
+    #[test]
+    fn keys_typed_on_after_an_answer_never_answer_a_card_not_yet_drawn() {
+        use crate::offer::{Offer, What};
+        let draw = |ed: &mut Editor| {
+            crate::term::render(ed, &mut Vec::new(), 100, 24).unwrap();
+            crate::screen::text(ed.last_frame.as_ref().unwrap().0.as_slice(), 100, 24).unwrap()
+        };
+        let card =
+            |t: &str| Offer::new(t.into(), "x = 1", "", String::new(), What::ProjectTrust { hash: [0; 32] });
+        for same in [false, true] {
+            let mut ed = editor("one\n");
+            ed.push_offer(card("Trust this project?"));
+            // (the second as Claude's same ask comes: stacked behind it, not merged into it)
+            let mut second = card(if same { "Trust this project?" } else { "Trust it again?" });
+            ed.offer_seq += 1;
+            second.id = ed.offer_seq;
+            ed.offers.push(second);
+            let id = ed.offer_seq;
+            draw(&mut ed);
+            feed(&mut ed, "<C-q>yy");
+            assert_eq!(
+                ed.offers.iter().map(|o| o.id).collect::<Vec<_>>(),
+                [id],
+                "{same}: the second up, unanswered"
+            );
+            assert!(!ed.card_has_keys(), "{same}: not before it's in sight");
+            let s = draw(&mut ed);
+            assert!(s.contains("came before this card was in sight"), "{same}: said on it:\n{s}");
+            assert!(ed.card_has_keys(), "{same}: drawn: the keys handed on");
+            feed(&mut ed, "y");
+            assert!(ed.offers.is_empty(), "{same}: seen, its y answers it");
+        }
+        // Focused before any frame drew it (the one in front gone unanswered, its text the same): the last frame's
+        // buttons aren't its, nor is the text seen whole before
+        let mut ed = editor("one\n");
+        ed.push_offer(card("Trust this project?"));
+        let mut second = card("Trust this project?");
+        ed.offer_seq += 1;
+        second.id = ed.offer_seq;
+        ed.offers.push(second);
+        draw(&mut ed);
+        ed.offers.remove(0);
+        feed(&mut ed, "<C-q>y");
+        assert_eq!(ed.offers.len(), 1, "never drawn: its y isn't taken");
+        draw(&mut ed);
+        feed(&mut ed, "y");
+        assert!(ed.offers.is_empty(), "drawn: answered");
+    }
+
+    /// A switch of session lets go of a focused card: a card that stays up across it (a project's trust doesn't park
+    /// with its session) waits in the other one, and again once back — a key there is never its answer.
+    #[test]
+    fn a_session_switch_lets_go_of_a_focused_card() {
+        use crate::offer::{Offer, What};
+        let dir = crate::scratch::Scratch::new("cardfocus-switch");
+        let mut ed = editor("one\n");
         let main = ed.session.id;
         let other = ed.session_open(dir.path()).unwrap();
         assert!(ed.session_switch(main));
-        // (the keys came in moments before: the wake comes in about 100 ms)
-        ed.last_input = Some(crate::clock::now() - (KEYS_QUIET - Duration::from_millis(100)));
         let trust = What::ProjectTrust { hash: [0; 32] };
         ed.push_offer(Offer::new("Trust this project?".into(), "x = 1", "", String::new(), trust));
-        assert!(ed.cards_typing() && ed.keys_waking, "it waits, its wake armed");
-        // To the other session: the trust card isn't one that parks with its session — still up, still waiting
+        feed(&mut ed, "<C-q>");
+        assert!(ed.card_has_keys());
         assert!(ed.session_switch(other));
-        assert!(ed.card_waits_quiet(), "up in front of the other session, waiting");
-        let end = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            assert!(std::time::Instant::now() < end, "no wake landed");
-            let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) else { continue };
-            let unchanged = crate::term::handle_noting(&mut ed, ev);
-            if !ed.cards_typing() {
-                assert!(!unchanged, "freed in front: a frame owed for it");
-                break;
-            }
-        }
-        assert!(ed.card_has_keys() && !ed.card_waits_quiet());
+        assert!(ed.offers.len() == 1 && !ed.card_has_keys(), "up in the other session, waiting");
+        assert!(ed.session_switch(main));
+        assert!(!ed.card_has_keys(), "back: still waiting");
+    }
+
+    /// A press on a card that waits focuses it — on one of its answers too, which isn't taken (a click as it came
+    /// up is no answer); focused, a press on an answer answers. `C-w` from it gives the keys back, the window prefix
+    /// going on; `C-w w` goes round to it after the panes.
+    #[test]
+    fn a_click_or_c_w_w_focuses_a_card_and_c_w_leaves_it() {
+        use crate::event::{Mouse, MouseKind};
+        use crate::offer::{Offer, What};
+        let mut ed = editor("one\n");
+        let trust = || What::ProjectTrust { hash: [0; 32] };
+        ed.push_offer(Offer::new("Trust?".into(), "x = 1", "", String::new(), trust()));
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        // (its `y` as drawn now — where a press lands on it)
+        let y_at = |ed: &Editor| {
+            let b = ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').expect("its y drawn");
+            Mouse { kind: MouseKind::Down, x: b.1 as u16, y: b.0 as u16, alt: false }
+        };
+        ed.handle_mouse(y_at(&ed));
+        assert!(ed.card_has_keys() && ed.offers.len() == 1, "focused, not answered");
+        // `C-w`: the keys back, the prefix under way from where they were
+        feed(&mut ed, "<C-w>");
+        assert!(!ed.card_has_keys() && ed.offers.len() == 1 && !ed.pending.is_empty(), "C-w left it");
+        feed(&mut ed, "<esc>");
+        // `C-w w` from the code: round to the card
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        feed(&mut ed, "<C-w>w");
+        assert!(ed.card_has_keys(), "C-w w went round to it");
+        // (from it, `C-w w` goes on round the panes — never back to it: the review of 7b)
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        feed(&mut ed, "<C-w>w");
+        assert!(!ed.card_has_keys() && ed.session.is_at(crate::session::At::Code), "C-w w from it left it");
+        feed(&mut ed, "<C-w>w");
+        assert!(ed.card_has_keys(), "and the round reaches it again");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 20).unwrap();
+        ed.handle_mouse(y_at(&ed));
+        assert!(ed.offers.is_empty(), "focused: its y pressed answered it");
     }
 
     /// Hints where there were none (uxaudit D6): a prompt says what enter does with its line (the command line's

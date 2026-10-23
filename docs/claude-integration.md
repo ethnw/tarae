@@ -95,21 +95,23 @@ conversation without asking, `n` says no. What goes is the screen as it is just 
 card. `llm.screen-terminal = false` leaves the terminal panel out: its rows go blank, and the card says so.
 To send the screen yourself, use `C-s` (below).
 
-A card that asks something (this one, a command to run, a read outside the project) takes its answer keys in
-the editor. While you're in the chat — typing, or its input empty as Claude asks mid-turn — or in a review, it
-leaves your keys alone and says `C-q to answer it` (the chat's hints say `C-q answer card`): the first letter of
-a message typed next is the message's, never an answer. The code is the same while keys are coming in: a card that
-comes within a second of your last key (a paste and its Enter, a chord, a script typing over `tarae keys`) waits
-for them to go quiet — the status line says `▲1 waiting · C-q` — and takes them once they've been quiet a second;
-a card your own last key asked for takes them at once. `C-q` gives the card the keys (the status line says `CARD`), your draft stays as it was, and
-Esc goes back unanswered. Esc never answers a card. `n` does. A card counts what waits behind it — `1/3`: cards
+A card that asks something (this one, a command to run, a read outside the project) takes the keys only once it's
+focused. One that came on its own — Claude's, a server's, a sync's — waits in a faint frame wherever your keys are
+(the code, the chat, a review) and says `C-q to answer it`; the status line says `▲1 waiting · C-q` (the chat's
+hints `C-q answer card`): a key typed for the code or a message is never an answer. `C-q`, a click on it or `C-w w`
+(its last stop) focuses it — its frame lit, the status line says `card`, your draft stays as it was; Esc goes back
+unanswered, and so does `C-w` (the window prefix going on from where you were). A card your own key asked for
+(`:restart`, a new session, a bring) is focused as it comes. A focused card whose text changes (asked again, joined)
+lets go of the keys: focus it again to answer what it says now. Esc never answers a card. `n` does. Answered, the
+keys go on to the next card when you were going through them with `C-q` — once a frame has drawn it: a `y` typed on
+before that (a repeat) is refused and said on it, never an answer to a card not yet in sight — else back where they were. A card counts what waits behind it — `1/3`: cards
 under it, Claude's calls queued, cards in other sessions — and says it in words: `2 more wait — 1 here, 1 in
 fix-login · space I lists them`.
 
 Claude's calls made at once can stack cards asking for the very same run — the same command, character for
 character, in the same folder, showing the same. The card in front lists those behind it — `+1 more like it: card#53 — same command, unchanged`
 — and `Y` answers it and them, a `y` each (each its own `card` line). Only once the card in front has been in
-sight whole and settled, as its `y` — a card joining the list after that makes it one to read again; never for a
+sight whole and focused, as its `y` — a card joining the list after that makes it one to read again; never for a
 card that warns of something, nor one past the sandbox (outside it, or with a socket) or with none around it (none
 here, or `llm.sandbox` off). Any other card behind is answered on its own.
 

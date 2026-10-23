@@ -51,27 +51,27 @@
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00
-01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff
-02  f   ffff ffffff fff fffffff                        fffff f
-03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f
-04  f  ff fffffff                                            f
-05  f  f                                       dddd dddddddd f
-06  f  f                                    ddddddd dddddddd f
-07  f  f                                    ddd dddd ddddddd f
-08  f  f                                   d ddddddddddd ddd f
-09  f  f                                   d ddddddddddd ddd f
-10  f  f                          ddd ddddddd dddddd ddddddd f
-11  f                                                        f
-12  f  ffffff f ffff ffffffff                                f
-13  fa d TTTTT TTTTTTTTTTTTTTTTTTTTTT           ddd d dd ddd f
-14  f  d                                        ddd d dd ddd f
-15  f                                                        f
-16  f  ffff fffffff                                          f
-17  f  d                                        ddd d dd ddd f
-18  f  d                                ddd d ddddd ddd dddd f
-19  f  d                                ddd d ddddd ddd dddd f
-20  f                                                        f
-21  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01  aa TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+02  a   ffff ffffff fff fffffff                        fffff a
+03  a ffffffffffffffffffffffffffffffffffffffffffffffffffffff a
+04  a  ff fffffff                                            a
+05  a  f                                       dddd dddddddd a
+06  a  f                                    ddddddd dddddddd a
+07  a  f                                    ddd dddd ddddddd a
+08  a  f                                   d ddddddddddd ddd a
+09  a  f                                   d ddddddddddd ddd a
+10  a  f                          ddd ddddddd dddddd ddddddd a
+11  a                                                        a
+12  a  ffffff f ffff ffffffff                                a
+13  aa d TTTTT TTTTTTTTTTTTTTTTTTTTTT           ddd d dd ddd a
+14  a  d                                        ddd d dd ddd a
+15  a                                                        a
+16  a  ffff fffffff                                          a
+17  a  d                                        ddd d dd ddd a
+18  a  d                                ddd d ddddd ddd dddd a
+19  a  d                                ddd d ddddd ddd dddd a
+20  a                                                        a
+21  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 22
 23  a TTTTTT   D ffff ff ffff  D D ffff  DDD fffff        TTT
 ## legend

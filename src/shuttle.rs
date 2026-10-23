@@ -664,9 +664,6 @@ pub fn step(ed: &mut Editor, s: Step, reply: Reply) {
 
 /// A step checked, then its keys (or text) handed in — its answer, and whether any of it landed.
 pub fn run(ed: &mut Editor, s: Step) -> (Value, bool) {
-    // (a card that waited for the keys to go quiet takes them now if it's time — before anything is checked, so its
-    // `expect` and each key's check see what the keys will meet: `input_came` frees none during a step)
-    ed.keys_quiet_sync();
     if let Err(r) = may_step(ed, &s) {
         return (r.json(ed), false);
     }
@@ -770,8 +767,6 @@ fn hand_in(
     };
     let mut took = None;
     for (i, &key) in keys.iter().enumerate() {
-        // (freed here, before the check, never between it and the key — friction 60's review)
-        ed.keys_quiet_sync();
         let now = ed.keys_to();
         if i > 0 && now.to != to {
             // (a sequence stays where it began: what was under way is let go, not finished elsewhere)
@@ -791,11 +786,6 @@ fn hand_in(
             }
             return Err((i, r));
         }
-        // (tests: the clock passing the keys' quiet between the check and the key)
-        #[cfg(test)]
-        if let Some(d) = AFTER_CHECK.take() {
-            ed.last_input = ed.last_input.map(|t| t - d);
-        }
         crate::uistate::TOOK.set(None);
         ed.handle_event(crate::event::Event::Key(key));
         took = crate::uistate::TOOK.get();
@@ -805,12 +795,6 @@ fn hand_in(
         }
     }
     Ok(took)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Tests: how far the clock moves between a key's check and the key (`hand_in`).
-    pub static AFTER_CHECK: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 /// A `:` line about to run (`typed::execute` — typed, a key bound to it, the palette): during a shuttle's step,

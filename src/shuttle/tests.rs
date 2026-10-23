@@ -52,18 +52,16 @@ fn light_card(ed: &mut Editor, title: &str, yours: bool) -> u64 {
     ed.offer_seq
 }
 
-/// The front card in sight long enough for its answers to count.
-/// The person answers the front card — drawn, and in sight long enough for a weighty one's answer to count.
+/// The person answers the front card — drawn, focused (a press on it), its key.
 fn answer_card(ed: &mut Editor, k: &str) {
     frame(ed);
-    settle(ed);
+    focus(ed);
     ed.handle_key(key(k));
 }
 
-fn settle(ed: &mut Editor) {
-    if let Some(o) = ed.offers.first() {
-        ed.offer_seen.set(Some((o.id, o.rev, Instant::now() - crate::offer::SETTLE * 2)));
-    }
+/// The front card focused, as a press on it does (P3 §3.8).
+fn focus(ed: &mut Editor) {
+    ed.card_focus_front();
 }
 
 /// A hello from process `pid` (started at `started`), the peer being it — and where its answer comes.
@@ -121,31 +119,22 @@ fn a_step_lands_where_a_persons_key_would() {
     );
 }
 
-/// A card that waits for the keys to go quiet (friction 60) is freed before a step's check, never between the
-/// check and its key: with the quiet passing right there (`AFTER_CHECK`), the shuttle's `y` checked as the code's
-/// lands in the code — it never reaches a card it may not answer (a project's trust) unchecked. A step after the
-/// keys went quiet meets the card, and its `y` is refused.
+/// A card that came on its own waits to be focused (P3 §3.8): a shuttle's `y` checked as the code's lands in the code
+/// — it never reaches a card it may not answer (a project's trust). Focused (its `C-q`), the card's `y` is refused.
 #[test]
-fn a_card_freed_as_a_step_lands_never_takes_its_key_unchecked() {
+fn a_shuttles_y_never_reaches_a_card_that_waits() {
     let mut ed = editor();
-    ed.keys_hold = true;
     let id = connect_for_test(&mut ed, "t", Level::Light);
-    // (keys coming in — the shuttle's last step, say — then the card from elsewhere)
-    ed.last_input = Some(crate::clock::now());
     let trust = What::ProjectTrust { hash: [0; 32] };
     ed.push_offer(Offer::new("Trust this project?".into(), "x = 1", "", String::new(), trust));
     frame(&mut ed);
-    settle(&mut ed);
-    // (keys just came: the frame drawn never eats into the window, however slow the machine)
-    ed.last_input = Some(crate::clock::now());
-    assert!(ed.card_waits_quiet(), "it waits for the keys");
+    assert!(ed.card_waits(), "it waits to be focused");
     let pane = to(&ed);
-    AFTER_CHECK.set(Some(crate::offer::KEYS_QUIET * 2));
     let (said, landed) = here(&mut ed, id, "y");
     assert!(landed && said["landed"] == pane.as_str() && said["took"] == "code", "{said}");
     assert_eq!(ed.offers.len(), 1, "the card unanswered");
-    // Quiet before the step: the card has the keys, and the shuttle's `y` on it is refused
-    ed.last_input = ed.last_input.map(|t| t - crate::offer::KEYS_QUIET * 2);
+    // Focused: the card has the keys, and the shuttle's `y` on it is refused
+    focus(&mut ed);
     let card = to(&ed);
     assert!(card.starts_with("card#"), "the card's: {card}");
     let (said, landed) = here(&mut ed, id, "y");
@@ -176,35 +165,38 @@ fn a_step_that_says_no_place_or_another_is_refused() {
     assert_eq!(said["why"], "no card#9 in sight");
 }
 
-/// Slip 1: a script read `card#1`, and as its `y` was on the way `card#2` came in front. The step names the
-/// card and its rev: refused, both cards still up — then, written for the card in front, it answers that one.
+/// Slip 1: a script read `card#1`, and as its `y` was on the way the card changed. A focused card keeps the front —
+/// another, the person's own, comes behind it — but asked again it lets go of the keys (P3 §3.8): the step names the
+/// card and where the keys go, refused, both cards still up; focused again, a step that names its old rev is refused
+/// for that alone, and one written for it as it is answers it.
 #[test]
-fn a_card_come_in_front_between_the_read_and_the_y_is_not_answered() {
+fn a_card_that_changed_between_the_read_and_the_y_is_not_answered() {
     let mut ed = editor();
     let id = connect_for_test(&mut ed, "t", Level::Light);
     let first = light_card(&mut ed, "End the review?", false);
     frame(&mut ed);
+    focus(&mut ed);
     assert_eq!(to(&ed), format!("card#{first}"));
     let read = json!({ "keys": { "to": format!("card#{first}") }, format!("card#{first}"): { "rev": 0 } });
-    // (it comes between: the person's own command asked for it)
+    // (one comes between: the person's own command asked for it — behind the one focused)
     let second = light_card(&mut ed, "End the other review?", true);
     frame(&mut ed);
-    assert_eq!(to(&ed), format!("card#{second}"), "in front");
+    assert_eq!(to(&ed), format!("card#{first}"), "the focused one keeps the front");
+    // Asked again, as it was: its focus gone with its rev, the keys the code's
+    light_card(&mut ed, "End the review?", false);
     let (said, landed) = keys(&mut ed, id, "y", read);
     assert!(!landed && said["refused"] == "expect", "{said}");
-    assert_eq!(said["why"], format!("the keys go to card#{second}, not card#{first}"));
     assert_eq!(ed.offers.len(), 2, "neither answered");
-    // Its rev moved on too (asked again, as it was): refused for that alone
-    light_card(&mut ed, "End the other review?", true);
-    let stale = json!({ "keys": { "to": format!("card#{second}") }, format!("card#{second}"): { "rev": 0 } });
+    focus(&mut ed);
+    let stale = json!({ "keys": { "to": format!("card#{first}") }, format!("card#{first}"): { "rev": 0 } });
     let (said, _) = keys(&mut ed, id, "y", stale);
-    assert_eq!(said["why"], format!("card#{second}'s rev is 1 — you expected 0"));
-    let now = json!({ "keys": { "to": format!("card#{second}") }, format!("card#{second}"): { "rev": 1 } });
+    assert_eq!(said["why"], format!("card#{first}'s rev is 1 — you expected 0"));
+    let now = json!({ "keys": { "to": format!("card#{first}") }, format!("card#{first}"): { "rev": 1 } });
     let (said, landed) = keys(&mut ed, id, "y", now);
     assert!(landed, "{said}");
     assert_eq!(said["took"], "card");
-    assert_eq!(said["said"], format!("card#{second} went: answered y by shuttle t"), "{said}");
-    assert!(ed.offers.iter().any(|o| o.id == first), "the first still up");
+    assert_eq!(said["said"], format!("card#{first} went: answered y by shuttle t"), "{said}");
+    assert!(ed.offers.iter().any(|o| o.id == second), "the second still up");
 }
 
 /// Slip 2: a paste meant for the commit message came before its buffer was open, and went to the pane that had
@@ -339,7 +331,7 @@ fn weighty_and_lasting_answers_stay_yours() {
     let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(999), ops: false };
     ed.push_offer(Offer::new("Claude changes 3 files".into(), q, "", String::new(), what));
     frame(&mut ed);
-    settle(&mut ed);
+    focus(&mut ed);
     let (said, landed) = here(&mut ed, id, "y");
     assert!(!landed && said["refused"] == "weighty", "{said}");
     assert_eq!(ed.offers.len(), 1, "still up");
@@ -351,10 +343,10 @@ fn weighty_and_lasting_answers_stay_yours() {
     // This card's own yes is never a shuttle's
     ed.push_offer(Offer::new(TITLE.into(), "x asks to send keys", "", String::new(), What::Shuttle));
     frame(&mut ed);
+    focus(&mut ed);
     let (said, landed) = here(&mut ed, id, "y");
     assert!(!landed && said["refused"] == "never", "{said}");
-    // (its `n` is a shuttle's to give — once it's settled, as a person's)
-    settle(&mut ed);
+    // (its `n` is a shuttle's to give)
     here(&mut ed, id, "n");
     // Nor a lasting answer on a light card (`A` on Claude's screen card), nor keeping what a run made
     let call = crate::tools::Call::test(7);
@@ -366,7 +358,8 @@ fn weighty_and_lasting_answers_stay_yours() {
         What::Screen { call },
     ));
     frame(&mut ed);
-    assert!(!ed.offers[0].weighty() && ed.card_takes(&ed.offers[0]).contains(&'A'));
+    focus(&mut ed);
+    assert!(!ed.offers[0].weighty() && ed.offers[0].acts_on('A'));
     let (said, landed) = here(&mut ed, id, "A");
     assert!(!landed && said["refused"] == "never", "{said}");
     assert!(said["why"].as_str().unwrap().starts_with("A on card#"), "{said}");
@@ -380,7 +373,7 @@ fn weighty_and_lasting_answers_stay_yours() {
         What::ProtectedMade { then, made: Vec::new() },
     ));
     frame(&mut ed);
-    settle(&mut ed);
+    focus(&mut ed);
     let (said, landed) = here(&mut ed, id, "y");
     assert!(!landed && said["refused"] == "never", "{said}");
     assert_eq!(ed.offers.len(), 1, "still up");
@@ -449,6 +442,7 @@ fn claudes_level_never_names_the_shuttle() {
     let id = answered(&rx).unwrap()["id"].as_u64().unwrap();
     light_card(&mut ed, "End the review?", false);
     frame(&mut ed);
+    focus(&mut ed);
     assert!(here(&mut ed, id, "n").1);
     frame(&mut ed);
     frame(&mut ed);
@@ -795,7 +789,7 @@ fn a_steps_second_key_finds_the_review_its_first_brought_up() {
     crate::refactor::land_yours(&mut ed, "p".into(), "apply p".into(), files, String::new(), String::new());
     // (the card's `r`, the person's: one file at a time)
     frame(&mut ed);
-    settle(&mut ed);
+    focus(&mut ed);
     ed.handle_event(crate::event::Event::Key(key("r")));
     let id = connect_for_test(&mut ed, "t", Level::Light);
     frame(&mut ed);
@@ -806,8 +800,7 @@ fn a_steps_second_key_finds_the_review_its_first_brought_up() {
 }
 
 /// The grant card is the program's to bring up — so a `y` you were typing as it came (a yank) isn't an answer: it
-/// settles first, as a weighty card does; drawn and in sight, `y` grants. A card dropped unanswered (its session
-/// gone, a restart) tells the hello waiting on it at once.
+/// waits to be focused, as every card that came on its own (P3 §3.8); focused, `y` grants.
 #[test]
 fn the_grant_card_takes_no_y_typed_as_it_came() {
     let mut ed = editor();
@@ -816,7 +809,7 @@ fn the_grant_card_takes_no_y_typed_as_it_came() {
     frame(&mut ed);
     ed.handle_key(key("y"));
     assert!(answered(&rx).is_none(), "not answered");
-    assert_eq!(ed.offer_said_now(), Some("y came as the card did — not taken; press it again"));
+    assert!(ed.card_waits(), "the y was the code's: the card waits");
     answer_card(&mut ed, "y");
     assert_eq!(answered(&rx).unwrap()["shuttle"], "connected");
     frame(&mut ed);
@@ -857,7 +850,7 @@ fn a_grant_card_dropped_unanswered_says_so_at_once() {
 }
 
 /// A weighty card's answers stay the person's whatever letter reaches it — `Y` on a run card's group too, a
-/// letter its hint row doesn't list (`offer_key` takes it in normal mode).
+/// letter its hint row doesn't list (`offer_key` takes it while focused).
 #[test]
 fn a_weighty_cards_group_answer_is_not_a_shuttles() {
     let mut ed = editor();
@@ -867,13 +860,14 @@ fn a_weighty_cards_group_answer_is_not_a_shuttles() {
     ed.push_offer(Offer::new("Claude changes 3 files".into(), q, "", String::new(), what));
     ed.offers[0].like = vec![99];
     frame(&mut ed);
-    settle(&mut ed);
-    assert!(!ed.card_takes(&ed.offers[0]).contains(&'Y') && ed.offers[0].acts_on('Y'));
+    focus(&mut ed);
+    assert!(ed.offers[0].acts_on('Y'));
     let pane = to(&ed);
     let (said, landed) = keys(&mut ed, id, "Y", json!({ "keys": { "to": pane } }));
     assert!(!landed && said["refused"] == "weighty", "{said}");
     assert!(matches!(ed.offers[0].state, crate::offer::OfferState::Asking), "still asking");
-    // (a letter the card doesn't act on goes on to the code)
+    // (unfocused, every letter goes on to the code)
+    ed.card_focus = None;
     assert!(here(&mut ed, id, "j").1);
     assert_eq!(ed.cursor_line(), 1);
     // Another letter no hint row lists: `m` on a resolved rebase's card (its commit's message)
@@ -881,8 +875,8 @@ fn a_weighty_cards_group_answer_is_not_a_shuttles() {
     let what = What::RebaseResolved { root: "/nowhere".into(), message: true };
     ed.push_offer(Offer::new("Rebase resolved".into(), "Go on?", "", String::new(), what));
     frame(&mut ed);
-    settle(&mut ed);
-    assert!(!ed.card_takes(&ed.offers[0]).contains(&'m') && ed.offers[0].acts_on('m'));
+    focus(&mut ed);
+    assert!(ed.offers[0].acts_on('m'));
     let pane = to(&ed);
     let (said, landed) = keys(&mut ed, id, "m", json!({ "keys": { "to": pane } }));
     assert!(!landed && said["refused"] == "weighty", "{said}");
@@ -1214,7 +1208,7 @@ fn every_card() -> Vec<Offer> {
 
 /// `Offer::acts_on` — the letters a shuttle's keys are checked against, and the only ones `offer_key` takes — is
 /// every letter `Offer::act` (what `offer_key` does) acts on, card kind by card kind, as the card may stand
-/// (settled or not, cut or not): a letter added to one and not the other fails here.
+/// (cut or not): a letter added to one and not the other fails here.
 #[test]
 fn acts_on_is_every_letter_a_card_acts_on() {
     use crate::offer::Stands;
@@ -1222,8 +1216,7 @@ fn acts_on_is_every_letter_a_card_acts_on() {
     let built: std::collections::BTreeSet<&str> = cards.iter().map(Offer::kind).collect();
     let kinds: std::collections::BTreeSet<&str> = crate::offer::KINDS.iter().copied().collect();
     assert_eq!(built, kinds, "every card kind, built (a new kind: add it to every_card)");
-    let stands = [(true, true), (true, false), (false, true), (false, false)]
-        .map(|(settled, whole)| Stands { drawn: true, settled, whole });
+    let stands = [true, false].map(|whole| Stands { drawn: true, whole });
     let mut wrong = Vec::new();
     for o in &cards {
         for c in ' '..='~' {
@@ -1235,7 +1228,7 @@ fn acts_on_is_every_letter_a_card_acts_on() {
             }
         }
         // (not drawn, a weighty card takes nothing)
-        let hidden = Stands { drawn: false, settled: true, whole: true };
+        let hidden = Stands { drawn: false, whole: true };
         assert!(!o.weighty() || (' '..='~').all(|c| o.act(c, hidden).is_none()), "{}", o.kind());
     }
     assert!(wrong.is_empty(), "acts_on and act differ:\n{}", wrong.join("\n"));

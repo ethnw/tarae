@@ -91,9 +91,9 @@ fn input(sim: &mut Sim, ed: &mut Editor, pid: u32, ys: &std::cell::Cell<usize>) 
             "a frame".into()
         }
         2 if ed.offers.first().is_some_and(|o| o.stuck().is_some()) => {
-            // (drawn, then settled: a weighty card's keys)
+            // (drawn, then focused — a press on it: its keys)
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
-            sim.wait(crate::offer::SETTLE + Duration::from_millis(50));
+            ed.card_focus_front();
             // (one stop a run of the scenario: a second one's read of the tree would race the kernel ending what
             // the first signalled — the later cards are kept waiting, `n`)
             if ys.get() > 0 {

@@ -124,7 +124,8 @@ fn input(
         }
         _ => {
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
-            sim.wait(crate::offer::SETTLE + Duration::from_millis(100));
+            // (focused — a press on it — then its key)
+            ed.card_focus_front();
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
             let key = *sim.choices.pick(&['y', 'y', 's', 'n']);
             // (a `y` on a card whose run ended: what it lets the next run reach)

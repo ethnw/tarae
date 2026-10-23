@@ -22,14 +22,14 @@
 19
 20
 21
-22
-23
-24                                                      ╭─ Go's language server ─────────────────────╮
-25                                                      │ gopls isn't installed. Install it with:    │
-26                                                      │ go install golang.org/x/tools/gopls@latest │
+22                                                      ╭─ Go's language server ─────────────────────╮
+23                                                      │ gopls isn't installed. Install it with:    │
+24                                                      │ go install golang.org/x/tools/gopls@latest │
+25                                                      │                                            │
+26                                                      │ C-q to answer it                           │
 27                                                      ╰─ y Install · n Not now · N Never ──────────╯
 28
-29  ● normal                                                                           utf-8 LF   1:1
+29  ● normal   ▲1 waiting · C-q                                                        utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -84,14 +84,14 @@
 19
 20
 21
-22
-23
-24                                                      ff TTTT TTTTTTTT TTTTTT ffffffffffffffffffffff
+22                                                      ff TTTT TTTTTTTT TTTTTT ffffffffffffffffffffff
+23                                                      f                                            f
+24                                                      f                                            f
 25                                                      f                                            f
-26                                                      f                                            f
-27                                                      ff A         f A ddd ddd f A ddddd fffffffffff
+26                                                      f ddd dd dddddd dd                           f
+27                                                      ff F fffffff f F fff fff f F fffff fffffffffff
 28
-29  a TTTTTT                                                                           ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww w www                                                        ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning

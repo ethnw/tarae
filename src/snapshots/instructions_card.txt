@@ -18,18 +18,18 @@
 15  15     let text = "the quick brown fox jumps over the lazy dog";
 16  16     let counts = word_counts(text);
 17  17     println!("{} distinct words", counts.len()); // 타래
-18  18 }
-19
-20                                     ╭─ CLAUDE.md: the main checkout's changed ────────────────────╮
-21                                     │ The main checkout's CLAUDE.md changed since this            │
-22                                     │ session's copy, and so did this one. y takes the main       │
-23                                     │ checkout's changes here. 1 of them touches lines this       │
-24                                     │ session changed: it stays as it is here.                    │
+18  18 }                               ╭─ CLAUDE.md: the main checkout's changed ────────────────────╮
+19                                     │ The main checkout's CLAUDE.md changed since this            │
+20                                     │ session's copy, and so did this one. y takes the main       │
+21                                     │ checkout's changes here. 1 of them touches lines this       │
+22                                     │ session changed: it stays as it is here.                    │
+23                                     │                                                             │
+24                                     │ Claude reads it from its next start.                        │
 25                                     │                                                             │
-26                                     │ Claude reads it from its next start.                        │
+26                                     │ C-q to answer it                                            │
 27                                     ╰─ y Take the main checkout's · v See them · n Keep this one ─╯
 28
-29  ● normal                                                                    rust   utf-8 LF   1:1
+29  ● normal   ▲1 waiting · C-q                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -80,18 +80,18 @@
 15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
 16  ff
 17  ff              ggg gggggggg gggggg
-18  ff
-19
-20                                     ff TTTTTTTTTT TTT TTTT TTTTTTTTTT TTTTTTT fffffffffffffffffffff
-21                                     f ddd dddd dddddddddd ddddddddd ddddddd ddddd dddd            f
-22                                     f ddddddddd ddddd ddd dd ddd dddd dddd d ddddd ddd dddd       f
-23                                     f dddddddddd ddddddd ddddd d dd dddd ddddddd ddddd dddd       f
-24                                     f ddddddd dddddddd dd ddddd dd dd dd ddddd                    f
+18  ff                                 ff TTTTTTTTTT TTT TTTT TTTTTTTTTT TTTTTTT fffffffffffffffffffff
+19                                     f ddd dddd dddddddddd ddddddddd ddddddd ddddd dddd            f
+20                                     f ddddddddd ddddd ddd dd ddd dddd dddd d ddddd ddd dddd       f
+21                                     f dddddddddd ddddddd ddddd d dd dddd ddddddd ddddd dddd       f
+22                                     f ddddddd dddddddd dd ddddd dd dd dd ddddd                    f
+23                                     f                                                             f
+24                                     f dddddd ddddd dd dddd ddd dddd dddddd                        f
 25                                     f                                                             f
-26                                     f dddddd ddddd dd dddd ddd dddd dddddd                        f
-27                                     ff A                          f A ddd dddd f A dddd dddd ddd ff
+26                                     f ddd dd dddddd dd                                            f
+27                                     ff F ffff fff ffff ffffffffff f F fff ffff f F ffff ffff fff ff
 28
-29  a TTTTTT                                                                    dddd   ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww w www                                                 dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

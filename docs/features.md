@@ -44,9 +44,9 @@ You don't need to know the keys to start:
   `y` for `o`). When tarae runs inside zellij (`ZELLIJ` is set), wherever one of those is hinted —
   which-key, the palette, the chat's and the cards' hints, the tutor — tarae says its twin, the key or command that does
   the same without it: `pageup` for `C-b`, `backspace` for insert mode's `C-h`, and for `C-q` what reaches where it
-  goes — for the card in front the way back to the code, where it takes the keys itself (`esc` from insert mode, a
-  prompt or a picker, `esc esc` from the chat, `C-\ C-\` from the terminal); for a card in a session behind or an
-  edit, the way back and then `space I` (the inbox); for a turn that ended, the way back and `space W`. The chat's
+  goes — for a card or an edit, the way back to the code (`esc` from insert mode, a prompt or a picker, `esc esc` from
+  the chat, `C-\ C-\` from the terminal) and then `space I` (the inbox, whose `enter` focuses the card); for a turn
+  that ended, the way back and `space W`. The chat's
   `C-t` `C-p` `C-s` `C-o` are `:model` `:chat-resume` `:chat-screen` `:chat-point`, typed in the code — the way back
   first (`esc esc :model`). The bindings stay as they are; a key with no twin works once `C-g` has
   locked zellij. Every key of a twin is said as bound (a remap moves it). `editor.zellij-hints` = `auto` (inside

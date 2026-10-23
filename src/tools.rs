@@ -6498,7 +6498,7 @@ mod tests {
     fn also_key(ed: &mut crate::editor::Editor, c: char) {
         crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
         let o = (ed.offers[0].id, ed.offers[0].rev);
-        ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+        ed.card_focus = Some((o.0, o.1));
         assert!(ed.offer_key(crate::key::Key::plain(crate::key::Code::Char(c))), "{c} taken");
     }
 

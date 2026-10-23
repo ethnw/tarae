@@ -9,27 +9,27 @@
 06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
 07   7     let mut counts = HashMap::new();
 08   8     for word in text.split_whitespace() {
-09   9     │   *counts.entry(word).or_insert(0) += 1;
-10  10     }
-11  11     counts                           ╭─ Quiet: Claude's command ──────────────────────────────╮
-12  12 }                                    │ No output for 14m 00s, 0% CPU — Claude's command cargo │
-13  13                                      │ xtask linux test in the task panel. Claude's turn      │
-14  14 fn main() {                          │ waits on it, and only you can stop it.                 │
-15  15     let text = "the quick brown fox j│                                                        │
-16  16     let counts = word_counts(text);  │ Its processes are connected to                         │
-17  17     println!("{} distinct words", cou│ ~/.colima/default/docker.sock — the work may be going  │
-18  18 }                                    │ on there: next to no CPU here doesn't mean it's stuck. │
-19                                          │                                                        │
-20                                          │ What each of its threads waits in is in its output now │
-21                                          │ (w), kept if you stop it:                              │
-22                                          │     pid 4242 · cargo xtask linux test · 1 thread       │
-23                                          │       cargo — waiting · 0.31 s CPU                     │
-24                                          │     pid 4250 · docker run --rm tarae-linux cargo test  │
-25                                          │         · 9 threads                                    │
-26                                          │       9 × docker — waiting · 0.12 s CPU                │
+09   9     │   *counts.entry(word).or_insert╭─ Quiet: Claude's command ──────────────────────────────╮
+10  10     }                                │ No output for 14m 00s, 0% CPU — Claude's command cargo │
+11  11     counts                           │ xtask linux test in the task panel. Claude's turn      │
+12  12 }                                    │ waits on it, and only you can stop it.                 │
+13  13                                      │                                                        │
+14  14 fn main() {                          │ Its processes are connected to                         │
+15  15     let text = "the quick brown fox j│ ~/.colima/default/docker.sock — the work may be going  │
+16  16     let counts = word_counts(text);  │ on there: next to no CPU here doesn't mean it's stuck. │
+17  17     println!("{} distinct words", cou│                                                        │
+18  18 }                                    │ What each of its threads waits in is in its output now │
+19                                          │ (w), kept if you stop it:                              │
+20                                          │     pid 4242 · cargo xtask linux test · 1 thread       │
+21                                          │       cargo — waiting · 0.31 s CPU                     │
+22                                          │     pid 4250 · docker run --rm tarae-linux cargo test  │
+23                                          │         · 9 threads                                    │
+24                                          │       9 × docker — waiting · 0.12 s CPU                │
+25                                          │                                                        │
+26                                          │ C-q to answer it                                       │
 27                                          ╰─ y Stop it · w What it waits on · n Keep waiting ──────╯
 28
-29  ● normal                                                                    rust   utf-8 LF   1:1
+29  ● normal   ▲1 waiting · C-q                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -71,27 +71,27 @@
 06   f
 07   f
 08   f
-09   f
-10  ff
-11  ff                                      ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffff
+09   f                                      ff TTTTTT TTTTTTTT TTTTTTT fffffffffffffffffffffffffffffff
+10  ff                                      f                                                        f
+11  ff                                      f                                                        f
 12  ff                                      f                                                        f
 13  ff                                      f                                                        f
 14  ff                                      f                                                        f
 15  ff                gggg ggggg ggggg ggg gf                                                        f
 16  ff                                      f                                                        f
 17  ff              ggg gggggggg gggggg     f                                                        f
-18  ff                                      f                                                        f
-19                                          f                                                        f
-20                                          f dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd f
-21                                          f dddd dddd dd ddd dddd ddd                              f
-22                                          f     ddd dddd d ddddd ddddd ddddd dddd d d dddddd       f
-23                                          f       ddddd d ddddddd d dddd d ddd                     f
-24                                          f     ddd dddd d dddddd ddd dddd ddddddddddd ddddd dddd  f
-25                                          f         d d ddddddd                                    f
-26                                          f       d d dddddd d ddddddd d dddd d ddd                f
-27                                          ff A         f A dddd dd ddddd dd f A dddd ddddddd fffffff
+18  ff                                      f dddd dddd dd ddd ddddddd ddddd dd dd dd ddd dddddd ddd f
+19                                          f dddd dddd dd ddd dddd ddd                              f
+20                                          f     ddd dddd d ddddd ddddd ddddd dddd d d dddddd       f
+21                                          f       ddddd d ddddddd d dddd d ddd                     f
+22                                          f     ddd dddd d dddddd ddd dddd ddddddddddd ddddd dddd  f
+23                                          f         d d ddddddd                                    f
+24                                          f       d d dddddd d ddddddd d dddd d ddd                f
+25                                          f                                                        f
+26                                          f ddd dd dddddd dd                                       f
+27                                          ff F ffff ff f F ffff ff fffff ff f F ffff fffffff fffffff
 28
-29  a TTTTTT                                                                    dddd   ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww w www                                                 dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
-fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  g=diff.plus
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

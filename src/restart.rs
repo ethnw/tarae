@@ -3633,12 +3633,12 @@ mod tests {
         crate::typed::execute(&mut ed, "restart!").unwrap();
         assert_eq!(ed.offers.len(), 1, "one card");
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("already asking")), "{:?}", ed.status);
-        feed(&mut ed, "n");
+        feed(&mut ed, "<C-q>n");
         assert!(ed.offers.is_empty());
         assert_eq!(ed.restart.as_ref().map(|r| &r.stage), Some(&Stage::Turn), "n: still waits");
         assert!(status(&mut ed).contains("restart waits for back"));
         crate::typed::execute(&mut ed, "restart!").unwrap();
-        feed(&mut ed, "y");
+        feed(&mut ed, "<C-q>y");
         assert!(ed.restart.is_none(), "y: called off");
         assert!(toasts(&ed).contains("restart canceled"), "{}", toasts(&ed));
         assert!(!status(&mut ed).contains("restart"));
@@ -3680,7 +3680,7 @@ mod tests {
         crate::typed::execute(&mut ed, "restart!").unwrap();
         let card = ed.offers.first().expect("a card asks");
         assert!(card.question.starts_with("restarting — keeping its symbols."), "{}", card.question);
-        feed(&mut ed, "y");
+        feed(&mut ed, "<C-q>y");
         assert!(ed.restart.is_none(), "y: called off");
         assert!(!status(&mut ed).contains("restart"));
     }

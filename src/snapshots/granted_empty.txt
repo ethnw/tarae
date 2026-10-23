@@ -63,22 +63,22 @@
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00                                                             ff dddddd ffffffffffffffffffffff fffff f
-01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff f
-02  f   ffff ffffff fff fffffff                          fff f f
-03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f f
-04  f  ff fffffff                                            f f
-05  fa f TTTT TTTTTTTTTTTTTTTTTTT              dddd dddddddd f f
-06  f  f                                    ddddddd dddddddd f f
-07  f  f                                    ddd dddd ddddddd f f
-08  f  f                                   d ddddddddddd ddd f f  a TTT TTTTTT
-09  f  f                                   d ddddddddddd ddd f f
-10  f  f                          ddd ddddddd dddddd ddddddd f f  dd ddddd ddd ddddd dddddddd
-11  f                                                        f f  dddddddd dddd dddddddd
-12  f  fffffff fff fffffff ffff fff ffffffff fff             f f
-13  f                                                        f f  DDD fff f ffffffffff
-14  f                                                        f f  f ddddddd dddd dddd dddd dddd
-15  f                                                        f f  f ddddd dd dddd dddd dddddd ddd dddd
-16  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff f  f ddd dd dddd dddddddddd dddddddddd
+01  aa TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f
+02  a   ffff ffffff fff fffffff                          fff a f
+03  a ffffffffffffffffffffffffffffffffffffffffffffffffffffff a f
+04  a  ff fffffff                                            a f
+05  aa f TTTT TTTTTTTTTTTTTTTTTTT              dddd dddddddd a f
+06  a  f                                    ddddddd dddddddd a f
+07  a  f                                    ddd dddd ddddddd a f
+08  a  f                                   d ddddddddddd ddd a f  a TTT TTTTTT
+09  a  f                                   d ddddddddddd ddd a f
+10  a  f                          ddd ddddddd dddddd ddddddd a f  dd ddddd ddd ddddd dddddddd
+11  a                                                        a f  dddddddd dddd dddddddd
+12  a  fffffff fff fffffff ffff fff ffffffff fff             a f
+13  a                                                        a f  DDD fff f ffffffffff
+14  a                                                        a f  f ddddddd dddd dddd dddd dddd
+15  a                                                        a f  f ddddd dd dddd dddd dddddd ddd dddd
+16  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f  f ddd dd dddd dddddddddd dddddddddd
 17                                                             f
 18                                                             f  DDD fff fffffff fffff
 19                                                             f

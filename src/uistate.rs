@@ -38,7 +38,9 @@ use crate::sizes::Slot;
 /// a drawn row before.
 /// 12: a linked group's list is `keys.region` `list:<kind>` (`list:tests`, the slot's name before) and its panes
 /// `list:<kind>` / `detail:<kind>` (`tests:list` / `tests:detail` before).
-pub const V: u64 = 12;
+/// 13: a card takes the keys only once focused (P3 §3.8): a card's `settled` gone, `focused` in its place; its `waits`
+/// is `focus` (`keys quiet` and `session list` gone); `keys.waiting` names the front card waiting to be focused.
+pub const V: u64 = 13;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -308,8 +310,8 @@ pub struct KeysTo {
     pub to: String,
     /// A program typing over the UI socket (`shuttle.rs`): its name, and whether your key paused it.
     pub shuttle: Option<(String, bool)>,
-    /// The card that takes the keys once they've been quiet `offer::KEYS_QUIET` — it came while they were coming in
-    /// (friction 60); until then they go where `region` says (`Editor::card_waits_quiet`).
+    /// The front card waiting to be focused (P3 §3.8, `Editor::card_waits`): up, without the keys — they go where
+    /// `region` says; `C-q`, a click on it or `C-w w` focuses it.
     pub waiting: Option<String>,
 }
 
@@ -369,13 +371,20 @@ impl Editor {
         }
         let modal = self.picker.is_some() || self.prompt.is_some();
         let next = self.next_up();
-        // `card_key`: held, every key is the front card's (`C-q` lets go); not held, `C-q` gives it them when
-        // it's the next up (`inbox::next_up`: this session's own first, then the oldest)
+        // `card_key`: focused, every key is the front card's but the window prefix (`C-q` and `esc` let go); not
+        // focused, `C-q` focuses it when it's the next up (`inbox::next_up`: this session's own first, then the
+        // oldest) — a card sees no other key (P3 §3.8)
         let up = self.offers.first().filter(|o| !o.installing() && !modal);
-        let held = up.is_some() && self.card_keys;
+        let held = up.is_some() && self.card_has_keys();
+        // (`card_key`: handed the keys by an answer, not drawn yet — its answers refused and said on it, the rest go on)
+        if let Some(o) = up.filter(|o| !held && self.card_next == Some((o.id, o.rev))) {
+            let letters = (' '..='~').filter(|&c| o.acts_on(c)).map(ch).collect();
+            v.push(shortcut(Region::Card(o.id), Filter::Only(letters)));
+        }
         if let Some(o) = up {
-            if self.card_keys {
-                v.push(layer(Region::Card(o.id), Filter::All));
+            if held {
+                let prefix = self.keymaps.window_prefix().filter(|_| self.pending.is_empty());
+                v.push(layer(Region::Card(o.id), Filter::Except(prefix.into_iter().collect())));
             } else if self.offer_reading() {
                 // (its text the buffer in sight: `C-q` gives it the keys whatever is next up)
                 v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
@@ -400,11 +409,6 @@ impl Editor {
             v.push(layer(Region::Program, Filter::All));
         } else if !modal && program && !prefix.is_empty() && self.pending == prefix {
             v.push(shortcut(Region::Program, Filter::Only(prefix)));
-        }
-        // `offer_key`: the front card's answers, in normal mode with nothing else holding the keys
-        if let Some(o) = self.offers.first().filter(|_| self.card_has_keys()) {
-            let takes = self.card_takes(o).into_iter().map(ch).collect();
-            v.push(layer(Region::Card(o.id), Filter::Only(takes)));
         }
         // (`handle_key_inner`:) floating text — Esc closes it, `C-d`/`C-u` and `C-e`/`C-y` scroll it
         if self.popup.is_some() {
@@ -536,62 +540,6 @@ impl Editor {
         v
     }
 
-    /// The letters the front card takes now — `offer_key`'s cases: its answers, what a weighty card swallows
-    /// while it settles, `v` while it's cut, `a`/`A` it refuses aloud.
-    pub(crate) fn card_takes(&self, o: &crate::offer::Offer) -> Vec<char> {
-        if o.installing() || self.plugin_panel_focused() {
-            return Vec::new();
-        }
-        let mut t: Vec<char> = Vec::new();
-        let answers = |o: &crate::offer::Offer| {
-            let mut v = vec!['y', 'a', 'A', 'D', 'R', 'c'];
-            v.extend(o.preflights().then_some('p'));
-            v.extend(o.aborts().then_some('X'));
-            v.extend(o.restart_other().then_some('f'));
-            v.extend(o.made().then_some('r'));
-            v.extend(o.for_session().then_some('s'));
-            v
-        };
-        if o.weighty() {
-            // (not drawn: its answers aren't on screen — nothing of it is taken)
-            if !self.screen.offer_buttons.iter().any(|b| !b.3.is_ascii_digit()) {
-                return Vec::new();
-            }
-            if !self.offer_settled() {
-                t.extend(['n', 'N']);
-                t.extend(answers(o));
-            }
-            if o.change_set().is_some() || o.made() {
-                t.extend(['r', 'v']);
-            }
-            if !self.offer_seen_whole() {
-                t.push('v');
-                t.extend(answers(o));
-            }
-        }
-        t.extend(['y', 'n']);
-        t.extend(o.end_dirty().then_some('R'));
-        t.extend(o.commits_first().then_some('c'));
-        t.extend(
-            matches!(o.what, crate::offer::What::Install { .. } | crate::offer::What::Fetch { .. })
-                .then_some('N'),
-        );
-        t.extend(o.lasts().then_some('a'));
-        t.extend(o.for_session().then_some('s'));
-        t.extend(o.keeps().then_some('A'));
-        t.extend(o.both().then_some('D'));
-        t.extend(o.preflights().then_some('p'));
-        t.extend(o.aborts().then_some('X'));
-        t.extend(o.base_steps().then_some('b'));
-        t.extend(o.restart_other().then_some('f'));
-        if o.lasts() || o.weighty() {
-            t.extend(['a', 'A']);
-        }
-        crate::sorting::sort(&mut t);
-        t.dedup();
-        t
-    }
-
     /// The region the keys go to now — `keys_to().region`, nothing else built.
     pub(crate) fn keys_region(&self) -> Region {
         let chain = self.keys_chain();
@@ -603,7 +551,7 @@ impl Editor {
         let chain = self.keys_chain();
         let main = chain.iter().position(|l| !l.shortcut).unwrap_or(chain.len() - 1);
         let region = chain[main].region;
-        let held = matches!(region, Region::Card(_)) && chain[main].filter == Filter::All;
+        let held = matches!(region, Region::Card(_)) && self.card_has_keys();
         let under = match region {
             Region::Card(_) => {
                 chain[main + 1..].iter().find(|l| !l.shortcut && !matches!(l.region, Region::Card(_)))
@@ -1470,7 +1418,8 @@ pub struct CardState {
     pub answers: Vec<(char, &'static str)>,
     pub state: &'static str,
     pub weighty: bool,
-    pub settled: bool,
+    /// The front card has the keys (`Editor::card_has_keys` — focused, P3 §3.8): its answers answer it.
+    pub focused: bool,
     pub rev: u64,
     /// `front` (up, taking its answers) · `stacked` (up behind it) · `parked` (in a session behind).
     pub up: &'static str,
@@ -1502,9 +1451,8 @@ pub struct CardState {
     pub withheld: Vec<char>,
     /// It stepped aside for what its `h` went to (`Offer.aside`): its letters are the code's, `C-q` answers it.
     pub aside: bool,
-    /// What it waits for before it takes the keys: `keys quiet` — it came while they were coming in (friction 60;
-    /// the keys' `waiting` names it) — or `session list` — the list has the keys, its letters keys (`card_waits_for`);
-    /// its letters are the code's or the list's meanwhile, `C-q` answers it.
+    /// What it waits for before it takes the keys: `focus` — the front card not focused (`card_waits`, the keys'
+    /// `waiting` names it): every key is where the keys are meanwhile; `C-q`, a click on it or `C-w w` focuses it.
     pub waits: Option<&'static str>,
     /// The front card's last key it didn't take, and why — what it says on itself (`offer_refused`; a `y` before
     /// it was seen whole: `y — see it whole first (v)`) — until it changes (frictions29 #69: a driver's two `y`s
@@ -1723,16 +1671,12 @@ impl Editor {
                     crate::offer::OfferState::Failed(_) => "failed",
                 },
                 weighty: o.weighty(),
-                settled: is_front && self.offer_settled(),
+                focused: is_front && self.card_has_keys(),
                 rev: o.rev,
                 up,
                 waited_ms: ms(crate::clock::since(o.since)),
                 since: o.since,
-                in_sight_ms: self
-                    .offer_seen
-                    .get()
-                    .filter(|&(id, rev, _)| (id, rev) == (o.id, o.rev))
-                    .map(|(.., at)| ms(crate::clock::since(at))),
+                in_sight_ms: o.drawn.get().map(|at| ms(crate::clock::since(at))),
                 seen_whole: whole,
                 cut: self.screen.offer_cut.filter(|_| is_front),
                 viewing: is_front && self.offer_viewing(),
@@ -1746,7 +1690,7 @@ impl Editor {
                 held: o.held.clone(),
                 withheld,
                 aside: o.aside,
-                waits: self.card_waits_for().filter(|_| is_front),
+                waits: (is_front && self.card_waits()).then_some("focus"),
             }
         };
         let mut cards: Vec<CardState> = self
@@ -1879,7 +1823,7 @@ impl UiState {
                     "asks": c.asks,
                     "answers": c.answers.iter().map(|(k, d)| json!({ "key": k.to_string(), "does": d }))
                         .collect::<Vec<_>>(),
-                    "state": c.state, "weighty": c.weighty, "settled": c.settled, "rev": c.rev, "up": c.up,
+                    "state": c.state, "weighty": c.weighty, "focused": c.focused, "rev": c.rev, "up": c.up,
                     "waited_ms": c.waited_ms, "in_sight_ms": c.in_sight_ms, "seen_whole": c.seen_whole,
                     "cut": c.cut, "viewing": c.viewing,
                     "at": c.at.map(|(x, y, w, h)| [x, y, w, h]),
@@ -2034,7 +1978,7 @@ impl UiState {
             keys += &format!(" · shuttle {name}{}", if *paused { " (paused)" } else { "" });
         }
         if let Some(card) = &k.waiting {
-            keys += &format!(" · {card} takes them once the keys are quiet");
+            keys += &format!(" · {card} waits — C-q focuses it");
         }
         Some(keys)
     }
@@ -2073,13 +2017,13 @@ impl UiState {
             if c.aside {
                 line += " · aside, C-q answers it";
             }
-            if let Some(w) = c.waits {
-                line += &format!(" · waits for the {w}, C-q answers it");
+            if c.waits.is_some() {
+                line += " · waits, C-q focuses it";
             }
             if c.state != "asking" {
                 line += &format!(" · {}", c.state);
-            } else if c.up == "front" && c.weighty {
-                line += if c.settled { " · settled" } else { " · settling" };
+            } else if c.focused {
+                line += " · focused";
             }
             // (what's been read of it: `y` on a weighty one waits for all of it)
             if c.up == "front" && (c.weighty || c.viewing || c.cut.is_some_and(|k| k > 0)) {

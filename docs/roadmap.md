@@ -460,8 +460,9 @@ main that has what it waits for, and the user says go:
   one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); step 6b (`345f0b09`): every pane's top one line with its
   name, `editor.header` gone (user, 2026-10-23); step 7a: a group floating in a frame of its own (`C-w e`, `C-w m`,
   sizes, the mouse; the whole screen its frame, user 2026-10-23) and the session list a floating pane, the manager's
-  overview; step 7b/7c add the focus rule, toasts as panes, the asks' bottom-right corner and the
-  follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  overview (`35fd6cc7`); step 7b: a card takes the keys only once focused — `C-q`, a click or `C-w w`, your own key's
+  at once, its frame faint while it waits and lit once focused; the settle and typing-quiet guards gone; step 7c adds
+  toasts as panes, the asks' bottom-right corner and the follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
   would conflict (to you; a Claude hears nothing of the others — the user, 2026-10-23) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the woven view (`:weave` — the user's name, 2026-10-22: a view, never a merge done) — everyone works in their own workspace and tarae shows the merge, each change in its

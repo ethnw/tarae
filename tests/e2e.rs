@@ -946,13 +946,7 @@ fn a_killed_taraes_unsaved_edits_come_back() {
     assert_eq!(sb.read("a.txt"), "alpha\n");
 
     let mut t = sb.spawn(&["a.txt"]);
-    t.wait_state("the recovery card settled in front", |s| {
-        s["cards"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|c| c["up"] == "front" && c["kind"] == "recover" && c["settled"] == true)
-    });
+    focus_card(&mut t, "the recovery card", |c| c["kind"] == "recover");
     t.wait_text("Unsaved edits · a.txt");
     t.send("y");
     t.wait_text("unsaved-edit alpha");
@@ -1258,12 +1252,8 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         }
         lines
     };
-    // (in sight and settled: a weighty card's `y` typed as it came isn't one)
-    t.wait_state("the grant card, settled", |s| {
-        s["cards"]
-            .as_array()
-            .is_some_and(|c| c.iter().any(|c| c["kind"] == "shuttle" && c["settled"] == true))
-    });
+    // (focused: a card that came on its own takes no key before — a `y` typed as it came is a yank)
+    focus_card(&mut t, "the grant card", |c| c["kind"] == "shuttle");
     t.send("y");
     let first = answer();
     assert_eq!(first.last().map(String::as_str), Some("exit 0"), "{first:?}");
@@ -1375,7 +1365,7 @@ fn a_driver_reads_where_the_keys_go() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
     let s = t.state_json(0);
-    assert_eq!(s["v"], 12, "the schema's version (`uistate::V`)");
+    assert_eq!(s["v"], 13, "the schema's version (`uistate::V`)");
     assert_eq!((s["keys"]["region"].as_str(), s["keys"]["takes"].as_str()), (Some("code"), Some("commands")));
     assert_eq!(s["tarae"]["pid"], t.pid());
     let input = s["input"].as_u64().unwrap();
@@ -1468,13 +1458,7 @@ fn a_watcher_hears_what_changes() {
     sb.write(".tarae.toml", "[editor]\nrestart-build = \"true\"\n");
     sb.write("a.txt", "one\n");
     let mut t = sb.spawn(&["a.txt"]);
-    let card = t.wait_state("the trust card settled", |s| {
-        s["cards"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|c| c["kind"] == "project-trust" && c["settled"] == true)
-    });
+    let card = focus_card(&mut t, "the trust card", |c| c["kind"] == "project-trust");
     let id = card["cards"][0]["id"].as_str().unwrap().to_string();
     let w = t.watch("");
     t.send("n");
@@ -1492,56 +1476,56 @@ fn a_watcher_hears_what_changes() {
     assert!(s["gone"].as_array().unwrap().iter().any(|g| g["id"] == id.as_str() && g["how"] == "answered n"));
 }
 
-/// A card that comes while keys are coming in waits for them to go quiet (friction 60), and a driver reads it
-/// before it sends: `keys.waiting` names it and the card `waits: keys quiet`; a `y` sent meanwhile is the code's
-/// (a yank), the card stays up; quiet a second, the next state has the keys the card's. The card is the project's
-/// trust, asked as a `.tarae.toml` written mid-session is read — no key asked for it.
+/// A card that comes on its own waits to be focused (P3 §3.8), and a driver reads it before it sends:
+/// `keys.waiting` names it and the card `waits: focus`; a `y` sent meanwhile is the code's (a yank), the card stays
+/// up, the status line says `▲1 waiting · C-q`; `C-q`, and the next state has the keys the card's. The card is the
+/// project's trust, asked as a `.tarae.toml` written mid-session is read — no key asked for it.
 #[test]
-fn a_card_that_comes_as_keys_come_waits_and_the_state_says_so() {
-    // (the window widened to 4 s: the state round trips and screen reads between the keys stay inside it however
-    // loaded the machine — a `y` after it would answer the trust card)
-    let sb = Sandbox::new("keysquiet").with_env("TARAE_KEYS_QUIET_MS", "4000");
+fn a_card_that_comes_on_its_own_waits_and_the_state_says_so() {
+    let sb = Sandbox::new("cardwait");
     sb.write("a.txt", "one\ntwo\nthree\n");
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("one");
-    // (a first key seen before the file is written: the card can only come while keys are coming in — written
-    // first, a fast read put it up before any key, and it took the keys at once)
-    let input = t.state_json(0)["input"].as_u64().unwrap();
-    t.send("j");
-    t.state_json(input + 1);
     sb.write(".tarae.toml", "[editor]\nrestart-build = \"true\"\n");
-    // (a key every 150 ms until the card is up: it comes as they come in)
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let (s, id) = loop {
-        let input = t.state_json(0)["input"].as_u64().unwrap();
-        t.send("j");
-        let s = t.state_json(input + 1);
-        let card = s["cards"].as_array().into_iter().flatten().find(|c| c["kind"] == "project-trust");
-        if let Some(id) = card.and_then(|c| c["id"].as_str()).map(str::to_string) {
-            break (s, id);
-        }
-        assert!(std::time::Instant::now() < end, "no trust card came");
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    };
+    let s = t.wait_state("the trust card", |s| {
+        s["cards"].as_array().into_iter().flatten().any(|c| c["kind"] == "project-trust")
+    });
+    let id = s["cards"][0]["id"].as_str().unwrap().to_string();
     assert_eq!(
         (s["keys"]["region"].as_str(), s["keys"]["waiting"].as_str()),
         (Some("code"), Some(id.as_str()))
     );
-    assert_eq!(s["cards"][0]["waits"], "keys quiet");
+    assert_eq!(
+        (s["cards"][0]["waits"].as_str(), s["cards"][0]["focused"].as_bool()),
+        (Some("focus"), Some(false))
+    );
     // A `y` while it waits: the code's
     let input = s["input"].as_u64().unwrap();
     t.send("y");
     let s = t.state_json(input + 1);
     assert!(s["cards"].as_array().is_some_and(|c| c.iter().any(|c| c["id"] == id.as_str())), "still up");
-    assert_eq!(s["keys"]["waiting"], id.as_str(), "still waiting: keys came");
+    assert_eq!(s["keys"]["waiting"], id.as_str(), "still waiting");
     t.wait_for("the status line says it waits", |s| s.status().contains("▲1 waiting · C-q"));
-    // Quiet: the screen changes by itself — the wake's own frame, read off the screen with nothing asked (a state
-    // request draws a frame of its own) — and the state says the keys are the card's, no key sent
-    t.wait_for("the card takes the keys, drawn", |s| !s.status().contains("waiting"));
-    let s = t.state_json(0);
+    // `C-q`: the keys the card's, nothing waits
+    t.send("\x11");
+    let s = t.state_json(input + 2);
     assert_eq!(s["keys"]["to"], id.as_str(), "{s}");
     assert!(s["keys"]["waiting"].is_null() && s["cards"][0]["waits"].is_null(), "{s}");
-    assert_eq!(s["input"].as_u64(), Some(input + 1), "no key since the y");
+    t.wait_for("the status line says the card has them", |s| !s.status().contains("waiting"));
+}
+
+/// The card in front that `pick` matches, focused: `C-q` unless it has the keys already (your own key's card is
+/// focused as it comes — P3 §3.8). The state once it has them.
+fn focus_card(t: &mut Term, what: &str, pick: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let front = |s: &serde_json::Value| -> Option<bool> {
+        let c = s["cards"].as_array().into_iter().flatten().find(|c| c["up"] == "front" && pick(c))?;
+        Some(c["focused"] == true)
+    };
+    let s = t.wait_state(what, |s| front(s).is_some());
+    if front(&s) == Some(false) {
+        t.send("\x11");
+    }
+    t.wait_state(&format!("{what}, focused"), |s| front(s) == Some(true))
 }
 
 /// A chat turn as a watcher hears it: `turn started` as the message goes, `turn ended` with its time when
@@ -1788,25 +1772,10 @@ fn a_folder_argument_opens_there_on_the_start_screen() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
-/// `:restart`'s card (which checkout it builds in, #108) answered `y` once it's in front and has been in sight
-/// a moment — the project's trust card, up since the start (its `.tarae.toml` sets the binary), set aside
-/// with `n` first.
+/// `:restart`'s card (which checkout it builds in, #108) answered `y` once it's in front with the keys — yours, it
+/// comes in front of the project's trust card (up since the start: its `.tarae.toml` sets the binary), focused.
 fn yes_to_restart(t: &mut Term) {
-    // (a card's answer counts once it has been in sight as it is — the state says when: `settled`; it slept
-    // 800 ms and hoped)
-    let front = |s: &serde_json::Value, kind: &str| {
-        s["cards"].as_array().into_iter().flatten().any(|c| c["up"] == "front" && c["kind"] == kind)
-    };
-    let settled = |s: &serde_json::Value| {
-        s["cards"].as_array().into_iter().flatten().any(|c| c["up"] == "front" && c["settled"] == true)
-    };
-    let s = t.wait_state("a card settled in front", |s| {
-        settled(s) && (front(s, "restart") || front(s, "project-trust"))
-    });
-    if front(&s, "project-trust") {
-        t.send("n");
-        t.wait_state("the restart card settled in front", |s| front(s, "restart") && settled(s));
-    }
+    focus_card(t, "the restart card", |c| c["kind"] == "restart");
     t.send("y");
 }
 
@@ -1840,7 +1809,8 @@ fn restart_becomes_the_new_binary_as_you_were() {
     assert!(t.running(), "the same process, still running");
     assert!(s.contains("bee two") && s.contains("line 6"), "both panes:\n{s}");
     assert!(s.status().contains("2:1"), "b focused, its cursor kept:\n{s}");
-    t.send("\x17w");
+    // (`C-w h`: `C-w w`'s round from the last pane goes on to the trust card waiting — P3 §3.8)
+    t.send("\x17h");
     t.wait_for("the other pane: a at line 6", |s| s.status().contains("6:1"));
 
     t.command("restart!");

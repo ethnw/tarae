@@ -2624,7 +2624,7 @@ fn step_aside(ed: &mut Editor, id: u64) {
     if let Some(o) = ed.offers.iter_mut().find(|o| o.id == id) {
         o.aside = true;
     }
-    ed.card_keys = false;
+    ed.card_focus = None;
 }
 
 /// After `h`: where the keys went, on the status line (the card stepped aside).
@@ -8624,12 +8624,12 @@ mod tests {
         assert!(o.held.is_some(), "{}", o.question);
         assert_eq!(o.held_changes.iter().map(Held::place).collect::<Vec<_>>(), ["a.rs:2", "a.rs:7"]);
         feed(&mut ed, "<C-q>");
-        assert!(ed.card_keys, "given the keys");
+        assert!(ed.card_has_keys(), "given the keys");
         feed(&mut ed, "h");
         let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
         assert_eq!(ed.cursor_line(), 1, "the card's first, not the review's next: {}", status(&ed));
         assert!(status(&ed).contains("a.rs:2") && status(&ed).contains("C-q"), "{}", status(&ed));
-        assert!(!ed.card_keys && !ed.card_has_keys(), "the keys are the review's");
+        assert!(!ed.card_has_keys(), "the keys are the review's");
         assert!(ed.offers.first().is_some_and(|o| o.aside && o.held.is_some()), "the card stays, aside");
         assert!(ed.offer_bar(), "a bar over the status line, the code in sight");
         // The review's keys: `]h` walks it, `space v h` looks — `h` is the code's again
@@ -8640,7 +8640,8 @@ mod tests {
         feed(&mut ed, "<space>vh");
         let o = ed.offers.first().unwrap();
         assert!(o.held.is_none() && !o.aside, "every one looked at: its y back, up again: {}", o.question);
-        assert!(ed.card_has_keys() && !ed.offer_bar());
+        // (whole again, waiting to be focused — it changed: a key meant for the review isn't its answer)
+        assert!(ed.card_waits() && !ed.offer_bar());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -9077,7 +9078,7 @@ mod tests {
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
         feed(&mut ed, "<C-q>h");
         let o = ed.offers.first().unwrap();
-        assert!(!o.aside && ed.card_keys, "whole, with the keys");
+        assert!(!o.aside && ed.card_has_keys(), "whole, with the keys");
         let said = ed.offer_said.as_ref().map(|s| s.2.clone()).unwrap_or_default();
         assert!(said.contains("no review here"), "on the card: {said}");
     }

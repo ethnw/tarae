@@ -306,24 +306,24 @@ fn no_holds_each_part_back() {
     until(&mut ed, "tarae's kept", |ed| kept(ed, &root.join(".tarae.toml"), hash) == State::Ignored);
 }
 
-/// A part joining changes the card: it settles again before `y` counts, and what it said about a key pressed
-/// before isn't carried over.
+/// A part joining changes the card: focused, it lets go of the keys (`card_focus` is by `rev` — a `y` meant for what
+/// it said isn't an answer to what it says now), and what it said about a key pressed before isn't carried over.
 #[test]
-fn a_part_joining_settles_the_card_again() {
+fn a_part_joining_lets_go_of_the_keys() {
     let (mut ed, root) = checkout("settle", None);
     crate::chat::open(&mut ed);
     until(&mut ed, "Claude's part", claude_card);
     let o = &ed.offers[0];
     assert_eq!(parts(o), ["project-trust", "claude-settings"]);
     assert!(o.question.split('\n').next().unwrap().ends_with("· Claude joined"), "{}", o.question);
-    ed.offer_seen.set(Some((o.id, o.rev, Instant::now() - crate::offer::SETTLE)));
-    assert!(ed.offer_settled());
-    ed.offer_refused("y came as the card did — not taken; press it again");
+    ed.card_focus = Some((o.id, o.rev));
+    assert!(ed.card_has_keys());
+    ed.offer_refused("x isn't an answer here");
     assert!(ed.offer_said_now().is_some());
     let r = crate::gitrepo::repo(&root).unwrap();
     ed.git_trust_check(&r);
     assert_eq!(parts(&ed.offers[0]), ["project-trust", "claude-settings", "git-trust"]);
-    assert!(!ed.offer_settled(), "changed: in sight again before y counts");
+    assert!(!ed.card_has_keys(), "changed: unfocused");
     assert_eq!(ed.offer_said_now(), None, "nothing carried over");
 }
 

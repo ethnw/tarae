@@ -161,7 +161,7 @@ fn moves(ed: &Editor) -> &Moves {
 fn key(ed: &mut Editor, c: char) {
     crate::term::render(ed, &mut Vec::new(), 120, 40).unwrap();
     let o = card(ed).map(|o| (o.id, o.rev)).expect("the base-moved card");
-    ed.offer_seen.set(Some((o.0, o.1, std::time::Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
     ed.handle_key(Key::plain(Code::Char(c)));
 }
 

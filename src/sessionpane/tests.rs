@@ -202,7 +202,7 @@ fn the_session_list_floats_and_stays_while_you_work() {
     assert_eq!(again, moved, "where you put it");
 }
 
-/// A card that comes while the list has the keys waits (reviewer 7a, as the picker held it until 7b's focus rule):
+/// A card that comes while the list has the keys waits to be focused (P3 §3.8, the rule 7a's stand-in folded into):
 /// its letters stay the list's — `n` its search, never the card's no; `v` the list's —; the status line says the
 /// card waits and `C-q` reaches it; there `n` answers it.
 #[test]
@@ -223,7 +223,7 @@ fn a_card_waits_while_the_session_list_has_the_keys() {
     assert_eq!(ed.keys_to().region, crate::uistate::Region::List(GroupKind::Sessions));
     assert_eq!(ed.keys_to().waiting, Some(format!("card#{}", ed.offer_seq)), "the state says it waits");
     let state = ed.ui_state().json();
-    assert_eq!(state["cards"][0]["waits"], "session list", "…and the card why");
+    assert_eq!(state["cards"][0]["waits"], "focus", "…and the card");
     let status = s.lines().nth(39).unwrap_or_default();
     assert!(status.contains("waiting") && status.contains("C-q"), "said: {status}");
     feed(&mut ed, "n");

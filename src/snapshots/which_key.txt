@@ -68,29 +68,29 @@
 03   f f
 04     f
 05     f
-06   f                         ff TTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-07   f                         f A                                  A                                f
-08   f                         f A                                  A                                f
-09   f                         f A                                  A  ddddd d                       f
-10  ff                         f A                                  A                                f
-11  ff                         f A                                  A                                f
-12  ff                         f A                                  A                                f
-13  ff                         f A                                  A                                f
-14  ff                         f A                                  A                                f
-15  ff                gggg ggggf A                                  A                                f
-16  ff                         f A                                  A                                f
-17  ff              ggg gggggggf A                                  A                                f
-18  ff                         f A                                  A                                f
-19                             f A                                  A                                f
-20                             f A                                  A                                f
-21                             f A                                  A                                f
-22                             f A  ddddd d                         A                                f
-23                             f A                                  A  dddddd d                      f
-24                             f A                                  A  dddddd d                      f
-25                             f A                                  A                                f
-26                             f A                                  A  ddddd d                       f
-27                             f A                                  A                                f
-28                             fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+06   f                         aa TTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+07   f                         a A                                  A                                a
+08   f                         a A                                  A                                a
+09   f                         a A                                  A  ddddd d                       a
+10  ff                         a A                                  A                                a
+11  ff                         a A                                  A                                a
+12  ff                         a A                                  A                                a
+13  ff                         a A                                  A                                a
+14  ff                         a A                                  A                                a
+15  ff                gggg gggga A                                  A                                a
+16  ff                         a A                                  A                                a
+17  ff              ggg ggggggga A                                  A                                a
+18  ff                         a A                                  A                                a
+19                             a A                                  A                                a
+20                             a A                                  A                                a
+21                             a A                                  A                                a
+22                             a A  ddddd d                         A                                a
+23                             a A                                  A  dddddd d                      a
+24                             a A                                  A  dddddd d                      a
+25                             a A                                  A                                a
+26                             a A                                  A  ddddd d                       a
+27                             a A                                  A                                a
+28                             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 29  a TTTTTT                                                                   dddd   ddddd dd   AAAAA
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

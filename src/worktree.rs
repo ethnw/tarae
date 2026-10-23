@@ -2789,6 +2789,8 @@ mod tests {
         feed(&mut ed, "b");
         assert!(q(&ed).starts_with(&format!("Branch second from first ({}).", &on_first[..7])), "{}", q(&ed));
         assert!(q(&ed).ends_with(&format!("b — from main ({}) instead", &main[..7])), "{}", q(&ed));
+        // (changed: its answers count once it's drawn as it is now)
+        card_in_sight(&mut ed);
         feed(&mut ed, "b");
         assert!(q(&ed).starts_with("Branch second from main"), "{}", q(&ed));
         // Made from main
@@ -3360,7 +3362,7 @@ mod tests {
     fn card_in_sight(ed: &mut Editor) -> Vec<char> {
         let mut out = Vec::new();
         crate::term::render(ed, &mut out, 112, 30).unwrap();
-        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        ed.card_focus_front();
         crate::term::render(ed, &mut out, 112, 30).unwrap();
         ed.screen.offer_buttons.iter().map(|b| b.3).collect()
     }
@@ -3957,7 +3959,7 @@ mod tests {
         // the card's text alone)
         let mut out = Vec::new();
         crate::term::render(&mut ed, &mut out, 112, 15).unwrap();
-        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        ed.card_focus_front();
         out.clear();
         crate::term::render(&mut ed, &mut out, 112, 15).unwrap();
         assert!(!ed.offer_seen_whole(), "cut at 15 rows");
@@ -4178,7 +4180,8 @@ mod tests {
         }
         let q = &card(&ed, "feat: conflicts resolved").unwrap().question;
         assert!(q.contains("Claude says the commit's message no longer holds — m shows its version"), "{q}");
-        feed(&mut ed, "m");
+        crate::term::render(&mut ed, &mut Vec::new(), 112, 30).unwrap();
+        feed(&mut ed, "<C-q>m");
         settle_until(&mut ed, |ed| ed.in_rebase_message() || says(ed, "the commit's message:"));
         let shown = ed.doc().text.to_string();
         assert!(
@@ -4361,7 +4364,7 @@ mod tests {
         ed.push_offer(m.failed_card("quick preflight", Some(("quick preflight · test".into(), output))));
         let mut out = Vec::new();
         crate::term::render(&mut ed, &mut out, 112, 10).unwrap();
-        std::thread::sleep(crate::offer::SETTLE + Duration::from_millis(50));
+        ed.card_focus_front();
         crate::term::render(&mut ed, &mut out, 112, 10).unwrap();
         assert!(!ed.offer_seen_whole(), "cut at 10 rows");
         feed(&mut ed, "v");
@@ -4702,7 +4705,7 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, feat);
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("feat: rebasing 1/2"));
-        assert!(ed.card_keys, "with the keys");
+        assert!(ed.card_has_keys(), "with the keys");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4739,7 +4742,7 @@ mod tests {
         assert_eq!(ed.session.id, feat);
         let up = ed.offers.first().map(|o| o.title.as_str());
         assert_eq!(up, Some("feat: conflicts resolved"), "its card, in front");
-        assert!(ed.card_keys, "with the keys");
+        assert!(ed.card_has_keys(), "with the keys");
         assert!(put_away(&ed).is_empty(), "up again: the card is what the inbox lists");
         // `C-q` from another session: there, its card up with the keys, as `enter` does — one key
         card_in_sight(&mut ed);
@@ -4749,7 +4752,7 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert_eq!(ed.session.id, feat, "C-q: there");
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("feat: conflicts resolved"));
-        assert!(ed.card_keys, "C-q: with the keys");
+        assert!(ed.card_has_keys(), "C-q: with the keys");
         drop(ed);
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -391,7 +391,8 @@ fn quiet(t: &mut Term, secs: u64) {
 fn untrusted(t: &mut Term, within: Duration) {
     esc(t);
     if t.poll_for(within, |s| s.contains("Trust this project")).is_some() {
-        // (a card takes keys once it's settled in sight — `offer::SETTLE`)
+        // (a card that came on its own takes keys once focused — `C-q`, P3 §3.8)
+        t.send("\x11");
         let end = Instant::now() + Duration::from_secs(15);
         while t.screen().contains("Trust this project") && Instant::now() < end {
             t.send("n");
@@ -415,7 +416,7 @@ fn new_session(t: &mut Term, name: &str) -> Instant {
     t.command(&format!("session-new {name}"));
     let card = format!("Branch {name}");
     t.wait_for("the new session's card", |s| s.contains(&card));
-    // (taken once it's settled in sight — `offer::SETTLE`; a `y` after it went is a yank, harmless)
+    // (yours: focused as it came — P3 §3.8; a `y` after it went is a yank, harmless)
     let mut at = Instant::now();
     while t.screen().contains(&card) {
         at = Instant::now();
@@ -1612,7 +1613,7 @@ fn ab_turn(t: &mut Term, ask: &str, stream: &Path) -> (usize, bool) {
             .as_array()
             .into_iter()
             .flatten()
-            .any(|c| c["state"] == "asking" && c["settled"] == true);
+            .any(|c| c["state"] == "asking" && c["up"] == "front");
         if asking {
             tries += 1;
             // (the card has the keys — lent by the chat — or `C-q` hands them to it first)

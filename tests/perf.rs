@@ -883,14 +883,21 @@ fn restored_sessions(n: usize) -> Restored {
     sb.git(&["add", "-A"]);
     sb.git(&["commit", "-q", "-m", "base"]);
     let files = ["src/picker.rs", "src/lsp.rs", "src/readonly.rs", "README.md"];
-    // (a card settled in front: of `kind`, or — `kind` empty — any but the project's trust card)
+    // (a card in front with the keys: of `kind`, or — `kind` empty — any but the project's trust card; `C-q` focuses
+    // one that came on its own — P3 §3.8)
     let front_card = |t: &mut Term, what: &str, kind: &str| {
-        t.wait_state(what, |s| {
-            s["cards"].as_array().into_iter().flatten().any(|c| {
+        let front = |s: &serde_json::Value| -> Option<bool> {
+            let c = s["cards"].as_array().into_iter().flatten().find(|c| {
                 let of = if kind.is_empty() { c["kind"] != "project-trust" } else { c["kind"] == kind };
-                c["up"] == "front" && c["settled"] == true && of
-            })
-        })
+                c["up"] == "front" && of
+            })?;
+            Some(c["focused"] == true)
+        };
+        let s = t.wait_state(what, |s| front(s).is_some());
+        if front(&s) == Some(false) {
+            t.send("\x11");
+        }
+        t.wait_state(what, |s| front(s) == Some(true))
     };
     let sessions = |s: &serde_json::Value| s["sessions"].as_array().map_or(0, Vec::len);
     let settled = |t: &mut Term| {

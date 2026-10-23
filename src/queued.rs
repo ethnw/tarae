@@ -945,7 +945,8 @@ mod tests {
                 && *k == "space m c"),
             "{said:?}"
         );
-        // `y`: stopped, and the one in line runs
+        // `y` (focused): stopped, and the one in line runs
+        ed.handle_key("C-q".parse().unwrap());
         ed.handle_key("y".parse().unwrap());
         assert!(ed.offers.is_empty());
         pump(&mut ed, "the waiting one ran", |_| answered(2).is_some());

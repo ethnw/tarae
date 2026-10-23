@@ -1293,7 +1293,7 @@ fn snapshot_card_reading_bar() {
     ));
     s.frame();
     let o = (s.ed.offers[0].id, s.ed.offers[0].rev);
-    s.ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE * 2)));
+    s.ed.card_focus = Some((o.0, o.1));
     s.keys("<C-q>vjj");
     s.check("card_reading_bar");
     s.frames_both("card_reading_bar");
@@ -1541,7 +1541,7 @@ fn frames_of_frictions30() {
         s.frame();
         s.frames_both(&format!("f30_cut_card-{w}"));
         let o = s.ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        s.ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+        s.ed.card_focus = Some((o.0, o.1));
         s.keys("y");
         assert_eq!(s.ed.offers.len(), 1, "y waits");
         s.frames_both(&format!("f30_cut_card_early_y-{w}"));
@@ -2727,7 +2727,7 @@ fn the_boards_card_folds_its_angles_rather_than_be_cut() {
         let mut s = Shot::new(w, h);
         s.ed.push_offer(card());
         match how {
-            1 => s.ed.card_keys = true,
+            1 => s.ed.card_focus_front(),
             2 => s.ed.offer_refused("not taken — it came as the card did"),
             _ => {}
         }
@@ -6443,10 +6443,10 @@ fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
     assert_eq!(rows[1], format!("╭{}╮", rows[0]), "the same spans in a frame");
 }
 
-/// D3: what takes the keys floats in a frame with its name set into the top line — a card with the keys (its
-/// title the name, its answers in the bottom line), which-key (`space`), a picker (its title, gone from the input
-/// row), a prompt (`command`) — the lines in the faint wash, the name in `ui.text.focus`; a card without the keys
-/// (the chat has them) has none.
+/// D3 and P3 §3.8: what can take the keys floats in a frame with its name set into the top line — a card (its title
+/// the name, its answers in the bottom line), which-key (`space`), a picker (its title, gone from the input row), a
+/// prompt (`command`); the name in `ui.text.focus`. The lines say whether it has them: the faint wash while a card
+/// waits to be focused (the code's or the chat's keys), the accent once it has them — as a docked pane's line.
 #[test]
 fn what_takes_the_keys_is_framed_with_its_name() {
     let (w, h) = (100u16, 30u16);
@@ -6465,9 +6465,10 @@ fn what_takes_the_keys_is_framed_with_its_name() {
     let rows = |s: &mut Shot| -> Vec<String> { cells(&s.frame(), w, h).screen().rows(0, w).collect() };
     let ui = Ui::new(&s.ed);
     let focus = vt_color(s.ed.theme.try_get("ui.text.focus").and_then(|s| s.fg)).unwrap();
-    let window = vt_color(ui.window).unwrap();
-    // The card with the keys: `╭─ title ─╮` over its body, `╰─ y … · n … ─╯` under it, no title row inside
-    assert!(s.ed.card_has_keys());
+    let (window, accent) = (vt_color(ui.window).unwrap(), vt_color(ui.accent.fg).unwrap());
+    // The card waiting (it came on its own): `╭─ title ─╮` over its body, `╰─ y … · n … ─╯` under it, no title row
+    // inside — its lines faint, its body saying how to answer it
+    assert!(!s.ed.card_has_keys());
     let r = rows(&mut s);
     let (x, y, cw, ch) = s.ed.screen.offer_card.expect("the card");
     let top: String = r[y].chars().skip(x).take(cw).collect();
@@ -6478,37 +6479,49 @@ fn what_takes_the_keys_is_framed_with_its_name() {
         !r[y + 1..y + ch - 1].iter().any(|row| row.contains("Claude asks")),
         "the title once, on the frame"
     );
+    assert_eq!(r[y..y + ch].iter().filter(|row| row.contains("C-q to answer it")).count(), 1, "{r:#?}");
     let p = cells(&s.frame(), w, h);
-    let at = |yy: usize, xx: usize| p.screen().cell(yy as u16, xx as u16).unwrap().fgcolor();
-    assert_eq!((at(y, x), at(y, x + 3), at(y + 1, x)), (window, focus, window), "line, name, side");
+    let at =
+        |p: &vt100::Parser, yy: usize, xx: usize| p.screen().cell(yy as u16, xx as u16).unwrap().fgcolor();
+    assert_eq!(
+        (at(&p, y, x), at(&p, y, x + 3), at(&p, y + 1, x)),
+        (window, focus, window),
+        "line, name, side"
+    );
+    // (its answers faint too: `╰─ y …` — the key at x + 3 in the frame's ink, never the accent — user, 2026-10-23)
+    let (by, key_at) = (y + ch - 1, x + 3);
+    assert_eq!(p.screen().cell(by as u16, key_at as u16).unwrap().contents(), "y");
+    assert_eq!(at(&p, by, key_at), window, "a waiting card's answer keys faint");
     s.frames_both("framed_card");
-    // The keys go elsewhere (insert mode: nothing else moves): the lines go; its name stays on its top row and its
-    // answers on its bottom one, its corner where it was — the only rows it gains say how to answer it (as before
-    // D3: `C-q to answer it`)
-    s.keys("i");
-    assert!(!s.ed.card_has_keys());
+    // Focused (`C-q`): the same frame, its lines lit, its corner where it was — its body saying esc's way back
+    s.keys("<C-q>");
+    assert!(s.ed.card_has_keys());
     let r = rows(&mut s);
     let (x2, y2, cw2, ch2) = s.ed.screen.offer_card.expect("the card");
-    assert_eq!((x2 + cw2, y2 + ch2), (x + cw, y + ch), "its corner where it was");
-    assert!(!r.iter().any(|row| row.contains('╭')), "no frame without the keys");
-    let (name, answers) = (&r[y2], &r[y2 + ch2 - 1]);
-    assert!(name.contains("Claude asks to see the screen") && answers.contains("y Once · "), "{r:#?}");
-    let said = r[y2..y2 + ch2].iter().filter(|row| row.contains("to answer it")).count();
-    assert_eq!((said, ch2 - ch), (1, 2), "only the way to answer it added (and its blank): {r:#?}");
+    assert_eq!((x2 + cw2, y2 + ch2, ch2), (x + cw, y + ch, ch), "in place, the same size");
+    assert!(r[y2..y2 + ch2].iter().any(|row| row.contains("esc goes back, unanswered")), "{r:#?}");
+    let p = cells(&s.frame(), w, h);
+    assert_eq!((at(&p, y2, x2), at(&p, y2, x2 + 3), at(&p, y2 + 1, x2)), (accent, focus, accent), "lit");
+    assert_eq!(at(&p, y2 + ch2 - 1, x2 + 3), accent, "focused: its answer keys in the accent");
+    s.frames_both("framed_card_focused");
+    // `esc`: the keys back, the frame faint again
     s.keys("<esc>");
-    assert!(rows(&mut s)[y].contains("╭─ Claude asks"), "the keys back: its frame");
-    // The chat takes the keys: the card loses its frame (it says `C-q to answer it`)
+    let p = cells(&s.frame(), w, h);
+    assert_eq!(at(&p, y, x), window, "the keys back: faint");
+    // The chat takes the keys: the card stays framed, faint (it says `C-q to answer it`)
     s.ed.config.llm.command = "sh".into();
     s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
     s.keys(" l");
     assert!(!s.ed.card_has_keys());
-    assert!(!rows(&mut s).iter().any(|row| row.contains('╭')), "no frame without the keys");
+    assert!(rows(&mut s).iter().any(|row| row.contains("╭─ Claude asks")), "framed, waiting");
     s.keys("<esc><C-w>h");
     s.ed.offers.clear();
-    // which-key: its keys' name on the frame
+    // which-key: its keys' name on the frame, lit (it has them)
     s.keys(" ");
     let r = rows(&mut s);
-    assert!(r.iter().any(|row| row.contains("╭─ space ─")), "which-key: {r:#?}");
+    let row = r.iter().position(|row| row.contains("╭─ space ─")).expect("which-key");
+    let col = r[row].chars().position(|c| c == '╭').unwrap();
+    assert_eq!(at(&cells(&s.frame(), w, h), row, col), accent, "which-key's frame lit");
     // A picker: its title on the frame, not on its input row
     s.keys("?");
     let r = rows(&mut s);

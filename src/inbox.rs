@@ -325,7 +325,7 @@ impl Editor {
                 // that session's chat kept them, and the `n` meant for the card was typed into it)
                 if e.card().is_some_and(|c| self.offers.first().is_some_and(|o| o.id == c && !o.installing()))
                 {
-                    self.card_keys = true;
+                    self.card_focus_front();
                 }
                 true
             }
@@ -370,7 +370,7 @@ impl Editor {
             let mine = |o: &crate::offer::Offer| matches!(o.what, crate::offer::What::RebaseResolved { .. });
             if let Some(i) = self.offers.iter().position(mine) {
                 self.offer_to_front(i);
-                self.card_keys = true;
+                self.card_focus_front();
             }
             return;
         }
@@ -412,7 +412,7 @@ impl Editor {
         };
         self.inbox_to(&e);
         if e.card().is_some_and(|c| self.offers.first().is_some_and(|o| o.id == c)) {
-            self.card_keys = true;
+            self.card_focus_front();
         }
     }
 

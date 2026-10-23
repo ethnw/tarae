@@ -3778,14 +3778,8 @@ mod tests {
         assert!(o.question.starts_with(head), "{}", o.question);
         assert!(o.question.contains("A yes holds for this session and its conversation"), "{}", o.question);
         assert_eq!(o.answers(false), [('y', "Start it"), ('n', "Not now")]);
-        // A `y` sent as it came up: refused, no board
-        drawn(&mut ed);
-        keys(&mut ed, &["y"]);
-        assert!(card(&ed).is_some() && ed.session.reviewer.is_none(), "not taken");
-        let said = ed.offer_said_now().unwrap_or_default();
-        assert!(said.contains("came as the card did"), "said on the card: {said:?}");
-        // Settled: `y` starts it
-        ed.offer_seen.set(Some((o.id, o.rev, Instant::now() - crate::offer::SETTLE)));
+        // Focused (as `space v C` asked it, P3 §3.8): `y` starts it
+        ed.card_focus = Some((o.id, o.rev));
         drawn(&mut ed);
         keys(&mut ed, &["y"]);
         let done =

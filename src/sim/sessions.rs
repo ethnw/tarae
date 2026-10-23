@@ -192,10 +192,10 @@ fn input(sim: &mut Sim, ed: &mut Editor, ids: &[(u64, String, PathBuf)]) -> Stri
             git(&root, &["commit", "-q", "-m", &file]);
             format!("{name}: a commit")
         }
-        // The card in front read, then answered: drawn, in sight past `SETTLE`, drawn again, its key
+        // The card in front read, then answered: drawn, focused (a press on it), its key
         8 => {
             crate::term::render(ed, &mut Vec::new(), 112, 30).unwrap();
-            sim.wait(crate::offer::SETTLE + Duration::from_millis(100));
+            ed.card_focus_front();
             let key = *sim.choices.pick(&['n', 'n', 'y']);
             format!("(read) {}", answer(ed, key))
         }

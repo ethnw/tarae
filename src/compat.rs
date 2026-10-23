@@ -1110,7 +1110,6 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ("src/editor.rs", "in fn with_root: dir", "new sessions' checkouts: compat runs in one"),
     ("src/editor.rs", "in fn with_root: features", NOT_RUNS),
     ("src/editor.rs", "in fn with_root: git_auto", NOT_RUNS),
-    ("src/editor.rs", "in fn with_root: keys_hold", NOT_RUNS),
     (
         "src/editor.rs",
         "in fn with_root: offer_popups",

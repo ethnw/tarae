@@ -38,6 +38,36 @@ struct Scene {
 
 const MAIN: &[&str] = &["src/main.rs"];
 
+/// Claude asked to run outside the sandbox, the keys back in the code (`C-w h`) as its card comes; then `j j` there.
+const FOCUS_CARD: &[&str] =
+    &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", "j", "j", "@1"];
+
+/// `FOCUS_CARD`, then `y` in the code — a yank, never the card's yes.
+const FOCUS_CARD_Y: &[&str] =
+    &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", "j", "j", "y", "@1"];
+
+/// `FOCUS_CARD`, then `C-q`.
+const FOCUS_CARD_Q: &[&str] =
+    &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", "j", "j", "\x11", "@1"];
+
+/// `FOCUS_CARD`, then `:features-reset` — your own card over Claude's.
+const FOCUS_CARD_YOURS: &[&str] = &[
+    "@1",
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "\x17",
+    "h",
+    "@?Its reason",
+    "@1",
+    "j",
+    "j",
+    ":features-reset\r",
+    "@1",
+];
+
 /// The finished turn (`chatdone`'s), in its view mode a line selected (`enter quote` said) — then `enter`: the
 /// chip over the input.
 const QUOTE_VIEW: &[&str] = &[
@@ -1831,6 +1861,15 @@ const SCENES: &[Scene] = &[
         files: MAIN,
         keys: &["@1", " ", "l", "@1", "run the tests", "\r", "@?Its reason", "@1", "\x11", "@1"],
     },
+    // (P3 step 7b: Claude's card comes while you're in the code — `j j` move the code, `y` yanks; it waits in its
+    // faint frame, `▲1 waiting · C-q`)
+    Scene { name: "focus-card", claude: "card", files: MAIN, keys: FOCUS_CARD },
+    // (…`y` in the code: a yank — before 7b the card's yes, its run gone outside the sandbox)
+    Scene { name: "focus-card-y", claude: "card", files: MAIN, keys: FOCUS_CARD_Y },
+    // (…`C-q` focuses it: its frame lit, its answers its own)
+    Scene { name: "focus-card-q", claude: "card", files: MAIN, keys: FOCUS_CARD_Q },
+    // (…a card your own key asked for over it — `:features-reset` — focused at once)
+    Scene { name: "focus-card-yours", claude: "card", files: MAIN, keys: FOCUS_CARD_YOURS },
     // (the same run asked again after a yes, the program it runs rebuilt since — git ignores it: the card's "Same as")
     Scene {
         name: "samebinary",

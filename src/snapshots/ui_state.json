@@ -14,12 +14,13 @@
       "aside": false,
       "asks": "End the review?",
       "at": [
-        72,
+        74,
         28,
-        47,
+        45,
         7
       ],
       "cut": 0,
+      "focused": false,
       "held": null,
       "id": "card#2",
       "in_sight_ms": 0,
@@ -29,7 +30,6 @@
       "same_as": null,
       "seen_whole": true,
       "session": "s0",
-      "settled": true,
       "shown_in": null,
       "state": "asking",
       "text": [
@@ -42,7 +42,7 @@
       "up": "front",
       "viewing": false,
       "waited_ms": 0,
-      "waits": null,
+      "waits": "focus",
       "weighty": false,
       "whose": "tarae",
       "withheld": []
@@ -70,6 +70,7 @@
       "asks": "Claude changes 2 files · Claude renames `x`.",
       "at": null,
       "cut": null,
+      "focused": false,
       "held": null,
       "id": "card#1",
       "in_sight_ms": null,
@@ -79,7 +80,6 @@
       "same_as": null,
       "seen_whole": false,
       "session": "s1",
-      "settled": false,
       "shown_in": null,
       "state": "asking",
       "text": [
@@ -144,7 +144,7 @@
     "takes": "answers",
     "to": "edit-review",
     "under": null,
-    "waiting": null
+    "waiting": "card#2"
   },
   "limits": {},
   "mode": "normal",
@@ -262,9 +262,9 @@
           "float": true,
           "id": "card#2",
           "rect": [
-            72,
+            74,
             28,
-            47,
+            45,
             7
           ],
           "shows": "card"
@@ -519,5 +519,5 @@
       "where": "waiting"
     }
   ],
-  "v": 12
+  "v": 13
 }

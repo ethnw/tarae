@@ -618,7 +618,7 @@ impl crate::editor::Editor {
         if !self.session.chat.as_ref().is_some_and(|c| !c.compact()) {
             return false;
         }
-        (self.session.is_at(At::Chat) && !self.card_keys)
+        (self.session.is_at(At::Chat) && !self.card_has_keys())
             || widths(total, true, false, self.sizes).chat < total
     }
 

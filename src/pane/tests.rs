@@ -71,7 +71,7 @@ fn a_floating_pane_has_the_keys_and_gives_them_back_to_the_pane_under_it() {
     assert_eq!(floated(&ed), Some(Floating::WhichKey));
     feed(&mut ed, "l");
     assert_eq!(ed.session.at, At::Chat, "C-w l from the code, which-key over it");
-    // (a card taking its answers over the code: its answer gives the keys back; `C-w l` goes from the code)
+    // (a card focused over the code: its answer gives the keys back; `C-w l` goes from the code)
     ed.session.at = At::Code;
     ed.push_offer(crate::offer::Offer::new(
         "End the review?".into(),
@@ -82,6 +82,8 @@ fn a_floating_pane_has_the_keys_and_gives_them_back_to_the_pane_under_it() {
     ));
     frame(&mut ed);
     let card = ed.offers[0].id;
+    assert_eq!(floated(&ed), None, "waiting: the keys stay the code's");
+    feed(&mut ed, "<C-q>");
     assert_eq!(floated(&ed), Some(Floating::Card(card)));
     let id = ed.session.at;
     feed(&mut ed, "<C-w>");
@@ -89,7 +91,9 @@ fn a_floating_pane_has_the_keys_and_gives_them_back_to_the_pane_under_it() {
     feed(&mut ed, "l");
     assert_eq!((ed.session.at, ed.offers.len()), (At::Chat, 1), "from the code; the card waits");
     feed(&mut ed, "<C-w>h");
-    assert_eq!(ed.session.at, id, "back on the code: the card's again, the same pane");
+    assert_eq!(ed.session.at, At::Code, "back on the code: the card waits");
+    feed(&mut ed, "<C-q>");
+    assert_eq!(ed.session.at, id, "focused again: the same pane");
     feed(&mut ed, "n");
     assert_eq!((ed.offers.len(), ed.session.at), (0, At::Code), "answered: the code's again");
     // (the picker opened from the code: a pane id of its own, the code's again after esc)

@@ -1209,11 +1209,11 @@ fn answered(n: u64) -> Option<Result<String, String>> {
     crate::tools::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
 }
 
-/// The front card in sight long enough, and read whole (as drawing it would).
-fn settled(ed: &crate::editor::Editor) {
+/// The front card focused (a press on it), and read whole (as drawing it would).
+fn settled(ed: &mut crate::editor::Editor) {
     let o = (ed.offers[0].id, ed.offers[0].rev);
     ed.offer_read_whole(o);
-    ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE)));
+    ed.card_focus = Some((o.0, o.1));
 }
 
 /// G23: your own runs in the checkout wait on the card too — a task (your build) and the preflight run what's
@@ -1258,7 +1258,7 @@ fn your_task_and_preflight_wait_on_what_claudes_run_made() {
     assert!(ed.offers[0].question.contains("check\n\nClaude's last run made sub/Cargo.toml"));
     crate::tools::turn_over(&mut ed);
     assert_eq!(ed.offers.len(), 1, "Claude's turn ending leaves your card");
-    settled(&ed);
+    settled(&mut ed);
     ed.offer_accept();
     let ended = |ed: &crate::editor::Editor| {
         ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
@@ -1289,7 +1289,7 @@ fn what_r_couldnt_remove_is_asked_again_before_the_run() {
     claude_runs(&mut ed, me, 2, "touch two");
     pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card");
     std::fs::write(dir.join("sub/Cargo.toml"), "[package]\nname = \"changed\"\n").unwrap();
-    settled(&ed);
+    settled(&mut ed);
     ed.offer_one_by_one();
     let again = |ed: &crate::editor::Editor| {
         ed.offers.first().is_some_and(|o| {
@@ -1321,7 +1321,7 @@ fn the_cards_answers_view_remove_and_keep_by_content() {
     pump_until(&mut ed, &|_| answered(1).is_some(), "the first run");
     claude_runs(&mut ed, me, 2, "touch two");
     pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card");
-    settled(&ed);
+    settled(&mut ed);
     // v
     ed.offer_view();
     let view = |ed: &crate::editor::Editor| {
@@ -1347,7 +1347,7 @@ fn the_cards_answers_view_remove_and_keep_by_content() {
     pump_until(&mut ed, &|_| answered(3).is_some(), "the third run");
     claude_runs(&mut ed, me, 4, "rm Makefile");
     pump_until(&mut ed, &|ed| !ed.offers.is_empty(), "the card for Makefile");
-    settled(&ed);
+    settled(&mut ed);
     ed.offer_accept();
     pump_until(&mut ed, &|_| answered(4).is_some(), "the fourth run");
     // Made again, the same: not asked

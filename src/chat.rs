@@ -4014,7 +4014,7 @@ mod tests {
     fn answer_card(ed: &mut Editor, k: &str) {
         crate::term::render(ed, &mut Vec::<u8>::new(), 140, 40).unwrap();
         let o = ed.offers.first().map(|o| (o.id, o.rev)).unwrap();
-        ed.offer_seen.set(Some((o.0, o.1, Instant::now() - crate::offer::SETTLE * 2)));
+        ed.card_focus = Some((o.0, o.1));
         assert!(ed.offer_key(k.parse().unwrap()), "{k} answers the card");
     }
 

@@ -16,20 +16,20 @@
 13  13
 14  14 fn main() {
 15  15     let text = "the quick brown fox jumps over the lazy dog";
-16  16     let counts = word_counts(text);
-17  17     println!("{} distinct words", counts.len()); // 타래
-18  18 }                                    ╭─ feat: conflicts resolved ─────────────────────────────╮
-19                                          │ a.txt resolved for commit 1 of 2 (0000000 Take grants  │
-20                                          │ back in every session). The review shows it against    │
-21                                          │ that commit — not staged yet: y stages it and goes on. │
-22                                          │                                                        │
-23                                          │ Claude says the commit's message no longer holds — m   │
-24                                          │ shows its version; :w there goes on with it.           │
+16  16     let counts = word_counts(text);  ╭─ feat: conflicts resolved ─────────────────────────────╮
+17  17     println!("{} distinct words", cou│ a.txt resolved for commit 1 of 2 (0000000 Take grants  │
+18  18 }                                    │ back in every session). The review shows it against    │
+19                                          │ that commit — not staged yet: y stages it and goes on. │
+20                                          │                                                        │
+21                                          │ Claude says the commit's message no longer holds — m   │
+22                                          │ shows its version; :w there goes on with it.           │
+23                                          │                                                        │
+24                                          │ X aborts the rebase: dev goes back as it was.          │
 25                                          │                                                        │
-26                                          │ X aborts the rebase: dev goes back as it was.          │
+26                                          │ C-q to answer it                                       │
 27                                          ╰─ y Continue · m Message · X Abort · n Not now ─────────╯
 28
-29  ● normal                                                                    rust   utf-8 LF   1:1
+29  ● normal   ▲1 waiting · C-q                                                 rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
 01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -78,20 +78,20 @@
 13  ff
 14  ff
 15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
-16  ff
-17  ff              ggg gggggggg gggggg
-18  ff                                      ff TTTTT TTTTTTTTT TTTTTTTT ffffffffffffffffffffffffffffff
+16  ff                                      ff TTTTT TTTTTTTTT TTTTTTTT ffffffffffffffffffffffffffffff
+17  ff              ggg gggggggg gggggg     f                                                        f
+18  ff                                      f                                                        f
 19                                          f                                                        f
 20                                          f                                                        f
-21                                          f                                                        f
-22                                          f                                                        f
-23                                          f dddddd dddd ddd dddddddd ddddddd dd dddddd ddddd d d   f
-24                                          f ddddd ddd dddddddd dd ddddd dddd dd dddd ddd           f
+21                                          f dddddd dddd ddd dddddddd ddddddd dd dddddd ddddd d d   f
+22                                          f ddddd ddd dddddddd dd ddddd dddd dd dddd ddd           f
+23                                          f                                                        f
+24                                          f w wwwwww www wwwwwww www wwww wwww ww ww wwww          f
 25                                          f                                                        f
-26                                          f w wwwwww www wwwwwww www wwww wwww ww ww wwww          f
-27                                          ff A          f A ddddddd f A ddddd f A ddd ddd ffffffffff
+26                                          f ddd dd dddddd dd                                       f
+27                                          ff F ffffffff f F fffffff f F fffff f F fff fff ffffffffff
 28
-29  a TTTTTT                                                                    dddd   ddddd dd   TTT
+29  a TTTTTT   ww wwwwwww w www                                                 dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  w=warning  g=diff.plus

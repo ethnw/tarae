@@ -173,14 +173,14 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     park(&mut ed, 0, claudes(1, 5));
     assert_eq!(ed.session.id, back, "the one that waited longest");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
-    assert!(ed.card_keys, "the keys with it");
+    assert!(ed.card_has_keys(), "the keys with it");
     assert_eq!(
         ed.keys_to().route(Key::plain(Code::Char('n'))),
         crate::uistate::Region::Card(ed.offers[0].id)
     );
     // `n` answers it there
     feed(&mut ed, "n");
-    assert!(ed.offers.is_empty() && !ed.card_keys);
+    assert!(ed.offers.is_empty() && !ed.card_has_keys());
     // C-q: third's — tarae's own card, its turn over (#94) — before front's newer one
     assert!(ed.status.as_ref().is_none_or(|s| s.0 != NOTHING));
     feed(&mut ed, "<C-q>");
@@ -190,7 +190,7 @@ fn c_q_goes_to_the_oldest_in_any_session() {
     // …then front's
     feed(&mut ed, "<C-q>");
     assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (0, Some("Claude asks 1")));
-    assert!(ed.card_keys);
+    assert!(ed.card_has_keys());
     // Nothing anywhere: said
     ed.offers.clear();
     feed(&mut ed, "<C-q>");
@@ -209,10 +209,10 @@ fn c_q_takes_this_sessions_own_card_first() {
     assert_eq!(ed.inbox()[0].session_id(), back, "the list: oldest first");
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, 0, "stays here");
-    assert!(ed.card_keys, "this session's card has the keys");
+    assert!(ed.card_has_keys(), "this session's card has the keys");
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
     feed(&mut ed, "n");
-    assert!(ed.offers.is_empty() && !ed.card_keys);
+    assert!(ed.offers.is_empty() && !ed.card_has_keys());
     // Answered: then the rest, by age
     feed(&mut ed, "<C-q>");
     assert_eq!((ed.session.id, ed.offers.first().map(|o| o.title.as_str())), (back, Some("Claude asks 1")));
@@ -469,7 +469,8 @@ fn a_card_waiting_comes_before_a_run_only_quiet() {
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, back);
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
-    feed(&mut ed, "<C-q>n");
+    assert!(ed.card_has_keys(), "focused there");
+    feed(&mut ed, "n");
     assert!(ed.offers.is_empty());
     // Answered: C-q now goes to the quiet run, its panel with the keys
     feed(&mut ed, "<C-q>");
@@ -536,7 +537,7 @@ fn the_list_goes_to_the_one_picked_and_its_card_takes_the_keys() {
     assert!(ed.picker.is_none());
     assert_eq!(ed.session.id, back);
     assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 1"));
-    assert!(ed.card_keys, "answered there");
+    assert!(ed.card_has_keys(), "answered there");
     // Answered meanwhile: the list follows; empty, it closes and says so
     ed.inbox_open();
     session(&mut ed, third).parked.clear();
