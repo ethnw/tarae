@@ -444,12 +444,14 @@ main that has what it waits for, and the user says go:
   over one italic preview buffer; the polish (`05037fbf`): a stacked group as tall as the member in sight, one run-time
   format; step 6 (`e864ba15`): a group docked beside the code — `C-w H L K`, `C-w J` back to the slot, its size its
   kind's, its members laid by its pane's shape (`C-w t`), folded into the slot when narrow, kept across `:restart`;
-  next one format for every elapsed time, then step 6b: every pane's top one line with its name (user, 2026-10-23); step 7 adds the asks' bottom-right corner and the
+  one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); next step 6b: every pane's top one line with its name
+  (user, 2026-10-23); step 7 adds the asks' bottom-right corner and the
   follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
   would conflict (to a Claude only in the `edit`/`read` of that file) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the woven view (`:weave` — the user's name, 2026-10-22: a view, never a merge done) — everyone works in their own workspace and tarae shows the merge, each change in its
-  participant's colour (part 1 `3501b885`: a file, in memory on a worker; 1b under way: the name, deletions shown, `enter` goes to that session's line), the woven tree's preflight on demand (part 2); C3 workspaces kept close to main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
+  participant's colour (part 1 `3501b885`: a file, in memory on a worker; 1b `320cc45e`: the name, deletions shown, numbers where each
+  line is, `enter` goes to that session's line), the woven tree's preflight on demand (part 2); C3 workspaces kept close to main) → **C0** the split of `Workspace` out of `Session` → **P3b** tabs (the workspace's) and the task list → the terminal line: several terminals → the engine →
   reflow → the shell understood → `tarae` verbs → output for Claude → another session beside → the floating
   terminal → shells across `:restart`. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
