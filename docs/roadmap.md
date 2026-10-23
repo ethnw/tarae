@@ -138,7 +138,7 @@ Items 1–3 are done (2026-10-16); 4 is the user's: the repository made public. 
 7. **What tarae carries, audited** (user, 2026-10-23 — after the main line in flight, before the crate split): a
    plan first — each feature's use (`:features`' counts, the card record), its code, its fit — keep · fold · a plugin
    · gone, the user deciding. Decided ahead (CLAUDE.md's "Cleanup" bullet): `llm.edit-tools`' other modes gone, the
-   ask flow folded into the chat, keep-warm gone (Claude Code's own cache rule), the debugger and the diagram view
+   ask flow folded into the chat, keep-warm replaced by Claude Code's idle compaction (`/compact` past 200k after ~54 min idle), shuttle keys gone, the debugger and the diagram view
    out of the core, Claude's rarely used tools measured.
 
 After it, the rest goes on in this order.
