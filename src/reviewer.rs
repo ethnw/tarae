@@ -2184,7 +2184,7 @@ mod tests {
             ed.session.chat = Some(crate::chat::Chat::new());
         }
         let rows = rows(ed);
-        rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
+        rows.iter().find(|r| r.contains(" · +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
     }
 
     /// The status line (the screen's last row).
@@ -2213,7 +2213,7 @@ mod tests {
         assert!(text.contains("s0 author (front) · idle · reviewing   s1 other · idle\n"), "{text}");
         // (in front its tab leaves it to the status line's segment — bgreview, the user's decision 2026-10-20)
         let row = tabs(&mut ed);
-        assert!(row.contains("author │ other │ +"), "{row}");
+        assert!(row.contains("author · other · +"), "{row}");
         assert!(status(&mut ed).contains("¶ reviewing"));
         // Behind
         assert!(ed.session_switch(other));
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!((&s[0]["doing"], &s[0]["reviewer"]), (&json!("idle"), &json!("reviewing")), "{s}");
         assert!(text.contains("s0 author · idle · reviewing   s1 other (front)"), "{text}");
         let row = tabs(&mut ed);
-        assert!(row.contains("author ¶ reviewing │ other │ +"), "{row}");
+        assert!(row.contains("author ¶ reviewing · other · +"), "{row}");
         // Done: said nowhere
         settle_until(&mut ed, |ed| !author(ed).reviewer.as_ref().unwrap().reading());
         let (s, text) = said(&ed);
@@ -2254,7 +2254,7 @@ mod tests {
         let st = ed.ui_state();
         assert_eq!(st.json()["inbox"][0]["id"], "reviewer#s0");
         let row = tabs(&mut ed);
-        assert!(row.contains("author • │ other │ +"), "{row}");
+        assert!(row.contains("author • · other · +"), "{row}");
         // News, not a question: no `▲ waiting` on the status line, nor in a card's count — its `•` says it
         // (the chip's `•1` with the chat closed)
         assert_eq!(ed.cards_waiting(), (0, 0));
@@ -2274,7 +2274,7 @@ mod tests {
         assert!(ed.inbox().is_empty(), "{:?}", ed.inbox());
         assert!(ed.session_switch(other));
         let row = tabs(&mut ed);
-        assert!(row.contains("author │ other │ +"), "{row}");
+        assert!(row.contains("author · other · +"), "{row}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2292,7 +2292,7 @@ mod tests {
         let inbox = ed.inbox();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
         assert!(inbox[0].asks.contains("stopped: Reached the maximum turns (60)"), "{}", inbox[0].asks);
-        assert!(tabs(&mut ed).contains("author • │ other │ +"));
+        assert!(tabs(&mut ed).contains("author • · other · +"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3898,7 +3898,7 @@ mod tests {
         let st = ed.ui_state();
         assert_eq!(st.json()["sessions"][0]["reviewer"], "waits to review");
         assert!(st.text().contains("s0 author (front) · idle · waits to review"), "{}", st.text());
-        assert!(tabs(&mut ed).contains("author ¶ waits │"));
+        assert!(tabs(&mut ed).contains("author ¶ waits ·"));
         assert_eq!(crate::worktree::Shown::reviewer_of(&ed, &ed.session), "¶ waits to review");
         // The retry lands, still critical: the next one armed; memory back: it reads, its time from there
         settle_until(&mut ed, |ed| !ed.reviewer_retry);

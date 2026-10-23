@@ -474,7 +474,8 @@ impl crate::editor::Editor {
                     let n = match side {
                         crate::pane::Side::Right => (r.x + r.w).saturating_sub(x),
                         crate::pane::Side::Left => (x + 1).saturating_sub(r.x),
-                        crate::pane::Side::Top => (y + 1).saturating_sub(r.y),
+                        // (its edge the code's line under its last row)
+                        crate::pane::Side::Top => y.saturating_sub(r.y),
                     };
                     self.dock_size(kind, n);
                 }

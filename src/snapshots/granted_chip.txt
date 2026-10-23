@@ -1,28 +1,28 @@
-# granted_chip · 100x30 · theme meok · cursor 2:4
+# granted_chip · 100x30 · theme meok · cursor 1:4
 ## text
-00  tarae  ›  src  ›  demo.rs                                  │  claude › 6 granted             ready
-01  ────────────────────────────────────────────────────────── │  ────────────────────────────────────
-02   1 use std::collections::HashMap;                          │
-03   2                                                         │
-04   3 ▎ Counts how often each word appears.                   │
-05     ▎                                                       │
-06     ▎ Words are split on whitespace; case is kept.          │
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>  │
-08     {                                                       │  ▎ Ask Claude
-09   7     let mut counts = HashMap::new();                    │
-10   8     for word in text.split_whitespace() {               │  It reads the whole project,
-11   9     │   *counts.entry(word).or_insert(0) += 1;          │  starting from demo.rs.
-12  10     }                                                   │
-13  11     counts                                              │  tab for a suggestion
-14  12 }                                                       │  › Explain what this file does
-15  13                                                         │  › Where is this used across the pro…
-16  14 fn main() {                                             │  › Why is this diagnostic happening?
-17  15     let text = "the quick brown fox jumps over the lazy │
-18         dog";                                               │  C-t for another model
-19  16     let counts = word_counts(text);                     │
-20  17     println!("{} distinct words", counts.len()); //     │
-21         타래                                                │
-22  18 }                                                       │
+00 ─ tarae › src › demo.rs ────────────────────────────────────┬─ claude ── 6 granted ───────── ready ─
+01   1 use std::collections::HashMap;                          │
+02   2                                                         │
+03   3 ▎ Counts how often each word appears.                   │
+04     ▎                                                       │
+05     ▎ Words are split on whitespace; case is kept.          │
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize>  │
+07     {                                                       │
+08   7     let mut counts = HashMap::new();                    │  ▎ Ask Claude
+09   8     for word in text.split_whitespace() {               │
+10   9     │   *counts.entry(word).or_insert(0) += 1;          │  It reads the whole project,
+11  10     }                                                   │  starting from demo.rs.
+12  11     counts                                              │
+13  12 }                                                       │  tab for a suggestion
+14  13                                                         │  › Explain what this file does
+15  14 fn main() {                                             │  › Where is this used across the pro…
+16  15     let text = "the quick brown fox jumps over the lazy │  › Why is this diagnostic happening?
+17         dog";                                               │
+18  16     let counts = word_counts(text);                     │  C-t for another model
+19  17     println!("{} distinct words", counts.len()); //     │
+20         타래                                                │
+21  18 }                                                       │
+22                                                             │
 23                                                             │
 24                                                             │
 25                                                             │
@@ -32,8 +32,8 @@
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,29 +62,29 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT                                  a  dddddd f f fffffff             fffff
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa a  ffffffffffffffffffffffffffffffffffff
-02   A                                                         a
-03   f                                                         a
-04   f f                                                       a
+00 a ddddd f ddd f TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf dddddd ff f fffffff fffffffff fffff f
+01   A                                                         a
+02   f                                                         a
+03   f f                                                       a
+04     f                                                       a
 05     f                                                       a
-06     f                                                       a
-07   f                                                         a
-08                                                             a  a TTT TTTTTT
+06   f                                                         a
+07                                                             a
+08   f                                                         a  a TTT TTTTTT
 09   f                                                         a
 10   f                                                         a  dd ddddd ddd ddddd dddddddd
-11   f                                                         a  dddddddd dddd dddddddd
+11  ff                                                         a  dddddddd dddd dddddddd
 12  ff                                                         a
 13  ff                                                         a  DDD fff f ffffffffff
 14  ff                                                         a  f ddddddd dddd dddd dddd dddd
 15  ff                                                         a  f ddddd dd dddd dddd dddddd ddd dddd
-16  ff                                                         a  f ddd dd dddd dddddddddd dddddddddd
-17  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg a
-18         gggg                                                a  DDD fff fffffff fffff
-19  ff                                                         a
-20  ff              ggg gggggggg gggggg                        a
-21                                                             a
-22  ff                                                         a
+16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg a  f ddd dd dddd dddddddddd dddddddddd
+17         gggg                                                a
+18  ff                                                         a  DDD fff fffffff fffff
+19  ff              ggg gggggggg gggggg                        a
+20                                                             a
+21  ff                                                         a
+22                                                             a
 23                                                             a
 24                                                             a
 25                                                             a

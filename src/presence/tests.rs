@@ -195,9 +195,9 @@ fn presence_maps_lines_across_checkouts() {
     let last_word = |r: &str| r.split('│').next().unwrap_or(r).split_whitespace().last().map(str::to_string);
     assert!(r.iter().any(|r| r.contains("a.rs") && last_word(r).as_deref() == Some("m")), "{r:#?}");
     assert!(r.iter().any(|r| r.contains("b.rs") && last_word(r).as_deref() == Some("b.rs")), "{r:#?}");
-    // The strip over a chat: its file after its mark
+    // The strip over a chat: its file after its mark (where the chat's line has room for it)
     ed.session.chat = Some(crate::chat::Chat::new());
-    let r = rows(&frame(&mut ed, 120));
+    let r = rows(&frame(&mut ed, 160));
     assert!(r.iter().any(|r| r.contains("main working a.rs")), "{r:#?}");
     ed.session.chat = None;
     // A file it isn't in: nothing
@@ -342,7 +342,7 @@ fn claude_accent(ed: &Editor) -> vt100::Color {
 
 /// A session is named one way in the chrome — its name in its participant colour, full, no `●` before it, its state
 /// after it (main at work, fix in front, docs waiting on a card behind — its `▲` in warning): on its row of the list
-/// (`space W`), in the strip over a chat and its dropdown, in the status line's chip, and there after `● follow` (the
+/// (`space W`), on the chat's top line and folded there, in the status line's chip, and there after `● follow` (the
 /// word alone: the chip says whom). A branch is a branch: no participant's colour.
 #[test]
 fn every_session_is_named_one_way_in_the_chrome() {
@@ -394,18 +394,18 @@ fn every_session_is_named_one_way_in_the_chrome() {
     ed.session.at = crate::session::At::Chat;
     let p = frame(&mut ed, 160);
     let r = rows(&p);
-    let y = r.iter().position(|r| r.contains("main working") && r.contains("│ docs")).expect("the strip");
+    let y = r.iter().position(|r| r.contains("main working") && r.contains("· docs")).expect("the strip");
     let strip = r[y].find("main").unwrap();
     for ((_, name), &c) in all.iter().zip(&colours) {
         assert_eq!(named(&p, &r, y, name, strip), c, "{name} in the strip: {}", r[y]);
     }
     assert_eq!(fg_of(&p, &r, y, "▲"), warning, "docs waits, in warning: {}", r[y]);
-    // (the dropdown where they don't fit: the front's name in its colour)
+    // (narrow, the states folded to what needs you: each name still in its colour)
     let fix = all.iter().position(|(_, n)| n == "fix").unwrap();
     let p = frame(&mut ed, 80);
     let r = rows(&p);
-    let y = row_of(&r, "◂ fix ▾");
-    assert_eq!(named(&p, &r, y, "fix", r[y].find('◂').unwrap()), colours[fix], "the dropdown: {}", r[y]);
+    let y = row_of(&r, "main · fix · docs ▲ · +");
+    assert_eq!(named(&p, &r, y, "fix", r[y].find("main").unwrap()), colours[fix], "folded: {}", r[y]);
     // (no participant's colour that isn't a name's: a branch is a branch)
     let ink = |c: &vt100::Color| !colours.contains(c);
     // The status line with the chat open (no chip): a branch is a branch — the one that is the session's name too

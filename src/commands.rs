@@ -1899,7 +1899,6 @@ const TYPED_IN_PALETTE: &[(&str, &str)] = &[
     ("Reload config", "config-reload"),
     ("Show current config", "config-show"),
     ("Toggle inlay hints", "toggle editor.inlay-hints"),
-    ("Toggle top bar", "toggle editor.header"),
     ("Toggle current line highlight", "toggle editor.cursorline"),
     ("Close buffer", "bc"),
     ("Next buffer", "bn"),

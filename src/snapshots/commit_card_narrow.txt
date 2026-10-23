@@ -1,26 +1,26 @@
-# commit_card_narrow · 64x32 · theme meok · cursor 2:4
+# commit_card_narrow · 64x32 · theme meok · cursor 1:4
 ## text
-00  tarae  ›  src  ›  demo.rs
-01  ──────────────────────────────────────────────────────────────
-02   1 use std::collections::HashMap;
-03   2
-04   3 ▎ Counts how often each word appears.
-05     ▎                 ╭─ Claude commits 3 files ──────────────╮
-06     ▎ Words are split │ Parse the lockfile once per build     │
-07   6 pub fn word_counts│ The second read was the slow half     │
-08   7     let mut counts│ of every check.                       │
-09   8     for word in te│                                       │
-10   9     │   *counts.en│ On main:                              │
-11  10     }             │   Cargo.toml      +1 −1  protected    │
-12  11     counts        │   src/check.rs    +3 −9               │
-13  12 }                 │   src/lock.rs   new +24               │
-14  13                   │ Protected: a build or a tool runs     │
-15  14 fn main() {       │ it later, outside the sandbox.        │
-16  15     let text = "th│                                       │
-17         dog";         │ @@ -12,9 +12,3 @@ pub fn check(root   │
-18  16     let counts = w│ -    let text = std::fs::read_to_st   │
-19  17     println!("{} d│ -    let lock = parse(&text)?;        │
-20  18 }                 │ +    let lock = crate::lock::once(r   │
+00 ─ tarae › src › demo.rs ────────────────────────────────────────
+01   1 use std::collections::HashMap;
+02   2
+03   3 ▎ Counts how often each word appears.
+04     ▎
+05     ▎ Words are split ╭─ Claude commits 3 files ──────────────╮
+06   6 pub fn word_counts│ Parse the lockfile once per build     │
+07   7     let mut counts│ The second read was the slow half     │
+08   8     for word in te│ of every check.                       │
+09   9     │   *counts.en│                                       │
+10  10     }             │ On main:                              │
+11  11     counts        │   Cargo.toml      +1 −1  protected    │
+12  12 }                 │   src/check.rs    +3 −9               │
+13  13                   │   src/lock.rs   new +24               │
+14  14 fn main() {       │ Protected: a build or a tool runs     │
+15  15     let text = "th│ it later, outside the sandbox.        │
+16         dog";         │                                       │
+17  16     let counts = w│ @@ -12,9 +12,3 @@ pub fn check(root   │
+18  17     println!("{} d│ -    let text = std::fs::read_to_st   │
+19  18 }                 │ -    let lock = parse(&text)?;        │
+20                       │ +    let lock = crate::lock::once(r   │
 21                       │ -        let again = parse(&std::fs   │
 22                       │ -        verify(p, &again)?;          │
 23                       │ … 1 more line — v shows it all        │
@@ -34,8 +34,8 @@
 31  ● normal                                rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -66,27 +66,27 @@
 30
 31
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A
-03   f
-04   f f
+00 a ddddd f ddd f TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   A
+02   f
+03   f f
+04     f
 05     f                 ff TTTTTT TTTTTTT T TTTTT fffffffffffffff
-06     f                 f                                       f
+06   f                   f                                       f
 07   f                   f ddd dddddd dddd ddd ddd dddd dddd     f
 08   f                   f dd ddddd dddddd                       f
 09   f                   f                                       f
-10   f                   f dd ddddd                              f
+10  ff                   f dd ddddd                              f
 11  ff                   f   wwwwwwwwww      ww ww  wwwwwwwww    f
 12  ff                   f   dddddddddddd    dd dd               f
 13  ff                   f   ddddddddddd   ddd ddd               f
 14  ff                   f wwwwwwwwww w wwwww ww w wwww wwww     f
-15  ff                   f ww wwwwww wwwwwww www wwwwwwww        f
-16  ff                gggf                                       f
-17         gggg          f dd ddddd ddddd dd ddd dd dddddddddd   f
-18  ff                   f e    eee eeee e eeeeeeeeeeeeeeeeeee   f
-19  ff              ggg gf e    eee eeee e eeeeeeeeeeeeee        f
-20  ff                   f g    ggg gggg g ggggggggggggggggggg   f
+15  ff                gggf ww wwwwww wwwwwww www wwwwwwww        f
+16         gggg          f                                       f
+17  ff                   f dd ddddd ddddd dd ddd dd dddddddddd   f
+18  ff              ggg gf e    eee eeee e eeeeeeeeeeeeeeeeeee   f
+19  ff                   f e    eee eeee e eeeeeeeeeeeeee        f
+20                       f g    ggg gggg g ggggggggggggggggggg   f
 21                       f e        eee eeeee e eeeeeeeeeeeeee   f
 22                       f e        eeeeeeeee eeeeeeeee          f
 23                       f d d dddd dddd d d ddddd dd ddd        f

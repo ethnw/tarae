@@ -955,11 +955,4 @@ mod tests {
             m.caps().is_some_and(|c| !c.reads(&outside))
         });
     }
-
-    /// The chip keeps its width whatever the count (`GRANTED_W` is its widest).
-    #[test]
-    fn the_chips_widest_is_its_width() {
-        use unicode_width::UnicodeWidthStr;
-        assert_eq!(" › 99+ granted".width(), crate::term::GRANTED_W);
-    }
 }

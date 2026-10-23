@@ -1,6 +1,6 @@
 # statusline_tight · 50x6 · theme meok · cursor 2:4
 ## text
-00  tarae  ›  src  ›  demo.rs
+00 ─ tarae › src › demo.rs ──────────────────────────
 01 ▎ 1 use std::collections::HashMap;   ● unre…  +1 ▎
 02   2
 03   3 ▎ Counts how often each word appears.
@@ -14,7 +14,7 @@
 04
 05
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
+00 a ddddd f ddd f TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaa
 01 e f                                  e        ff e
 02   A
 03   f f

@@ -38,8 +38,6 @@ pub struct EditorConfig {
     pub cursor_shape: (CursorShape, CursorShape, CursorShape),
     pub color_modes: bool,
     pub cursorline: bool,
-    /// Top line = path and definition location (breadcrumb) + open buffers.
-    pub header: bool,
     /// Language server inlay hints (types and parameter names as dimmed text).
     pub inlay_hints: bool,
     /// Indent guides (│) · right-hand scrollbar (including diagnostic markers).
@@ -137,7 +135,6 @@ impl Default for EditorConfig {
             cursor_shape: (CursorShape::Block, CursorShape::Bar, CursorShape::Underline),
             color_modes: true,
             cursorline: true,
-            header: true,
             inlay_hints: true,
             indent_guides: true,
             render_doc_comments: true,

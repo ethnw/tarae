@@ -1,35 +1,35 @@
 # side_panel_git · 112x24 · theme meok · cursor hidden
 ## text
-00   files · outline · git        │ tarae  ›  src  ›  demo.rs
-01   ──────────────────────────── │ ──────────────────────────────────────────────────────────────────────────────
-02     Changes                 3  │  1 use std::collections::HashMap;
-03   │   src/                     │  2
-04 ▎ │ │ M demo.rs         +3 −1  │  3 ▎ Counts how often each word appears.
-05   │ │ D old.rs            −12  │    ▎
-06   │ │   ui/                    │    ▎ Words are split on whitespace; case is kept.
-07   │ │ │ ? card.rs         +40  │  6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08     Staged                  1  │  7     let mut counts = HashMap::new();
-09   │ M README.md            +2  │  8     for word in text.split_whitespace() {
-10                                │  9     │   *counts.entry(word).or_insert(0) += 1;
-11                                │ 10     }
-12                                │ 11     counts
-13                                │ 12 }
-14                                │ 13
-15                                │ 14 fn main() {
-16                                │ 15     let text = "the quick brown fox jumps over the lazy dog";
-17                                │ 16     let counts = word_counts(text);
-18                                │ 17     println!("{} distinct words", counts.len()); // 타래
-19                                │ 18 }
+00 ─ files · outline · git ───────┬─ tarae › src › demo.rs ────────────────────────────────────────────────────────
+01     Changes                 3  │  1 use std::collections::HashMap;
+02   │   src/                     │  2
+03 ▎ │ │ M demo.rs         +3 −1  │  3 ▎ Counts how often each word appears.
+04   │ │ D old.rs            −12  │    ▎
+05   │ │   ui/                    │    ▎ Words are split on whitespace; case is kept.
+06   │ │ │ ? card.rs         +40  │  6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07     Staged                  1  │  7     let mut counts = HashMap::new();
+08   │ M README.md            +2  │  8     for word in text.split_whitespace() {
+09                                │  9     │   *counts.entry(word).or_insert(0) += 1;
+10                                │ 10     }
+11                                │ 11     counts
+12                                │ 12 }
+13                                │ 13
+14                                │ 14 fn main() {
+15                                │ 15     let text = "the quick brown fox jumps over the lazy dog";
+16                                │ 16     let counts = word_counts(text);
+17                                │ 17     println!("{} distinct words", counts.len()); // 타래
+18                                │ 18 }
+19                                │
 20                                │
 21   s u stage  d discard  ? keys │
 22   c commit  C Claude drafts    │
 23  ● git                                                                                   rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02                                     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-03
-04 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+01                                     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
+03 PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP
+04
 05
 06
 07
@@ -50,26 +50,26 @@
 22
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   ddddd f ddddddd f TTT        a ddddd  f  ddd  f  TTTTTTT
-01   aaaaaaaaaaaaaaaaaaaaaaaaaaaa a ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02     TTTTTTT                 d  a  A
-03   f   dddf                     a  f
-04 a f f w TTTTTTT         dd dd  a  f f
-05   f f e                   ddd  a    f
-06   f f   ddf                    a    f
-07   f f f g                 ddd  a  f
-08     TTTTTT                  d  a  f
-09   f w                      dd  a  f
-10                                a  f
+00 a ddddd f ddddddd f TTT aaaaaaaaf ddddd f ddd f TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01     TTTTTTT                 d  a  A
+02   f   dddf                     a  f
+03 a f f w TTTTTTT         dd dd  a  f f
+04   f f e                   ddd  a    f
+05   f f   ddf                    a    f
+06   f f f g                 ddd  a  f
+07     TTTTTT                  d  a  f
+08   f w                      dd  a  f
+09                                a  f
+10                                a ff
 11                                a ff
 12                                a ff
 13                                a ff
 14                                a ff
-15                                a ff
-16                                a ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
-17                                a ff
-18                                a ff              ggg gggggggg gggggg
-19                                a ff
+15                                a ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+16                                a ff
+17                                a ff              ggg gggggggg gggggg
+18                                a ff
+19                                a
 20                                a
 21   B B fffff  B fffffff  B ffff a
 22   B ffffff  B ffffff ffffff    a

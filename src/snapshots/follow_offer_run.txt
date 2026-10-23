@@ -1,25 +1,25 @@
 # follow_offer_run · 100x30 · theme meok · cursor hidden
 ## text
-00  tarae  ›  src  ›  demo.rs
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 use std::collections::HashMap;
-03   2                                                            claude › follow      waiting   0ms
-04   3 ▎ Counts how often each word appears.                      ▎ commit it
-05     ▎
-06     ▎ Words are split on whitespace; case is kept.             C-c stop  C-f unfollow
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   7     let mut counts = HashMap::new();
-09   8     for word in text.split_whitespace() {
-10   9     │   *counts.entry(word).or_insert(0) += 1;
-11  10     }
-12  11     counts
-13  12 }
-14  13
-15  14 fn main() {
-16  15     let text = "the quick brown fox jumps over the lazy dog";
-17  16     let counts = word_counts(text);
-18  17     println!("{} distinct words", coun   Claude wants to run — outside the sandbox
-19  18 }                                       git commit -am 'Count words'
+00 ─ tarae › src › demo.rs ────────────────────────────────────────────────────────────────────────────
+01   1 use std::collections::HashMap;
+02   2                                                            claude › follow      waiting   0ms
+03   3 ▎ Counts how often each word appears.                      ▎ commit it
+04     ▎
+05     ▎ Words are split on whitespace; case is kept.             C-c stop  C-f unfollow
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   7     let mut counts = HashMap::new();
+08   8     for word in text.split_whitespace() {
+09   9     │   *counts.entry(word).or_insert(0) += 1;
+10  10     }
+11  11     counts
+12  12 }
+13  13
+14  14 fn main() {
+15  15     let text = "the quick brown fox jumps over the lazy dog";
+16  16     let counts = word_counts(text);
+17  17     println!("{} distinct words", counts.len()); // 타래
+18  18 }                                        Claude wants to run — outside the sandbox
+19                                             git commit -am 'Count words'
 20
 21                                             Its reason: the hooks sign with the key in your agent
 22
@@ -32,13 +32,13 @@
 29  ● chat                                                                      rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccppppppppppppppppppppppppppppppppppppppc
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccppppppppppppppppppppppppppppppppppppppc
+02                                                              pppppppppppppppppppppppppppppppppppppp
 03                                                              pppppppppppppppppppppppppppppppppppppp
 04                                                              pppppppppppppppppppppppppppppppppppppp
 05                                                              pppppppppppppppppppppppppppppppppppppp
 06                                                              pppppppppppppppppppppppppppppppppppppp
-07                                                              pppppppppppppppppppppppppppppppppppppp
+07
 08
 09
 10
@@ -62,26 +62,26 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02   A
-03   f                                                            TTTTTT a aaaaaa      aaaaaaa   fff
-04   f f                                                          a TTTTTT TT
-05     f
-06     f                                                          DDD ffff  DDD ffffffff
+00 f ddddd f ddd f TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01   A
+02   f                                                            TTTTTT a aaaaaa      aaaaaaa   fff
+03   f f                                                          a TTTTTT TT
+04     f
+05     f                                                          DDD ffff  DDD ffffffff
+06   f
 07   f
 08   f
 09   f
-10   f
+10  ff
 11  ff
 12  ff
 13  ff
 14  ff
-15  ff
-16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
-17  ff
-18  ff              ggg gggggggg gggggg         TTTTTT TTTTT TT TTT T TTTTTTT TTT TTTTTTT
-19  ff
+15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg
+16  ff
+17  ff              ggg gggggggg gggggg
+18  ff                                          TTTTTT TTTTT TT TTT T TTTTTTT TTT TTTTTTT
+19
 20
 21                                             ddd ddddddd ddd ddddd dddd dddd ddd ddd dd dddd ddddd
 22

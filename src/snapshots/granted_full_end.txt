@@ -1,7 +1,7 @@
 # granted_full_end · 100x50 · theme meok · cursor hidden
 ## text
-00                                                             │  claude › 6 granted             ready
-01  ╭─ granted ──────────────────────────────────────────────╮ │  ────────────────────────────────────
+00                                                             ┌─ claude ── 6 granted ───────── ready ─
+01  ╭─ granted ──────────────────────────────────────────────╮ │
 02  │   what you've let through                        20/20 │ │
 03  │ ────────────────────────────────────────────────────── │ │
 04  │  by default                                            │ │
@@ -102,8 +102,8 @@
 48
 49
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00                                                             f  dddddd f f fffffff             fffff
-01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff f  ffffffffffffffffffffffffffffffffffff
+00                                                             ff dddddd ff f fffffff fffffffff fffff f
+01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff f
 02  f   ffff ffffff fff fffffff                        fffff f f
 03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f f
 04  f  ff fffffff                                            f f

@@ -558,11 +558,11 @@ fn the_strip_the_list_and_the_tree_say_it() {
     let mut p = vt100::Parser::new(30, 160, 0);
     p.process(&bytes);
     let strip =
-        p.screen().rows(0, 160).find(|r| r.contains("│ fix") || r.starts_with("main")).unwrap_or_default();
+        p.screen().rows(0, 160).find(|r| r.contains("· fix") || r.starts_with("main")).unwrap_or_default();
     assert!(strip.contains("main ≈ fix") && strip.contains("fix ≈ main"), "{strip}");
     let p = frame(&mut ed);
-    assert_eq!(fg_at(&p, "fix ≈ main │", "", "≈"), warning, "the strip's ≈");
-    assert_eq!(fg_at(&p, "fix ≈ main │", "≈", "main"), main_c, "the strip's main");
+    assert_eq!(fg_at(&p, "fix ≈ main ·", "", "≈"), warning, "the strip's ≈");
+    assert_eq!(fg_at(&p, "fix ≈ main ·", "≈", "main"), main_c, "the strip's main");
     // The tree
     ed.session.chat = None;
     ed.session.at = crate::session::At::Code;

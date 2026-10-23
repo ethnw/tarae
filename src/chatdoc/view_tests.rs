@@ -243,8 +243,8 @@ fn esc_from_the_input_views_the_conversation_and_i_types_again() {
         let shown = frame(&mut ed);
         let status = shown.lines().last().unwrap_or_default().to_string();
         assert!(status.contains("● normal · chat "), "the status line: {status}");
-        assert!(shown.contains("claude ● normal"), "the chat's title says it:\n{shown}");
-        let title = shown.lines().find(|l| l.contains("claude ●")).unwrap_or_default();
+        assert!(shown.contains("claude ── ● normal"), "the chat's title says it:\n{shown}");
+        let title = shown.lines().find(|l| l.contains("claude ── ●")).unwrap_or_default();
         assert!(!(title.contains("view") || status.contains("view")), "no other word for it:\n{shown}");
         feed(&mut ed, back);
         assert_eq!(region(&ed), "chat", "{back}: the input again");
@@ -297,7 +297,7 @@ fn moves_and_selections_run_on_the_transcript_never_the_code() {
     assert_eq!(view(&ed).pane.keys.mode, Mode::Select);
     let shown = frame(&mut ed);
     assert!(shown.lines().last().unwrap_or_default().contains("● select · chat "), "{shown}");
-    assert!(shown.contains("claude ● select"), "the chat's title too:\n{shown}");
+    assert!(shown.contains("claude ── ● select"), "the chat's title too:\n{shown}");
     feed(&mut ed, "<esc>");
     assert_eq!(view(&ed).pane.keys.mode, Mode::Normal, "esc ends `v`, the view stays");
     assert!(has_keys(&ed));

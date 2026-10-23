@@ -144,9 +144,11 @@ configs carry over as they are.
   bottom rows, and it says how to answer it (`C-q`).
   Notes — completion, docs, hover, toasts, the follow card — float as cards of their own colour, without a frame; two
   cards never touch. The selected row has an accent bar `▎`
-- **Path bar** — `project › folder › file ● › ƒ enclosing_fn`: the function, type, or module around the cursor comes
-  from the tree-sitter tree. With several buffers open, the list shows on the right. Turn it off with
-  `editor.header = false`
+- **Path bar** — `─ project › folder › file ● › ƒ enclosing_fn ──`, on the code pane's top line: the function, type,
+  or module around the cursor comes from the tree-sitter tree. With several buffers open, the list shows on the
+  right. Every pane's top is one line with its name on it — the code's path, the chat's sessions, the side panel's
+  views, a slot's tabs — lit in the accent where the keys are; split panes each have their own, the scope and the
+  buffers on the focused one's
 - **Status line** — the mode (`● normal`: the dot in the accent, or a color per mode, the word in ink bold; `● follow`
   while Claude's follow mode leads the cursor, `● chat · follow` with the keys in the chat) · git branch and `+3 −2` · Claude status (`…` waiting,
   `● change` a change of Claude's waits for its review) · `● errors ▲ warnings` · language, colored by its server's state — dim italic starting, green

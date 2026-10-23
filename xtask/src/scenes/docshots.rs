@@ -511,7 +511,7 @@ const DOCS: &[DocShot] = &[
     row("follow-show.png", None, (140, 40)),
     row("follow-ask.png", None, S),
     // (the turn's time on the chat's last answer row, right-aligned: tarae's clock, a tenth either way)
-    row("m4-chat-hanji.png", Some("chatanswer"), S).light().varies(&[turn_time(24, (103, 111))]),
+    row("m4-chat-hanji.png", Some("chatanswer"), S).light().varies(&[turn_time(23, (103, 111))]),
     row("chat-plan.png", None, S),
     // (its head quotes what was asked, as every review of Claude's change does — frictions34 43)
     // (the follow card's wait on its head row, right-aligned: how long the scene took to get there)
@@ -521,7 +521,7 @@ const DOCS: &[DocShot] = &[
     row("chat-review-at-end.png", None, S),
     row("chat-undo-turn.png", None, S),
     row("chat-tests.png", None, S),
-    row("chat-run.png", Some("runcard"), S).varies(&[wait_time(3, (103, 111))]),
+    row("chat-run.png", Some("runcard"), S).varies(&[wait_time(2, (103, 111))]),
     row("notes.png", None, S),
     row("commit-draft.png", None, S),
     row("review.png", Some("codereview"), S),

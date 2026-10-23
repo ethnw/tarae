@@ -308,7 +308,7 @@ today).
 **Shown:**
 
 - At grant: the toast, as now (`Claude's commands may read ~/src/other-lib in this session`).
-- Always: when any grant past the defaults is live, the chat's title row carries `› 3 granted`
+- Always: when any grant past the defaults is live, the chat's top line carries `3 granted`
   (faint, clickable). That's the same place as today's `› no sandbox` (`tools::unsandboxed`).
 - In Claude's run report, as now (`The user also let it …`, `sandbox.rs:132-135`).
 - **`:granted`** (`:sandbox-allowed` kept as an alias; and a key under `space v`, chosen in the

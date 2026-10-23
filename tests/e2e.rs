@@ -1738,7 +1738,7 @@ fn the_project_search_needs_no_rg() {
     t.send("needle");
     t.wait_for("both hits", |s| s.contains("needle: ci") && s.contains("fn needle_here() {}"));
     t.send("\x1b[B\r");
-    t.wait_for("src.rs at the hit", |s| s.rows[0].contains("›  src.rs") && s.status().contains(" 3:4 "));
+    t.wait_for("src.rs at the hit", |s| s.rows[0].contains("› src.rs") && s.status().contains(" 3:4 "));
 }
 
 /// `tarae <folder>`: tarae works there on the start screen — even with files kept to reopen there — and the

@@ -1,36 +1,36 @@
 # chat_table · 150x44 · theme meok · cursor 41:95
 ## text
-00  tarae  ›  src  ›  demo.rs                                                                │  claude › follow                                    ready
-01  ──────────────────────────────────────────────────────────────────────────────────────── │  ────────────────────────────────────────────────────────
-02   1 use std::collections::HashMap;                                                        │  ▎ 표는 어떻게 그릴까?
-03   2                                                                                       │
-04   3 ▎ Counts how often each word appears.                                                 │  Two ways to draw a cell that doesn't fit:
-05     ▎                                                                                     │
-06     ▎ Words are split on whitespace; case is kept.                                        │  방식              장점                단점
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                              │  ────────────────  ──────────────────  ──────────────────
-08   7     let mut counts = HashMap::new();                                                  │  셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가
-09   8     for word in text.split_whitespace() {                                             │                    열 정렬이 유지된다  들쭉날쭉해진다
-10   9     │   *counts.entry(word).or_insert(0) += 1;                                        │
-11  10     }                                                                                 │  잘라내기(…)       한 행 = 한 줄,      잘린 내용은 볼
-12  11     counts                                                                            │                    훑어보기 좋다       방법이 없다
-13  12 }                                                                                     │
-14  13                                                                                       │  The work, roughly:
-15  14 fn main() {                                                                           │
-16  15     let text = "the quick brown fox jumps over the lazy dog";                         │  부분                 줄 수    비고
-17  16     let counts = word_counts(text);                                                   │  ───────────────────  ─────  ────────
-18  17     println!("{} distinct words", counts.len()); // 타래                              │  markdown.rs 표 파싱   ~120    핵심
-19  18 }                                                                                     │  wrap 배치              ~80
-20                                                                                           │  테스트                ~150  스냅샷 1
-21                                                                                           │
-22                                                                                           │  And a wide one, row by row:
-23                                                                                           │
-24                                                                                           │  chat.width
-25                                                                                           │    기본값  0.4
-26                                                                                           │    범위    0.2–0.6
-27                                                                                           │    설명    채팅 패널이 차지하는 화면 비율
-28                                                                                           │    예시    :set chat.width 0.5
-29                                                                                           │    비고    좁으면 전체 화면
-30                                                                                           │                                                      3.1s
+00 ─ tarae › src › demo.rs ──────────────────────────────────────────────────────────────────┬─ claude ── follow ──────────────────────────────── ready ─
+01   1 use std::collections::HashMap;                                                        │  ▎ 표는 어떻게 그릴까?
+02   2                                                                                       │
+03   3 ▎ Counts how often each word appears.                                                 │  Two ways to draw a cell that doesn't fit:
+04     ▎                                                                                     │
+05     ▎ Words are split on whitespace; case is kept.                                        │  방식              장점                단점
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                              │  ────────────────  ──────────────────  ──────────────────
+07   7     let mut counts = HashMap::new();                                                  │  셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가
+08   8     for word in text.split_whitespace() {                                             │                    열 정렬이 유지된다  들쭉날쭉해진다
+09   9     │   *counts.entry(word).or_insert(0) += 1;                                        │
+10  10     }                                                                                 │  잘라내기(…)       한 행 = 한 줄,      잘린 내용은 볼
+11  11     counts                                                                            │                    훑어보기 좋다       방법이 없다
+12  12 }                                                                                     │
+13  13                                                                                       │  The work, roughly:
+14  14 fn main() {                                                                           │
+15  15     let text = "the quick brown fox jumps over the lazy dog";                         │  부분                 줄 수    비고
+16  16     let counts = word_counts(text);                                                   │  ───────────────────  ─────  ────────
+17  17     println!("{} distinct words", counts.len()); // 타래                              │  markdown.rs 표 파싱   ~120    핵심
+18  18 }                                                                                     │  wrap 배치              ~80
+19                                                                                           │  테스트                ~150  스냅샷 1
+20                                                                                           │
+21                                                                                           │  And a wide one, row by row:
+22                                                                                           │
+23                                                                                           │  chat.width
+24                                                                                           │    기본값  0.4
+25                                                                                           │    범위    0.2–0.6
+26                                                                                           │    설명    채팅 패널이 차지하는 화면 비율
+27                                                                                           │    예시    :set chat.width 0.5
+28                                                                                           │    비고    좁으면 전체 화면
+29                                                                                           │                                                      3.1s
+30                                                                                           │
 31                                                                                           │
 32                                                                                           │
 33                                                                                           │
@@ -46,8 +46,8 @@
 43  ● chat                                                                                                                        rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -90,37 +90,37 @@
 42
 43
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT                                                                a  TTTTTT a aaaaaa                                    fffff
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A                                                                                       a  a TTTT TTTTTT TTTTTTT
-03   f                                                                                       a
-04   f f                                                                                     a
-05     f                                                                                     a
-06     f                                                                                     a  BBBB              BBBB                BBBB
-07   f                                                                                       a  ffffffffffffffff  ffffffffffffffffff  ffffffffffffffffff
+00 f ddddd f ddd f TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaa TTTTTT aa aaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fffff a
+01   A                                                                                       a  a TTTT TTTTTT TTTTTTT
+02   f                                                                                       a
+03   f f                                                                                     a
+04     f                                                                                     a
+05     f                                                                                     a  BBBB              BBBB                BBBB
+06   f                                                                                       a  ffffffffffffffff  ffffffffffffffffff  ffffffffffffffffff
+07   f                                                                                       a
 08   f                                                                                       a
 09   f                                                                                       a
-10   f                                                                                       a
+10  ff                                                                                       a
 11  ff                                                                                       a
 12  ff                                                                                       a
 13  ff                                                                                       a
 14  ff                                                                                       a
-15  ff                                                                                       a
-16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg                          a  BBBB                 BB BB    BBBB
-17  ff                                                                                       a  fffffffffffffffffff  fffff  ffffffff
-18  ff              ggg gggggggg gggggg                                                      a                                BBBB
-19  ff                                                                                       a
+15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg                          a  BBBB                 BB BB    BBBB
+16  ff                                                                                       a  fffffffffffffffffff  fffff  ffffffff
+17  ff              ggg gggggggg gggggg                                                      a                                BBBB
+18  ff                                                                                       a
+19                                                                                           a
 20                                                                                           a
 21                                                                                           a
 22                                                                                           a
-23                                                                                           a
-24                                                                                           a  BBBBBBBBBB
-25                                                                                           a    dddddd
+23                                                                                           a  BBBBBBBBBB
+24                                                                                           a    dddddd
+25                                                                                           a    dddd
 26                                                                                           a    dddd
 27                                                                                           a    dddd
 28                                                                                           a    dddd
-29                                                                                           a    dddd
-30                                                                                           a                                                      ffff
+29                                                                                           a                                                      ffff
+30                                                                                           a
 31                                                                                           a
 32                                                                                           a
 33                                                                                           a

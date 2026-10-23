@@ -570,7 +570,7 @@ impl Session {
     }
 
     /// What the tabs, the chip and the list call it: a session by its name (its branch), the checkout tarae
-    /// started in by its branch (`main │ fix-login ● │ …`) — its folder's name until the branch is known.
+    /// started in by its branch (`main · fix-login ● · …`) — its folder's name until the branch is known.
     pub fn label(&self) -> &str {
         match (self.id, &self.git_branch) {
             (0, Some(b)) => b,
@@ -1656,8 +1656,8 @@ mod tests {
         assert!(ed.session_switch(0));
         crate::chat::open(&mut ed);
         let rows = screen(&mut ed, 160, 24);
-        let tabs = rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"));
-        assert!(tabs.contains("back unsent │ +") && !tabs.contains("front unsent"), "{tabs}");
+        let tabs = rows.iter().find(|r| r.contains(" · +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(tabs.contains("back unsent · +") && !tabs.contains("front unsent"), "{tabs}");
         session_by_mut(&mut ed, id).chat.as_mut().unwrap().input.clear();
         let rows = screen(&mut ed, 160, 24);
         assert!(!rows.iter().any(|r| r.contains("unsent")), "{rows:#?}");
@@ -1707,10 +1707,10 @@ mod tests {
         // (front's own card up: front waits; back is done)
         let tabs = |ed: &mut Editor| {
             let rows = screen(ed, 160, 24);
-            rows.iter().find(|r| r.contains(" │ +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
+            rows.iter().find(|r| r.contains(" · +")).cloned().unwrap_or_else(|| panic!("{rows:#?}"))
         };
         let row = tabs(&mut ed);
-        assert!(row.contains("front ▲ waits │ back done │ +"), "{row}");
+        assert!(row.contains("front ▲ waits · back done · +"), "{row}");
         ed.offers.clear();
         let row = tabs(&mut ed);
         assert!(row.contains("back done") && !row.contains('▲'), "{row}");
@@ -2362,7 +2362,7 @@ mod tests {
         let doing = ed.doing(session_by(&ed, id));
         assert_eq!(doing, Doing::Stuck { tool: "symbols", secs: 42 });
         assert_eq!(ed.sessions_stuck(), 1);
-        let tabs = screen(&mut ed, 160, 24).into_iter().find(|r| r.contains("front │")).expect("the tabs");
+        let tabs = screen(&mut ed, 160, 24).into_iter().find(|r| r.contains("front ·")).expect("the tabs");
         assert!(tabs.contains("back ◦ symbols 42s"), "{tabs}");
         assert!(!tabs.contains("working"), "{tabs}");
         let shown = |doing| crate::worktree::Shown {
@@ -2389,13 +2389,13 @@ mod tests {
         assert!(row.hint.contains("stuck? symbols 42s"), "{}", row.hint);
         assert_eq!(row.glyph, None, "who it is is its name; stuck is said in words");
         assert!(row.hint.contains("◦ stuck? symbols 42s"), "{}", row.hint);
-        // In minutes past one; no room for the tabs: the dropdown counts it
+        // In minutes past one; no room for the words: the states fold to their marks, the names to their prefixes
         since(&mut ed, 200);
         assert_eq!(ed.doing(session_by(&ed, id)).said(), "symbols  3m");
         session_by_mut(&mut ed, id).name = "back-and-forth-and-back-again".into();
         let narrow =
-            screen(&mut ed, 100, 24).into_iter().find(|r| r.contains("◂ front")).expect("the dropdown");
-        assert!(narrow.contains("◦1"), "{narrow}");
+            screen(&mut ed, 100, 24).into_iter().find(|r| r.contains(" · + ")).expect("the sessions' line");
+        assert!(narrow.contains("f · b ◦ · +"), "{narrow}");
         // Answered: the mark goes
         serve(&mut ed, &file);
         let end = Instant::now() + Duration::from_secs(10);

@@ -756,7 +756,7 @@ struct Layout {
     header: bool,
     /// Rightmost cell of the editing area = scrollbar (only when the doc is taller than the screen).
     scrollbar: bool,
-    /// The code's first row: under the path bar and its rule (`chrome::HEAD`), else the screen's first.
+    /// The code's first row: under its top line (the path bar, P3 step 6b), else the screen's first.
     text_top: u16,
     text_rows: usize,
     gutter: usize,
@@ -781,14 +781,21 @@ struct Layout {
     /// Every pane of the session's tree, laid out in this frame (panes P2b): the rects the fields above are read
     /// from, the code panes' too (`panes`).
     leaves: Vec<(crate::split::PaneId, crate::split::Rect)>,
-    /// The path bar's place over the code's column (x, y, width) — beside or under a docked group, not the edit area's.
-    bar: (usize, usize, usize),
     /// The rows under the path bar's and over the status line's: the code's, the slot's, a group's docked over the code.
     rows: usize,
     /// A docked group's layout (`Layout::docked`): its panel drawn in its own rect, not the slot's — its kind, the
     /// side it's on, its first row (`slot_y`).
     docked: Option<(crate::pane::GroupKind, crate::pane::Side, usize)>,
+    /// The code panes' top lines and the dividers between them (`code_lines`, `code_dividers`), worked out once a frame:
+    /// every edge that meets them asks.
+    code: std::cell::OnceCell<CodeEdges>,
 }
+
+/// A code pane's top line: its row, first column, width, pane and whether it's the focused one (`code_lines`).
+type CodeLine = (usize, usize, usize, crate::split::PaneId, bool);
+
+/// The code panes' top lines and the dividers between them, each its column and rows (`code_edges`).
+type CodeEdges = (Vec<CodeLine>, Vec<(usize, std::ops::Range<usize>)>);
 
 impl Layout {
     /// No code drawn: something else fills the screen (the chat on a narrow screen too).
@@ -811,7 +818,8 @@ impl Layout {
         let (x, w, h) = match side {
             Side::Right => (r.x + 1, r.w.saturating_sub(1), r.h),
             Side::Left => (r.x, r.w.saturating_sub(1), r.h),
-            Side::Top => (r.x, r.w, r.h.saturating_sub(1)),
+            // (over the code: its bottom is the code's top line — no edge row of its own)
+            Side::Top => (r.x, r.w, r.h),
         };
         Layout { slot_x: x, slot_w: w, debug_h: h, docked: Some((kind, side, r.y)), ..self.clone() }
     }
@@ -897,7 +905,7 @@ use crate::pane::Shape;
 
 /// Over and under wants the pane this many rows under its line at least: the list's few, the detail's top line, the
 /// detail's rows.
-const OVER_ROWS: usize = 14;
+pub(crate) const OVER_ROWS: usize = 14;
 
 /// Group `g`'s shape in a pane `w` wide and `h` rows under its line, and the list's width (side by side) or rows (over
 /// and under): side by side where both get their least (`LIST_MIN`, `DETAIL_MIN`; `:procs`' own), over and under where
@@ -923,13 +931,14 @@ fn group_shape(editor: &Editor, g: &crate::pane::Group, w: usize, h: usize) -> O
     })
 }
 
-/// The shape group `g` would be laid in, in the pane it had in the last frame (docked: its leaf's rect inside its edge;
-/// in the slot: the slot's) — what `C-w t` says of its choice. None: not laid out there.
+/// The shape group `g` would be laid in, in the pane it had in the last frame (docked beside the code: its leaf's rect
+/// inside its edge; over it: the whole rect; in the slot: the slot's) — what `C-w t` says of its choice. None: not laid out there.
 pub(crate) fn group_shape_now(editor: &Editor, g: &crate::pane::Group) -> Option<Shape> {
     use crate::pane::Side;
     let s = &editor.screen;
     let (w, h) = match editor.dock_rect(g.kind).filter(|_| editor.docked_in_sight(g.kind)) {
-        Some((Side::Top, r)) => (r.w, r.h.saturating_sub(1)),
+        // (over the code: the whole rect, its bottom the code's line — as `Layout::docked` lays it)
+        Some((Side::Top, r)) => (r.w, r.h),
         Some((_, r)) => (r.w.saturating_sub(1), r.h),
         None => (s.slot_w, s.bottom_h),
     };
@@ -1082,15 +1091,11 @@ impl Layout {
         let zoom = editor.zoomed();
         let zoom_shows = editor.zoomed_shows();
         // (the slot's header in the line where it meets what's above — panes P3 §1: filling the screen, that line
-        // is its first row, no path bar over it)
+        // is its first row, no code's line over it)
         let slot_head = crate::chrome::SLOT_HEAD;
-        let header = (editor.config.header || editor.docs.len() > 1) && zoom_shows != Some(Shows::Slot);
-        // (the path bar and its rule over the code — `chrome::HEAD`; a short screen keeps the row for code)
-        let text_top = match header {
-            true if h >= crate::chrome::RULE_MIN_ROWS => crate::chrome::HEAD as u16,
-            true => 1,
-            false => 0,
-        };
+        let header = zoom_shows != Some(Shows::Slot);
+        // (the code's top line over its column — every pane's top is one line with its name on it, P3 step 6b)
+        let text_top = u16::from(header);
         // (the status line is the last row — no command row: a prompt is a card standing on it)
         let all = (h as usize).saturating_sub(1 + text_top as usize).max(1);
         // A card stepped aside to a bar while its text is read (U8): the row over the status line is its
@@ -1185,7 +1190,7 @@ impl Layout {
                 None => 0,
             },
             Some(_) => {
-                let h = (total / 3).clamp(8, 15) - (crate::chrome::HEAD - slot_head);
+                let h = (total / 3).clamp(8, 15) - 1;
                 h.min(total.saturating_sub(4))
             }
             None => 0,
@@ -1265,8 +1270,8 @@ impl Layout {
             zoom,
             zoom_shows,
             leaves,
-            bar: path_bar,
             docked: None,
+            code: std::cell::OnceCell::new(),
         }
     }
 }
@@ -1336,7 +1341,8 @@ fn code_column(s: &crate::session::Session) -> Option<&crate::split::Split> {
 }
 
 impl Layout {
-    /// One split pane's layout: in its rect (below any title row), the doc's line-number column + scrollbar.
+    /// One split pane's layout: in its rect (below its top line when it's in its first row — `title`), the doc's
+    /// line-number column + scrollbar.
     fn pane(
         &self,
         doc: &crate::document::Document,
@@ -1355,6 +1361,8 @@ impl Layout {
             gutter,
             scrollbar,
             text_cols: r.w.saturating_sub(gutter + scrollbar as usize).max(1),
+            // (the frame's code edges are the frame layout's to keep, not a pane's)
+            code: std::cell::OnceCell::new(),
             ..self.clone()
         }
     }
@@ -1373,8 +1381,6 @@ fn panes(
         w: lay.edit_w - lay.rail_w,
         h: lay.text_rows,
     };
-    // (`C-w z`: the focused pane alone, no title row)
-    let many = editor.session.views.len() > 1 && lay.zoom.is_none();
     // (the code's panes where the tree laid them out — `C-w z`: the focused one alone, with no room when another
     // pane fills the screen)
     let mut tiles: Vec<_> =
@@ -1397,7 +1403,9 @@ fn panes(
                 if focused { (doc.top, doc.left) } else { (v.top.min(mv::last_line(&doc.text)), v.left) };
             let rows = if focused { doc.top_rows } else { v.top_rows };
             let top = (top, rows.filter(|&(l, _)| l == top).map_or(0, |r| r.1));
-            Some((id, r, lay.pane(doc, r, many, editor), idx, top, left, focused))
+            // (a pane under another has its top line in its first row; one at the column's top, on the line over it)
+            let line = r.y > lay.text_top as usize;
+            Some((id, r, lay.pane(doc, r, line, editor), idx, top, left, focused))
         })
         .collect();
     crate::sorting::by_key(&mut out, |p| (p.1.x, p.1.y));
@@ -1904,7 +1912,20 @@ fn slot_header(
         line: detail_line,
         join: line,
     });
-    let head = TopLine { names: &names, details: &said, keys: hints, key, faint, plain: false, beyond };
+    let ups = match lay.docked {
+        None => dividers_up(editor, lay, y0),
+        Some(_) => Vec::new(),
+    };
+    let head = TopLine {
+        names: &names,
+        details: &said,
+        keys: hints,
+        key,
+        faint,
+        beyond,
+        ups: &ups,
+        ..TopLine::default()
+    };
     let cols = top_line(out, stretches.0, card, (x0, y0, w), ("", "", "┬"), splits, true, &head)?;
     // (a tab's spot from its label's first cell to its badge's last; a member's its name's)
     for (slot, (a, b)) in owner.iter().zip(&cols).filter_map(|(o, c)| o.map(|s| (s, *c))) {
@@ -1962,8 +1983,7 @@ fn member_line(
     let line = if keys { line } else { Style { fg: ui.window, ..line } };
     let names = [(m.detail.to_string(), if keys { strong } else { dim })];
     let key = Style { bold: true, ..dim };
-    let head =
-        TopLine { names: &names, details: &m.details, keys: &[], key, faint, plain: false, beyond: None };
+    let head = TopLine { names: &names, details: &m.details, key, faint, ..TopLine::default() };
     let cols = top_line(out, line, card, (x, y, w), ("", "", "┬"), &[], true, &head)?;
     if let Some(&(a, b)) = cols.first().filter(|c| c.1 > c.0) {
         editor.screen.member_names.borrow_mut().push((y, a, b, m.ids.1));
@@ -1976,6 +1996,7 @@ const TOP_LINE_OWN: usize = 4;
 
 /// What a top line says (`top_line`): the names (spans, `NAMES_SEP` among them), what the one in front says, its keys
 /// — `key` and `faint` their look, as a bottom panel's keys have always been.
+#[derive(Default)]
 struct TopLine<'a> {
     names: &'a [(String, Style)],
     details: &'a [(String, Style)],
@@ -1986,6 +2007,14 @@ struct TopLine<'a> {
     plain: bool,
     /// A group laid side by side: its detail's part, past the first line down.
     beyond: Option<Beyond<'a>>,
+    /// What stands at the line's right end instead of keys (the code's buffers, the chat's model or time): whole or
+    /// not at all, a blank either side, a `─` after it.
+    right: &'a [(String, Style)],
+    /// The details fold before the right end (a turn's time); else it gives way to them first (the model's name).
+    keep_right: bool,
+    /// Columns where a line from above ends on this one (a code pane's divider over the slot's line): `┴` in its run of
+    /// `─` (`┼` where one goes down there too).
+    ups: &'a [usize],
 }
 
 /// The part of a top line over a group's detail (panes P3 step 3b): from the first line down (`splits`) on, its own
@@ -2075,7 +2104,7 @@ const KEYS_AFTER: usize = 4;
 /// only in the line's run of `─`, never under text: the details end short of the first past the names and the keys
 /// start past the last (pairs fold). Not `drawn`: the same text in place, blanks where the lines would be (a card
 /// without the keys).
-/// Returns each name span's columns (`a..b`), for the mouse.
+/// Returns each name span's columns (`a..b`), for the mouse — then each shown detail span's.
 #[allow(clippy::too_many_arguments)]
 fn top_line(
     out: &mut impl Write,
@@ -2133,24 +2162,36 @@ fn top_line(
     let past = downs.iter().max().map_or(0, |&s| s + 2);
     // What the one in front says, after ` ── `: as much as there's room for, the first without its leading blanks
     // (`bare`: no names before them — `─ ` then, not ` ── `)
-    let said_after =
-        |buf: &mut Vec<u8>, line: Style, details: &[(String, Style)], col: &mut usize, most, bare| {
-            let lead = if bare { 2 } else { 4 };
-            let details = match room(*col) >= 4 + DETAILS_MIN && most >= DETAILS_MIN {
-                true => fold_details(details, (room(*col) - 4).min(most)),
-                false => Vec::new(),
-            };
-            if !details.is_empty() {
-                put(buf, line, if lead == 2 { "─ " } else { " ── " })?;
-                *col += lead;
-                for (s, st) in &details {
-                    apply_put(buf, *st, s)?;
-                    *col += s.width();
-                }
-            }
-            io::Result::Ok(())
+    // (each shown detail's columns, after the names' in what's returned)
+    let mut said_cols = Vec::new();
+    let said_after = |buf: &mut Vec<u8>,
+                      at: &mut Vec<(usize, usize)>,
+                      line: Style,
+                      details: &[(String, Style)],
+                      col: &mut usize,
+                      most,
+                      bare| {
+        let lead = if bare { 2 } else { 4 };
+        let details = match room(*col) >= 4 + DETAILS_MIN && most >= DETAILS_MIN {
+            true => fold_details(details, (room(*col) - 4).min(most)),
+            false => Vec::new(),
         };
-    said_after(&mut buf, line, head.details, &mut col, short_of, head.names.is_empty())?;
+        if !details.is_empty() {
+            put(buf, line, if lead == 2 { "─ " } else { " ── " })?;
+            *col += lead;
+            for (s, st) in &details {
+                apply_put(buf, *st, s)?;
+                at.push((x + *col, x + *col + s.width()));
+                *col += s.width();
+            }
+        }
+        io::Result::Ok(())
+    };
+    // (the right end's room kept from the details: they fold before it)
+    let right_w: usize = head.right.iter().map(|(s, _)| s.width()).sum();
+    let keep_right = if right_w > 0 && head.keep_right { right_w + 3 } else { 0 };
+    let most = short_of.min(room(col).saturating_sub(4 + keep_right));
+    said_after(&mut buf, &mut said_cols, line, head.details, &mut col, most, head.names.is_empty())?;
     // A group's detail past the first line down (`beyond`): this stretch's line to it, the join, then its own names
     // and details after `─ ` — the rest of the line in its stretch's look
     let mut line = line;
@@ -2165,7 +2206,7 @@ fn top_line(
         put(&mut buf, line, "─ ")?;
         col = s.max(col) + 1 + 2;
         names(&mut buf, b.names, &mut col)?;
-        said_after(&mut buf, line, b.details, &mut col, usize::MAX, b.names.is_empty())?;
+        said_after(&mut buf, &mut said_cols, line, b.details, &mut col, usize::MAX, b.names.is_empty())?;
     }
     // The keys at the right end: as many whole pairs as fit, from the first — a run of the line (`KEYS_AFTER`)
     // before them, so it reads as a line still
@@ -2181,13 +2222,33 @@ fn top_line(
             fits
         })
         .count();
+    // What stands at the right end instead of keys: whole, with a `─` at least before it
+    let right_cells = match right_w {
+        0 => 0,
+        _ if n == 0 && col + usize::from(said) + 1 + right_w + 3 <= w - r.width() => right_w + 3,
+        _ => 0,
+    };
     if said {
         put(&mut buf, line, " ")?;
         col += 1;
     }
-    let fill_end = w - r.width() - keys_w;
-    let fill: String = (col..fill_end).map(|c| if splits.contains(&(x + c)) { join } else { "─" }).collect();
+    let fill_end = w - r.width() - keys_w - right_cells;
+    let cell = |c: usize| match (splits.contains(&(x + c)), head.ups.contains(&(x + c))) {
+        (true, true) => "┼",
+        (true, false) => join,
+        (false, true) => "┴",
+        (false, false) => "─",
+    };
+    let fill: String = (col..fill_end).map(cell).collect();
     put(&mut buf, line, &fill)?;
+    if right_cells > 0 {
+        apply_put(&mut buf, card, " ")?;
+        for (s, st) in head.right {
+            apply_put(&mut buf, *st, s)?;
+        }
+        apply_put(&mut buf, card, " ")?;
+        put(&mut buf, line, "─")?;
+    }
     for (i, (k, v)) in head.keys[..n].iter().enumerate() {
         apply_put(&mut buf, card, if i == 0 { " " } else { "  " })?;
         apply_put(&mut buf, head.key, k)?;
@@ -2199,6 +2260,7 @@ fn top_line(
     }
     put(&mut buf, line, r)?;
     out.write_all(&buf)?;
+    cols.extend(said_cols);
     Ok(cols)
 }
 
@@ -2355,7 +2417,7 @@ fn task_panel_foot(r: &crate::task::Run) -> usize {
 /// rows the same.
 fn terminal_panel_h(total: usize, head: usize) -> usize {
     // Never more than leaves 4 rows of code; too little room for a header and a row → none
-    let h = ((total * 2 / 5).clamp(8, 24) - (crate::chrome::HEAD - head)).min(total.saturating_sub(4));
+    let h = ((total * 2 / 5).clamp(8, 24) - 1).min(total.saturating_sub(4));
     if h <= head { 0 } else { h }
 }
 
@@ -3059,7 +3121,7 @@ fn procs_panel_h(editor: &Editor, total: usize, head: usize) -> usize {
     let want = head + 1 + p.rows.len().max(1) + 1 + p.checks.len().clamp(1, 4);
     let cap = (total / 2).min(total.saturating_sub(4));
     let tall = p.panel.as_ref().map_or(0, |s| s.tall.get());
-    let h = want.max(8 - (crate::chrome::HEAD - head)).max(tall).min(cap);
+    let h = want.max(7).max(tall).min(cap);
     if let Some(s) = p.panel.as_ref() {
         s.tall.set(tall.max(h));
     }
@@ -3794,9 +3856,8 @@ fn draw_panes(
     out: &mut impl Write,
 ) -> io::Result<Option<(u16, u16)>> {
     let ps = panes(editor, lay);
-    let many = ps.len() > 1;
     let mut cursor = None;
-    for (_, r, pl, idx, top, left, focused) in &ps {
+    for (_, _, pl, idx, top, left, focused) in &ps {
         let _fade = Fade::unless(keys.code() && *focused, ui);
         let doc = &editor.docs[*idx];
         let shows = Shows::pane(editor, doc, *focused, *left);
@@ -3807,78 +3868,106 @@ fn draw_panes(
             own = rows_pane(editor, doc, *top, &shows, pl);
             &own
         };
-        if many {
-            draw_pane_title(editor, doc, *r, *focused, ui, out)?;
-        }
         let c = draw_text(editor, &Source::of(doc), top.0, &shows, view, ui, pl, out)?;
         if *focused {
             cursor = c;
         }
     }
-    // Dividers between side-by-side panes (plain line at title-row height, no ┬) — last
-    // In the theme's `ui.window` (Helix's key for them), else faint
-    let window = editor.theme.try_get("ui.window").and_then(|s| s.fg).or(ui.linenr.fg);
-    let faint = Style { fg: window, ..ui.base };
-    // (one being dragged in the accent, as the panels' edges are)
+    // Dividers between side-by-side panes, each from the top line it starts at (`┬`, never above it), joined where a
+    // pane's line meets it from the side (`├` `┤` `┼`) — last. The faint wash, the rows edging the pane with the keys
+    // lit (D2), as every surface's lines are; one being dragged in the accent
+    let wash = Style { fg: ui.window, ..ui.base };
     let dragged = match editor.dragging {
         Some(crate::sizes::Border::Divider(id)) => ps.iter().find(|p| p.0 == id).map(|p| p.1.x + p.1.w),
         _ => None,
     };
-    // (D2: the rows of a divider that edge the pane with the keys lit, as every surface's lines are — the others the
-    // faint wash)
     let keys_here = ui.lit == Some(Region::Code);
-    let focused = ps.iter().find(|p| p.6).map(|p| p.1).filter(|_| keys_here);
+    let (lines, dividers) = code_edges(editor, lay);
+    let focused = lines.iter().find(|l| l.4).filter(|_| keys_here).map(|l| {
+        let r = ps.iter().find(|p| p.0 == l.3).map_or(crate::split::Rect::default(), |p| p.1);
+        (r.x, r.w, l.0..r.y + r.h)
+    });
     let edges = |x: usize, y: usize| {
-        focused.is_some_and(|f| (f.x == x + 1 || f.x + f.w == x) && (f.y..f.y + f.h).contains(&y))
+        focused.as_ref().is_some_and(|(fx, fw, rows)| (*fx == x + 1 || fx + fw == x) && rows.contains(&y))
     };
-    for (_, r, ..) in ps.iter().filter(|p| p.1.x > 0) {
-        let x = r.x - 1;
-        for y in r.y..r.y + r.h {
-            let style = match dragged == Some(x) || edges(x, y) {
+    for (x, rows) in dividers {
+        for y in rows.clone() {
+            let style = match dragged == Some(*x) || edges(*x, y) {
                 true => Style { fg: ui.accent.fg, ..ui.base },
-                false => faint,
+                false => wash,
             };
-            queue!(out, MoveTo(x as u16, y as u16))?;
-            put_line(out, style, "│")?;
+            let glyph = divider_glyph(lines, dividers, *x, y);
+            queue!(out, MoveTo(*x as u16, y as u16))?;
+            put_line(out, style, glyph)?;
         }
     }
     Ok(cursor)
 }
 
-/// Pane title row: `▎ main.rs ●` — focused pane gets accent bar, bold name, faint band; others dimmed.
-fn draw_pane_title(
-    editor: &Editor,
-    doc: &crate::document::Document,
-    r: crate::split::Rect,
-    focused: bool,
-    ui: &Ui,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    let t = &editor.theme;
-    let band = if focused { blend(ui.accent.fg, ui.tint, 0.10).or(ui.base.bg) } else { ui.base.bg };
-    let base = Style { bg: band, ..ui.base };
-    queue!(out, MoveTo(r.x as u16, r.y as u16))?;
-    apply(
-        out,
-        if focused { Style { fg: ui.accent.fg, ..base } } else { Style { fg: ui.linenr.fg, ..base } },
-    )?;
-    queue!(out, Print(" ▎ "))?;
-    let name = fit_ellipsis(&doc.display_name(&editor.session.root), r.w.saturating_sub(8));
-    let name_style = if focused {
-        base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }))
-    } else {
-        Style { fg: ui.virt.fg, ..base }
-    };
-    apply(out, Style { bg: band, ..name_style })?;
-    queue!(out, Print(&name))?;
-    let mut used = 3 + name.width();
-    if doc.is_modified() {
-        apply(out, Style { fg: ui.accent.fg, ..base })?;
-        queue!(out, Print(" ●"))?;
-        used += 2;
+/// A code pane's top line (P3 step 6b): its row, its first column and width, its pane, whether it's the focused one —
+/// on the row over the pane where the pane starts at the code's first row (the column's line, under any group docked
+/// over it), else its own first row. None with no code drawn.
+fn code_lines<'a>(editor: &Editor, lay: &'a Layout) -> &'a [CodeLine] {
+    &code_edges(editor, lay).0
+}
+
+/// The code panes' top lines (`code_lines`) and the dividers between side-by-side ones: each divider's column (the
+/// cell left of a pane with a code pane left of it) and its rows — from the pane's top line down. Worked out once a
+/// frame (`Layout.code`).
+fn code_edges<'a>(editor: &Editor, lay: &'a Layout) -> &'a CodeEdges {
+    lay.code.get_or_init(|| {
+        if lay.code_hidden() || !lay.header {
+            return (Vec::new(), Vec::new());
+        }
+        let ps = panes(editor, lay);
+        let lines: Vec<CodeLine> = ps
+            .iter()
+            .filter(|p| p.1.w > 0)
+            .map(|(id, r, pl, .., focused)| {
+                ((pl.text_top as usize).saturating_sub(1), r.x, r.w, *id, *focused)
+            })
+            .collect();
+        let mut dividers = Vec::new();
+        for (id, r, ..) in &ps {
+            let Some(x) = r.x.checked_sub(1) else { continue };
+            let Some(top) = lines.iter().find(|l| l.3 == *id).map(|l| l.0) else { continue };
+            let rows = top..r.y + r.h;
+            let beside = ps.iter().any(|q| {
+                q.1.x < r.x && q.1.x + q.1.w + 1 >= r.x && q.1.y < rows.end && rows.start < q.1.y + q.1.h
+            });
+            if beside {
+                dividers.push((x, rows));
+            }
+        }
+        (lines, dividers)
+    })
+}
+
+/// A divider's cell at `(x, y)`: `│`, or where it starts at a line `┬` (`┌` `┐` with a line on one side only), where a
+/// pane's line meets it from a side `├` `┤`, from both `┼`.
+fn divider_glyph(
+    lines: &[CodeLine],
+    dividers: &[(usize, std::ops::Range<usize>)],
+    x: usize,
+    y: usize,
+) -> &'static str {
+    let up = y > 0 && dividers.iter().any(|d| d.0 == x && d.1.contains(&(y - 1)));
+    let left = lines.iter().any(|l| l.0 == y && l.1 + l.2 == x);
+    let right = lines.iter().any(|l| l.0 == y && l.1 == x + 1);
+    match (up, left, right) {
+        (false, true, true) => "┬",
+        (false, false, true) => "┌",
+        (false, true, false) => "┐",
+        (true, true, true) => "┼",
+        (true, false, true) => "├",
+        (true, true, false) => "┤",
+        _ => "│",
     }
-    apply(out, base)?;
-    queue!(out, Spaces(r.w.saturating_sub(used)))
+}
+
+/// The columns of the code's dividers that end on the row over `y` — a line there takes them in (`┴`).
+fn dividers_up(editor: &Editor, lay: &Layout, y: usize) -> Vec<usize> {
+    code_edges(editor, lay).1.iter().filter(|d| y > 0 && d.1.end == y).map(|d| d.0).collect()
 }
 
 /// Line-number column width (the sign column before it aside) — two digits at least, so a file growing
@@ -4688,10 +4777,9 @@ fn dock_edge(
         (false, Some(r)) => edge_style(ui, ui.base, r),
         (false, None) => edge_style(ui, ui.base, mine),
     };
+    // (over the code: its bottom is the code's top line, no edge of its own)
     if side == Side::Top {
-        let y = r.y + r.h - 1;
-        queue!(out, MoveTo(r.x as u16, y as u16))?;
-        return put_line(out, style(Region::Code), &"─".repeat(r.w));
+        return Ok(());
     }
     let x = if side == Side::Right { r.x } else { r.x + r.w - 1 };
     let slot = lay.slot_y();
@@ -4699,37 +4787,26 @@ fn dock_edge(
     let slot_beside =
         lay.debug_h > 0 && lay.slot_w > 0 && (lay.slot_x + lay.slot_w == x || x + 1 == lay.slot_x);
     let (start, own, meet) = if side == Side::Right { ("┌", "├", "┤") } else { ("┐", "┤", "├") };
-    // (its detail's top line, laid over and under; the code's rule under the path bar, run up to it — `draw_header`)
+    // (its detail's top line, laid over and under; a code pane's top line meeting it — at its own top, the two lines
+    // one: `┬`)
     let middle =
         editor.session.group(kind).and_then(|g| group_members(editor, lay, &g)).and_then(|m| over_under(&m));
-    let rule = dock_rule(lay, (side, r));
+    let code = code_lines(editor, lay);
+    let code_at = |y: usize| code.iter().any(|l| l.0 == y && (l.1 + l.2 == x || l.1 == x + 1));
     for y in r.y..r.y + r.h {
         let in_slot = slot_beside && (slot..slot + lay.debug_h).contains(&y);
         let glyph = match y {
+            _ if y == r.y && code_at(y) => "┬",
             _ if y == r.y => start,
             _ if Some(y) == middle => own,
             _ if in_slot && y == slot => meet,
-            _ if Some(y) == rule => meet,
+            _ if code_at(y) => meet,
             _ => "│",
         };
         queue!(out, MoveTo(x as u16, y as u16))?;
         put_line(out, style(if in_slot { Region::Slot } else { Region::Code }), glyph)?;
     }
     Ok(())
-}
-
-/// The row of the code's rule under its path bar where it meets a group docked beside it (`r` its leaf's rect): the rule
-/// runs up to the group's edge there (`draw_header`), joined (`dock_edge`).
-fn dock_rule(lay: &Layout, (side, r): (crate::pane::Side, crate::split::Rect)) -> Option<usize> {
-    let (x0, y0, w) = lay.bar;
-    let y = y0 + 1;
-    let ruled = lay.text_top as usize >= y0 + crate::chrome::HEAD && w > 0 && !lay.code_hidden();
-    let beside = match side {
-        crate::pane::Side::Right => r.x == x0 + w,
-        crate::pane::Side::Left => r.x + r.w == x0,
-        crate::pane::Side::Top => false,
-    };
-    (ruled && beside && (r.y..r.y + r.h).contains(&y)).then_some(y)
 }
 
 /// A card's rect as another card keeps out of it: a row and two cells wider all round — two cards never touch (D3:
@@ -8225,25 +8302,56 @@ fn draw_diff_row(
 /// The code's title row, over it between the side panel and the chat: `project › folder › file ● › ƒ
 /// definition` ……… open buffers (current one bold) — and its rule under it (the accent while the code has
 /// the keys). When narrow, drop less important parts first (project, folders, outer definitions).
+/// Every code pane's top line (P3 step 6b): one line with its name on it, as every pane's top is — on the row over the
+/// pane at the column's top (the screen's first row, or under a group docked over the code), on its first row under
+/// another (`code_lines`).
 fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
-    use crate::chrome::{PAD_R, SIGNS};
-    let doc = editor.doc();
+    if lay.code_hidden() {
+        return Ok(());
+    }
+    // (a review whose rail has no room — the chat beside it, a phone: the line says which of its files this is)
+    let railless = lay.rail_w == 0 || !editor.review_rail_up();
+    let ps = panes(editor, lay);
+    for (id, r, pl, idx, .., focused) in &ps {
+        let y = (pl.text_top as usize).saturating_sub(1);
+        code_line(editor, ui, &editor.docs[*idx], (*id, *focused, railless), (r.x, y, r.w), out)?;
+    }
+    Ok(())
+}
+
+/// One code pane's top line: `─ project › folder › file ● › ƒ scope ─── other.rs  file ● ─` — the file's path (a preview's
+/// name in italic), what it's compared with, a woven view's sessions; the focused pane's also the scope under the cursor,
+/// a review's place and the buffers at the right end. Lit (`edge_style`) where the keys are; folded by each piece's
+/// `keep` (`fit_segments`).
+fn code_line(
+    editor: &Editor,
+    ui: &Ui,
+    doc: &crate::document::Document,
+    (id, focused, railless): (crate::split::PaneId, bool, bool),
+    (x0, y0, width): (usize, usize, usize),
+    out: &mut impl Write,
+) -> io::Result<()> {
     let t = &editor.theme;
     let dim = Style { fg: ui.virt.fg, ..ui.base };
     let faint = Style { fg: ui.linenr.fg, ..ui.base };
     let strong =
         ui.base.patch(t.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
-    // (over the code's column: beside a docked group, under one docked over it)
-    let (x0, y0, width) = lay.bar;
-    let ruled = lay.text_top as usize >= y0 + crate::chrome::HEAD;
-    // (the start screen is a title page: no path bar or rule over an empty buffer — the page takes these rows,
-    // the folder's name is in its colophon: `draw_welcome`)
-    if width == 0 || lay.code_hidden() || editor.welcome() {
-        return Ok(());
+    let line = match focused {
+        true => edge_style(ui, ui.base, Region::Code),
+        false => Style { fg: ui.window, bold: false, dim: false, italic: false, ..ui.base },
+    };
+    let key = Style { bold: true, ..dim };
+    let bare = |out: &mut _| {
+        let head = TopLine { key, faint, ..TopLine::default() };
+        top_line(out, line, ui.base, (x0, y0, width), ("", "", "┬"), &[], true, &head).map(|_| ())
+    };
+    // (the start screen is a title page: its line bare over an empty buffer — the folder's name is in its colophon:
+    // `draw_welcome`)
+    if editor.welcome() {
+        return bare(out);
     }
-    let sep = |keep| Seg { text: "  ›  ".into(), style: faint, keep };
-    // (where the code's numbers start — `chrome::SIGNS`)
-    let mut left = vec![Seg { text: " ".repeat(SIGNS), style: ui.base, keep: 255 }];
+    let sep = |keep| Seg { text: MEMBERS_SEP.into(), style: faint, keep };
+    let mut left = Vec::new();
     let project = editor.session.root.file_name().map(|p| p.to_string_lossy().into_owned());
     // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
     #[cfg(test)]
@@ -8264,24 +8372,23 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     }
     // (a preview — the git tab's or the rail's look, the next one taking its place: in italic, not settled yet)
     let named = |s: Style, d: &crate::document::Document| Style { italic: s.italic || d.preview, ..s };
-    left.push(Seg { text: doc.display_name_short(), style: named(strong, doc), keep: 250 });
+    left.push(Seg {
+        text: doc.display_name_short(),
+        style: named(if focused { strong } else { dim }, doc),
+        keep: 250,
+    });
     if doc.loading {
         left.push(Seg { text: " …".into(), style: dim, keep: 240 });
     } else if doc.is_modified() {
         left.push(Seg { text: " ●".into(), style: ui.base.patch(ui.accent), keep: 245 });
     }
-    // The focused pane, as Claude names it: given or cited this turn, a faint mark after its file
-    let pane = format!("pane#{}", editor.session.focus);
-    let of = crate::uistate::point::Of::Pane(editor.session.focus);
-    // (its label on the rule under the bar, where the bar's words start — none hidden)
-    let at = (x0 + SIGNS, y0 + usize::from(ruled));
-    editor.screen.spots.borrow_mut().push(crate::uistate::point::Spot { of, x: x0, y: y0, w: width, at });
+    // The pane, as Claude names it: given or cited this turn, a faint mark after its file
+    let pane = format!("pane#{id}");
     if let Some((m, st)) = ui_mark(ui, editor, &pane, ui.base) {
         left.push(Seg { text: format!(" {m}"), style: st, keep: 245 });
     }
     // A review with no room for its rail (the chat beside it, a phone): which of its files this is
-    if let Some(r) =
-        editor.session.code_review.as_ref().filter(|_| lay.rail_w == 0 || !editor.review_rail_up())
+    if let Some(r) = editor.session.code_review.as_ref().filter(|_| focused && railless)
         && let Some(i) = r.current(editor)
     {
         let n = r.files.len();
@@ -8355,7 +8462,7 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     }
     // (each definition's segments — separator, glyph, name — by their `keep`: they go together)
     let mut scope: Vec<(u8, usize)> = Vec::new();
-    if let Some(syn) = doc.syntax.as_ref() {
+    if let Some(syn) = doc.syntax.as_ref().filter(|_| focused) {
         let head = doc.selection().primary().cursor(&doc.text);
         let path = syntax::scope_path(syn, &doc.text, head);
         let n = path.len();
@@ -8380,116 +8487,60 @@ fn draw_header(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
     let mut right = Vec::new();
     // (the front session's buffers)
     let buffers = editor.buffers();
-    if buffers.len() > 1 {
+    if buffers.len() > 1 && focused {
         for i in buffers {
             let (d, current) = (&editor.docs[i], i == editor.current);
             let mark = if d.is_modified() { " ●" } else { "" };
             let keep = if current { 90 } else { 10 };
-            right.push(Seg {
-                text: format!("{}{mark}", d.display_name_short()),
-                style: named(if current { strong } else { dim }, d),
-                keep,
-            });
+            let style = named(if current { strong } else { dim }, d);
+            right.push(Seg { text: format!("{}{mark}", d.display_name_short()), style, keep });
             // (the gap upright: an italic name's slant stops at its last letter)
             right.push(Seg { text: "  ".into(), style: ui.base, keep });
         }
     }
-    // (the buffers' list ends in its own two blanks — the padding on the right)
-    let room = width.saturating_sub(if right.is_empty() { PAD_R } else { 0 });
-    fit_segments(&mut left, &mut right, room);
+    // (the line's own cells: its lead `─ `, a blank and a `─` after the path — with the buffers, a blank and a `─` after
+    // them too; `fit_segments` keeps two cells between the two)
+    fit_segments(&mut left, &mut right, width.saturating_sub(TOP_LINE_OWN + 1));
     parts_whole(&mut left, &scope);
-    // (brought into sight from a link: the bar flashes)
-    let lit = |s: Style| flashed(ui, editor, &pane, s);
-    queue!(out, MoveTo(x0 as u16, y0 as u16))?;
-    let mut used = 0;
-    for s in &left {
-        apply(out, lit(s.style))?;
-        queue!(out, Print(&s.text))?;
-        used += s.text.width();
-    }
-    let right_w: usize = right.iter().map(|s| s.text.width()).sum();
-    apply(out, lit(ui.base))?;
-    queue!(out, Spaces(width.saturating_sub(used + right_w)))?;
-    for s in &right {
-        apply(out, lit(s.style))?;
-        queue!(out, Print(&s.text))?;
-    }
-    if ruled {
-        // (a group docked beside the code: the rule runs up to its edge, which joins it — `dock_rule`)
-        let (mut pads, y) = ((SIGNS, PAD_R), y0 + 1);
-        for g in &editor.session.groups {
-            let crate::pane::Place::Docked(side) = g.place else { continue };
-            let Some(r) = lay.leaves.iter().find(|l| l.0 == g.host).map(|l| l.1) else { continue };
-            if !editor.docked_in_sight(g.kind) || dock_rule(lay, (side, r)) != Some(y) {
-                continue;
-            }
-            match side {
-                crate::pane::Side::Left => pads.0 = 0,
-                _ => pads.1 = 0,
-            }
+    // (a blank spacer left at an end of either side: the line's own blanks take its place)
+    for side in [&mut left, &mut right] {
+        while side.first().is_some_and(|s| s.text.trim().is_empty()) {
+            side.remove(0);
         }
-        header_rule_within(out, ui, ui.base, (x0, y, width), Region::Code, pads)?;
+        while side.last().is_some_and(|s| s.text.trim().is_empty()) {
+            side.pop();
+        }
     }
+    if let Some(first) = left.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    // (brought into sight from a link: its names flash)
+    let lit = |s: Style| flashed(ui, editor, &pane, s);
+    let names: Vec<(String, Style)> = left.into_iter().map(|s| (s.text, lit(s.style))).collect();
+    let right: Vec<(String, Style)> = right.into_iter().map(|s| (s.text, lit(s.style))).collect();
+    let head = TopLine { names: &names, key, faint, right: &right, ..TopLine::default() };
+    let cols = top_line(out, line, ui.base, (x0, y0, width), ("", "", "┬"), &[], true, &head)?;
+    // (pointed at: the pane's label on its line past its path — none of the path hidden)
+    let of = crate::uistate::point::Of::Pane(id);
+    let at = (cols.last().map_or(x0 + 2, |c| c.1 + 1).min(x0 + width.saturating_sub(1)), y0);
+    editor.screen.spots.borrow_mut().push(crate::uistate::point::Spot { of, x: x0, y: y0, w: width, at });
     Ok(())
 }
 
-/// A header's rule — the row under a title (`chrome::HEAD`): `─` across the region's text, inside its
-/// padding, on `base`; lit as every edge of `region` is (`edge_style`).
-fn header_rule(
-    out: &mut impl Write,
-    ui: &Ui,
-    base: Style,
-    rect: (usize, usize, usize),
-    region: Region,
-) -> io::Result<()> {
-    header_rule_from(out, ui, base, rect, region, crate::chrome::PAD)
-}
-
-/// `header_rule` starting `pad` cells in (the code's: where its numbers start).
-fn header_rule_from(
-    out: &mut impl Write,
-    ui: &Ui,
-    base: Style,
-    rect: (usize, usize, usize),
-    region: Region,
-    pad: usize,
-) -> io::Result<()> {
-    header_rule_within(out, ui, base, rect, region, (pad, crate::chrome::PAD_R))
-}
-
-/// `header_rule` `pad` cells in from the left and `pad_r` short of the right (0: to the edge, a line it meets there).
-fn header_rule_within(
-    out: &mut impl Write,
-    ui: &Ui,
-    base: Style,
-    (x, y, w): (usize, usize, usize),
-    region: Region,
-    (pad, pad_r): (usize, usize),
-) -> io::Result<()> {
-    let line = w.saturating_sub(pad + pad_r);
-    queue!(out, MoveTo(x as u16, y as u16))?;
-    apply(out, base)?;
-    queue!(out, Spaces(pad.min(w)))?;
-    put_line(out, edge_style(ui, base, region), &"─".repeat(line))?;
-    apply(out, base)?;
-    queue!(out, Spaces(w.saturating_sub(pad + line)))
-}
-
-/// After `fit_segments`, the path bar's parts go whole: a definition's (`  ›  ` · `ƒ ` · its name, one `keep`;
+/// After `fit_segments`, the path bar's parts go whole: a definition's (` › ` · `ƒ ` · its name, one `keep`;
 /// `scope` = each such keep and how many segments it had) that lost a piece loses the rest — not `demo.rsƒ
-/// word_counts` — and a separator left with nothing on one side goes too, not `› src › main.rs` (`left[0]` is
-/// the padding).
+/// word_counts` — and a separator left with nothing on one side goes too, not `› src › main.rs`.
 fn parts_whole(left: &mut Vec<Seg>, scope: &[(u8, usize)]) {
     for &(keep, n) in scope {
         if left.iter().filter(|s| s.keep == keep).count() < n {
             left.retain(|s| s.keep != keep);
         }
     }
-    let is_sep = |s: &Seg| s.text == "  ›  ";
-    let mut k = 1;
+    let is_sep = |s: &Seg| s.text == MEMBERS_SEP;
+    let mut k = 0;
     while k < left.len() {
         let alone = is_sep(&left[k])
-            && (left[1..k].last().is_none_or(is_sep) || left[k + 1..].first().is_none_or(is_sep));
+            && (left[..k].last().is_none_or(is_sep) || left[k + 1..].first().is_none_or(is_sep));
         if alone {
             left.remove(k);
         } else {
@@ -8768,16 +8819,6 @@ fn draw_statusline(
     {
         left.push(Seg { text: "  unsent ".into(), style: accent, keep: 225 });
         left.push(Seg { text: fit_ellipsis(&text, 24), style: dim, keep: 225 });
-    }
-    // (no path bar: the file here — but where the slot fills the screen, its line the first row)
-    if !lay.header && lay.zoom_shows != Some(crate::pane::Shows::Slot) {
-        let modified = if doc.is_modified() { " ●" } else { "" };
-        left.push(Seg {
-            text: format!("  {}", doc.display_name(&editor.session.root)),
-            style: strong,
-            keep: 200,
-        });
-        left.push(Seg { text: modified.into(), style: accent, keep: 200 });
     }
     // (a session's branch is its name — the chip said it; a branch is a branch, faint ink, never a session's colour)
     if let Some(b) =
@@ -11427,7 +11468,7 @@ fn side_rel<'a>(
 /// List rows of the side panel: all but the header (its title and rule), a row saying a review is behind
 /// it, and the gap and two key rows at the bottom.
 fn sidebar_list_rows(lay: &Layout, behind: bool) -> usize {
-    lay.body_h.saturating_sub(crate::chrome::HEAD + usize::from(behind) + 3).max(1)
+    lay.body_h.saturating_sub(1 + usize::from(behind) + 3).max(1)
 }
 
 /// The side panel, left of the code, the whole height — a panel like the chat (`chrome.rs`): tabs `files
@@ -11453,7 +11494,7 @@ fn draw_sidebar(
     lay: &Layout,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    use crate::chrome::{GAP, HEAD, PAD, PAD_R};
+    use crate::chrome::{GAP, PAD, PAD_R};
     use crate::markdown::Span;
     use crate::sidebar::Mode as SMode;
     let card = panel_style(ui, editor);
@@ -11487,14 +11528,9 @@ fn draw_sidebar(
     }
     let names: Vec<&str> = views.iter().map(|v| v.0).collect();
     let current = views.iter().position(|v| v.1 == sb.mode).unwrap_or(0);
-    let mut head: Vec<Span> =
-        pane_names(ui, editor, card, &names, current).into_iter().map(|(t, st)| sp(&t, st)).collect();
-    // …only when it fits whole (it's what the tabs already say, in other words)
-    let used: usize = head.iter().map(|x| x.text.width()).sum();
-    let room = w.saturating_sub(used + 2);
-    if of.width() + 2 <= room {
-        head.push(sp(&pad_left(&of, room), faint));
-    }
+    // (on its top line: the views as a group's members, what the one in sight is of after them — folded first)
+    let head = pane_names(ui, editor, card, &names, current);
+    let of = [(of, faint)];
     let tab = match sb.mode {
         SMode::Files => " outline",
         SMode::Outline if has_list => " list",
@@ -11538,7 +11574,7 @@ fn draw_sidebar(
     };
     let list_rows = sidebar_list_rows(lay, !behind.is_empty());
     let shown = sb.shown_rows(list_rows, lines.len());
-    let first = HEAD + usize::from(!behind.is_empty());
+    let first = 1 + usize::from(!behind.is_empty());
     let empty = if lines.is_empty() {
         let text = |spans| crate::markdown::Line::Text { spans, indent: 0 };
         let mut note = vec![text(vec![sp(sb.empty_note(editor), faint)])];
@@ -11589,13 +11625,16 @@ fn draw_sidebar(
     // (a row's id, looked up only while something's marked or flashing — `Editor::ui_lit`)
     let lit = editor.ui_lit();
     let tab = crate::uistate::side_tab(sb.mode);
+    let gutter = side_gutter((ui, editor, lay), card, dragged);
     for y in 0..lay.body_h {
         let mut given = None;
         queue!(out, MoveTo(0, y as u16))?;
         apply(out, card)?;
-        if y == 1 {
-            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), Region::Side)?;
-            gutter_cell(out, (ui, editor, lay), card, dragged, y)?;
+        if y == 0 {
+            let line = edge_style(ui, card, Region::Side);
+            let head = TopLine { names: &head, details: &of, key, faint, ..TopLine::default() };
+            top_line(out, line, card, (0, 0, lay.rail_w - GAP), ("", "", "┬"), &[], true, &head)?;
+            put_gutter(out, gutter(y))?;
             continue;
         }
         let list = y.checked_sub(first).filter(|&i| i < list_rows);
@@ -11604,8 +11643,7 @@ fn draw_sidebar(
             queue!(out, Spaces(PAD))?;
         }
         let used = match (y, list) {
-            (0, _) => chat_spans(out, &head, card, w)?,
-            (2, _) if !behind.is_empty() => chat_spans(out, &behind, card, w)?,
+            (1, _) if !behind.is_empty() => chat_spans(out, &behind, card, w)?,
             (_, Some(i)) => match shown.get(i).map(|&r| (r, &lines[r])) {
                 Some((r, l)) => {
                     // (a file another session is in, or whose changes would conflict with yours: each its initial
@@ -11686,7 +11724,7 @@ fn draw_sidebar(
             apply(out, st)?;
             queue!(out, Print(m))?;
         }
-        gutter_cell(out, (ui, editor, lay), card, dragged, y)?;
+        put_gutter(out, gutter(y))?;
     }
     // The whole name on its row, running on over the code — ending in a half cell of the row's color
     if let Some((y, row, whole)) = overflow
@@ -11700,28 +11738,20 @@ fn draw_sidebar(
     Ok(())
 }
 
-/// The gutter right of a left column panel (the side panel, the review's rail) on row `y` (`chrome::GAP`): the line
-/// there (`meeting_line`) — with something beside it; filling the screen, the panel takes the cell whole.
-fn gutter_cell(
-    out: &mut impl Write,
-    (ui, editor, lay): (&Ui, &Editor, &Layout),
+/// The gutter right of a left column panel (the side panel, the review's rail) (`chrome::GAP`), row by row: the line
+/// there (`meeting_line`) — with something beside it; filling the screen, the panel takes the cell whole. What's beside
+/// it is worked out once a frame (every row asks).
+fn side_gutter<'a>(
+    (ui, editor, lay): (&'a Ui, &Editor, &Layout),
     card: Style,
     dragged: bool,
-    y: usize,
-) -> io::Result<()> {
-    match lay.rail_w < lay.width {
-        true => put_gutter(
-            out,
-            meeting_line(
-                ui,
-                &beside_rows(editor, lay, crate::pane::Side::Left),
-                Region::Side,
-                "├",
-                dragged,
-                y,
-            ),
-        ),
-        false => put_gutter(out, (" ", card)),
+) -> impl Fn(usize) -> (&'static str, Style) + 'a {
+    let parts = beside_rows(editor, lay, crate::pane::Side::Left);
+    let over = editor.picker.as_ref().is_some_and(|p| !p.compact);
+    let whole = lay.rail_w >= lay.width;
+    move |y| match whole {
+        false => meeting_line(ui, &parts, Region::Side, "├", (dragged, over), y),
+        true => (" ", card),
     }
 }
 
@@ -11757,10 +11787,19 @@ fn beside_rows(
         };
         match g.place {
             Place::Docked(s) if s == toward => parts.push((r.y..r.y + r.h, vec![r.y], Region::Dock(g.kind))),
-            Place::Docked(Side::Top) => {
-                parts.push((r.y..r.y + r.h, vec![r.y, r.y + r.h - 1], Region::Dock(g.kind)))
-            }
+            Place::Docked(Side::Top) => parts.push((r.y..r.y + r.h, vec![r.y], Region::Dock(g.kind))),
             _ => {}
+        }
+    }
+    // (a code pane's top line under the screen's first row against this side — under a group docked over the code, a
+    // pane under another)
+    let edge = match toward {
+        Side::Left => lay.rail_w,
+        _ => lay.edit_w,
+    };
+    for l in code_lines(editor, lay).iter().filter(|l| l.0 > 0) {
+        if (toward == Side::Left && l.1 == edge) || (toward != Side::Left && l.1 + l.2 == edge) {
+            parts.push((l.0..l.0 + 1, vec![l.0], Region::Code));
         }
     }
     let y = lay.slot_y();
@@ -11780,7 +11819,7 @@ fn meeting_line(
     parts: &[(std::ops::Range<usize>, Vec<usize>, Region)],
     mine: Region,
     join: &'static str,
-    dragged: bool,
+    (dragged, picker_over): (bool, bool),
     y: usize,
 ) -> (&'static str, Style) {
     let at = parts.iter().find(|p| p.0.contains(&y));
@@ -11792,23 +11831,41 @@ fn meeting_line(
         (false, Some(r)) => edge_style(ui, ui.base, r),
         (false, None) => edge_style(ui, ui.base, mine),
     };
-    (if rule { join } else { "│" }, style)
+    // (on the screen's first row both sides' top lines meet it: it starts there, never above a line — under a picker
+    // over the editing area, only its own: it turns down)
+    let covered = picker_over;
+    let glyph = match y {
+        0 if covered && mine == Region::Chat => "┌",
+        0 if covered => "┐",
+        0 => "┬",
+        _ if rule => join,
+        _ => "│",
+    };
+    (glyph, style)
 }
 
-/// The chat's gutter on row `y` (`gutter_cell`'s rule from the other side): the line where it meets what's left of
+/// The chat's gutter, row by row (`side_gutter`'s rule from the other side): the line where it meets what's left of
 /// it (`meeting_line`). The chat filling the screen takes the cell whole.
-fn chat_gutter(ui: &Ui, editor: &Editor, lay: &Layout, card: Style, y: usize) -> (&'static str, Style) {
-    if lay.edit_w == 0 {
-        return (" ", card);
-    }
+fn chat_gutter<'a>(
+    ui: &'a Ui,
+    editor: &Editor,
+    lay: &Layout,
+    card: Style,
+) -> impl Fn(usize) -> (&'static str, Style) + 'a {
+    let parts = beside_rows(editor, lay, crate::pane::Side::Right);
     let dragged = editor.dragging == Some(crate::sizes::Border::Chat);
-    meeting_line(ui, &beside_rows(editor, lay, crate::pane::Side::Right), Region::Chat, "┤", dragged, y)
+    let over = editor.picker.as_ref().is_some_and(|p| !p.compact);
+    let whole = lay.edit_w == 0;
+    move |y| match whole {
+        false => meeting_line(ui, &parts, Region::Chat, "┤", (dragged, over), y),
+        true => (" ", card),
+    }
 }
 
-/// Draws a gutter's cell (`gutter_cell`, `chat_gutter`) — its line unfaded: a line is lit or faint by `edge_style`
+/// Draws a gutter's cell (`side_gutter`, `chat_gutter`) — its line unfaded: a line is lit or faint by `edge_style`
 /// alone, whichever side of it fades.
 fn put_gutter(out: &mut impl Write, (glyph, style): (&str, Style)) -> io::Result<()> {
-    if matches!(glyph, "│" | "├" | "┤") {
+    if matches!(glyph, "│" | "├" | "┤" | "┬" | "┌" | "┐") {
         let fading = FADING.replace(None);
         let applied = apply(out, style);
         FADING.set(fading);
@@ -12057,13 +12114,12 @@ fn review_rail_list(lay: &Layout, editor: &Editor, r: &crate::codereview::CodeRe
 /// and didn't count cut the keys.
 fn rail_head(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Vec<Vec<(Tone, String)>> {
     let mut rows = Vec::new();
+    // (its top line: `─ review ── <base> ─` — the base cut from the left, where it says what it is)
     let label = r.base.label();
-    let head_room = w.saturating_sub(6);
     rows.push(vec![
         (Tone::Strong, "review".to_string()),
-        (Tone::Faint, pad_left(&fit_left(&label, head_room.saturating_sub(2)), head_room)),
+        (Tone::Faint, fit_left(&label, w.saturating_sub(11))),
     ]);
-    rows.push(Vec::new());
     // Claude's turn: what it was asked, under the head
     if let crate::codereview::Base::Turn { question, at } = &r.base {
         let q = format!("“{}”", question.lines().next().unwrap_or_default());
@@ -12676,10 +12732,15 @@ fn draw_review_rail(
         rows.push((row, card, None));
     }
     let mut links = editor.screen.review_rail.borrow_mut();
+    let gutter = side_gutter((ui, editor, lay), card, false);
     for (y, (row, bg, file)) in rows.iter().take(lay.body_h).enumerate() {
-        if y == 1 {
-            header_rule(out, ui, card, (0, 1, lay.rail_w - GAP), Region::Side)?;
-            gutter_cell(out, (ui, editor, lay), card, false, y)?;
+        if y == 0 {
+            let line = edge_style(ui, card, Region::Side);
+            let span = |i: usize| row.get(i).map(|s| vec![(s.text.clone(), s.style)]).unwrap_or_default();
+            let (names, details) = (span(0), span(1));
+            let head = TopLine { names: &names, details: &details, key, faint, ..TopLine::default() };
+            top_line(out, line, card, (0, 0, lay.rail_w - GAP), ("", "", "┬"), &[], true, &head)?;
+            put_gutter(out, gutter(y))?;
             continue;
         }
         queue!(out, MoveTo(0, y as u16))?;
@@ -12722,7 +12783,7 @@ fn draw_review_rail(
             apply(out, st)?;
             queue!(out, Print(m))?;
         }
-        gutter_cell(out, (ui, editor, lay), card, false, y)?;
+        put_gutter(out, gutter(y))?;
         if let Some(i) = file {
             links.push((y, *i));
         }
@@ -12815,8 +12876,14 @@ fn session_tabs(
             .as_ref()
             .map(|r| Span { text: format!(" {}", r.said()), style: if r.stopped() { warn } else { dim } })
     };
-    // (where each is in its turn — its file, `presence.rs` — the first to go when the strip runs out of room)
-    for files in [true, false] {
+    // (as short as they're told apart — `presence::prefixes`, the side panel's file rows' rule)
+    let short =
+        crate::presence::prefixes(&sessions.iter().map(|l| l.label().to_string()).collect::<Vec<_>>());
+    // Folds, least important first: where each is in its turn (its file, `presence.rs`), then the states to what needs
+    // you (`▲`, `◦`), then the names to their prefixes
+    for (files, states, prefix) in
+        [(true, true, false), (false, true, false), (false, false, false), (false, false, true)]
+    {
         let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
         let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
             x += text.width();
@@ -12824,12 +12891,19 @@ fn session_tabs(
             x
         };
         for (i, l) in sessions.iter().enumerate() {
-            let start = if i > 0 { put(&mut spans, " │ ".into(), faint) } else { 0 };
+            // (`·` between them, as between a top line's names — `pane_names`)
+            let start = if i > 0 { put(&mut spans, NAMES_SEP.into(), faint) } else { 0 };
             // (who it is: its name in its colour, the front's bold — its state after it)
             let own = colour(l.colour);
             let own = Style { bold: l.id == editor.session.id || own.bold, ..own };
-            let mut end = put(&mut spans, l.label().to_string(), own);
-            if let Some(m) = mark(l) {
+            let name = if prefix { short[i].clone() } else { l.label().to_string() };
+            let mut end = put(&mut spans, name, own);
+            let folded = |m: Span| match m.text.trim_start().chars().next() {
+                _ if states => Some(m),
+                Some(g @ ('▲' | '◦')) => Some(Span { text: format!(" {g}"), ..m }),
+                _ => None,
+            };
+            if let Some(m) = mark(l).and_then(folded) {
                 end = put(&mut spans, m.text, m.style);
             }
             // (whom its changes would conflict with — `≈ main`, each in its colour: `overlap.rs`)
@@ -12860,7 +12934,7 @@ fn session_tabs(
             }
             spots.push((start, end, Spot::Session(l.id)));
         }
-        let start = put(&mut spans, " │ ".into(), faint);
+        let start = put(&mut spans, NAMES_SEP.into(), faint);
         let end = put(&mut spans, "+".into(), dim);
         spots.push((start, end, Spot::New));
         if x <= w {
@@ -12920,9 +12994,6 @@ fn session_tabs(
     let spots = vec![(0, 1, Spot::Prev), (2, list_end, Spot::List), (list_end + 1, list_end + 2, Spot::Next)];
     (spans, spots)
 }
-
-/// The chat title's `› N granted`, as wide as its widest (` › 99+ granted`) whatever the count.
-pub(crate) const GRANTED_W: usize = 14;
 
 /// The conversation as the chat lays it out `chat_w` wide: each message's rows — laid out only when its key changed
 /// (`Msg.cache`) — the air before a question and a run of tool rows, what a live run waits on under its row
@@ -13313,9 +13384,6 @@ fn draw_chat(
         None => Vec::new(),
     };
     let plan_h = plan_rows.len() + usize::from(!plan_rows.is_empty());
-    // ── The sessions over it all, when there's more than one: their row and a row of air under it (a row of
-    // text, unlike the header's rule, needs one before the messages)
-    let tabs_h = if editor.sessions.is_empty() { 0 } else { 2 };
     // ── What the conversation costs, under it all (once something was reported)
     let warn_fg = t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
     let now_ms = crate::usage::now_ms();
@@ -13331,8 +13399,8 @@ fn draw_chat(
     );
     let usage_h = usize::from(usage_row.is_some());
     // ── Message rows (filled from the bottom)
-    // (tabs + title·divider + plan + divider·hint + usage)
-    let area = rows.saturating_sub(input_h + 4 + plan_h + tabs_h + usage_h);
+    // (its top line + plan + divider·hint + usage)
+    let area = rows.saturating_sub(input_h + 3 + plan_h + usage_h);
     let sp = |text: String, style: Style| Span { text, style };
     let plain = |spans: Vec<Span>| ChatRow { spans, ..ChatRow::default() };
     let own = |row: ChatRow| -> std::sync::Arc<[ChatRow]> { std::sync::Arc::from(vec![row]) };
@@ -13434,89 +13502,68 @@ fn draw_chat(
 
     // ── Draw row by row: [gutter][padding][text w][padding]
     // (the gutter's left half the bottom slot's on its rows; in the accent while it's being dragged — U1)
-    let edge = |y: usize| chat_gutter(ui, editor, lay, card, y);
+    let edge = chat_gutter(ui, editor, lay, card);
     let text_x = x0 + GAP + PAD;
     let mut y = top;
-    // Title
-    chat_row_start(out, x0, y, edge(y), card)?;
-    apply(out, if editor.session.is_at(At::Chat) { strong } else { dim })?;
-    queue!(out, Print("claude"))?;
+    // Its top line (P3 step 6b), lit with the chat's lines: with more than one session the sessions are its names —
+    // each in its colour, its state after it (the chat is the front one's spine: `session_tabs`) — else `claude`;
+    // what it's in and what's on after them, folded from the last; the model or the turn's time at its right end
+    let line = edge_style(ui, card, Region::Chat);
+    // (against the screen's edge — the chat filling it — the line takes the gutter's cell too)
+    let (lx, lw) = match lay.edit_w {
+        0 => (x0, lay.chat_w),
+        _ => (x0 + GAP, lay.chat_w.saturating_sub(GAP)),
+    };
     // Normal mode on its document (`v`: select), as a run's output says it — held still; once something came after
     // what it holds, said (`G` catches up)
     let came = view.is_some() && crate::chatdoc::came(editor);
     let select = crate::chatdoc::transcript(editor).is_some_and(|t| t.pane.keys.mode == Mode::Select);
-    let held = match view {
-        None => "",
-        Some(_) if select => " ● select",
-        Some(_) => " ● normal",
+    // (each a piece of its own after ` ── `, ` · ` between them — a slot's line says its state so)
+    let mut details: Vec<(String, Style)> = Vec::new();
+    let mut say = |text: &str, style: Style| {
+        if !details.is_empty() {
+            details.push((NAMES_SEP.into(), faint));
+        }
+        details.push((text.into(), style));
     };
-    let after = match view {
-        Some(_) if came && w >= 46 => " · new text after",
-        Some(_) if came => " · new",
-        _ => "",
-    };
-    apply(out, accent)?;
-    queue!(out, Print(held))?;
-    apply(out, dim)?;
-    queue!(out, Print(after))?;
-    let view_w = held.width() + after.width();
+    if view.is_some() {
+        say(if select { "● select" } else { "● normal" }, accent);
+        if came {
+            say("new text after", dim);
+        }
+    }
     // Follow badge: accent while following, faint once the user took over
     // (paused lasts until the next question — only worth saying while Claude works)
     let paused = c.follow.paused && c.busy();
-    let badge = match (c.follow.on, paused) {
-        (false, _) => "",
-        (true, false) => " › follow",
-        (true, true) => " › paused",
-    };
-    apply(out, if paused { faint } else { accent })?;
-    queue!(out, Print(badge))?;
-    // Review at the end: Claude's edits go in unasked — said while it's on. Room for it before the model's
-    // name (which gives way); shorter when the time of a turn in flight needs the room
-    let busy_w = if c.busy() { 4 + " thinking 00.0s".len() + 1 } else { 0 };
-    let room = w.saturating_sub(6 + view_w + badge.width() + busy_w);
-    let at_end = match c.edits.at_end.is_some() {
-        false => "",
-        true if room >= 16 => " › review at end",
-        true if room >= 9 => " › at end",
-        true => "",
-    };
-    apply(out, accent)?;
-    queue!(out, Print(at_end))?;
+    match (c.follow.on, paused) {
+        (false, _) => {}
+        (true, false) => say("follow", accent),
+        (true, true) => say("paused", faint),
+    }
     // Claude's commands without a sandbox (off, or none here and agreed): said while it's so, in warning
-    let room = room.saturating_sub(at_end.width());
-    let bare = match crate::tools::unsandboxed(editor) {
-        false => "",
-        true if room >= 13 => " › no sandbox",
-        true if room >= 7 => " › bare",
-        true => "",
-    };
     let warn = editor
         .theme
         .try_get("warning")
         .and_then(|s| s.fg)
         .map_or(accent, |fg| Style { fg: Some(fg), ..accent });
-    apply(out, warn)?;
-    queue!(out, Print(bare))?;
-    // What Claude may do without asking past the defaults (`:granted`), faint — as wide for 1 as for 99, so
-    // nothing after it moves when the count does; a click lists them
-    let room = room.saturating_sub(bare.width());
-    let granted = match crate::granted::count(&editor.session) {
-        _ if !bare.is_empty() || room < GRANTED_W => String::new(),
-        0 => String::new(),
-        n @ 1..=99 => format!(" › {n} granted"),
-        _ => " › 99+ granted".into(),
-    };
-    if !granted.is_empty() {
-        let x = text_x + 6 + view_w + badge.width() + at_end.width();
-        let spot = (y, x + 1, x + granted.width(), crate::session::Spot::Granted);
-        editor.screen.session_spots.borrow_mut().push(spot);
-        apply(out, faint)?;
-        queue!(out, Print(&granted), Spaces(GRANTED_W - granted.width()))?;
+    if crate::tools::unsandboxed(editor) {
+        say("no sandbox", warn);
     }
-    let chip_w = if granted.is_empty() { 0 } else { GRANTED_W };
-    let title_w = 6 + view_w + badge.width() + at_end.width() + bare.width() + chip_w;
-    // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready" — either only where it fits
-    let left = w.saturating_sub(title_w + 2);
+    // Review at the end: Claude's edits go in unasked — said while it's on
+    if c.edits.at_end.is_some() {
+        say("review at end", accent);
+    }
+    // What Claude may do without asking past the defaults (`:granted`), faint — the first to fold; a click lists them
+    let granted = match crate::granted::count(&editor.session) {
+        0 => None,
+        n @ 1..=99 => Some(format!("{n} granted")),
+        _ => Some("99+ granted".into()),
+    };
+    if let Some(g) = granted.as_ref() {
+        say(g, faint);
+    }
+    // Idle: the model it's talking to (`Opus 5.5 · high`), else "ready"
+    let left = lw / 2;
     let status: Vec<Span> = match c.state {
         // (its claude not up yet: the project's settings read first — frictions29 #67, a send then waits for it)
         State::Idle if let Some(t) = c.settings.waiting_since() => {
@@ -13548,37 +13595,53 @@ fn draw_chat(
             ),
         ],
     };
-    let sw: usize = status.iter().map(|s| s.text.width()).sum();
-    apply(out, card)?;
-    queue!(out, Spaces(w.saturating_sub(title_w + sw)))?;
-    let used = title_w + w.saturating_sub(title_w + sw) + chat_spans(out, &status, card, w)?;
-    chat_row_end(out, card, lay.chat_w, used)?;
-    y += 1;
-    // Its rule: lit with the chat's lines (`edge_style`)
-    chat_row_start(out, x0, y, edge(y), card)?;
-    put_line(out, edge_style(ui, card, Region::Chat), &"─".repeat(w))?;
-    chat_row_end(out, card, lay.chat_w, w)?;
-    y += 1;
-    // The sessions, when there's more than one — under the header, so every panel's top lines up
-    if tabs_h > 0 {
-        let warn =
-            t.try_get("warning").and_then(|s| s.fg).map_or(accent, |fg| Style { fg: Some(fg), ..card });
-        let reviewer = Style { fg: reviewer_style(editor, ui).fg, ..card };
-        let (spans, spots) =
-            session_tabs(editor, w, lay.rail_w, [dim, faint, accent, warn, reviewer], &|c| Style {
-                fg: ui.participant(c, true),
-                ..card
-            });
-        chat_row_start(out, x0, y, edge(y), card)?;
-        let used = chat_spans(out, &spans, card, w)?;
-        chat_row_end(out, card, lay.chat_w, used)?;
-        let mut taken = editor.screen.session_spots.borrow_mut();
-        taken.extend(spots.into_iter().map(|(a, b, s)| (y, text_x + a, text_x + b, s)));
-        y += 1;
-        chat_row_start(out, x0, y, edge(y), card)?;
-        chat_row_end(out, card, lay.chat_w, 0)?;
-        y += 1;
+    let right: Vec<(String, Style)> = status.into_iter().map(|s| (s.text, s.style)).collect();
+    let right_w: usize = right.iter().map(|s| s.0.width()).sum();
+    // The names: the sessions, as many of their words as fit before the right end (`session_tabs` folds them), or
+    // `claude`
+    let (names, spots): (Vec<(String, Style)>, Vec<_>) = match editor.sessions.is_empty() {
+        true => {
+            (vec![("claude".into(), if editor.session.is_at(At::Chat) { strong } else { dim })], Vec::new())
+        }
+        false => {
+            let reviewer = Style { fg: reviewer_style(editor, ui).fg, ..card };
+            let busy = c.busy() || c.settings.waiting_since().is_some();
+            let room = lw.saturating_sub(TOP_LINE_OWN + if right_w > 0 && busy { right_w + 3 } else { 0 });
+            let (spans, spots) =
+                session_tabs(editor, room, lay.rail_w, [dim, faint, accent, warn_fg, reviewer], &|c| Style {
+                    fg: ui.participant(c, true),
+                    ..card
+                });
+            (spans.into_iter().map(|s| (s.text, s.style)).collect(), spots)
+        }
+    };
+    queue!(out, MoveTo(x0 as u16, y as u16))?;
+    put_gutter(out, edge(y))?;
+    let key = Style { bold: true, ..dim };
+    // (a turn's time stands; the model's name gives way to what's on)
+    let keep_right = c.busy() || c.settings.waiting_since().is_some();
+    let head = TopLine {
+        names: &names,
+        details: &details,
+        key,
+        faint,
+        right: &right,
+        keep_right,
+        ..TopLine::default()
+    };
+    let cols = top_line(out, line, card, (lx, y, lw), ("", "", "┬"), &[], true, &head)?;
+    // (where its names and its granted chip were drawn: their clicks)
+    let mut taken = editor.screen.session_spots.borrow_mut();
+    if let Some(&(base, _)) = cols.first() {
+        taken.extend(spots.into_iter().map(|(a, b, s)| (y, base + a, base + b, s)));
     }
+    let said = &cols[names.len().min(cols.len())..];
+    if granted.is_some() && said.len() == details.len() {
+        let (a, b) = said[said.len() - 1];
+        taken.push((y, a, b, crate::session::Spot::Granted));
+    }
+    drop(taken);
+    y += 1;
     if !plan_rows.is_empty() {
         for row in &plan_rows {
             chat_row_start(out, x0, y, edge(y), card)?;
@@ -15454,7 +15517,7 @@ fn draw_frame(
             key: card,
             faint: card,
             plain: true,
-            beyond: None,
+            ..TopLine::default()
         };
         top_line(out, line, card, (x, yy, w), ends, splits, drawn, &head).map(|_| ())
     };
@@ -16786,16 +16849,15 @@ mod tests {
         assert_eq!(toast_place(card, rows, &[(0, 2, 20, 8)]), Some(1), "a card elsewhere doesn't matter");
     }
 
-    /// The path bar's parts go whole when room runs short: a definition (`  ›  ` · `ƒ ` · its name) never loses
+    /// The path bar's parts go whole when room runs short: a definition (` › ` · `ƒ ` · its name) never loses
     /// its separator alone (`demo.rsƒ word_counts`), and no separator is left with nothing on one side — at
     /// every width.
     #[test]
     fn the_path_bars_parts_go_whole() {
         let seg = |text: &str, keep: u8| Seg { text: text.into(), style: Style::default(), keep };
-        let sep = "  ›  ";
+        let sep = MEMBERS_SEP;
         for room in 6..60 {
             let mut left = vec![
-                seg(" ", 255),
                 seg("tarae", 20),
                 seg(sep, 20),
                 seg("src", 30),
@@ -16811,9 +16873,9 @@ mod tests {
             fit_segments(&mut left, &mut Vec::new(), room);
             parts_whole(&mut left, &[(100, 3), (105, 3)]);
             let bar: String = left.iter().map(|s| s.text.as_str()).collect();
-            for (i, s) in left.iter().enumerate().skip(1) {
+            for (i, s) in left.iter().enumerate() {
                 if matches!(s.text.as_str(), "τ " | "ƒ ") {
-                    assert!(left[i - 1].text == sep && i + 1 < left.len(), "{room}: {bar:?}");
+                    assert!(i > 0 && left[i - 1].text == sep && i + 1 < left.len(), "{room}: {bar:?}");
                 }
             }
             let words = bar.trim();
@@ -17514,7 +17576,7 @@ mod tests {
         ed.config.soft_wrap = "never".into();
         let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
         ed.docs[0].text = Rope::from_str(&text);
-        let (w, h) = (30, 20); // 17 text rows (under the path bar and its rule, over the status line), scrolloff 5
+        let (w, h) = (30, 19); // 17 text rows (under the code's top line, over the status line), scrolloff 5
         let keys = |ed: &mut Editor, ks: &str| {
             for k in ks.split(' ') {
                 ed.handle_key(k.parse().unwrap());
@@ -20133,8 +20195,8 @@ mod tests {
             render(&mut ed, &mut buf, w, 20).unwrap();
             let rows = screen(&buf, w as usize, 20);
             let cursor = rows.iter().any(|r| r.split_whitespace().any(|w| w == "line6"));
-            // (the text under the path bar and its rule: the top line's, from a row it has)
-            assert!(cursor && rows[2].contains("word"), "{how}: {rows:#?}");
+            // (the text under the code's top line: the top line's, from a row it has)
+            assert!(cursor && rows[1].contains("word"), "{how}: {rows:#?}");
         }
     }
 

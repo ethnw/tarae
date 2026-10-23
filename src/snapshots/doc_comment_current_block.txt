@@ -1,30 +1,30 @@
 # doc_comment_current_block · 100x30 · theme meok · cursor hidden
 ## text
-00  tarae  ›  src  ›  point.rs
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 ▎ Tiny geometry helpers.
-03   2
-04   3 ▎ A point on the plane.
-05     ▎
-06     ▎ • x grows to the right
-07     ▎ • y grows downward
-08     ▎
-09     ▎ Examples
-10     ▎
-11     ▎   let p = Point { x: 1, y: 2 };
-12  13 #[derive(Clone, Copy, Debug)]
-13  14 pub struct Point {
-14  15     pub x: i32,
-15  16     pub y: i32,
-16  17 }
-17  18
-18  19 impl Point {
-19  20     ▎ Distance to other, squared — cheap to compare.
-20  21     pub fn dist2(self, other: Point) -> i32 {
-21  22     │   let (dx, dy) = (self.x - other.x, self.y - other.y);
-22  23     │   dx * dx + dy * dy
-23  24     }
-24  25 }
+00 ─ tarae › src › point.rs ───────────────────────────────────────────────────────────────────────────
+01   1 ▎ Tiny geometry helpers.
+02   2
+03   3 ▎ A point on the plane.
+04     ▎
+05     ▎ • x grows to the right
+06     ▎ • y grows downward
+07     ▎
+08     ▎ Examples
+09     ▎
+10     ▎   let p = Point { x: 1, y: 2 };
+11  13 #[derive(Clone, Copy, Debug)]
+12  14 pub struct Point {
+13  15     pub x: i32,
+14  16     pub y: i32,
+15  17 }
+16  18
+17  19 impl Point {
+18  20     ▎ Distance to other, squared — cheap to compare.
+19  21     pub fn dist2(self, other: Point) -> i32 {
+20  22     │   let (dx, dy) = (self.x - other.x, self.y - other.y);
+21  23     │   dx * dx + dy * dy
+22  24     }
+23  25 }
+24
 25
 26
 27
@@ -62,31 +62,31 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   f f
-03   f
-04   A a                BBBBB
-05     a
+00 a ddddd f ddd f TTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   f f
+02   f
+03   A a                BBBBB
+04     a
+05     a a
 06     a a
-07     a a
-08     a
-09     a AAAAAAAA
+07     a
+08     a AAAAAAAA
+09     a
 10     a
-11     a
-12  ff   aaaaaa
+11  ff   aaaaaa
+12  ff
 13  ff
 14  ff
 15  ff
 16  ff
 17  ff
-18  ff
-19  ff     f
+18  ff     f
+19  ff
 20  ff
 21  ff
 22  ff
 23  ff
-24  ff
+24
 25
 26
 27

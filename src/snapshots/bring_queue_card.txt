@@ -1,8 +1,8 @@
-# bring_queue_card · 112x30 · theme meok · cursor 2:4
+# bring_queue_card · 112x30 · theme meok · cursor 1:4
 ## text
-00  tarae  ›  [scratch]
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
-02   1
+00 ─ tarae › [scratch] ────────────────────────────────────────────────────────────────────────────────────────────
+01   1
+02
 03
 04
 05
@@ -32,8 +32,8 @@
 29  ● normal   main   ▎ parser marked to bring 2nd — B brings the 2 in turn                        utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,9 +62,9 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A
+00 a ddddd f TTTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   A
+02
 03
 04
 05

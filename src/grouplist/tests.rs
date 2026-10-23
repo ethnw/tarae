@@ -562,11 +562,11 @@ fn column(row: &[char], name: &str, from: usize) -> Option<usize> {
     (from..row.len().saturating_sub(n.len())).find(|&x| row[x..x + n.len()] == n[..])
 }
 
-/// The slot's line (the row naming the group's members after ` › `) and, laid side by side, the column of the line
-/// between its members.
+/// The slot's line (the row naming the group's members after ` › `, under the code's own on the first row) and, laid
+/// side by side, the column of the line between its members.
 fn slot_line(ed: &Editor, p: &vt100::Parser, kind: GroupKind) -> (u16, Option<usize>) {
     let h = p.screen().size().0;
-    let y = (0..h)
+    let y = (1..h)
         .find(|&y| row(p, y)[0] == '─' && column(&row(p, y), " › ", 0).is_some())
         .expect("the slot's line");
     let g = ed.session.group(kind).unwrap();

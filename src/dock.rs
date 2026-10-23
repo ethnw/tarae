@@ -343,7 +343,8 @@ impl Editor {
         Some((side, r))
     }
 
-    /// The docked group whose edge is at screen cell (`x`, `y`), as last drawn (`term::dock_edge`).
+    /// The docked group whose edge is at screen cell (`x`, `y`), as last drawn (`term::dock_edge`) — docked over the
+    /// code, the code's top line under it (its bottom: `Layout::docked` gives its last row to its panel).
     pub fn dock_edge_at(&self, x: usize, y: usize) -> Option<GroupKind> {
         let docked = self.screen.docked.borrow().iter().map(|d| d.0).collect::<Vec<_>>();
         docked.into_iter().find(|&kind| {
@@ -352,7 +353,7 @@ impl Editor {
             match side {
                 Side::Right => x == r.x && rows,
                 Side::Left => x + 1 == r.x + r.w && rows,
-                Side::Top => y + 1 == r.y + r.h && (r.x..r.x + r.w).contains(&x),
+                Side::Top => y == r.y + r.h && (r.x..r.x + r.w).contains(&x),
             }
         })
     }

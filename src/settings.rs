@@ -172,13 +172,6 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.cursorline = b(v),
     },
     Setting {
-        path: "editor.header",
-        kind: Kind::Bool,
-        doc: "Top bar: path › definition under the cursor, and open buffers",
-        get: |c| Value::from(c.header),
-        set: |c, v| c.header = b(v),
-    },
-    Setting {
         path: "editor.inlay-hints",
         kind: Kind::Bool,
         doc: "Show language server inlay hints (types, parameter names) as dim virtual text",

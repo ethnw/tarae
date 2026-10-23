@@ -8819,7 +8819,7 @@ mod tests {
         crate::term::render(&mut ed, &mut bytes, 150, 40).unwrap();
         let mut parser = vt100::Parser::new(40, 150, 0);
         parser.process(&bytes);
-        assert!(parser.screen().contents().contains("› no sandbox"), "{}", parser.screen().contents());
+        assert!(parser.screen().contents().contains("· no sandbox"), "{}", parser.screen().contents());
         // A command that asks anyway: its own card says there's no sandbox, and `y` there is enough
         // (`;` and what isn't a check make it more than a check)
         run_turn(&mut ed, &dir, &format!("{command}; basename x"));
@@ -12415,13 +12415,14 @@ mod tests {
             parser.screen().rows(0, w).collect()
         };
         let r = rows(&mut ed, 200);
-        // (the checkout tarae started in by its branch)
-        let tabs = r.iter().position(|r| r.contains("main │ fix-login-everywhere │ parser ▲ waits │ +"));
+        // (the checkout tarae started in by its branch) — the chat's top line names them, where `claude` stood
+        let tabs = r.iter().position(|r| r.contains("─ main · fix-login-everywhere · parser ▲ waits · + ─"));
         let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
-        assert!(r[tabs - 2].contains("claude") && r[tabs - 1].contains("────"), "under its header: {r:#?}");
-        // Narrow: the dropdown — how many wait is the status line's, every session's
+        assert!(tabs == 0 && !r[0].contains("claude"), "the chat's top line: {r:#?}");
+        // Narrow: the states fold to what needs you, then the names to their prefixes — how many wait is the status
+        // line's, every session's
         let r = rows(&mut ed, 100);
-        assert!(r.iter().any(|r| r.contains("◂ main ▾ 1/3 ▸")), "{r:#?}");
+        assert!(r[0].contains("─ m · f · p ▲ · + ─"), "{}", r[0]);
         assert!(r[23].contains("● normal   ▲1 waiting"), "{}", r[23]);
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
@@ -12436,13 +12437,12 @@ mod tests {
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
         assert!(ed.picker.as_ref().is_some_and(|p| p.keys), "the list");
         ed.picker = None;
-        // The dropdown's arrows step
+        // A name folded to its prefix is clicked as the name is
         ed.session_switch(0);
         let r = rows(&mut ed, 100);
-        let y = r.iter().position(|r| r.contains("◂ main")).unwrap();
-        let x = r[y].find('▸').map(|b| r[y][..b].chars().count()).unwrap();
-        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
-        assert_eq!(ed.session.id, one, "▸: the next one");
+        let x = r[0].find("· f ·").map(|b| r[0][..b].chars().count() + 2).unwrap();
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: 0, alt: false });
+        assert_eq!(ed.session.id, one, "f: fix-login-everywhere");
         ed.sessions.clear();
         for w in [&wt, &other] {
             git_in(&repo, &["worktree", "remove", "--force", w.to_str().unwrap()]);

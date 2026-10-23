@@ -1,25 +1,25 @@
-# sandbox_blocked_card · 100x30 · theme meok · cursor 2:4
+# sandbox_blocked_card · 100x30 · theme meok · cursor 1:4
 ## text
-00  tarae  ›  src  ›  demo.rs
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 use std::collections::HashMap;
-03   2
-04   3 ▎ Counts how often each word appears.
-05     ▎
-06     ▎ Words are split on whitespace; case is kept.
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
-08   7     let mut counts = HashMap::new();
-09   8     for word in text.split_whitespace() {
-10   9     │   *counts.entry(word).or_insert(0) += 1;
-11  10     }
-12  11     counts
-13  12 }
-14  13
-15  14 fn main() {                  ╭─ Open the sandbox a little? ───────────────────────────────────╮
-16  15     let text = "the quick bro│ Let Claude's commands write in                                 │
-17  16     let counts = word_counts(│ /private/tmp/tarae-shot-blocked/npm-cache and everything in it │
-18  17     println!("{} distinct wor│                                                                │
-19  18 }                            │ npm was writing …/_cacache/index-v5 in it, in `npm test` —     │
+00 ─ tarae › src › demo.rs ────────────────────────────────────────────────────────────────────────────
+01   1 use std::collections::HashMap;
+02   2
+03   3 ▎ Counts how often each word appears.
+04     ▎
+05     ▎ Words are split on whitespace; case is kept.
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {
+07   7     let mut counts = HashMap::new();
+08   8     for word in text.split_whitespace() {
+09   9     │   *counts.entry(word).or_insert(0) += 1;
+10  10     }
+11  11     counts
+12  12 }
+13  13
+14  14 fn main() {
+15  15     let text = "the quick bro╭─ Open the sandbox a little? ───────────────────────────────────╮
+16  16     let counts = word_counts(│ Let Claude's commands write in                                 │
+17  17     println!("{} distinct wor│ /private/tmp/tarae-shot-blocked/npm-cache and everything in it │
+18  18 }                            │                                                                │
+19                                  │ npm was writing …/_cacache/index-v5 in it, in `npm test` —     │
 20                                  │ which runs again now with it open, whichever you choose.       │
 21                                  │ Claude hears how it ended with your next message. s lasts      │
 22                                  │ until this session ends, A until :granted takes it back.       │
@@ -32,8 +32,8 @@
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,26 +62,26 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A
-03   f
-04   f f
+00 a ddddd f ddd f TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   A
+02   f
+03   f f
+04     f
 05     f
-06     f
+06   f
 07   f
 08   f
 09   f
-10   f
+10  ff
 11  ff
 12  ff
 13  ff
 14  ff
-15  ff                              ff TTTT TTT TTTTTTT T TTTTTTT ffffffffffffffffffffffffffffffffffff
-16  ff                gggg ggggg gggf                                                                f
-17  ff                              f                                                                f
-18  ff              ggg gggggggg gggf                                                                f
-19  ff                              f ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd ddddd d     f
+15  ff                gggg ggggg gggff TTTT TTT TTTTTTT T TTTTTTT ffffffffffffffffffffffffffffffffffff
+16  ff                              f                                                                f
+17  ff              ggg gggggggg gggf                                                                f
+18  ff                              f                                                                f
+19                                  f ddd ddd ddddddd ddddddddddddddddddd dd ddd dd dddd ddddd d     f
 20                                  f ddddd dddd ddddd ddd dddd dd ddddd ddddddddd ddd ddddddd       f
 21                                  f dddddd ddddd ddd dd ddddd dddd dddd dddd dddddddd d ddddd      f
 22                                  f ddddd dddd ddddddd ddddd d ddddd dddddddd ddddd dd ddddd       f

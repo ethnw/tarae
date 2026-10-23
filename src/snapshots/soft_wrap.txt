@@ -1,6 +1,6 @@
 # soft_wrap · 60x14 · theme meok · cursor 3:4
 ## text
-00  tarae  ›  notes.md
+00 ─ tarae › notes.md ─────────────────────────────────────────
 01   1 # Notes
 02   2
 03   3 Long lines in prose wrap at word boundaries instead of
@@ -30,7 +30,7 @@
 12
 13
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTTTTTT
+00 a ddddd f TTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 01   f A AAAAA
 02   f
 03   A

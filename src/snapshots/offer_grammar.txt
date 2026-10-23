@@ -1,12 +1,12 @@
-# offer_grammar · 100x30 · theme meok · cursor 2:4
+# offer_grammar · 100x30 · theme meok · cursor 1:4
 ## text
-00  tarae  ›  app.py
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 def greet(name):
-03   2     return f"hello, {name}"
-04   3
-05   4
-06   5 print(greet("tarae"))
+00 ─ tarae › app.py ───────────────────────────────────────────────────────────────────────────────────
+01   1 def greet(name):
+02   2     return f"hello, {name}"
+03   3
+04   4
+05   5 print(greet("tarae"))
+06
 07
 08
 09
@@ -32,8 +32,8 @@
 29  ● normal                                                                           utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,13 +62,13 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A
+00 a ddddd f TTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   A
+02   f
 03   f
 04   f
 05   f
-06   f
+06
 07
 08
 09

@@ -1,26 +1,26 @@
-# review_doc_comments · 100x24 · theme meok · cursor 16:34
+# review_doc_comments · 100x24 · theme meok · cursor 15:34
 ## text
-00   review         uncommitted │ tarae  ›  src  ›  demo.rs  ›  ƒ main
-01   ────────────────────────── │ ────────────────────────────────────────────────────────────────────
-02   1 file  +1                 │  1 ▎ Counts the words in text.
-03   0 of 1 viewed · 1 unviewed │    ▎
-04                              │    ▎ Splits on whitespace, so a  b is two words.
-05     src/                     │  4 pub fn count(text: &str) -> usize {
-06 ▎ │ ◦ demo.rs           • +1 │  5     text.split_whitespace().count()
-07                              │  6 }
-08                              │  7
-09                              │   −/// The longest word.
-10                              │  8▎/// The longest word, if there is one.
-11                              │  9▎/// Ties go to the first of them.
-12                              │ 10 pub fn longest(text: &str) -> Option<&str> {
-13                              │ 11     text.split_whitespace().max_by_key(|w| w.len())
-14                              │ 12 }
-15                              │ 13
-16                              │ 14 fn main() {
-17                              │ 15     let text = "to be or not to be";
-18   ]g hunk  ]F file           │ 16     println!("{} words, the longest {:?}", count(text),
-19   space e files  ]u unviewed │        longest(text));
-20   space n comment            │ 17 }
+00 ─ review ── uncommitted ─────┬─ tarae › src › demo.rs › ƒ main ─────────────────────────────────────
+01   1 file  +1                 │  1 ▎ Counts the words in text.
+02   0 of 1 viewed · 1 unviewed │    ▎
+03                              │    ▎ Splits on whitespace, so a  b is two words.
+04     src/                     │  4 pub fn count(text: &str) -> usize {
+05 ▎ │ ◦ demo.rs           • +1 │  5     text.split_whitespace().count()
+06                              │  6 }
+07                              │  7
+08                              │   −/// The longest word.
+09                              │  8▎/// The longest word, if there is one.
+10                              │  9▎/// Ties go to the first of them.
+11                              │ 10 pub fn longest(text: &str) -> Option<&str> {
+12                              │ 11     text.split_whitespace().max_by_key(|w| w.len())
+13                              │ 12 }
+14                              │ 13
+15                              │ 14 fn main() {
+16                              │ 15     let text = "to be or not to be";
+17                              │ 16     println!("{} words, the longest {:?}", count(text),
+18   ]g hunk  ]F file           │        longest(text));
+19   space e files  ]u unviewed │ 17 }
+20   space n comment            │
 21   space v m viewed           │
 22   space v q end              │
 23  ● normal   +2  −1                                                          rust   utf-8 LF   14:1
@@ -30,18 +30,18 @@
 02
 03
 04
-05
-06 PPPPPPPPPPPPPPPPPPPPPPPPPPPP
+05 PPPPPPPPPPPPPPPPPPPPPPPPPPPP
+06
 07
-08
-09                               1111111111111111111111111111111111111111111111111111111111111111111111
+08                               1111111111111111111111111111111111111111111111111111111111111111111111
+09                                   222222222222222222222222222222222222222222222222222222222222222222
 10                                   222222222222222222222222222222222222222222222222222222222222222222
-11                                   222222222222222222222222222222222222222222222222222222222222222222
+11
 12
 13
 14
-15
-16                                   Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+15                                   Accccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+16
 17
 18
 19
@@ -50,27 +50,27 @@
 22
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTTT         fffffffffff a ddddd  f  ddd  f  TTTTTTT  f    dddd
-01   ffffffffffffffffffffffffff a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  gg                 a  f f
-03   f ff f ffffff d d dddddddd a    f
-04                              a    f           BBBBBBBBBB
-05     dddf                     a  f
-06 a f f ttttttt           w gg a  f
+00 f TTTTTT ff fffffffffff fffffaa ddddd f ddd f TTTTTTT f   dddd aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   d dddd  gg                 a  f f
+02   f ff f ffffff d d dddddddd a    f
+03                              a    f           BBBBBBBBBB
+04     dddf                     a  f
+05 a f f ttttttt           w gg a  f
+06                              a  f
 07                              a  f
-08                              a  f
-09                              a   E
+08                              a   E
+09                              a  fw
 10                              a  fw
-11                              a  fw
+11                              a ff
 12                              a ff
 13                              a ff
 14                              a ff
-15                              a ff
-16                              a AA
-17                              a ff                ggg gg gg ggg gg ggg
-18   BB ffff  BB ffff           a ff              ggg gggggg ggg ggggggg ggggg
-19   BBBBB B fffff  BB ffffffff a
-20   BBBBB B fffffff            a ff
+15                              a AA
+16                              a ff                ggg gg gg ggg gg ggg
+17                              a ff              ggg gggggg ggg ggggggg ggggg
+18   BB ffff  BB ffff           a
+19   BBBBB B fffff  BB ffffffff a ff
+20   BBBBB B fffffff            a
 21   BBBBB B B ffffff           a
 22   BBBBB B B fff              a
 23  a TTTTTT   gg  ee                                                          dddd   ddddd dd   TTTT

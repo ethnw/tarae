@@ -11,13 +11,13 @@
 //!   against nothing.
 //! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge.
 //!   The code has none of its own: its sign column is the first cell after the gutter (so a server attaching
-//!   doesn't move the text), its numbers right after — they inset its text already — and its path bar and
-//!   rule start where the numbers do (`SIGNS`).
-//! - **Header.** Every panel, and the code under the path bar, opens with a title row and a thin rule
-//!   (`HEAD` rows); their tops line up on the screen's first row. (A screen under `RULE_MIN_ROWS` rows:
-//!   the code's title goes without its rule.) The bottom slot's header is the line where it meets the code
-//!   above it (panes P3 §1, `SLOT_HEAD`) — one row, as a frame's top line names it.
-//! - **Focus, quietly.** What has the keys draws its header rule in the accent; everything else keeps
+//!   doesn't move the text), its numbers right after — they inset its text already; its top line's path starts
+//!   `PAD` in, as every line's names do.
+//! - **Header.** Every pane's top is one line with its name on it (panes P3 step 6b, `term::top_line`): the code's
+//!   path, the chat's sessions, the side panel's views, the rail's review, a slot's tabs — at the screen's top edge
+//!   the screen's first row, the dividers starting at it (`┬`), a pane's bottom line the next one's top. The bottom
+//!   slot's is the line where it meets the code above it (`SLOT_HEAD`).
+//! - **Focus, quietly.** What has the keys draws its top line in the accent; everything else keeps
 //!   `FADE` of its text's contrast; the status line's label names where the keys go (`Keys::label`).
 //! - **The bottom slot's tabs.** The slot's title row lists every panel that's there (`Editor::slot_tabs`),
 //!   with a badge for how it's doing; only one shows. A run that starts while the slot has the keys stays a
@@ -37,15 +37,9 @@ pub const PAD_R: usize = 1;
 pub const SIGNS: usize = 1;
 /// The gutter between two regions side by side: a cell, half of it ground.
 pub const GAP: usize = 1;
-/// A header: the title row and its rule.
-pub const HEAD: usize = 2;
-
 /// The bottom slot's header rows: one — the line where the slot meets what's above it carries its names, details
 /// and keys (panes P3 §1).
 pub const SLOT_HEAD: usize = 1;
-/// Under this many screen rows the code's path bar goes without its rule (a small pane keeps the row for
-/// code; the panels beside keep theirs).
-pub const RULE_MIN_ROWS: u16 = 16;
 /// The picker's margins over the editor area: columns, rows (a cell is about twice as tall as wide — the
 /// two look the same).
 pub const PICKER_MX: usize = 2;

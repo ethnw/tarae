@@ -1,47 +1,47 @@
-# review_risk · 112x30 · theme meok · cursor 5:34
+# review_risk · 112x30 · theme meok · cursor 4:34
 ## text
-00   review         uncommitted │ tarae  ›  src  ›  demo.rs
-01   ────────────────────────── │ ────────────────────────────────────────────────────────────────────────────────
-02   1 file  +30                │  1 let line_1 = 1;                                                              ▎
-03   0 of 1 viewed · 1 unviewed │  2 let line_2 = 2;                                                              ▎
-04   ▲ 2 high to look at        │  3 let line_3 = 3;                                                              ▎
-05   space v C  a board         │  4 let line_4 = 4;                                                              ▎
-06   reviewer  1 finding ▲1     │  5 let line_5 = 5;                                                              ▎
-07   “One risk: the unsafe cal… │  6▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▎
-08                              │  7▎let added_2 = 2;                                                             ▎
-09     src/                     │  8▎let added_3 = 3;                                                             ▎
-10 ▎ │ ◦ demo.rs         ▲2 +30 │  9▎let added_4 = 4;                                                             ▎
-11                              │ 10▎let added_5 = 5;                                                             ▎
-12                              │ 11▎let added_6 = 6;                                                             ▎
-13                              │ 12▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comme… ▎
-14                              │ 13▎let added_8 = 8;                                                             ▎
-15                              │ 14▎let added_9 = 9;                                                             ▎
-16                              │ 15▎let added_10 = 10;                                                           ▎
-17                              │ 16▎let added_11 = 11;                                                           ▎
-18                              │ 17▎let added_12 = 12;                                                           ▎
-19                              │ 18▎let added_13 = 13;                                                           ▎
-20                              │ 19▎let added_14 = 14;                                                           ▎
-21                              │ 20▎let added_15 = 15;                                                           ▎
-22                              │ 21▎let added_16 = 16;                                                           ▎
-23                              │ 22▎let added_17 = 17;                                                           ▎
-24   ]g hunk  ]F file           │ 23▎let added_18 = 18;                                                           ▎
-25   space e files  ]u unviewed │ 24▎let added_19 = 19;                                                           ▎
-26   space n comment            │ 25▎let added_20 = 20;                                                           ▎
-27   space v m viewed           │ 26▎let added_21 = 21;                                                           ▎
-28   space v q end              │ 27▎let added_22 = 22;                                                           ▎
+00 ─ review ── uncommitted ─────┬─ tarae › src › demo.rs ──────────────────────────────────────────────────────────
+01   1 file  +30                │  1 let line_1 = 1;                                                              ▎
+02   0 of 1 viewed · 1 unviewed │  2 let line_2 = 2;                                                              ▎
+03   ▲ 2 high to look at        │  3 let line_3 = 3;                                                              ▎
+04   space v C  a board         │  4 let line_4 = 4;                                                              ▎
+05   reviewer  1 finding ▲1     │  5 let line_5 = 5;                                                              ▎
+06   “One risk: the unsafe cal… │  6▎let added_1 = 1;   ▲ high · piece 1/2 · unsafe (rust pack) · space v h       ▎
+07                              │  7▎let added_2 = 2;                                                             ▎
+08     src/                     │  8▎let added_3 = 3;                                                             ▎
+09 ▎ │ ◦ demo.rs         ▲2 +30 │  9▎let added_4 = 4;                                                             ▎
+10                              │ 10▎let added_5 = 5;                                                             ▎
+11                              │ 11▎let added_6 = 6;                                                             ▎
+12                              │ 12▎let pid = unsafe { getpid() };   ¶ reviewer · unsafe without a SAFETY comme… ▎
+13                              │ 13▎let added_8 = 8;                                                             ▎
+14                              │ 14▎let added_9 = 9;                                                             ▎
+15                              │ 15▎let added_10 = 10;                                                           ▎
+16                              │ 16▎let added_11 = 11;                                                           ▎
+17                              │ 17▎let added_12 = 12;                                                           ▎
+18                              │ 18▎let added_13 = 13;                                                           ▎
+19                              │ 19▎let added_14 = 14;                                                           ▎
+20                              │ 20▎let added_15 = 15;                                                           ▎
+21                              │ 21▎let added_16 = 16;                                                           ▎
+22                              │ 22▎let added_17 = 17;                                                           ▎
+23                              │ 23▎let added_18 = 18;                                                           ▎
+24   ]g hunk  ]F file           │ 24▎let added_19 = 19;                                                           ▎
+25   space e files  ]u unviewed │ 25▎let added_20 = 20;                                                           ▎
+26   space n comment            │ 26▎let added_21 = 21;                                                           ▎
+27   space v m viewed           │ 27▎let added_22 = 22;                                                           ▎
+28   space v q end              │ 28▎let added_23 = 23;                                                           ▎
 29  ● normal   +30                                                                          rust   utf-8 LF   4:1
 ## bg · surface per cell, blank = ui.background
 00
 01
 02
 03
-04
-05                                   Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-06
+04                                   Acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+05
+06                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 07                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 08                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
-09                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
-10 PPPPPPPPPPPPPPPPPPPPPPPPPPPP      11111111111111111111111111111111111111111111111111111111111111111111111111111
+09 PPPPPPPPPPPPPPPPPPPPPPPPPPPP      11111111111111111111111111111111111111111111111111111111111111111111111111111
+10                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 11                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 12                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 13                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
@@ -62,17 +62,17 @@
 28                                   11111111111111111111111111111111111111111111111111111111111111111111111111111
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00   TTTTTT         fffffffffff a ddddd  f  ddd  f  TTTTTTT
-01   ffffffffffffffffffffffffff a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   d dddd  ggg                a  f                                                                              f
-03   f ff f ffffff d d dddddddd a  f                                                                              f
-04   e e eeee ee eeee ee        a  f                                                                              f
-05   DDDDD D D  f fffff         a  A                                                                              g
-06   BBBBBBBB  d ddddddd ee     a  f                                                                              g
-07   dddd ddddd ddd dddddd dddd a  fg                   e                                                         g
-08                              a  fg                                                                             g
-09     dddf                     a  fg                                                                             g
-10 a f f ttttttt         ee ggg a  fg                                                                             g
+00 f TTTTTT ff fffffffffff fffffaa ddddd f ddd f TTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01   d dddd  ggg                a  f                                                                              f
+02   f ff f ffffff d d dddddddd a  f                                                                              f
+03   e e eeee ee eeee ee        a  f                                                                              f
+04   DDDDD D D  f fffff         a  A                                                                              g
+05   BBBBBBBB  d ddddddd ee     a  f                                                                              g
+06   dddd ddddd ddd dddddd dddd a  fg                   e                                                         g
+07                              a  fg                                                                             g
+08     dddf                     a  fg                                                                             g
+09 a f f ttttttt         ee ggg a  fg                                                                             g
+10                              a ffg                                                                             g
 11                              a ffg                                                                             g
 12                              a ffg                                                                             g
 13                              a ffg                                                                             g

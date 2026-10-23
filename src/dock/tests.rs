@@ -396,10 +396,34 @@ fn a_group_docked_over_the_code_is_sized_by_its_rows() {
     feed(&mut ed, "<C-w>");
     ed.handle_key(Key::plain(Code::Char('<')));
     assert!(ed.toasts.iter().any(|t| t.text.contains("C-w - + size it")), "said");
-    // (dragged: its bottom edge down to the status line — the code keeps its least)
+    // (its edge is the code's top line under its last row — that row is its panel's, a click there a click on it)
     let r = ed.dock_rect(GroupKind::Tests).unwrap().1;
-    let edge = r.y + r.h - 1;
+    let edge = r.y + r.h;
     assert_eq!(ed.border_at(10, edge), Some(crate::sizes::Border::Leaf(GroupKind::Tests)), "its edge");
+    assert_eq!(ed.border_at(10, edge - 1), None, "its last row isn't an edge");
+    feed(&mut ed, "<esc>");
+    assert_eq!(ed.session.at, At::Code);
+    let click = |ed: &mut Editor, x: usize, y: usize, kind| {
+        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false });
+        frame(ed, W);
+    };
+    let list = rect(&ed, tests(&ed).list);
+    click(&mut ed, list.x + 1, edge - 1, crate::event::MouseKind::Down);
+    let list_id = tests(&ed).list;
+    assert_eq!(
+        (ed.dragging, ed.session.at),
+        (None, At::List(list_id)),
+        "a click on its last row: its list's"
+    );
+    click(&mut ed, list.x + 1, edge - 1, crate::event::MouseKind::Up);
+    // (dragged from the code's line: let go three rows lower, the line there)
+    click(&mut ed, 10, edge, crate::event::MouseKind::Down);
+    assert_eq!(ed.dragging, Some(crate::sizes::Border::Leaf(GroupKind::Tests)), "the code's line drags it");
+    click(&mut ed, 10, edge + 3, crate::event::MouseKind::Drag);
+    click(&mut ed, 10, edge + 3, crate::event::MouseKind::Up);
+    let r = ed.dock_rect(GroupKind::Tests).unwrap().1;
+    assert_eq!(r.y + r.h, edge + 3, "its bottom line where it was let go");
+    // (dragged: its bottom edge down to the status line — the code keeps its least)
     ed.border_drag(crate::sizes::Border::Leaf(GroupKind::Tests), 10, H as usize - 2);
     frame(&mut ed, W);
     let n = ed.sizes.docked[0].unwrap() as usize;
@@ -480,8 +504,11 @@ fn a_group_lays_its_members_by_its_panes_shape() {
     let text = shown(&mut ed, W);
     let edge = list.x - 1;
     assert!(row_from(&text, detail.y - 1, edge).starts_with("├─ output ─"), "{text}");
-    assert!(row_from(&text, 0, edge).starts_with("┌─ tests"), "the edge starts at its top line: {text}");
-    assert!(row_from(&text, 1, edge - 2).starts_with("──┤"), "the code's rule meets it: {text}");
+    assert!(
+        row_from(&text, 0, edge - 2).starts_with("──┬─ tests"),
+        "the edge starts where the code's top line meets its own: {text}"
+    );
+    assert!(row_from(&text, 1, edge).starts_with('│'), "nothing of the code's beside it under: {text}");
     feed(&mut ed, "j");
     assert_eq!(ed.session.test_run.as_ref().unwrap().selected, 1, "the list's keys");
     // (thirty: the list a third of the pane, the last one selected in sight there)
@@ -514,12 +541,32 @@ fn a_group_lays_its_members_by_its_panes_shape() {
     let text = shown(&mut ed, W);
     let edge = list.x + list.w;
     let at = |y: usize| text.lines().nth(y).unwrap_or_default().chars().nth(edge);
-    assert_eq!((at(0), at(1), at(detail.y - 1)), (Some('┐'), Some('├'), Some('┤')), "{text}");
+    assert_eq!((at(0), at(1), at(detail.y - 1)), (Some('┬'), Some('│'), Some('┤')), "{text}");
     feed(&mut ed, "<C-w>K");
     assert_eq!(shape(&ed), Some(Shape::Beside), "docked over the code at 160");
     frame(&mut ed, 80);
     frame(&mut ed, 80);
     assert_eq!(shape(&ed), Some(Shape::Beside), "…and at 80");
+}
+
+/// P3 step 6b: a pane's bottom line is the next one's top — a group docked over the code has no edge of its own under
+/// it: its last row is its panel's, the code's top line right under it (never two lines); docked right, its edge starts
+/// at the code's line and its own, one `┬`.
+#[test]
+fn a_group_docked_over_the_code_meets_its_line() {
+    let (_dir, mut ed) = tests_and_a_task();
+    feed(&mut ed, "<C-w>K");
+    let r = ed.dock_rect(GroupKind::Tests).unwrap().1;
+    let text = shown(&mut ed, W);
+    let code_line = r.y + r.h;
+    assert!(row_from(&text, code_line, r.x).starts_with("─ tarae › "), "the code's line under it: {text}");
+    let only_line = |y: usize| row_from(&text, y, r.x).trim().chars().all(|c| c == '─');
+    assert!(!only_line(code_line - 1), "no edge of the group's over it: {text}");
+    assert_eq!(ed.screen.text_top, code_line + 1, "the code right under its line");
+    feed(&mut ed, "<C-w>L");
+    let r = ed.dock_rect(GroupKind::Tests).unwrap().1;
+    let text = shown(&mut ed, W);
+    assert!(row_from(&text, 0, r.x - 2).starts_with("──┬─ tests"), "{text}");
 }
 
 /// `C-w t` on a group's member turns it as it turns a split: docked right (over and under) to side by side — no room
@@ -554,6 +601,26 @@ fn c_w_t_turns_a_groups_members() {
     assert_eq!(shape(&ed), Some(Shape::Over), "taller: over and under");
     feed(&mut ed, "<C-w>=");
     assert_eq!(shape(&ed), Some(Shape::Beside), "automatic again");
+}
+
+/// Docked over the code, `C-w t` says the shape it draws: the panel the whole rect under its line (its bottom the code's
+/// line) — at the height where over and under starts to fit (`OVER_ROWS`), 60 wide (too narrow side by side), over and
+/// under drawn and said, never "stacked until then".
+#[test]
+fn c_w_t_over_the_code_says_what_it_draws() {
+    use crate::pane::{Laid, Shape};
+    let (_dir, mut ed) = tests_and_a_task();
+    feed_in(&mut ed, "<C-w>K", 60, H);
+    ed.sizes.docked[GroupKind::Tests.dock_index()] =
+        Some((crate::term::OVER_ROWS + crate::chrome::SLOT_HEAD) as u16);
+    frame_in(&mut ed, 60, H);
+    assert_eq!(shape(&ed), Some(Shape::Over), "tall enough: over and under");
+    feed_in(&mut ed, "<C-w>t", 60, H);
+    assert_eq!((tests(&ed).laid, shape(&ed)), (Laid::Beside, Some(Shape::Stacked)), "no room side by side");
+    feed_in(&mut ed, "<C-w>t", 60, H);
+    assert_eq!((tests(&ed).laid, shape(&ed)), (Laid::Over, Some(Shape::Over)));
+    let said = |s: &str| ed.toasts.iter().any(|t| t.text.starts_with(s));
+    assert!(said("tests over and under — C-w t turns it back"), "said as drawn");
 }
 
 /// A click on a docked group's output gives it the keys; one on the code takes them back; the state lists its host

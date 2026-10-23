@@ -1,10 +1,10 @@
 # plugin_panel · 100x30 · theme meok · cursor hidden
 ## text
-00  tarae  ›  app.yaml
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 kind: Deployment
-03   2 metadata:
-04   3   name: web
+00 ─ tarae › app.yaml ─────────────────────────────────────────────────────────────────────────────────
+01   1 kind: Deployment
+02   2 metadata:
+03   3   name: web
+04
 05
 06
 07
@@ -32,8 +32,8 @@
 29  ● panel                                                                            utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,11 +62,11 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTTTTTT
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-02   A
+00 f ddddd f TTTTTTTT fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01   A
+02   f
 03   f
-04   f
+04
 05
 06
 07

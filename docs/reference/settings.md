@@ -20,7 +20,6 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 | `editor.tab-width` | integer 1–16 | `4` | Display width of a tab; the indent step when a file doesn't show its own |
 | `editor.color-modes` | bool | `true` | Color the mode indicator by mode |
 | `editor.cursorline` | bool | `true` | Highlight the line of the primary cursor (theme: ui.cursorline.primary) |
-| `editor.header` | bool | `true` | Top bar: path › definition under the cursor, and open buffers |
 | `editor.inlay-hints` | bool | `true` | Show language server inlay hints (types, parameter names) as dim virtual text |
 | `editor.auto-save` | `"off"` · `"focus"` · `"idle"` | `"focus"` | Save modified files automatically: when the terminal loses focus, or also after 2 s idle |
 | `editor.persistent-undo` | bool | `true` | Keep undo history across restarts (saved next to your state, dropped if the file changed elsewhere) |

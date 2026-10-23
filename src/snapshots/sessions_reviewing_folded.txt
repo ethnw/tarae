@@ -1,0 +1,55 @@
+# sessions_reviewing_folded · 100x16 · theme meok · cursor 1:4
+## text
+00 ─ tarae › [scratch] ────────────────────────────────────────┬─ m · f ¶ reviewing · d • · + ─ ready ─
+01   1                                                         │  ▎ Ask Claude
+02                                                             │
+03                                                             │  It reads the whole project,
+04                                                             │  starting from [scratch].
+05                                                             │
+06                                                             │  tab for a suggestion
+07                                                             │  › Explain what this file does
+08                                                             │  › Where is this used across the pro…
+09                                                             │  › Why is this diagnostic happening?
+10                                                             │
+11                                                             │  C-t for another model
+12                                                             │  ────────────────────────────────────
+13                                                             │  › Ask about [scratch]…
+14                                                             │  space l focus  space L close
+15  ● normal   ¶ reviewing · 0 reads                                                   utf-8 LF   1:1
+## bg · surface per cell, blank = ui.background
+00
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
+03
+04
+05
+06
+07
+08
+09
+10
+11
+12
+13
+14
+15
+## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
+00 a ddddd f TTTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf B f               f   d f d f fffff f
+01   A                                                         a  a TTT TTTTTT
+02                                                             a
+03                                                             a  dd ddddd ddd ddddd dddddddd
+04                                                             a  dddddddd dddd dddddddddd
+05                                                             a
+06                                                             a  DDD fff f ffffffffff
+07                                                             a  f ddddddd dddd dddd dddd dddd
+08                                                             a  f ddddd dd dddd dddd dddddd ddd dddd
+09                                                             a  f ddd dd dddd dddddddddd dddddddddd
+10                                                             a
+11                                                             a  DDD fff fffffff fffff
+12                                                             a  ffffffffffffffffffffffffffffffffffff
+13                                                             a  f fff fffff ffffffffff
+14                                                             a  DDDDD D fffff  DDDDD D fffff
+15  a TTTTTT               d d ddddd                                                   ddddd dd   TTT
+## legend
+bg: c=ui.cursorline.primary
+fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  B=bold

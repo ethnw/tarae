@@ -1,6 +1,6 @@
 # statusline_narrow · 30x6 · theme meok · cursor 3:4
 ## text
-00  tarae  ›  src  ›  demo.rs
+00 ─ tarae › src › demo.rs ──────
 01 ▎↑1 std::collections::HashMa ▎
 02     p;   ● unresolved i…  +1
 03   2
@@ -14,7 +14,7 @@
 04
 05
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT
+00 a ddddd f ddd f TTTTTTT aaaaaa
 01 eff                          e
 02          e                ff
 03   A

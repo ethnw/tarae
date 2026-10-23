@@ -628,7 +628,8 @@ Built as below (`uistate/claude.rs`, `uistate/point.rs`), with these choices:
   `chat_point` (`:chat-point` too). While labels are up every key is pointing's (`keys_to` region `point`,
   takes `label`, the status line `POINT · esc stop pointing`); after the first letter only the matching labels
   stay, their second letter shown, as `gw` does. Labels sit on margins, never over words: a card's on its
-  margin and `▎`, a row's in its left padding, the path bar's and a slot tab's on the rule under it.
+  margin and `▎`, a row's in its left padding, a pane's on its top line past its path (P3 step 6b), a slot tab's on
+  the rule under it.
 
 **Size:** ~1,200–1,600 lines, plus a design pass with shots for each of the three looks. Built: ~1,240 lines
 of code, ~525 of tests.

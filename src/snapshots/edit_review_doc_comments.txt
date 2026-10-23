@@ -1,27 +1,27 @@
 # edit_review_doc_comments · 100x24 · theme meok · cursor hidden
 ## text
-00  tarae  ›  src  ›  words.rs
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02  ▎ Claude  src/words.rs   “say what it does on a tie”                                0 of 1 decided
-03   1 ▎ Counts the words in text.
-04     ▎
-05     ▎ Splits on whitespace, so a  b is two words.
-06   4 pub fn count(text: &str) -> usize {
-07   5     text.split_whitespace().count()
-08   6 }
-09   7
-10    ▎ Change 1 of 1 · line 8   y accept   n reject   esc back, unanswered
-11   8−/// The longest word.
-12    ▎/// The longest word, if there is one.
-13    ▎/// Ties go to the first of them.
-14   9 pub fn longest(text: &str) -> Option<&str> {
-15  10     text.split_whitespace().max_by_key(|w| w.len())
-16  11 }
-17  12
-18  13 fn main() {
-19  14     let text = "to be or not to be";
-20  15     println!("{} words, the longest {:?}", count(text), longest(text));
-21  16 }
+00 ─ tarae › src › words.rs ───────────────────────────────────────────────────────────────────────────
+01  ▎ Claude  src/words.rs   “say what it does on a tie”                                0 of 1 decided
+02   1 ▎ Counts the words in text.
+03     ▎
+04     ▎ Splits on whitespace, so a  b is two words.
+05   4 pub fn count(text: &str) -> usize {
+06   5     text.split_whitespace().count()
+07   6 }
+08   7
+09    ▎ Change 1 of 1 · line 8   y accept   n reject   esc back, unanswered
+10   8−/// The longest word.
+11    ▎/// The longest word, if there is one.
+12    ▎/// Ties go to the first of them.
+13   9 pub fn longest(text: &str) -> Option<&str> {
+14  10     text.split_whitespace().max_by_key(|w| w.len())
+15  11 }
+16  12
+17  13 fn main() {
+18  14     let text = "to be or not to be";
+19  15     println!("{} words, the longest {:?}", count(text), longest(text));
+20  16 }
+21
 22
 23  ● change                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
@@ -34,11 +34,11 @@
 06
 07
 08
-09
-10 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
-11 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+09 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+10 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+11 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
 12 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
-13 2222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222
+13
 14
 15
 16
@@ -50,28 +50,28 @@
 22
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTTT
-01  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02  a TTTTTT  dddd           dddd dddd dd dddd dd d dddd                                f ff f fffffff
-03   f f
-04     f
-05     f           BBBBBBBBBB
+00 a ddddd f ddd f TTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+01  a TTTTTT  dddd           dddd dddd dd dddd dd d dddd                                f ff f fffffff
+02   f f
+03     f
+04     f           BBBBBBBBBB
+05   f
 06   f
 07   f
 08   f
-09   f
-10    t TTTTTT T TT T T TTTT T   A dddddd   A dddddd   DDD ddddd dddddddddd
-11   fE
+09    t TTTTTT T TT T T TTTT T   A dddddd   A dddddd   DDD ddddd dddddddddd
+10   fE
+11    g
 12    g
-13    g
-14   f
+13   f
+14  ff
 15  ff
 16  ff
 17  ff
-18  ff
-19  ff                ggg gg gg ggg gg ggg
-20  ff              ggg gggggg ggg ggggggg ggggg
-21  ff
+18  ff                ggg gg gg ggg gg ggg
+19  ff              ggg gggggg ggg ggggggg ggggg
+20  ff
+21
 22
 23  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend

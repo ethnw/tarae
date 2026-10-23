@@ -792,8 +792,8 @@ fn the_doc_block_the_cursor_is_in_has_the_accent_bar() {
     };
     s.keys("3gg");
     let inside = bars(&mut s);
-    assert_eq!(inside.first(), Some(&(2, faint)), "the `//!` block, not the cursor's: {inside:?}");
-    let block: Vec<_> = inside.iter().filter(|(r, _)| (4..=11).contains(r)).collect();
+    assert_eq!(inside.first(), Some(&(1, faint)), "the `//!` block, not the cursor's: {inside:?}");
+    let block: Vec<_> = inside.iter().filter(|(r, _)| (3..=10).contains(r)).collect();
     assert_eq!(block.len(), 8, "the `///` block's rows: {inside:?}");
     assert!(block.iter().all(|(_, c)| *c == accent), "the cursor's block in the accent: {inside:?}");
     s.keys("22gg");
@@ -2470,7 +2470,7 @@ fn snapshot_sessions_cards_waiting_behind() {
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
-    assert!(rows.iter().any(|r| r.contains("main │ fix-login ▲2 waits │ +")), "{rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("main · fix-login ▲2 waits · +")), "{rows:#?}");
     s.check("sessions_cards_waiting_behind");
     s.frames_both("sessions_cards_waiting_behind");
 }
@@ -2611,12 +2611,11 @@ fn queued_behind_a_stopped_turn(ran: Duration, w: u16) -> Shot {
     s
 }
 
-/// The chat's session tabs have a row of air under them — the layout's, not the first message's: scrolled to the
-/// top, the first message's chip is two rows under the tabs; at the bottom of a long chat the row under them is
-/// still blank, the last message still in sight and the input where one session has it. One session: no tabs,
-/// no gap — the header's rule is its edge, the chip right under it.
+/// The chat's rows start right under its top line, one session or more (P3 step 6b: the sessions are the line's
+/// names, no row of tabs and no row of air under them): scrolled to the top, the first message's chip on the row under
+/// the line; at the bottom of a long chat the last message in sight and the input where it was.
 #[test]
-fn the_chats_session_tabs_have_a_row_of_air_under_them() {
+fn the_chats_rows_start_under_its_line_with_sessions_or_not() {
     use crate::chat::{Msg, Role};
     let mut s = Shot::new(120, 24);
     let mut chat = crate::chat::Chat::new();
@@ -2636,33 +2635,33 @@ fn the_chats_session_tabs_have_a_row_of_air_under_them() {
     let col = |row: &str, text: &str| row[..row.find(text).unwrap()].chars().count();
     let from = |row: &str, col: usize| row.chars().skip(col).collect::<String>();
     let one = rows(&mut s, 1000);
-    let title = at(&one, "claude").expect("the chat's title");
-    assert_eq!(at(&one, "lib.rs"), Some(title + 2), "one session: the chip under the rule\n{one:#?}");
+    assert_eq!(at(&one, "claude"), Some(0), "its line, the screen's first row\n{one:#?}");
+    assert_eq!(at(&one, "lib.rs"), Some(1), "one session: the chip under its line\n{one:#?}");
     let input = at(&one, "Ask about").expect("the input");
     s.ed.session_add(std::env::temp_dir().join("tarae-chat-air-other"));
     let top = rows(&mut s, 1000);
-    let tabs = at(&top, " │ +").expect("the sessions' tabs");
-    let x = col(&top[title], "claude");
-    assert_eq!(at(&top, "lib.rs"), Some(tabs + 2), "the chip a row below the tabs\n{top:#?}");
-    assert_eq!(from(&top[tabs + 1], x).trim(), "", "the row under the tabs\n{top:#?}");
+    let line = at(&top, " · +").expect("the sessions on its line");
+    let x = col(&top[line], " · +");
+    assert_eq!(line, 0, "the sessions on its line\n{top:#?}");
+    assert_eq!(at(&top, "lib.rs"), Some(1), "the chip right under it, as with one\n{top:#?}");
     assert_eq!(at(&top, "Ask about"), Some(input), "the input stays\n{top:#?}");
-    s.frames_both("chat_tabs_air_top");
+    s.frames_both("chat_sessions_line_top");
     rows(&mut s, 8);
-    s.frames_both("chat_tabs_air_scrolled");
+    s.frames_both("chat_sessions_line_scrolled");
     let bottom = rows(&mut s, 0);
-    assert_eq!(from(&bottom[tabs + 1], x).trim(), "", "scrolled: the row under the tabs\n{bottom:#?}");
+    assert!(!from(&bottom[1], x).contains('─'), "scrolled: no rule under the line\n{bottom:#?}");
     let last = at(&bottom, "answer line 29").expect("the last message in sight");
     assert!(last < input, "{bottom:#?}");
     assert_eq!(at(&bottom, "Ask about"), Some(input), "{bottom:#?}");
-    // An empty chat's start text taller than its room (16 rows): from its first line, two rows under the tabs —
-    // what doesn't fit is its end (the suggestions, the model's key), never its heading
+    // An empty chat's start text taller than its room (16 rows): from its first line — what doesn't fit is its end
+    // (the suggestions, the model's key), never its heading
     let mut e = Shot::new(120, 16);
     e.ed.session.chat = Some(crate::chat::Chat::new());
     e.ed.session_add(std::env::temp_dir().join("tarae-chat-air-other"));
     let empty = rows(&mut e, 0);
-    let tabs = at(&empty, " │ +").expect("the sessions' tabs");
-    assert_eq!(at(&empty, "Ask Claude"), Some(tabs + 2), "the start text's first line\n{empty:#?}");
-    assert_eq!(at(&empty, "It reads the whole project,"), Some(tabs + 4), "{empty:#?}");
+    assert_eq!(at(&empty, " · +"), Some(0), "the sessions on its line\n{empty:#?}");
+    let first = at(&empty, "Ask Claude").expect("the start text's first line");
+    assert_eq!(at(&empty, "It reads the whole project,"), Some(first + 2), "{empty:#?}");
     assert!(at(&empty, "starting from").is_some_and(|r| r < at(&empty, "Ask about").unwrap()), "{empty:#?}");
 }
 
@@ -2675,8 +2674,8 @@ fn snapshot_sessions_with_the_reviewer_reading() {
     let mut s = sessions_reviewing(160);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
-    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" │ +")).unwrap_or_default();
-    assert!(row.contains("main │ fix-login working ¶ reviewing │ docs • │ +"), "{row}");
+    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" · +")).unwrap_or_default();
+    assert!(row.contains("main · fix-login working ¶ reviewing · docs • · +"), "{row}");
     let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
     assert!(!status.contains("waiting") && status.contains("¶ reviewing · 0 reads"), "{status}");
     s.check("sessions_reviewing_tabs");
@@ -2686,28 +2685,27 @@ fn snapshot_sessions_with_the_reviewer_reading() {
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
     // (the list's rows — not the tabs', beside it)
     let row = |name: &str| {
-        rows.iter().find(|r| r.contains(name) && !r.contains(" │ ")).cloned().unwrap_or_default()
+        rows.iter().find(|r| r.contains(name) && !r.contains(" · +")).cloned().unwrap_or_default()
     };
     assert!(row("fix-login").contains("working") && row("fix-login").contains("¶ reviewing"), "{rows:#?}");
     assert!(row("docs").contains("¶ reviewer done"), "{rows:#?}");
     s.check("sessions_reviewing_list");
 }
 
-/// #195: where the tabs don't fit — the dropdown: a long name is cut, the `▸` stays whole, and `docs`'
-/// reviewer news in `•1`. The front's reviewer reading is the status line's segment, not a `¶` beside the name
-/// (bgreview).
+/// #195: where the names don't fit whole — each folded to its prefix on the chat's line, `docs`' reviewer news its
+/// `•`, the one behind reading its `¶`. The front's reviewer reading is the status line's segment, not a `¶` beside
+/// its name (bgreview).
 #[test]
-fn snapshot_sessions_dropdown_with_the_reviewer_reading() {
+fn snapshot_sessions_folded_with_the_reviewer_reading() {
     let mut s = sessions_reviewing(100);
     s.ed.session.name = "main-with-a-long-feature-name".into();
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
-    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" ▾ ")).unwrap_or_default();
-    assert!(row.contains("◂ main-with-a-long") && row.contains("… ▾ 1/3 •1 ▸"), "{row}");
-    assert!(!row.contains("¶"), "{row}");
+    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" · +")).unwrap_or_default();
+    assert!(row.contains("─ m · f ¶ reviewing · d • · +"), "{row}");
     let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
     assert!(status.contains("¶ reviewing"), "{status}");
-    s.check("sessions_reviewing_dropdown");
+    s.check("sessions_reviewing_folded");
 }
 
 /// The board's card at 60 columns (bgreview, the user's decision 2026-10-20): whole — no `↓ more lines`, so its
@@ -4349,18 +4347,18 @@ fn a_turns_rail_says_what_else_differs_from_head() {
         parser.process(&s.frame());
         let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
         assert!(rows[0].contains("review") && rows[0].contains("last turn"), "{rows:#?}");
-        assert!(rows[2].contains("“fix it”"), "{rows:#?}");
+        assert!(rows[1].contains("“fix it”"), "{rows:#?}");
         match rows_want {
-            1 => assert!(rows[3].contains("9 more differ from HEAD · space v v"), "{rows:#?}"),
+            1 => assert!(rows[2].contains("9 more differ from HEAD · space v v"), "{rows:#?}"),
             _ => {
                 assert!(
-                    rows[3].contains("9 more differ from HEAD") && !rows[3].contains("space"),
+                    rows[2].contains("9 more differ from HEAD") && !rows[2].contains("space"),
                     "{rows:#?}"
                 );
-                assert!(rows[4].trim_start().starts_with("space v v "), "{rows:#?}");
+                assert!(rows[3].trim_start().starts_with("space v v "), "{rows:#?}");
             }
         }
-        assert!(rows[3 + rows_want].contains("1 file"), "the counts under it: {rows:#?}");
+        assert!(rows[2 + rows_want].contains("1 file"), "the counts under it: {rows:#?}");
         assert!(rows.iter().any(|r| r.contains("demo.rs")), "{rows:#?}");
         assert!(rows.iter().any(|r| r.contains("space u") && r.contains("undo the whole turn")), "{rows:#?}");
     }
@@ -6208,7 +6206,7 @@ fn chrome_colors(ed: &Editor) -> (vt100::Color, vt100::Color, vt100::Color) {
 /// `the_edges_light_with_the_keys`.)
 #[test]
 fn the_panels_follow_one_set_of_rules() {
-    use crate::chrome::{GAP, HEAD, PAD, PAD_R, SIGNS, SLOT_HEAD};
+    use crate::chrome::{GAP, PAD, SIGNS, SLOT_HEAD};
     let (w, h) = (150u16, 36u16);
     let mut s = Shot::new(w, h);
     let cwd = s.in_project();
@@ -6230,31 +6228,29 @@ fn the_panels_follow_one_set_of_rules() {
     let end = sc.text_top + sc.body_h;
     let slot_y = end - sc.bottom_h;
     assert!(side > 0 && sc.bottom_h > 0 && slot_x == side, "the slot under the code only");
-    // Every title on the first row, its text at the padding; the slot's tabs in its line, after its lead `─ `
-    let first = |y: usize, a: usize, b: usize| (a..b).find(|&x| !blank(y, x));
-    assert_eq!(first(0, 0, side), Some(PAD), "the side panel's title");
-    assert_eq!(first(0, side, chat), Some(side + SIGNS), "the code's path bar, where its numbers start");
-    assert_eq!(first(0, chat + GAP, w as usize), Some(chat + GAP + PAD), "the chat's title");
+    // Every pane's top a line on the first row, its names at the padding after its lead `─ `; the slot's tabs in its line
+    let first = |y: usize, a: usize, b: usize| (a..b).find(|&x| !blank(y, x) && at(y, x).contents() != "─");
+    assert_eq!(first(0, 0, side), Some(PAD), "the side panel's names");
+    assert_eq!(first(0, side, chat), Some(side + PAD), "the code's path");
+    assert_eq!(first(0, chat + GAP, w as usize), Some(chat + GAP + PAD), "the chat's name");
     let tab = s.ed.screen.slot_tabs.borrow()[0];
     assert_eq!((tab.0, tab.1), (slot_y, slot_x + PAD), "the slot's tabs");
-    // …a thin rule under each, from padding to padding (the code's from its numbers)
-    let regions = [(1, 0, side - GAP, PAD), (1, side, chat, SIGNS), (1, chat + GAP, w as usize, PAD)];
-    for (y, a, b, pad) in regions {
-        let line: String = (a + pad..b - PAD_R).map(|x| at(y, x).contents().to_string()).collect();
-        assert!(line.chars().all(|c| c == '─'), "row {y} from {a}: {line:?}");
-        assert!(blank(y, a + pad - 1) && blank(y, b - 1), "row {y} from {a}: inside the padding");
+    // …each from its edge, no rule under it
+    for (a, what) in [(0, "side"), (side, "code"), (chat + GAP, "chat")] {
+        assert_eq!(at(0, a).contents(), "─", "the {what}'s line starts at its edge");
+        assert!(!at(1, a + PAD).contents().contains('─'), "the {what}: no rule under its line");
     }
     // The bodies' text: the code's numbers right after its sign column (two-digit ones there, none before),
     // the chat's words and the task's output at the padding
-    assert_eq!(sc.text_top, HEAD);
-    let starts: Vec<usize> = (HEAD..slot_y).filter_map(|y| first(y, side, chat)).collect();
+    assert_eq!(sc.text_top, 1);
+    let starts: Vec<usize> = (1..slot_y).filter_map(|y| first(y, side, chat)).collect();
     assert_eq!(starts.iter().min(), Some(&(side + SIGNS)), "the numbers right after the sign column");
     let row_with = |t: &str| (0..end).find(|&y| p.screen().rows(0, w).nth(y).is_some_and(|r| r.contains(t)));
     let ask = row_with("Ask Claude").expect("the chat's empty state");
     assert_eq!(first(ask, chat + GAP, w as usize), Some(chat + GAP + PAD));
     assert_eq!(first(slot_y + SLOT_HEAD, slot_x, chat), Some(slot_x + PAD), "the task's output");
-    // What has the keys: its rule in the accent (the slot's line), the status line's label naming it
-    let rules = [(1, PAD), (1, side + SIGNS), (1, chat + GAP + PAD), (slot_y, slot_x)];
+    // What has the keys: its line in the accent, the status line's label naming it
+    let rules = [(0, 0), (0, side), (0, chat + GAP), (slot_y, slot_x)];
     let keys = |s: &mut Shot| -> (Vec<bool>, String) {
         let p = cells(&s.frame(), w, h);
         let lit =
@@ -6338,7 +6334,8 @@ fn the_edges_light_with_the_keys() {
     let lit = |v: &[(String, bool)], rows: std::ops::Range<usize>| rows.into_iter().all(|y| v[y].1);
     let dark = |v: &[(String, bool)], rows: std::ops::Range<usize>| rows.into_iter().all(|y| !v[y].1);
     let (side, chat, rule, corner, ends) = lines(&mut s);
-    let joined = |j: &str| format!("{}{j}{}", "│".repeat(slot_y), "│".repeat(end - slot_y - 1));
+    // (each starting at the top lines' `┬` on the first row)
+    let joined = |j: &str| format!("┬{}{j}{}", "│".repeat(slot_y - 1), "│".repeat(end - slot_y - 1));
     assert_eq!(glyphs(&side), joined("├"), "the side panel's line, joined where the slot's edge meets it");
     assert_eq!(glyphs(&chat), joined("┤"), "the chat's");
     assert_eq!(ends, ["─", "─"], "the slot's top edge, across it whole");
@@ -6419,8 +6416,7 @@ fn a_top_line_says_the_same_in_the_slot_and_in_a_frame() {
         keys: &[("tab", "failure"), ("q", "close")],
         key: card,
         faint: card,
-        plain: false,
-        beyond: None,
+        ..TopLine::default()
     };
     let mut out = Vec::new();
     // (the split under the details' text gets no join; the one in the line's run does)
@@ -6602,7 +6598,8 @@ fn the_chats_edge_is_one_line_on_every_row() {
         let (cx, end) = (sc.chat_x.unwrap(), sc.text_top + sc.body_h);
         for y in 0..end {
             let at = |x: usize| p.screen().cell(y as u16, x as u16).unwrap().contents().to_string();
-            assert_eq!(at(cx), "│", "line {line}, row {y}: the chat's line");
+            let want = if y == 0 { "┬" } else { "│" };
+            assert_eq!(at(cx), want, "line {line}, row {y}: the chat's line");
             let beside = at(cx - 1);
             let half = ["▌", "▐", "▄", "▀"].contains(&beside.as_str());
             assert!(!half, "line {line}, row {y}: {beside:?} beside it");
@@ -6750,7 +6747,7 @@ fn every_panel_starts_its_text_the_same_distance_in() {
     let inset = |y: usize, gx: Option<usize>| {
         let edge = gx.map_or(0, |gx| {
             let c = p.screen().cell(y as u16, gx as u16).unwrap().contents().to_string();
-            assert!(["│", "├", "┤"].contains(&c.as_str()), "row {y}: a line at {gx}: {c:?}");
+            assert!(["│", "├", "┤", "┬"].contains(&c.as_str()), "row {y}: a line at {gx}: {c:?}");
             gx + 1
         });
         let text = (edge..w as usize)
@@ -6896,9 +6893,10 @@ fn the_gutters_hold_at_their_edges() {
     s.ed.dragging = Some(Border::Chat);
     assert_eq!(cell(&mut s, 5, chat), ("│".into(), accent), "the chat's border, held");
     s.ed.dragging = None;
-    // The chat filling the screen: its gutter's cell whole, no line at the screen's edge
+    // The chat filling the screen: its gutter's cell whole, no line at the screen's edge (its top line from it)
     s.keys(" l<C-w>z");
-    for y in 0..end {
+    assert_eq!(cell(&mut s, 0, 0).0, "─", "its top line from the screen's edge");
+    for y in 1..end {
         assert_eq!(cell(&mut s, y, 0).0, " ", "row {y}, zoomed");
     }
 }
@@ -6975,10 +6973,10 @@ fn the_picker_floats_with_equal_margins() {
             assert_eq!(at(y, x).bgcolor(), ground, "the margin at {y},{x}");
         }
     }
-    // The chat whole beside it: its title, its rule, its input
+    // The chat whole beside it: its top line, turning down at its gutter (no line of the code's beside it), its input
     let screen: Vec<String> = p.screen().rows(0, w).collect();
     let beside = |r: &str| r.chars().skip(chat).collect::<String>();
-    assert!(beside(&screen[0]).contains("claude") && beside(&screen[1]).contains("────"), "{screen:#?}");
+    assert!(beside(&screen[0]).starts_with("┌─ claude"), "{screen:#?}");
     assert!(screen.iter().any(|r| r.contains("› Ask about demo.rs")), "{screen:#?}");
     assert!(screen[end].contains("● picker "));
 }
@@ -7224,9 +7222,9 @@ fn an_edit_reviews_reason_is_whole_sentences() {
                   the map. The entry API keeps the one that came first. I will switch it so a repeat keeps the \
                   first strand, and since nothing else reads the map, no other line has to change.";
     s.ed.session.review.as_mut().unwrap().reason = reason.into();
-    let top = s.ed.screen.review_rows.borrow().first().map_or(4, |r| r.0);
+    let top = s.ed.screen.review_rows.borrow().first().map_or(3, |r| r.0);
     // (the title's row, then the reason's: up to the first change's head)
-    let rows = rows_of(&mut s, (0, 3, 100, top.saturating_sub(3)));
+    let rows = rows_of(&mut s, (0, 2, 100, top.saturating_sub(2)));
     let shown: Vec<&str> = rows
         .iter()
         .take_while(|r| !r.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()))
@@ -7242,8 +7240,8 @@ fn an_edit_reviews_reason_is_whole_sentences() {
     // letter words: wrapped at the full width, its first row fills it — the mark would push it past)
     let long = format!("Short one. {}word end.", "a ".repeat(200));
     s.ed.session.review.as_mut().unwrap().reason = long.clone();
-    let top = s.ed.screen.review_rows.borrow().first().map_or(4, |r| r.0);
-    let rows = rows_of(&mut s, (0, 3, 100, top.saturating_sub(3)));
+    let top = s.ed.screen.review_rows.borrow().first().map_or(3, |r| r.0);
+    let rows = rows_of(&mut s, (0, 2, 100, top.saturating_sub(2)));
     let reason_rows: Vec<&String> = rows
         .iter()
         .take_while(|r| !r.trim_start().chars().next().is_some_and(|c| c.is_ascii_digit()))
@@ -7534,4 +7532,141 @@ fn granted_rows_cut_keep_what_differs() {
     for n in names {
         assert!(rows.iter().any(|r| r.contains(n)), "{n} in {rows:#?}");
     }
+}
+
+/// The side panel, the code and the chat, `w` × `h`: a file open, the keys on the code.
+fn three_columns(w: u16, h: u16) -> Shot {
+    let mut s = Shot::new(w, h);
+    let cwd = s.in_project();
+    s.file("src/demo.rs", DEMO_RS);
+    let rels = ["Cargo.toml", "README.md", "src/demo.rs"].map(String::from).to_vec();
+    s.ed.session.sidebar = Some(crate::sidebar::Sidebar::with_files(cwd, rels));
+    s.ed.config.llm.command = "sh".into();
+    s.ed.config.llm.args = vec!["-c".into(), "cat > /dev/null".into()];
+    s.keys(" l<esc>");
+    s
+}
+
+/// A frame's rows as text, and the character at a cell.
+fn frame_text(s: &mut Shot, w: u16, h: u16) -> (Vec<String>, impl Fn(usize, usize) -> String + use<>) {
+    let p = cells(&s.frame(), w, h);
+    let rows: Vec<String> = p.screen().rows(0, w).collect();
+    let at = move |y: usize, x: usize| {
+        p.screen().cell(y as u16, x as u16).map(|c| c.contents().to_string()).unwrap_or_default()
+    };
+    (rows, at)
+}
+
+/// The rows of the frame where a top line sits: a row whose cells from `x` on start with `─ ` and a name.
+fn named_line(at: &impl Fn(usize, usize) -> String, y: usize, x: usize) -> bool {
+    at(y, x) == "─"
+        && at(y, x + 1).trim().is_empty()
+        && !at(y, x + 2).trim().is_empty()
+        && at(y, x + 2) != "─"
+}
+
+/// panes P3 step 6b: every pane's top is one line with its name on it — the side panel's views, the code's path, the
+/// chat's `claude` — on the screen's first row, nothing under any that's only a rule; the gutters start at it (`┬`).
+#[test]
+fn every_panes_top_is_one_line() {
+    for (w, h) in [(80u16, 24u16), (160, 40)] {
+        let mut s = three_columns(w, h);
+        let (rows, at) = frame_text(&mut s, w, h);
+        let sc = &s.ed.screen;
+        let (side, chat) = (sc.side_w, sc.chat_x.unwrap());
+        assert_eq!(sc.text_top, 1, "{w}: the code right under its line");
+        let from = |x: usize| -> String { (x..w as usize).map(|c| at(0, c)).collect() };
+        let mut tops = vec![(side, "─ tarae › src › demo.rs"), (chat + 1, "─ claude")];
+        if side > 0 {
+            tops.push((0, "─ files · outline · git"));
+        }
+        for (x, says) in tops {
+            assert!(from(x).starts_with(says), "{w}: the top line from {x}: {:?}", rows[0]);
+        }
+        let gutters: Vec<usize> = [side.checked_sub(1), Some(chat)].into_iter().flatten().collect();
+        for x in gutters {
+            assert_eq!(
+                (at(0, x), at(1, x)),
+                ("┬".into(), "│".into()),
+                "{w}: the gutter at {x} starts at the lines"
+            );
+        }
+        assert!(!rows[1].contains("──"), "{w}: no rule under the lines: {:?}", rows[1]);
+        assert!(rows[1].contains("use std"), "{w}: the code's first line right under: {:?}", rows[1]);
+    }
+}
+
+/// A split's panes each have their own line: side by side the divider starts at the two lines' `┬` (never above a
+/// line); over and under the lower pane's line is the row between them, joined to the side panel's gutter (`├`) —
+/// one line, never two; the lit one is the pane with the keys.
+#[test]
+fn a_split_starts_at_a_join() {
+    let (w, h) = (120u16, 30u16);
+    let mut s = three_columns(w, h);
+    s.keys(" l<C-w>v");
+    let (rows, at) = frame_text(&mut s, w, h);
+    let side = s.ed.screen.side_w;
+    let divider = (side + 1..w as usize).find(|&x| at(5, x) == "│").expect("a divider");
+    assert_eq!(at(0, divider), "┬", "the divider starts at the lines: {:?}", rows[0]);
+    assert!(named_line(&at, 0, side) && named_line(&at, 0, divider + 1), "both panes' lines: {:?}", rows[0]);
+    let path = |y: usize, x: usize| -> String { (x..x + 30).map(|c| at(y, c)).collect() };
+    assert!(path(0, side).starts_with("─ tarae › src › demo.rs"), "{:?}", rows[0]);
+    assert!(path(0, divider + 1).contains("demo.rs"), "{:?}", rows[0]);
+    // (the focused one's line in the accent, the other's the wash)
+    let (_, _, accent) = chrome_colors(&s.ed);
+    let p = cells(&s.frame(), w, h);
+    let fg = |x: usize| p.screen().cell(0, x as u16).unwrap().fgcolor();
+    assert_eq!(fg(divider + 1), accent, "the pane with the keys: its line lit");
+    assert_ne!(fg(side), accent, "the other's the wash");
+    // The slot under them: the divider ends on its line (`┴`), never past it
+    let cwd = s.ed.session.root.clone();
+    s.ed.task_start(crate::task::Task { name: "check".into(), cmd: "echo all good".into(), cwd });
+    s.until("task", |ed| ed.session.task_run.as_ref().is_some_and(|r| r.took.is_some()));
+    s.ed.toasts.clear();
+    let (rows, at) = frame_text(&mut s, w, h);
+    let sc = &s.ed.screen;
+    let slot_y = sc.text_top + sc.body_h - sc.bottom_h;
+    assert_eq!(at(slot_y, divider), "┴", "the divider ends on the slot's line: {:?}", rows[slot_y]);
+    assert_eq!(at(slot_y - 1, divider), "│", "{:?}", rows[slot_y - 1]);
+    s.keys("<C-w>k");
+    // Over and under: the lower pane's line between them
+    s.keys("<C-w>q<C-w>s");
+    let (rows, at) = frame_text(&mut s, w, h);
+    let sc = &s.ed.screen;
+    let slot_y = sc.text_top + sc.body_h - sc.bottom_h;
+    let lines: Vec<usize> = (0..slot_y).filter(|&y| named_line(&at, y, side)).collect();
+    assert_eq!(lines.len(), 2, "two panes, two lines: {lines:?}\n{}", rows.join("\n"));
+    let low = lines[1];
+    assert!(
+        !named_line(&at, low - 1, side) && at(low - 1, side) != "─",
+        "one line, never two: {:?}",
+        rows[low - 1]
+    );
+    assert_eq!(at(low, side - 1), "├", "its line meets the side panel's gutter: {:?}", rows[low]);
+}
+
+/// The chat's line names the sessions when there are more than one — each its name, `·` between — where `claude`
+/// stood; no row of tabs under it.
+#[test]
+fn the_chats_line_names_the_sessions() {
+    let (w, h) = (160u16, 40u16);
+    let mut s = three_columns(w, h);
+    let (_, at) = frame_text(&mut s, w, h);
+    let chat = s.ed.screen.chat_x.unwrap();
+    let line = |at: &dyn Fn(usize, usize) -> String| -> String {
+        (chat + 1..w as usize).map(|x| at(0, x)).collect()
+    };
+    assert!(line(&at).starts_with("─ claude"), "one session: {:?}", line(&at));
+    let fix = s.ed.session.root.join("fix");
+    std::fs::create_dir_all(&fix).unwrap();
+    let id = s.ed.session_add(fix);
+    let name = s.ed.sessions.iter().find(|l| l.id == id).unwrap().label().to_string();
+    let (rows, at) = frame_text(&mut s, w, h);
+    let top = line(&at);
+    assert!(
+        !top.contains("claude") && top.contains(&format!(" · {name}")),
+        "the sessions on its line: {top:?}"
+    );
+    let under: String = (chat + 1..w as usize).map(|x| at(1, x)).collect();
+    assert!(!under.contains(&name), "no row of tabs under it: {:?}", rows[1]);
 }

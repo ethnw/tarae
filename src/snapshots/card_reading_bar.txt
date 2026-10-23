@@ -1,35 +1,35 @@
 # card_reading_bar · 100x24 · theme meok · cursor hidden
 ## text
-00  tarae  ›  card · Claude wants to run a script
-01  ──────────────────────────────────────────────────────────────────────────────────────────────────
-02   1 Claude wants to run a script                                                                   ▎
-03   2                                                                                                ▎
-04   3 echo step 1                                                                                    ▎
-05   4 echo step 2                                                                                    ▎
-06   5 echo step 3                                                                                    ▎
-07   6 echo step 4                                                                                    ▎
-08   7 echo step 5                                                                                    ▎
-09   8 echo step 6
-10   9 echo step 7
-11  10 echo step 8
-12  11 echo step 9
-13  12 echo step 10
-14  13 echo step 11
-15  14 echo step 12
-16  15 echo step 13
-17  16 echo step 14
-18  17 echo step 15
-19  18 echo step 16
-20  19 echo step 17
-21  20 echo step 18
+00 ─ tarae › card · Claude wants to run a script ──────────────────────────────────────────────────────
+01   1 Claude wants to run a script                                                                   ▎
+02   2                                                                                                ▎
+03   3 echo step 1                                                                                    ▎
+04   4 echo step 2                                                                                    ▎
+05   5 echo step 3                                                                                    ▎
+06   6 echo step 4                                                                                    ▎
+07   7 echo step 5                                                                                    ▎
+08   8 echo step 6
+09   9 echo step 7
+10  10 echo step 8
+11  11 echo step 9
+12  12 echo step 10
+13  13 echo step 11
+14  14 echo step 12
+15  15 echo step 13
+16  16 echo step 14
+17  17 echo step 15
+18  18 echo step 16
+19  19 echo step 17
+20  20 echo step 18
+21  21 echo step 19
 22  ▎ Claude wants to run a script   ge to its end · esc goes back    y Install   n Not now   N Never
 23  ● card                                                                             utf-8 LF   3:1
 ## bg · surface per cell, blank = ui.background
 00
 01
 02
-03
-04     ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+03     ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+04
 05
 06
 07
@@ -50,17 +50,17 @@
 22 pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  TTTT T TTTTTT TTTTT TT TTT T TTTTTT
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+00 f ddddd f TTTT T TTTTTT TTTTT TT TTT T TTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffffffff
+01   f                                                                                                f
 02   f                                                                                                f
-03   f                                                                                                f
-04   A                                                                                                f
+03   A                                                                                                f
+04   f                                                                                                f
 05   f                                                                                                f
 06   f                                                                                                f
 07   f                                                                                                f
-08   f                                                                                                f
+08   f
 09   f
-10   f
+10  ff
 11  ff
 12  ff
 13  ff

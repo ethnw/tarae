@@ -1,25 +1,25 @@
 # chat_run_queued_behind_a_stopped_turns · 120x30 · theme meok · cursor 27:77
 ## text
-00  tarae  ›  src  ›  demo.rs                                              │  claude                   ▂▅▆ exploring   0ms
-01  ────────────────────────────────────────────────────────────────────── │  ────────────────────────────────────────────
-02   1 use std::collections::HashMap;                                      │  ▎ now run the tests
-03   2                                                                     │
-04   3 ▎ Counts how often each word appears.                               │  ● run    cargo test -p tarae
-05     ▎                                                                   │    queued 1st, behind a stopped turn's run
-06     ▎ Words are split on whitespace; case is kept.                      │    grep -rn TOD… ·  7m 12s  space m c stop it
-07   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {            │
-08   7     let mut counts = HashMap::new();                                │
-09   8     for word in text.split_whitespace() {                           │
-10   9     │   *counts.entry(word).or_insert(0) += 1;                      │
-11  10     }                                                               │
-12  11     counts                                                          │
-13  12 }                                                                   │
-14  13                                                                     │
-15  14 fn main() {                                                         │
-16  15     let text = "the quick brown fox jumps over the lazy dog";       │
-17  16     let counts = word_counts(text);                                 │
-18  17     println!("{} distinct words", counts.len()); // 타래            │
-19  18 }                                                                   │
+00 ─ tarae › src › demo.rs ────────────────────────────────────────────────┬─ claude ──────────────── ▂▅▆ exploring   0ms ─
+01   1 use std::collections::HashMap;                                      │  ▎ now run the tests
+02   2                                                                     │
+03   3 ▎ Counts how often each word appears.                               │  ● run    cargo test -p tarae
+04     ▎                                                                   │    queued 1st, behind a stopped turn's run
+05     ▎ Words are split on whitespace; case is kept.                      │    grep -rn TOD… ·  7m 12s  space m c stop it
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {            │
+07   7     let mut counts = HashMap::new();                                │
+08   8     for word in text.split_whitespace() {                           │
+09   9     │   *counts.entry(word).or_insert(0) += 1;                      │
+10  10     }                                                               │
+11  11     counts                                                          │
+12  12 }                                                                   │
+13  13                                                                     │
+14  14 fn main() {                                                         │
+15  15     let text = "the quick brown fox jumps over the lazy dog";       │
+16  16     let counts = word_counts(text);                                 │
+17  17     println!("{} distinct words", counts.len()); // 타래            │
+18  18 }                                                                   │
+19                                                                         │
 20                                                                         │
 21                                                                         │
 22                                                                         │
@@ -32,8 +32,8 @@
 29  ● chat                                                                                          rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
-01
-02     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+01     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+02
 03
 04
 05
@@ -62,26 +62,26 @@
 28
 29
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00  ddddd  f  ddd  f  TTTTTTT                                              a  TTTTTT                   aaa ddddddddd   ddd
-01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-02   A                                                                     a  a TTT TTT TTT TTTTT
-03   f                                                                     a
-04   f f                                                                   a  a fff    ggggg gggg gg ggggg
-05     f                                                                   a    ffffff ffff ffffff f fffffff ffffff fff
-06     f                                                                   a    dddd ddd dddd f  ff fff  BBBBB B B ffff ff
+00 f ddddd f ddd f TTTTTTT ffffffffffffffffffffffffffffffffffffffffffffffffaa TTTTTT aaaaaaaaaaaaaaaa aaa ddddddddd   ddd a
+01   A                                                                     a  a TTT TTT TTT TTTTT
+02   f                                                                     a
+03   f f                                                                   a  a fff    ggggg gggg gg ggggg
+04     f                                                                   a    ffffff ffff ffffff f fffffff ffffff fff
+05     f                                                                   a    dddd ddd dddd f  ff fff  BBBBB B B ffff ff
+06   f                                                                     a
 07   f                                                                     a
 08   f                                                                     a
 09   f                                                                     a
-10   f                                                                     a
+10  ff                                                                     a
 11  ff                                                                     a
 12  ff                                                                     a
 13  ff                                                                     a
 14  ff                                                                     a
-15  ff                                                                     a
-16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg        a
-17  ff                                                                     a
-18  ff              ggg gggggggg gggggg                                    a
-19  ff                                                                     a
+15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg        a
+16  ff                                                                     a
+17  ff              ggg gggggggg gggggg                                    a
+18  ff                                                                     a
+19                                                                         a
 20                                                                         a
 21                                                                         a
 22                                                                         a
