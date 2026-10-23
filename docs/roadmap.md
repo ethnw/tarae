@@ -460,9 +460,13 @@ main that has what it waits for, and the user says go:
   one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); step 6b (`345f0b09`): every pane's top one line with its
   name, `editor.header` gone (user, 2026-10-23); step 7a: a group floating in a frame of its own (`C-w e`, `C-w m`,
   sizes, the mouse; the whole screen its frame, user 2026-10-23) and the session list a floating pane, the manager's
-  overview (`35fd6cc7`); step 7b: a card takes the keys only once focused — `C-q`, a click or `C-w w`, your own key's
-  at once, its frame faint while it waits and lit once focused; the settle and typing-quiet guards gone; step 7c adds
-  toasts as panes, the asks' bottom-right corner and the follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  overview (`35fd6cc7`); step 7b (`e466b200`): a card takes the keys only once focused — `C-q`, a click or `C-w w`,
+  your own key's at once, its frame faint while it waits and lit once focused; the settle and typing-quiet guards gone;
+  step 7c (`f7eea996`): toasts are panes — a faint frame named `messages`, focused by a press or `C-w w`'s round, its
+  rect unchanged; `:messages` a floating list (oldest first; the toasts go while it's up, a message whose row isn't in
+  sight still a toast); a floating list done once used; step 7d next — every session's asks in one stack bottom-right,
+  named in their colours, the follow card a floating pane, the chat's line with whole names and `+N`, the session list
+  docking — user, 2026-10-22/24), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
   would conflict (to you; a Claude hears nothing of the others — the user, 2026-10-23) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the woven view (`:weave` — the user's name, 2026-10-22: a view, never a merge done) — everyone works in their own workspace and tarae shows the merge, each change in its
@@ -605,8 +609,16 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   a card a host, its answers reads' alone; the page framed as someone else's words, over 16 KB its outline, then
   `url:a-b` or `url#heading`; a replay stop showing the copy read — measured against Claude Code's WebFetch on 10
   coders' questions: both 10/10, one of WebFetch's from memory after its fetches failed; −54 % input tokens, −70 %
-  output, −37 % time, +9 % $; +48 tokens a request). Next: the pane → its rendered view; **the goal is the text browser pane**,
-  a real browser (carbonyl in the terminal pane) not now.
+  output, −37 % time, +9 % $; +48 tokens a request); **a page is a buffer, as code is** (`8bdacd53`, user 2026-10-23:
+  no web pane — beside the code is your own split): read-only in the pane you're in, its links answered by a language
+  server of tarae's own on the LSP routes (`gd` a link, `gr` the links to a heading, `space k` where it goes, `space s`
+  its headings), `C-c` stops a read, `:w <path>` saves a copy, `gf` opens a path or address from any buffer; a page in
+  front is named to Claude by its address only; the server's answers fuzzed. Next: the rendered view (P5); **the goal
+  is the text browser**, a real browser (carbonyl in the terminal pane) not now.
+- **Motion that says something** (user, 2026-10-24, the motion session's plan): what an invisible act touched
+  flashes (undo/redo, `.`, a paste that doesn't select), Claude's fresh writing dries, an honest shimmer on the turn's
+  word (moved by the stream), the turn's stops as a strip of marks (one vocabulary with the knots), a card's answer
+  pressed as a stamp — `editor.motion` yours, contact sheets for the user's look.
 - **Short videos, made ahead** (user, 2026-10-23): scripted scenes as docshots are — 16:9, English captions, no
   voice — for YouTube, the homepage and the README; a live stream once orchestra drives (Part I) and there's a
   homepage and a release to point at. Planned and measured (collab's spike: 1080p, MP4 ~600 KB a clip); made — `cargo xtask
