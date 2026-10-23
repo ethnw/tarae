@@ -674,6 +674,38 @@ fn mutated_pages_hold_the_property() {
     }
 }
 
+/// The page's own server's property (`check::facts`, the `facts` fuzz target's in-tree twin): every fixture asked at
+/// its first 2 KB's every byte (one in a hundred past it), then the small ones and the reader's own HTML mutated by fixed seeds — the same every run. By hand,
+/// longer: `TARAE_WEB_MUTATE_SECS=60`.
+#[test]
+fn the_pages_server_holds_its_property_on_any_page() {
+    for f in fixtures() {
+        check::facts(&bytes(&f.name), f.content_type.as_deref(), Prefer::Guess, 2048, crate::clock::now());
+    }
+    let secs = std::env::var("TARAE_WEB_MUTATE_SECS").ok().and_then(|s| s.parse::<u64>().ok());
+    let until = secs.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+    use crate::mutate::{Rng, bytes as mutate};
+    let mut seeds: Vec<Vec<u8>> = ["spa", "issue"].iter().map(|n| bytes(n)).collect();
+    seeds.extend(seed_pages());
+    let words: &[&[u8]] =
+        &[b"<a href=\"#x\">", b"</a>", b"<h2 id=x>", b"## ", b"\n", b"```", b"\xea\xb0", b"#"];
+    let mut rng = Rng(0x7eb_5e7e_0000_0002);
+    let mut k = 0;
+    while until.map_or(k < 300, |u| std::time::Instant::now() < u) {
+        k += 1;
+        let mut b = seeds[k % seeds.len()].clone();
+        for _ in 0..1 + rng.below(8) {
+            mutate(&mut rng, &mut b, words);
+        }
+        let mut input = vec![rng.next() as u8];
+        input.extend(b);
+        check::facts_input(&input, crate::clock::now());
+    }
+    if secs.is_some() {
+        eprintln!("MUTATED {k} pages asked at every byte, the property held");
+    }
+}
+
 /// HTML of the reader's own, each shape a piece reads (the fuzz target's seeds too).
 fn seed_pages() -> Vec<Vec<u8>> {
     [
@@ -683,6 +715,9 @@ fn seed_pages() -> Vec<Vec<u8>> {
          <dl><dt>t</dt><dd>d</dd></dl><blockquote><p>q</p><pre><code class=language-rs>let a = 1;</code></pre></blockquote></body></html>",
         "<html><head><meta charset=euc-kr><meta http-equiv=refresh content=\"5; URL='next.html'\"></head><body>\
          <noscript>JS</noscript><script>x()</script><header>h</header><article><header>ah</header><p>p</p></article></body></html>",
+        // (breaks the rope makes and `\n` doesn't, kept by a code block, a heading and its link after them)
+        "<html><body><main><pre>a&#13;b\x0Bc\x0Cd\u{85}e\u{2028}f\u{2029}g</pre><h2 id=after>After</h2>\
+         <p><a href=#after>up</a></p></main></body></html>",
     ]
     .iter()
     .map(|s| s.as_bytes().to_vec())
@@ -696,8 +731,11 @@ fn seed_pages() -> Vec<Vec<u8>> {
 fn writes_fuzz_seeds() {
     let fixtures = ["blog-redirect", "spa", "issue", "refresh"].map(|n| (n.to_string(), bytes(n)));
     let own = seed_pages().into_iter().enumerate().map(|(k, b)| (format!("own-{k}"), b));
-    let seeds = fixtures.into_iter().chain(own).map(|(n, b)| (n, [&[0u8][..], &b].concat()));
-    crate::mutate::fuzz_seeds("web", seeds);
+    let seeds: Vec<(String, Vec<u8>)> =
+        fixtures.into_iter().chain(own).map(|(n, b)| (n, [&[0u8][..], &b].concat())).collect();
+    crate::mutate::fuzz_seeds("web", seeds.clone());
+    // (the page's own server's target reads its input as the reader's does)
+    crate::mutate::fuzz_seeds("facts", seeds);
 }
 
 // ── :web ──
@@ -727,6 +765,16 @@ fn settle_until(ed: &mut crate::editor::Editor, done: impl Fn(&crate::editor::Ed
 
 fn toasts(ed: &crate::editor::Editor) -> Vec<String> {
     ed.toasts.iter().map(|t| t.text.clone()).collect()
+}
+
+/// The front buffer is a page whose read has landed (or ended).
+fn landed(ed: &crate::editor::Editor) -> bool {
+    super::page::of(ed.doc()).is_some_and(|p| p.fetching.is_none())
+}
+
+/// No page's read is under way.
+fn none_reading(ed: &crate::editor::Editor) -> bool {
+    !ed.docs.iter().any(|d| super::page::of(d).is_some_and(|p| p.fetching.is_some()))
 }
 
 /// `:web <path>` from the project's folder, an ignored folder's as `:open` takes it: the page read on a worker into
@@ -767,15 +815,19 @@ fn web_reads_a_saved_page_into_a_buffer_named_by_its_title() {
     settle_until(&mut ed, |ed| ed.toasts.iter().any(|t| t.text.starts_with("page · ")));
     assert_eq!(ed.docs.len(), docs);
 
-    let showing = ed.doc().id;
+    // What isn't a page: its buffer says so, faint, on its first row — and its line
     feed(&mut ed, ":web saved/a.pdf<ret>");
     settle_until(&mut ed, |ed| toasts(ed).iter().any(|t| t.starts_with("web: a PDF")));
-    assert_eq!((ed.doc().id, ed.docs.len()), (showing, docs), "no buffer for what isn't a page");
+    assert_eq!(ed.docs.len(), docs + 1);
+    let p = super::page::of(ed.doc()).unwrap();
+    assert!(p.read.is_none() && p.failed.as_deref().is_some_and(|f| f.starts_with("a PDF")));
+    assert!(ed.doc().text.to_string().starts_with("a PDF"), "{}", ed.doc().text);
+    assert_eq!(ed.doc().paint.len(), 1, "faint");
 }
 
 /// `:web https://…` with the session's copy of that page (fetched within `KEEP`, by the address asked or the one it
 /// came from) opens it with no network, said with its age; an address the fetch refuses is said at once, nothing
-/// fetched; `:web-stop` with nothing under way says so.
+/// fetched, no buffer made.
 #[test]
 fn web_fetches_a_page_or_takes_the_session_s_copy() {
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
@@ -795,29 +847,30 @@ fn web_fetches_a_page_or_takes_the_session_s_copy() {
     };
     let gone = ed.session.pages.put(std::sync::Arc::new(f), crate::clock::now());
     assert!(gone.is_empty());
-    let first = ed.doc().id;
     feed(&mut ed, ":web https://kept.test/a<ret>");
-    settle_until(&mut ed, |ed| ed.doc().id != first);
+    assert_eq!(ed.doc().title.as_deref(), Some("web · kept.test"), "made at once");
+    settle_until(&mut ed, landed);
     assert_eq!(ed.doc().title.as_deref(), Some("web · kept.test › Kept"));
     assert!(ed.doc().text.to_string().contains("# A kept page"));
+    assert_eq!(ed.doc().selection().primary().head, 0, "a first read at its top");
     let said = |t: &String| t.ends_with(" · UTF-8 · read just now · over https");
     assert!(toasts(&ed).iter().any(said), "{:?}", toasts(&ed));
 
     for (typed, said) in [
         (":web https://user:pw@kept.test/<ret>", "an address with a user or password in it isn't fetched"),
         (":web https://10.0.0.1/<ret>", "a bare address isn't fetched"),
-        (":web-stop<ret>", "no page is being fetched"),
     ] {
-        let before = toasts(&ed).len();
+        let (before, docs) = (toasts(&ed).len(), ed.docs.len());
         feed(&mut ed, typed);
         assert!(toasts(&ed)[before..].iter().any(|t| t.starts_with(said)), "{typed}: {:?}", toasts(&ed));
-        assert!(ed.session.web_fetch.is_none(), "{typed}: nothing under way");
+        assert!(none_reading(&ed) && ed.docs.len() == docs, "{typed}: nothing under way, no buffer");
     }
 }
 
-/// The session keeps only a whole 2xx page that isn't this machine's: the same address again opens the copy, but an
-/// error's page, one maybe cut short and a `localhost` one (a dev server changes under you) are fetched each time;
-/// `:web!` fetches again whatever was kept, the new copy kept in its place.
+/// The session keeps only a whole 2xx page that isn't this machine's: the same address again (its buffer closed) opens
+/// the copy, but an error's page, one maybe cut short and a `localhost` one (a dev server changes under you) are
+/// fetched each time; with its buffer open it's that buffer, nothing fetched; `:web!` fetches again into it whatever
+/// was kept, the new copy kept in its place.
 #[test]
 fn web_keeps_only_whole_pages_and_web_bang_fetches_again() {
     use super::fetch::tests::{Reply, ok, path, reply, server, way, yours_rules};
@@ -834,12 +887,16 @@ fn web_keeps_only_whole_pages_and_web_bang_fetches_again() {
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
     ed.session.web_way =
         Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
-    // (how many requests the server had for what `typed` opened)
-    let asked = |ed: &mut crate::editor::Editor, typed: &str| {
-        let before = ed.doc().id;
+    // (how many requests the server had for what `typed` opened, its buffer closed after)
+    let opened = |ed: &mut crate::editor::Editor, typed: &str| {
         feed(ed, &format!("{typed}<ret>"));
-        settle_until(ed, |ed| ed.doc().id != before && ed.session.web_fetch.is_none());
+        settle_until(ed, |ed| landed(ed) && none_reading(ed));
         heads.try_iter().count()
+    };
+    let asked = |ed: &mut crate::editor::Editor, typed: &str| {
+        let n = opened(ed, typed);
+        feed(ed, ":buffer-close<ret>");
+        n
     };
     let kept =
         |ed: &crate::editor::Editor, url: &str| ed.session.pages.get(url, crate::clock::now()).is_some();
@@ -854,18 +911,204 @@ fn web_keeps_only_whole_pages_and_web_bang_fetches_again() {
         assert_eq!(kept(&ed, url), keeps, "{url}");
         assert_eq!(asked(&mut ed, &format!(":web {url}")), usize::from(!keeps), "{url}: again");
     }
+    let missing = opened(&mut ed, ":web https://page.test/missing");
+    let (page, docs) = (ed.doc().id, ed.docs.len());
+    assert_eq!((missing, opened(&mut ed, ":web https://page.test/missing")), (1, 0), "its buffer: no fetch");
+    assert_eq!((ed.doc().id, ed.docs.len()), (page, docs));
+
     let before = ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(at, _)| at);
-    assert_eq!(asked(&mut ed, ":web! https://page.test/a"), 1, ":web! fetches again");
+    assert_eq!(opened(&mut ed, ":web https://page.test/a"), 0, "the copy");
+    let (page, docs) = (ed.doc().id, ed.docs.len());
+    assert_eq!(opened(&mut ed, ":web! https://page.test/a"), 1, ":web! fetches again");
+    assert_eq!((ed.doc().id, ed.docs.len()), (page, docs), "into its buffer");
     let after = ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(at, _)| at);
     assert!(after > before, "the new copy kept in its place");
 }
 
-/// `:web https://…` through its way (servers and a proxy of the test's own standing in for yours): the step said while
-/// it runs and gone once it lands, the page in its buffer; `:web-stop` ends one under way — its late result dropped,
-/// no buffer, no error; a second `:web` replaces the first — the first's late result opens nothing and never takes
-/// the second's step —, the session's copy answering the second too: the first stopped all the same, its step gone.
+/// `:web <path> <address>` into the buffer a fetch of that address made: the file is its source from then on —
+/// `:reload` and `:web-reader` read the file again, nothing fetched, the network's copy gone with its text; `:web!`
+/// fetches it again, and the fetch is its source.
 #[test]
-fn web_fetches_through_its_way_and_a_stop_or_a_newer_one_drops_the_older() {
+fn a_saved_page_read_into_a_fetched_pages_buffer_is_its_source_from_then_on() {
+    use super::fetch::tests::{ok, server, way, yours_rules};
+    let (at, heads) =
+        server(true, |_| ok("<title>Net</title><main><h1>From the network</h1><p>t.</p></main>"));
+    let root = crate::scratch::Scratch::new("web-saved-into");
+    std::fs::copy(dir().join("pages/issue.html"), root.join("issue.html")).unwrap();
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = std::fs::canonicalize(root.path()).unwrap();
+    ed.session.web_way =
+        Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    let opened = |ed: &mut crate::editor::Editor, typed: &str| {
+        feed(ed, &format!("{typed}<ret>"));
+        settle_until(ed, |ed| landed(ed) && none_reading(ed));
+        heads.try_iter().count()
+    };
+    let source = |ed: &crate::editor::Editor| {
+        let p = super::page::of(ed.doc()).unwrap();
+        (
+            p.saved.as_deref().and_then(|s| s.file_name()).map(|n| n.to_string_lossy().into_owned()),
+            p.copy.is_some(),
+        )
+    };
+    assert_eq!(opened(&mut ed, ":web https://page.test/a"), 1);
+    let (page, docs) = (ed.doc().id, ed.docs.len());
+    assert_eq!(source(&ed), (None, true));
+
+    assert_eq!(opened(&mut ed, ":web issue.html https://page.test/a"), 0);
+    assert_eq!((ed.doc().id, ed.docs.len()), (page, docs), "into its buffer");
+    assert!(ed.doc().text.to_string().contains("# web: read a saved page into a buffer #12"));
+    assert_eq!(source(&ed), (Some("issue.html".into()), false), "the file its source, the copy gone");
+    assert_eq!(opened(&mut ed, ":reload"), 0, "the file read again");
+    assert_eq!(opened(&mut ed, ":web-reader page"), 0);
+    assert!(ed.doc().text.to_string().contains("# web: read a saved page into a buffer #12"));
+    assert_eq!(source(&ed), (Some("issue.html".into()), false));
+
+    assert_eq!(opened(&mut ed, ":web! https://page.test/a"), 1, ":web! fetches");
+    assert!(ed.doc().text.to_string().contains("# From the network"));
+    assert_eq!(source(&ed), (None, true), "the fetch its source");
+}
+
+/// A read whose redirect lands on an address another buffer has: that one is shown, and where to go goes along. A
+/// buffer that never landed goes; one read before (`:reload`) keeps what it showed, said — never closed under you.
+#[test]
+fn a_redirect_to_an_open_page_shows_it_and_closes_only_a_buffer_that_never_landed() {
+    use super::fetch::tests::{ok, path, reply, server, way, yours_rules};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let moved = std::sync::Arc::new(AtomicBool::new(false));
+    let moves = moved.clone();
+    let (at, _) = server(true, move |head| {
+        let to_b = || reply("HTTP/1.1 302 Found\r\nLocation: /b\r\nContent-Length: 0\r\n\r\n");
+        match path(head) {
+            "/a" if moves.load(Ordering::SeqCst) => to_b(),
+            "/a" => ok("<title>A</title><main><h1>A page</h1><p>Its text.</p></main>"),
+            "/c" => to_b(),
+            _ => ok(&format!("<title>B</title><main><h1>B</h1>{}<h2 id=x>X</h2><p>u.</p></main>", para("b"))),
+        }
+    });
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.web_way =
+        Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    let opened = |ed: &mut crate::editor::Editor, typed: &str| {
+        feed(ed, &format!("{typed}<ret>"));
+        settle_until(ed, |ed| landed(ed) && none_reading(ed));
+    };
+    opened(&mut ed, ":web https://page.test/b");
+    let b = ed.doc().id;
+    opened(&mut ed, ":web https://page.test/a");
+    let (a, docs, text) = (ed.doc().id, ed.docs.len(), ed.doc().text.to_string());
+
+    moved.store(true, Ordering::SeqCst);
+    opened(&mut ed, ":reload");
+    assert_eq!(ed.doc().id, b, "the page it redirects to shown");
+    let kept = ed.docs.iter().find(|d| d.id == a).expect("the reloaded buffer kept");
+    assert_eq!((kept.text.to_string(), ed.docs.len()), (text, docs), "as it was");
+    let said = "web: it redirects to https://page.test/b, open already — this one kept as it was";
+    assert!(toasts(&ed).iter().any(|t| t == said), "{:?}", toasts(&ed));
+
+    // A new one that lands there: gone, its fragment taken to the open one
+    opened(&mut ed, ":web https://page.test/c#x");
+    assert_eq!((ed.doc().id, ed.docs.len()), (b, docs), "its buffer gone");
+    let line = ed.doc().text.byte_to_line(ed.doc().selection().primary().head);
+    assert_eq!(ed.doc().text.line(line).to_string(), "## X\n", "at #x");
+}
+
+/// A read that fails says why once in each place: its line the short why (its host is on the line), its first row the
+/// whole of it — the address, the why, the OS's words after ` · `, no parentheses inside the why's.
+#[test]
+fn a_failed_read_says_its_why_short_on_its_line_and_whole_on_its_first_row() {
+    use super::fetch::tests::{way, yours_rules};
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    let at = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    ed.session.web_way =
+        Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    feed(&mut ed, &format!(":web http://localhost:{port}/<ret>"));
+    settle_until(&mut ed, none_reading);
+    let refused = std::io::Error::from_raw_os_error(libc::ECONNREFUSED).to_string();
+    let os = refused.split(" (os error").next().unwrap().to_lowercase();
+    let whole =
+        format!("http://localhost:{port}/: nothing answers there · {os} · os error {}", libc::ECONNREFUSED);
+    assert_eq!(ed.doc().text.to_string(), whole, "row 1: the whole why");
+    assert_eq!(ed.doc().selection().primary().head, 0, "at its start");
+    let p = super::page::of(ed.doc()).unwrap();
+    assert_eq!(super::page::brief(p.failed.as_deref().unwrap()), "nothing answers there", "its line");
+    // (what isn't the fetch's form is said as it is)
+    assert_eq!(super::page::brief("stopped"), "stopped");
+    assert_eq!(super::page::brief("a PDF, not a page tarae reads"), "a PDF, not a page tarae reads");
+}
+
+/// A page being read is in sight from the first frame: its empty buffer never shows the start screen in its place.
+#[test]
+fn a_page_being_read_is_no_start_screen() {
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    assert!(ed.welcome());
+    super::page::stand_in(&mut ed, "https://page.test/a", "");
+    assert_eq!(ed.docs.len(), 1, "in the empty scratch's place");
+    assert!(!ed.welcome());
+}
+
+/// The page's commands: `:web-reader` reads the page in sight again as another part from its copy (nothing fetched),
+/// says the part it reads with no word and when it's that part already; `:reload` fetches it anew into its buffer;
+/// `:web-open` hands its own address to the system's opener (none started in tests) — never a saved page's, nor on
+/// code. A page that needs JavaScript says `:web-open` on its line.
+#[test]
+fn a_pages_commands_read_it_again_reload_it_and_hand_it_to_the_browser() {
+    use super::fetch::tests::{ok, server, way, yours_rules};
+    let html = format!(
+        "<title>A</title><p>Before its main.</p><main><h1>A page</h1>{}{}</main>",
+        para("one"),
+        para("two")
+    );
+    let (at, heads) = server(true, move |_| ok(&html));
+    let root = crate::scratch::Scratch::new("web-commands");
+    std::fs::copy(dir().join("pages/spa.html"), root.join("spa.html")).unwrap();
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = std::fs::canonicalize(root.path()).unwrap();
+    ed.session.web_way =
+        Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    let said = |ed: &mut crate::editor::Editor, typed: &str, words: &str| {
+        let before = toasts(ed).len();
+        feed(ed, &format!("{typed}<ret>"));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(landed(ed) && toasts(ed)[before..].iter().any(|t| t.starts_with(words))) {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            let ev = ed.events.recv_timeout(left);
+            let ev = ev.unwrap_or_else(|| panic!("{typed}: {words:?} in {:?}", &toasts(ed)[before..]));
+            ed.handle_event(ev);
+        }
+        heads.try_iter().count()
+    };
+    assert_eq!(said(&mut ed, ":web https://page.test/a", "main · "), 1);
+    let (page, docs, main) = (ed.doc().id, ed.docs.len(), ed.doc().text.to_string());
+    assert_eq!(said(&mut ed, ":web-reader", "usage: :web-reader main|article|page — it reads main now"), 0);
+    assert_eq!(said(&mut ed, ":web-reader page", "page · "), 0, "from its copy");
+    assert_ne!(ed.doc().text.to_string(), main, "the whole page");
+    assert_eq!(said(&mut ed, ":web-reader page", "web: already read as page"), 0);
+    assert_eq!(said(&mut ed, ":reload", "page · "), 1, "fetched anew");
+    assert_eq!((ed.doc().id, ed.docs.len()), (page, docs), "into its buffer");
+    said(&mut ed, ":web-open", "web: https://page.test/a handed to your browser");
+    assert_eq!(ed.session.web_opened, ["https://page.test/a"]);
+
+    said(
+        &mut ed,
+        ":web spa.html",
+        "web: needs JavaScript: tarae doesn't run a page's scripts — :web-open opens",
+    );
+    said(&mut ed, ":web-open", "a saved page has no web address");
+    ed.new_scratch();
+    feed(&mut ed, ":web-open<ret>");
+    assert!(toasts(&ed).iter().any(|t| t == "not a web page — :web <url> reads one"), "{:?}", toasts(&ed));
+    assert_eq!(ed.session.web_opened.len(), 1, "nothing else handed over");
+}
+
+/// `:web https://…` through its way (servers and a proxy of the test's own standing in for yours): its buffer made at
+/// once, reading, the page in it once it lands; `C-c` on a page being read stops it — its late result dropped, the
+/// buffer saying `stopped`, no error — and with nothing under way is the code's (said); two pages read at once, each
+/// into its own buffer; a buffer closed mid-read stops its read, its result dropped; `:web` of a page that never
+/// landed reads it again.
+#[test]
+fn web_reads_into_its_buffer_and_c_c_or_closing_it_stops_the_read() {
     use super::fetch::tests::{Reply, ok, path, reply, server, way, yours_rules};
     use std::sync::{Arc, Mutex, mpsc};
     let (release, gate) = mpsc::channel::<()>();
@@ -879,53 +1122,65 @@ fn web_fetches_through_its_way_and_a_stop_or_a_newer_one_drops_the_older() {
     });
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
     ed.session.web_way = Some(Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
-    let stepping = |ed: &crate::editor::Editor| ed.toasts.iter().any(|t| t.step.is_some());
     let dropped = |n: usize| move |ed: &crate::editor::Editor| ed.session.web_dropped == n;
+    let wait = |what: &str| heads.recv_timeout(std::time::Duration::from_secs(5)).expect(what);
+    let errors = |ed: &crate::editor::Editor| toasts(ed).iter().filter(|t| t.starts_with("web: ")).count();
 
-    let first = ed.doc().id;
     feed(&mut ed, ":web https://page.test/a<ret>");
-    assert!(toasts(&ed).iter().any(|t| t.starts_with("reading page.test…")), "{:?}", toasts(&ed));
-    settle_until(&mut ed, |ed| ed.doc().id != first);
+    let a = ed.doc().id;
+    let reading =
+        |ed: &crate::editor::Editor| super::page::of(ed.doc()).and_then(|p| p.fetching.as_ref()).is_some();
+    assert!(reading(&ed) && ed.doc().title.as_deref() == Some("web · page.test"), "made at once");
+    let page_layer = super::page::takes;
+    assert!(page_layer(&ed), "C-c is the page's");
+    settle_until(&mut ed, landed);
     assert_eq!(ed.doc().title.as_deref(), Some("web · page.test › A"));
-    assert!(!stepping(&ed) && ed.session.web_fetch.is_none(), "the step over once it landed");
+    assert!(ed.doc().text.to_string().contains("# A page"));
+    assert!(!page_layer(&ed), "landed: C-c is the code's");
     assert_eq!(
         ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(_, f)| f.status),
         Some(200)
     );
+    wait("a's request");
 
-    let (showing, docs) = (ed.doc().id, ed.docs.len());
+    // `C-c` mid-read: stopped, said once, its result dropped; the buffer stays, saying so
     feed(&mut ed, ":web https://page.test/held<ret>");
-    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the first request came");
-    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the held one came");
-    feed(&mut ed, ":web-stop<ret>");
-    assert!(!stepping(&ed) && toasts(&ed).iter().any(|t| t == "web: stopped"), "{:?}", toasts(&ed));
-    let said = toasts(&ed).len();
+    let held = ed.doc().id;
+    wait("the held one came");
+    let said = errors(&ed);
+    feed(&mut ed, "<C-c>");
+    assert!(toasts(&ed).iter().any(|t| t == "web: stopped reading page.test"), "{:?}", toasts(&ed));
     settle_until(&mut ed, dropped(1));
-    assert_eq!((ed.doc().id, ed.docs.len(), toasts(&ed).len()), (showing, docs, said), "nothing of it shown");
+    assert_eq!((ed.doc().id, ed.doc().text.to_string().as_str()), (held, "stopped"));
+    assert_eq!(errors(&ed), said + 1, "no error past the stop's word: {:?}", toasts(&ed));
+    // (nothing under way: the code's `C-c` — refused on a read-only page, said)
+    let before = toasts(&ed).len();
+    feed(&mut ed, "<C-c>");
+    assert!(toasts(&ed).len() > before && ed.doc().text == "stopped", "{:?}", toasts(&ed));
 
+    // Two at once, each into its own buffer; `:web` of the stopped one reads it again
     feed(&mut ed, ":web https://page.test/held<ret>");
-    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the older came");
+    assert_eq!(ed.doc().id, held, "its buffer");
+    wait("held again");
     feed(&mut ed, ":web https://page.test/gated<ret>");
-    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the newer came");
-    settle_until(&mut ed, dropped(2));
-    assert!(stepping(&ed), "the older's late result left the newer's step: {:?}", toasts(&ed));
-    assert!(!toasts(&ed).iter().any(|t| t.starts_with("web: ") && t != "web: stopped"), "{:?}", toasts(&ed));
-    assert_eq!((ed.doc().id, ed.docs.len()), (showing, docs));
+    let gated = ed.doc().id;
+    wait("gated came");
     release.send(()).unwrap();
-    settle_until(&mut ed, |ed| ed.doc().id != showing);
-    assert_eq!(ed.doc().title.as_deref(), Some("web · page.test › Gated"));
-    assert!(!stepping(&ed));
+    settle_until(&mut ed, landed);
+    assert_eq!((ed.doc().id, ed.doc().title.as_deref()), (gated, Some("web · page.test › Gated")));
+    let doc =
+        |id| ed.docs.iter().find(|d| d.id == id).and_then(super::page::of).map(|p| p.fetching.is_some());
+    assert_eq!(doc(held), Some(true), "held still reading");
 
-    // (the newer answered from the session's copy: the older stopped first all the same)
-    feed(&mut ed, ":web https://page.test/held<ret>");
-    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the older came");
-    assert!(stepping(&ed));
+    // Its buffer closed: its read stopped, its result dropped
+    ed.close_doc(held);
+    settle_until(&mut ed, dropped(2));
+    assert!(none_reading(&ed));
+
+    // A page open: `:web` of it shows it, nothing fetched
     feed(&mut ed, ":web https://page.test/a<ret>");
-    assert!(!stepping(&ed) && ed.session.web_fetch.is_none(), "the older stopped, its step gone");
-    settle_until(&mut ed, |ed| ed.doc().title.as_deref() == Some("web · page.test › A"));
-    settle_until(&mut ed, dropped(3));
-    assert!(heads.try_recv().is_err(), "the copy answered: nothing fetched");
-    assert!(!stepping(&ed));
+    assert_eq!(ed.doc().id, a);
+    assert!(landed(&ed) && heads.try_recv().is_err(), "its buffer: nothing fetched");
 }
 
 /// A FIFO with nothing writing to it: refused at once and said — never a worker held inside open(2).
@@ -971,7 +1226,7 @@ fn a_pages_buffer_is_read_only_and_read_again_in_place() {
     ed.session.root = std::fs::canonicalize(root.path()).unwrap();
     let first = ed.doc().id;
     feed(&mut ed, ":web issue.html<ret>");
-    settle_until(&mut ed, |ed| ed.doc().id != first);
+    settle_until(&mut ed, |ed| ed.doc().id != first && landed(ed));
     let text = ed.doc().text.to_string();
     let typed = |ed: &mut crate::editor::Editor, keys: &str| {
         for c in keys.chars() {
@@ -981,7 +1236,7 @@ fn a_pages_buffer_is_read_only_and_read_again_in_place() {
     typed(&mut ed, "jdd");
     assert_eq!(ed.doc().text.to_string(), text, "put back");
     assert!(
-        toasts(&ed).iter().any(|t| t == "a web page is read-only — :web reads it again"),
+        toasts(&ed).iter().any(|t| t == "a web page is read-only — :w <path> saves a copy"),
         "{:?}",
         toasts(&ed)
     );
@@ -994,6 +1249,36 @@ fn a_pages_buffer_is_read_only_and_read_again_in_place() {
     settle_until(&mut ed, |ed| toasts(ed)[before..].iter().any(|t| t.starts_with("page · ")));
     assert_eq!(ed.docs.len(), docs, "the one buffer, read anew");
     assert!(ed.doc().read_only.is_some() && ed.doc().text != text.as_str());
+}
+
+/// `:w` on a page says how to save a copy; `:w <path>` writes its text as shown after a first line saying where it came
+/// from and when (an HTML comment: the markdown reads the same) — one there refused but with `:w!`.
+#[test]
+fn w_saves_a_copy_of_a_page_saying_where_it_came_from() {
+    let root = crate::scratch::Scratch::new("web-w");
+    std::fs::copy(dir().join("pages/issue.html"), root.join("issue.html")).unwrap();
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.root = std::fs::canonicalize(root.path()).unwrap();
+    feed(&mut ed, ":web issue.html https://github.com/ethnw/tarae/issues/12<ret>");
+    settle_until(&mut ed, landed);
+    let said = |ed: &crate::editor::Editor, start: &str| toasts(ed).iter().any(|t| t.starts_with(start));
+
+    feed(&mut ed, ":w<ret>");
+    assert!(said(&ed, "a web page is read-only — :w <path> saves a copy"), "{:?}", toasts(&ed));
+    feed(&mut ed, ":w copy.md<ret>");
+    settle_until(&mut ed, |ed| said(ed, "saved a copy of the page to copy.md — :open copy.md"));
+    let written = std::fs::read_to_string(root.join("copy.md")).unwrap();
+    let (head, rest) = written.split_once('\n').unwrap();
+    assert!(head.starts_with("<!-- https://github.com/ethnw/tarae/issues/12 · read 20"), "{head}");
+    assert!(head.ends_with(" -->"), "{head}");
+    assert_eq!(rest, ed.doc().text.to_string());
+
+    std::fs::write(root.join("copy.md"), "mine").unwrap();
+    feed(&mut ed, ":w copy.md<ret>");
+    settle_until(&mut ed, |ed| toasts(ed).iter().any(|t| t.contains("copy.md is there — :w! ")));
+    assert_eq!(std::fs::read_to_string(root.join("copy.md")).unwrap(), "mine", "refused");
+    feed(&mut ed, ":w! copy.md<ret>");
+    settle_until(&mut ed, |_| std::fs::read_to_string(root.join("copy.md")).unwrap() == written);
 }
 
 // ── Times ──

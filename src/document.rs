@@ -368,6 +368,8 @@ pub struct Document {
     /// A read-only document's text as it's kept (a web page, `web/open.rs`): an edit is put back
     /// (`hold_read_only`).
     pub read_only: Option<Snapshot>,
+    /// The web page this read-only document is (`web/page.rs`): where it came from, its facts, its read under way.
+    pub page: Option<Box<crate::web::page::PageOf>>,
     /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
     /// lands they're coloured one line at a time. It follows sight as the document's own trees do
     /// (`Editor::trees_follow_sight`: gone with them, parsed again when shown). `base_seq` tells a parse of an
@@ -476,6 +478,7 @@ impl Document {
             writing_align: None,
             woven: None,
             read_only: None,
+            page: None,
         }
     }
 
@@ -805,6 +808,14 @@ impl Document {
             .as_ref()
             .map(|s| s.lang.name.as_str())
             .or_else(|| self.path.as_deref().and_then(crate::syntax::detect).map(|s| s.name.as_str()))
+    }
+
+    /// What its servers call it: its file's URI, else its own address (a server's document, a web page).
+    pub fn lsp_uri(&self) -> Option<String> {
+        match &self.path {
+            Some(p) => Some(crate::lsp::uri(p)),
+            None => self.virtual_uri.clone(),
+        }
     }
 
     /// Its path relative to `root` (the editor's), else its title.

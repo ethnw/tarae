@@ -356,10 +356,8 @@ fn a_page_read_is_a_stop_showing_the_copy_read() {
     let copy = stop.page.as_ref().and_then(|p| p.copy.clone()).expect("the stop has its copy");
     assert_eq!(copy.0, "https://page.test/a");
     assert_eq!(stop.lines, Some(2..3));
-    let first = ed.doc().id;
     assert!(crate::follow::replay_call(&mut ed, "t1"));
-    settle(&mut ed, &|ed| ed.doc().id != first);
-    assert_eq!(ed.doc().title.as_deref(), Some("web · page.test › A"));
+    settle(&mut ed, &|ed| ed.doc().title.as_deref() == Some("web · page.test › A"));
     let at = ed.doc().selection().primary().head;
     assert_eq!(crate::movement::line_of(&ed.doc().text, at), 2, "at the lines read");
     assert!(heads.try_recv().is_err(), "never fetched again");
@@ -370,4 +368,43 @@ fn a_page_read_is_a_stop_showing_the_copy_read() {
         ed.toasts.iter().any(|t| t.text.contains("isn't kept — :web! https://page.test/a fetches it now"))
     );
     assert!(heads.try_recv().is_err());
+}
+
+/// D14, live: Claude's page read while follow leads shows the copy it read at the lines read, as a file read does —
+/// its buffer saying it's the copy Claude read; paused, nothing opens (`C-]`/`]r` show it later, as for a file).
+#[test]
+fn follow_shows_a_page_read_only_while_it_leads() {
+    let (mut ed, generation, _heads) =
+        editor(|_| ok("<title>A</title><main><h1>A page</h1><p>one</p><p>two</p></main>"));
+    ed.session.web_hosts.push(("page.test".into(), 443));
+    let look = |what: &str| crate::chat::Look {
+        verb: "read",
+        what: what.into(),
+        pattern: false,
+        range: String::new(),
+        link: None,
+    };
+    ed.session.chat.as_mut().unwrap().follow.on = true;
+    let input = json!({ "files": ["https://page.test/a:3-3"] });
+    crate::follow::on_tool(&mut ed, "t1", "mcp__tarae__read", &input, &look("page.test/a:3-3"));
+    read(&mut ed, generation, 31, &["https://page.test/a:3-3"]);
+    settle(&mut ed, &|ed| ed.doc().title.as_deref() == Some("web · page.test › A"));
+    let at = ed.doc().selection().primary().head;
+    assert_eq!(crate::movement::line_of(&ed.doc().text, at), 2, "at the lines read");
+    assert!(crate::web::page::of(ed.doc()).is_some_and(|p| p.claudes), "the copy Claude read");
+
+    ed.new_scratch();
+    let code = ed.doc().id;
+    ed.session.chat.as_mut().unwrap().follow.paused = true;
+    let input = json!({ "files": ["https://page.test/b"] });
+    crate::follow::on_tool(&mut ed, "t2", "mcp__tarae__read", &input, &look("page.test/b"));
+    read(&mut ed, generation, 32, &["https://page.test/b"]);
+    settle(&mut ed, &|_| answered(32).is_some());
+    for _ in 0..3 {
+        if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
+            ed.handle_event(ev);
+        }
+    }
+    assert_eq!(ed.doc().id, code, "paused: nothing opened");
+    assert!(!ed.docs.iter().any(|d| d.virtual_uri.as_deref() == Some("https://page.test/b")));
 }

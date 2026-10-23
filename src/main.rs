@@ -73,6 +73,7 @@ mod gitpanel;
 mod gitrepo;
 mod gittool;
 mod gittrust;
+mod gotofile;
 mod grammar;
 mod granted;
 mod graphemes;

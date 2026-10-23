@@ -68,3 +68,9 @@ pub fn gzip(b: &[u8]) {
 pub fn web(b: &[u8]) {
     web::check::page_input(b);
 }
+
+/// A web page's bytes read as `web` reads them, then asked of by the page's own language server (`web::facts`) —
+/// every request kind at every byte.
+pub fn facts(b: &[u8]) {
+    web::check::facts_input(b, std::time::Instant::now());
+}

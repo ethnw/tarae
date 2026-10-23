@@ -25,14 +25,18 @@ thread_local! {
     static AHEAD: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
     /// Where `hold` stopped this thread's clock.
     static HELD: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// The wall clock where `hold` stopped it.
+    static HELD_SYSTEM: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
 }
 
-/// Tests outside a simulation: this thread's clock held still from now on (`advance` still moves it) — a frame with a
-/// live time in it (a run's time so far) draws the same at every read, however long the drawing takes. Its now.
+/// Tests outside a simulation: this thread's clock held still from now on (`advance` still moves it), the wall clock
+/// too — a frame with a live time in it (a run's time so far) draws the same at every read, however long the drawing
+/// takes; an age in seconds (`allow::now_s`) read on this thread never crosses a second's boundary. Its now.
 #[cfg(test)]
 pub fn hold() -> Instant {
     let t = now();
     HELD.set(Some(t - AHEAD.get()));
+    HELD_SYSTEM.set(Some(system() - AHEAD.get()));
     t
 }
 
@@ -41,6 +45,7 @@ pub fn hold() -> Instant {
 #[cfg(test)]
 pub fn release() {
     HELD.set(None);
+    HELD_SYSTEM.set(None);
 }
 
 /// Tests outside a simulation: this thread's clock moved on by `d` — what `now` and `since` read here from now on (a
@@ -56,6 +61,10 @@ pub fn system() -> SystemTime {
     #[cfg(test)]
     if let Some(t) = crate::sim::system() {
         return t;
+    }
+    #[cfg(test)]
+    if let Some(t) = HELD_SYSTEM.get() {
+        return t + AHEAD.get();
     }
     SystemTime::now()
 }
@@ -93,7 +102,6 @@ mod tests {
 
     /// Raw clock reads left, per file (paths under `src/`).
     const RAW_CLOCK_READS: &[(&str, usize)] = &[
-        ("allow.rs", 1),
         ("attach.rs", 4),
         ("builds.rs", 3),
         ("calls.rs", 1),

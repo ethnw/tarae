@@ -86,6 +86,8 @@ pub enum Region {
     Output(crate::rundoc::Run),
     /// A woven view in the code (`weave.rs`): `enter` goes to that change's workspace.
     Weave,
+    /// A web page being read (`web/page.rs`): `C-c` stops its read.
+    Page,
     /// `C-w m` moving a floating pane (`float.rs`): its moves, `enter`/`esc` end it, the rest said.
     Move,
 }
@@ -113,6 +115,7 @@ impl Region {
             Region::View(s) => format!("view:{}", s.name()),
             Region::Output(r) => format!("output:{}", r.name()),
             Region::Weave => "weave".into(),
+            Region::Page => "page".into(),
             Region::Move => "move".into(),
         }
     }
@@ -143,6 +146,7 @@ impl Region {
             Region::View(crate::view::Surface::Terminal) => Handler::TerminalView,
             Region::Output(_) => Handler::Output,
             Region::Weave => Handler::Weave,
+            Region::Page => Handler::Page,
             Region::Move => Handler::Move,
         }
     }
@@ -194,6 +198,7 @@ pub enum Handler {
     List,
     Prompt,
     Weave,
+    Page,
     Move,
     Code,
 }
@@ -221,6 +226,7 @@ impl Handler {
             Handler::List => "list",
             Handler::Prompt => "prompt",
             Handler::Weave => "weave",
+            Handler::Page => "page",
             Handler::Move => "move",
             Handler::Code => "code",
         }
@@ -549,6 +555,10 @@ impl Editor {
         if crate::weave::takes(self) && !self.doc().loading {
             v.push(shortcut(Region::Weave, Filter::Only(vec![Key::plain(Code::Enter)])));
         }
+        // `web::page::key`: a page's `C-c` while its read is under way, in normal mode with nothing under way
+        if crate::web::page::takes(self) {
+            v.push(shortcut(Region::Page, Filter::Only(vec![ctrl('c')])));
+        }
         v.push(layer(Region::Code, Filter::All));
         v
     }
@@ -629,7 +639,7 @@ impl Editor {
         match r {
             // (its focused pane — the one the keys go to — with room: a chat filling a narrow screen leaves
             // the code's panes laid out zero wide)
-            Region::Code | Region::Weave => {
+            Region::Code | Region::Weave | Region::Page => {
                 s.panes.iter().any(|p| p.0 == self.session.focus && p.1.w > 0) || self.welcome()
             }
             Region::Prompt => s.width.is_some(),
@@ -666,7 +676,7 @@ impl Editor {
         match r {
             Region::Card(id) => format!("card#{id}"),
             Region::Toast(id) => format!("toast#{id}"),
-            Region::Code | Region::Weave => format!("pane#{}", self.session.focus),
+            Region::Code | Region::Weave | Region::Page => format!("pane#{}", self.session.focus),
             Region::Side(crate::sidebar::Mode::Git) => "git".into(),
             Region::Side(_) => "side".into(),
             Region::Slot(Slot::Terminal) | Region::Program | Region::View(crate::view::Surface::Terminal) => {

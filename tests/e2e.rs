@@ -1163,6 +1163,60 @@ fn counting_features_wakes_nothing_and_is_written_at_the_end() {
     assert!(saved.contains(":[2,"), "{saved}");
 }
 
+/// `:web` in the real binary against a server of this test's own on this machine (held until the test lets it
+/// answer): the page's buffer at once, its line saying it's reading with `C-c stop`; then the page — its title on the
+/// line, its first heading in the text — and once it landed, nothing drawn and nothing woken.
+#[test]
+fn a_page_reads_into_its_buffer_and_then_sleeps() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (go, held) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut head = Vec::new();
+        let mut b = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match s.read(&mut b) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => head.extend_from_slice(&b[..n]),
+            }
+        }
+        let _ = held.recv();
+        let body = "<title>Held</title><main><h1>Held page</h1><p>Its text, at last.</p></main>";
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = s.write_all(reply.as_bytes());
+    });
+    let sb = Sandbox::new("web-page");
+    let mut t = sb.spawn(&[]);
+    t.wait_for("started", |s| s.status().contains("● normal"));
+    t.command(&format!("web http://localhost:{port}/a"));
+    t.wait_for("reading, C-c stop", |s| s.contains("reading localhost") && s.contains("C-c stop"));
+    go.send(()).unwrap();
+    let s = t.wait_text("# Held page");
+    assert!(s.contains("localhost › Held") && !s.contains("reading localhost"), "{s}");
+    // Landed: its toast gone, a second with no frame (what lands late drawn), then two more with none and nothing
+    // woken (the line's age is drawn when a frame comes, never a frame of its own)
+    t.wait_for("its toast gone", |s| !s.status().contains(" chars · "));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let frames = t.frames();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if t.frames() == frames || std::time::Instant::now() > end {
+            break;
+        }
+    }
+    let (frames, before) = (t.frames(), t.usage());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (drawn, used) = (t.frames() - frames, t.usage() - before);
+    assert!(drawn == 0 && used.switches < 30, "{drawn} frames, {used:?} in 2 s\n{}", t.screen());
+    t.command("q");
+    assert_eq!(t.wait_exit().code(), Some(0));
+}
+
 /// `space f` in the real binary: the tree picker's first frame (the list still coming from its worker —
 /// no rows yet) draws, then the files show; a query nothing matches draws too.
 /// An idle tarae sleeps — a file open in a git repository, then the side panel, the git tab, the terminal,

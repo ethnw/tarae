@@ -16,9 +16,14 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
     let rest = rest.trim();
     match cmd {
         "" => Ok(()),
+        // (a web page: a copy of its text to a file of yours — `web/page.rs`)
+        "w" | "write" | "w!" | "write!" if editor.doc().page.is_some() => {
+            crate::web::page::write(editor, rest, cmd.ends_with('!'))
+        }
         "w" | "write" if rest.is_empty() && editor.format_then_save(false) => Ok(()),
         "w" | "write" => write(editor, rest, false),
         "w!" | "write!" => write(editor, rest, true),
+        "reload" if editor.doc().page.is_some() => crate::web::page::reload(editor),
         "reload" => editor.reload_current(),
         "redraw" => {
             editor.redraw = true;
@@ -145,7 +150,8 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
         }
         "web" => crate::web::open::web(editor, rest, false),
         "web!" => crate::web::open::web(editor, rest, true),
-        "web-stop" => crate::web::open::stop(editor),
+        "web-reader" => crate::web::page::reader(editor, rest),
+        "web-open" => crate::web::page::web_open(editor),
         "session-open" if !rest.trim().is_empty() => {
             let id = editor.session_open(Path::new(rest.trim()))?;
             let all = editor.sessions_in_order();
@@ -710,7 +716,7 @@ pub(crate) fn typed_path(editor: &Editor, p: &str) -> PathBuf {
 
 /// A typed path with home spelled out: `~`, `~/…`, `$HOME`, `${HOME}` at its start (`home`: the user's
 /// home folder; without one, the path as typed).
-fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
+pub(crate) fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
     let rest = ["~", "$HOME", "${HOME}"].iter().find_map(|h| {
         let rest = p.strip_prefix(h)?;
         (rest.is_empty() || rest.starts_with('/')).then(|| rest.trim_start_matches('/'))
@@ -724,7 +730,7 @@ fn expand_home(p: &str, home: Option<&Path>) -> PathBuf {
 
 /// `file:12` / `file:12:5` (1-based line and column, as compilers and greps print them) when `file`
 /// exists and the whole doesn't: the file and the 0-based line and column.
-fn at_line(path: &Path, exists: impl Fn(&Path) -> bool) -> Option<(PathBuf, usize, usize)> {
+pub(crate) fn at_line(path: &Path, exists: impl Fn(&Path) -> bool) -> Option<(PathBuf, usize, usize)> {
     if exists(path) {
         return None;
     }

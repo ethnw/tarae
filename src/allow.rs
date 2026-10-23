@@ -47,9 +47,9 @@ pub struct Allowed {
     pub given: BTreeMap<Grant, char>,
 }
 
-/// Now, in seconds since the epoch.
+/// Now, in seconds since the epoch (the wall clock as logic reads it: an answer's age is said by it).
 pub fn now_s() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    crate::clock::system().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 impl Allowed {

@@ -7573,6 +7573,22 @@ fn frame_text(s: &mut Shot, w: u16, h: u16) -> (Vec<String>, impl Fn(usize, usiz
     (rows, at)
 }
 
+/// A web page's line: its `web · host` whole, its title cut to the room with `…` in a narrow pane — never gone (a
+/// segment that doesn't fit goes whole: the page's long name went, leaving a bare rule), whole where there's room.
+#[test]
+fn a_pages_name_folds_its_title_never_its_place() {
+    for (w, whole) in [(40u16, false), (120, true)] {
+        let mut s = Shot::new(w, 12);
+        crate::web::page::stand_in(&mut s.ed, "https://docs.rs/r", "# Rope\n");
+        s.ed.doc_mut().page.as_deref_mut().unwrap().fetching = None;
+        s.ed.doc_mut().title = Some("web · docs.rs › Rope in ropey - Rust, a long title".into());
+        let (rows, _) = frame_text(&mut s, w, 12);
+        assert!(rows[0].contains("web · docs.rs › Rope"), "{w}: {:?}", rows[0]);
+        assert_eq!(rows[0].contains("a long title"), whole, "{w}: {:?}", rows[0]);
+        assert_eq!(rows[0].contains('…'), !whole, "{w}: {:?}", rows[0]);
+    }
+}
+
 /// The rows of the frame where a top line sits: a row whose cells from `x` on start with `─ ` and a name.
 fn named_line(at: &impl Fn(usize, usize) -> String, y: usize, x: usize) -> bool {
     at(y, x) == "─"

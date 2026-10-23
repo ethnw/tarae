@@ -406,8 +406,19 @@ fn io_said(e: &io::Error, way: &Way) -> String {
     match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => late(way),
         io::ErrorKind::InvalidData => format!("TLS: {e}"),
-        _ => e.to_string(),
+        _ => os_words(e),
     }
+}
+
+/// The OS's words for an I/O error after a why of tarae's: `connection refused · os error 61` (std's own
+/// `Connection refused (os error 61)`, its code apart, never in parentheses inside a why's).
+fn os_words(e: &io::Error) -> String {
+    let said = e.to_string();
+    let Some(code) = e.raw_os_error() else { return said };
+    let words = said.strip_suffix(&format!(" (os error {code})")).unwrap_or(&said);
+    let mut c = words.chars();
+    let words = c.next().map_or_else(String::new, |f| f.to_lowercase().chain(c).collect());
+    format!("{words} · os error {code}")
 }
 
 fn talk(
@@ -500,8 +511,8 @@ fn connect(t: &Target, way: &Way, run: u64, by: Instant) -> Result<Deadline, Str
     let at = t.url();
     let left = || by.saturating_duration_since(crate::clock::now());
     if t.loopback {
-        let found =
-            (way.resolve)(&t.host, t.port).map_err(|e| format!("{at}: its name isn't found ({e})"))?;
+        let found = (way.resolve)(&t.host, t.port)
+            .map_err(|e| format!("{at}: its name isn't found · {}", os_words(&e)))?;
         if found.is_empty() || found.iter().any(|a| !a.ip().to_canonical().is_loopback()) {
             return Err(format!("{at}: {} isn't only this machine's", t.host));
         }
@@ -515,13 +526,11 @@ fn connect(t: &Target, way: &Way, run: u64, by: Instant) -> Result<Deadline, Str
                 Err(e) => last = Some(e),
             }
         }
-        return Err(format!(
-            "{at}: nothing answers there ({})",
-            last.map(|e| e.to_string()).unwrap_or_default()
-        ));
+        let why = last.map(|e| format!(" · {}", os_words(&e))).unwrap_or_default();
+        return Err(format!("{at}: nothing answers there{why}"));
     }
     let (mine, theirs) = proxy::pair(libc::AF_INET, |_| Ok(()), |_| {})
-        .map_err(|e| format!("{at}: a way to tarae's proxy couldn't be made ({e})"))?;
+        .map_err(|e| format!("{at}: a way to tarae's proxy couldn't be made · {}", os_words(&e)))?;
     let (told, refusals) = mpsc::channel();
     let c = Connection {
         fd: theirs.into(),

@@ -18,6 +18,9 @@
 //! `]r`/`[r` show the copy Claude read, never a second fetch.
 
 use std::ops::Range;
+
+use super::facts::decoded;
+pub use super::facts::{Heading, headings};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -102,26 +105,6 @@ pub fn item(spec: &str) -> Item {
         }
     };
     Item { url: url.to_string(), want, given }
-}
-
-/// A fragment as its anchor is written: `%XX` taken back to its bytes (UTF-8, else as it was).
-fn decoded(s: &str) -> String {
-    let b = s.as_bytes();
-    let (mut out, mut i) = (Vec::with_capacity(b.len()), 0);
-    while i < b.len() {
-        let hex = |c: u8| (c as char).to_digit(16);
-        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
-            (b'%', Some(h), Some(l)) => {
-                out.push((h * 16 + l) as u8);
-                i += 3;
-            }
-            (c, _, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// A host Claude's read asks for, as its card holds it: the call waiting, its input (run again once answered).
@@ -597,48 +580,6 @@ fn framed(head: &str, notes: &[String], f: &Fetched, page: &Page, body: &str) ->
         out.push('\n');
     }
     out.push_str(&format!("</page id=\"{id}\">\n"));
-    out
-}
-
-/// A heading of the page's markdown: its level, words, line (0-based) and where its section ends (exclusive).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Heading {
-    pub level: usize,
-    pub text: String,
-    pub line: usize,
-    pub end: usize,
-}
-
-/// The markdown's ATX headings — none inside a fence — each with its section (to the next one as high or higher).
-pub fn headings(lines: &[&str]) -> Vec<Heading> {
-    let mut out: Vec<Heading> = Vec::new();
-    let mut fence: Option<&str> = None;
-    for (i, l) in lines.iter().enumerate() {
-        let t = l.trim_start();
-        let mark = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
-        match (fence, mark) {
-            (Some(f), Some(m)) if f == m => {
-                fence = None;
-                continue;
-            }
-            (None, Some(m)) => {
-                fence = Some(m);
-                continue;
-            }
-            (Some(_), _) => continue,
-            (None, None) => {}
-        }
-        let level = t.bytes().take_while(|&b| b == b'#').count();
-        let words = &t[level..];
-        if (1..=6).contains(&level) && (words.starts_with(' ') || words.is_empty()) {
-            let text = words.trim().trim_end_matches('#').trim().to_string();
-            out.push(Heading { level, text, line: i, end: lines.len() });
-        }
-    }
-    for k in 0..out.len() {
-        let next = out[k + 1..].iter().find(|h| h.level <= out[k].level).map(|h| h.line);
-        out[k].end = next.unwrap_or(lines.len());
-    }
     out
 }
 

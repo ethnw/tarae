@@ -12,12 +12,13 @@
 //! property, its loop in every `cargo test`, and `fuzz/parsers`' `web` target.
 //!
 //! `:web https://… [main|article|page]` fetches a page into a buffer, `:web <path> [url] […]` reads a saved one
-//! (`open.rs`). Claude's `read` takes an `https://` URL (`tool.rs`): its own gate, the page framed as data.
+//! (`open.rs`); a page is a buffer as code is (`page.rs`). Claude's `read` takes an `https://` URL (`tool.rs`): its own gate, the page framed as data.
 
 mod charset;
 #[cfg(any(test, fuzzing))]
 pub mod check;
 mod convert;
+pub mod facts;
 #[cfg(not(fuzzing))]
 pub mod fetch;
 mod gzip;
@@ -26,8 +27,12 @@ mod http;
 mod lang;
 #[cfg(not(fuzzing))]
 pub mod open;
+#[cfg(not(fuzzing))]
+pub mod page;
 mod pick;
 mod reader;
+#[cfg(not(fuzzing))]
+pub mod serve;
 #[cfg(not(fuzzing))]
 pub mod tool;
 mod tree;

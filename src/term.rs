@@ -8107,7 +8107,7 @@ fn draw_picker(
             | Action::Note { path, .. }
             | Action::JumpParked { path, .. },
         ) => rel_path(editor, path),
-        Some(Action::Buffer(id) | Action::Jump { doc: id, .. }) => editor
+        Some(Action::Buffer(id) | Action::Jump { doc: id, .. } | Action::Line { doc: id, .. }) => editor
             .docs
             .iter()
             .find(|d| d.id == *id)
@@ -8445,7 +8445,9 @@ fn preview_lines<'a>(
             let styles = editor.theme.capture_styles();
             return Some(PreviewView::Diff { files: f.diff.clone(), rows, styles });
         }
-        Action::Jump { doc: id, line, .. } => (editor.docs.iter().find(|d| d.id == *id)?, Some(*line)),
+        Action::Jump { doc: id, line, .. } | Action::Line { doc: id, line, .. } => {
+            (editor.docs.iter().find(|d| d.id == *id)?, Some(*line))
+        }
         Action::Code(i) => {
             use crate::lsp_editor::ActionPreview;
             return Some(match editor.action_preview(*i)? {
@@ -8805,7 +8807,10 @@ fn code_line(
     }
     let sep = |keep| Seg { text: MEMBERS_SEP.into(), style: faint, keep };
     let mut left = Vec::new();
-    let project = editor.session.root.file_name().map(|p| p.to_string_lossy().into_owned());
+    let page = crate::web::page::of(doc);
+    // (a web page is no project's: its name is its host's and title's)
+    let project =
+        editor.session.root.file_name().filter(|_| page.is_none()).map(|p| p.to_string_lossy().into_owned());
     // Tests: a fixed project name (the checkout folder's name varies — worktrees, CI)
     #[cfg(test)]
     let project = project.map(|_| "tarae".to_string());
@@ -8825,11 +8830,21 @@ fn code_line(
     }
     // (a preview — the git tab's or the rail's look, the next one taking its place: in italic, not settled yet)
     let named = |s: Style, d: &crate::document::Document| Style { italic: s.italic || d.preview, ..s };
-    left.push(Seg {
-        text: doc.display_name_short(),
-        style: named(if focused { strong } else { dim }, doc),
-        keep: 250,
-    });
+    let name = doc.display_name_short();
+    let style = named(if focused { strong } else { dim }, doc);
+    // (a page's title cut to the room left with `…`, its `web · host` whole — a page's name runs long where a file's
+    // is short, and a segment that doesn't fit goes whole)
+    match name.split_once(" › ").filter(|_| page.is_some()) {
+        Some((place, title)) => {
+            let room = width.saturating_sub(TOP_LINE_OWN + 1 + place.width() + " › ".width());
+            let title = crate::cut::fit_ellipsis(title, room);
+            left.push(Seg { text: place.to_string(), style, keep: 250 });
+            if title.width() > 1 {
+                left.push(Seg { text: format!(" › {title}"), style, keep: 249 });
+            }
+        }
+        None => left.push(Seg { text: name, style, keep: 250 }),
+    }
     if doc.loading {
         left.push(Seg { text: " …".into(), style: dim, keep: 240 });
     } else if doc.is_modified() {
@@ -8862,9 +8877,42 @@ fn code_line(
         let warn = t.try_get("warning").map(|s| Style { bg: None, ..s }).unwrap_or_default();
         left.push(Seg { text: "  ▲ changed on disk".into(), style: ui.base.patch(warn), keep: 246 });
     }
+    let mut hint = Vec::new();
+    // A web page (`web/page.rs`): how it read, faint — the part, its size, its copy's age, the host a redirect left;
+    // while it's read, what it reads and for how long, `C-c stop`; a read that failed, why, in warning
+    if let Some(p) = page {
+        let warn = ui.base.patch(ui.sign[2]);
+        match (&p.fetching, &p.failed, p.read) {
+            (Some(f), ..) => {
+                left.push(Seg { text: format!("  reading {}…", f.what), style: faint, keep: 244 });
+                let time = timer(crate::clock::since(f.since), !editor.moving());
+                left.push(Seg { text: format!(" {time}"), style: faint, keep: 243 });
+                hint.push(Seg { text: "  ".into(), style: faint, keep: 238 });
+                for s in hint_spans(ui, &[("C-c", "stop")], dim, faint) {
+                    hint.push(Seg { text: s.text, style: s.style, keep: 238 });
+                }
+            }
+            (None, Some(why), _) => {
+                let why = crate::web::page::brief(why);
+                left.push(Seg { text: format!("  {why}"), style: warn, keep: 244 })
+            }
+            (None, None, Some(read)) => {
+                let k = p.chars.div_ceil(1000);
+                left.push(Seg { text: format!("  {} · {k}k chars", read.word()), style: faint, keep: 241 });
+                if let Some((at, f)) = &p.copy {
+                    let ago = crate::term::ago(crate::clock::since(*at), true);
+                    let said = if p.claudes { format!("the copy Claude read {ago}") } else { ago };
+                    left.push(Seg { text: format!(" · {said}"), style: faint, keep: 240 });
+                    if let Some(from) = f.from.first() {
+                        left.push(Seg { text: format!(" · from {from}"), style: faint, keep: 239 });
+                    }
+                }
+            }
+            (None, None, None) => {}
+        }
+    }
     // A woven view (`weave.rs`): whose changes it merges — each name in its colour, how far behind the base's tip,
     // unsaved — and its conflicts in warning; what it couldn't merge, said
-    let mut hint = Vec::new();
     if let Some(m) = crate::weave::of(doc) {
         let warn = ui.base.patch(ui.sign[2]);
         match (&m.said, m.sides.is_empty()) {

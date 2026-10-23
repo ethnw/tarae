@@ -54,6 +54,7 @@ mod toasts;
 mod watchers;
 mod weave;
 mod web;
+mod weblinks;
 mod writing;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

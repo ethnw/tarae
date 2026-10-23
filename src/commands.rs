@@ -296,6 +296,7 @@ commands! {
         goto_implementation => "Go to implementation (LSP)",
         goto_reference => "Go to references (LSP)",
         goto_last_accessed_file => "Go to last accessed file",
+        goto_file => "Open the path or URL here",
         jumplist_picker => "Jump list",
         last_picker => "Reopen the last picker",
         jump_backward => "Jump back to the previous spot",
@@ -1738,6 +1739,10 @@ fn goto_implementation(cx: &mut Context) {
 }
 fn goto_reference(cx: &mut Context) {
     cx.editor.goto_location(crate::lsp_editor::Goto::References)
+}
+/// `gf` (body in gotofile.rs).
+fn goto_file(cx: &mut Context) {
+    crate::gotofile::goto_file(cx.editor)
 }
 
 // ── Jump list (body in jumplist.rs) ──────────────────────────────────────

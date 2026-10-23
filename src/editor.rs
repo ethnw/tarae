@@ -1244,7 +1244,10 @@ impl Editor {
     /// The slot of the empty scratch created at startup, if it can be handed over: the only buffer, or the
     /// current one when it's the session's own first (`session_open`) and nothing else was added in it since.
     fn replaceable_scratch(&self) -> Option<usize> {
-        let blank = |i: usize| self.docs[i].path.is_none() && !self.docs[i].is_modified();
+        // (a web page is no blank: its text is a page's, read)
+        let blank = |i: usize| {
+            self.docs[i].path.is_none() && !self.docs[i].is_modified() && self.docs[i].page.is_none()
+        };
         if self.docs.len() == 1 && blank(0) {
             return Some(0);
         }
@@ -3164,10 +3167,12 @@ impl Editor {
         }
     }
 
-    /// When to show the start screen: a single empty unnamed buffer and nothing typed.
+    /// When to show the start screen: a single empty unnamed buffer and nothing typed — never a page or a server's
+    /// document still empty while it's read (its line says so).
     pub fn welcome(&self) -> bool {
         self.docs.len() == 1
             && self.docs[0].path.is_none()
+            && self.docs[0].virtual_uri.is_none()
             && self.docs[0].text.len_bytes() == 0
             && !self.docs[0].is_modified()
             && self.mode == Mode::Normal
@@ -3213,6 +3218,7 @@ impl Editor {
             || self.session.chat.as_ref().is_some_and(|c| c.busy())
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || (run && slot_drawn)
+            || crate::web::page::reading_in_sight(self)
             || self.offer_busy();
         // (the wave held still where nothing moves on a clock: a frame a second, for the time waited — its timers
         // say whole seconds there, `term::running`)
@@ -3860,6 +3866,19 @@ impl Editor {
                 }),
             Action::Goto { path, line, col } => self.open_at(&path, line, col),
             Action::Note { path, line, .. } => self.open_at(&path, line, 0),
+            Action::Line { doc, line, col } => {
+                let Some(i) = self.docs.iter().position(|d| d.id == doc) else {
+                    return Err(anyhow::anyhow!("that buffer is closed"));
+                };
+                self.push_jump();
+                self.current = i;
+                let d = self.doc_mut();
+                let start =
+                    crate::movement::line_start(&d.text, line.min(crate::movement::last_line(&d.text)));
+                let at = crate::graphemes::prev_boundary(&d.text, (start + col + 1).min(d.text.len_bytes()));
+                d.set_selection(crate::selection::Selection::point(at.max(start)));
+                Ok(())
+            }
         }
     }
 
@@ -4550,6 +4569,10 @@ impl Editor {
         // A woven view's `enter`: to that change's workspace (`weave.rs`)
         if crate::weave::enter(self, key) {
             return took(Handler::Weave);
+        }
+        // A web page's `C-c` while it's read: stops the read (`web/page.rs`)
+        if crate::web::page::key(self, key) {
+            return took(Handler::Page);
         }
         self.pending.push(key);
         self.dispatch_pending();

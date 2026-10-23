@@ -349,11 +349,13 @@ impl Editor {
                 })
                 .flatten(),
         };
+        // (the answers' ages by the loop's clock, as their times were taken: read here, not on the worker)
+        let now = crate::allow::now_s();
         self.events.jobs().spawn(move || {
             let caps = basis.build();
             let more = More { reads, ..More::look(&look) };
             let answers = [&basis.kept().1.all, &basis.session, &basis.chat];
-            let items = items(&caps, answers, &hosts, &more, crate::allow::now_s());
+            let items = items(&caps, answers, &hosts, &more, now);
             move |ed: &mut Editor| ed.granted_open(items, again)
         });
     }
@@ -806,6 +808,8 @@ mod tests {
     fn the_list_says_where_each_comes_from_and_a_default_stays() {
         let s = crate::scratch::Scratch::new("granted-list");
         let (mut ed, root, _) = editor(&s);
+        // (an answer's age is in whole seconds: a run that crosses one said `1s ago` — the clock held, never)
+        crate::clock::hold();
         crate::allow::grant(&mut ed, &Grant::Write("/t/w".into()), Scope::Session);
         crate::allow::grant(&mut ed, &Grant::Port(8080), Scope::ThisChat);
         crate::allow::grant(&mut ed, &Grant::Terminals, Scope::Always);
@@ -848,6 +852,7 @@ mod tests {
         key(&mut ed, 'x');
         let said = ed.toasts.last().map(|t| t.text.clone()).unwrap_or_default();
         assert!(said.contains("does nothing in the list of grants"), "{said}");
+        crate::clock::release();
     }
 
     /// Piece E: a hook's kept yes, the packs' preflight told and the session's no-sandbox `s` are each listed —

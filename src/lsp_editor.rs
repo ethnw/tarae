@@ -37,6 +37,8 @@ impl Default for Clock {
 pub struct LspState {
     pub clients: Vec<Client>,
     next_id: ClientId,
+    /// tarae's own server for web pages (`web/serve.rs`) and what it answers from.
+    pub(crate) web: Option<(ClientId, crate::web::serve::Store)>,
     pub(crate) pending: HashMap<(ClientId, u64), Pending>,
     /// Last code action list, each with the server it came from (picker picks are taken from here) · new
     /// id per list · servers yet to answer for it · per-item previews.
@@ -509,6 +511,10 @@ impl Editor {
         if doc.loading {
             return;
         }
+        // (a web page: tarae's own server, its only one — `web/serve.rs`)
+        if doc.page.is_some() {
+            return crate::web::serve::attach(self, id);
+        }
         let Some(path) = doc.path.clone() else { return };
         let Some(spec) = crate::syntax::detect(&path) else { return };
         // (its session's servers paused: protected names a run made wait for their card — `made_hold_sync`)
@@ -639,6 +645,37 @@ impl Editor {
 
     /// A new `server` for the workspace folders `roots` (`checks_off`: its checks — its pack's `share.checks` —
     /// held off until they're turned on) — None if it couldn't start, or keeps exiting.
+    /// A server of tarae's own (`Client::own`) made and listed — its id.
+    pub(crate) fn lsp_own(
+        &mut self,
+        name: &str,
+        traits: &'static lsp::ServerTraits,
+        serve: lsp::Serve,
+    ) -> ClientId {
+        self.lsp.next_id += 1;
+        let cid = self.lsp.next_id;
+        self.lsp.clients.push(Client::own(cid, name, traits, serve));
+        self.lsp_own_serve(cid);
+        cid
+    }
+
+    /// tarae's own server `cid`: what was sent to it answered on a worker, each answer then handled as a server's
+    /// is — and what handling them sent (the requests queued while it started), in turn.
+    pub(crate) fn lsp_own_serve(&mut self, cid: ClientId) {
+        let Some(work) = self.client_mut(cid).and_then(|c| c.own_batch()) else { return };
+        self.events.shared_jobs().spawn(move || {
+            let replies = work();
+            let at = crate::clock::now();
+            move |ed: &mut Editor| {
+                for r in replies {
+                    ed.lsp.arrived = Some(at);
+                    ed.on_lsp_message(cid, r);
+                }
+                ed.lsp_own_serve(cid);
+            }
+        });
+    }
+
     pub(crate) fn lsp_start(
         &mut self,
         server: &lsp::ServerSpec,
@@ -707,10 +744,12 @@ impl Editor {
         let can = |cid: ClientId| {
             self.client(cid).is_some_and(|c| c.ready && !c.caps[cap].is_null() && c.caps[cap] != json!(false))
         };
+        // (tarae's own answers only what it says it can — never the main server's "more than it says")
+        let own = |cid: ClientId| self.client(cid).is_some_and(|c| c.own);
         doc.lsp
             .clients()
             .find(|&c| self.allows(c, feature) && can(c))
-            .or_else(|| doc.lsp.client.filter(|&c| self.allows(c, feature)))
+            .or_else(|| doc.lsp.client.filter(|&c| self.allows(c, feature) && !own(c)))
     }
 
     /// Flush queued changes as didChange (at the end of each event batch — key bursts become one message),
@@ -722,6 +761,11 @@ impl Editor {
             let uri = || lsp::uri(doc.path.as_deref().unwrap_or(std::path::Path::new("")));
             for l in doc.lsp.links.iter_mut().filter(|l| l.behind()) {
                 let Some(client) = clients.iter_mut().find(|c| c.id == l.client && c.ready) else { continue };
+                // (tarae's own reads a page's facts, never its text: a page's changes go nowhere)
+                if client.own {
+                    (l.changes, l.full_sync) = (Vec::new(), false);
+                    continue;
+                }
                 l.u16 = client.encoding == Encoding::Utf16;
                 l.version += 1;
                 let changes = std::mem::take(&mut l.changes);
@@ -891,7 +935,10 @@ impl Editor {
                     }
                     self.server_log(cid).line(&name, "ready", &format!("after {took}"));
                     self.lsp.failed.remove(&name);
-                    self.set_success(format!("{name} ready"));
+                    // (tarae's own is ready as it's made: nothing to say)
+                    if !self.client(cid).is_some_and(|c| c.own) {
+                        self.set_success(format!("{name} ready"));
+                    }
                     self.lsp_flush();
                     // A question put off while it started (N3): asked once it's up — by the end of the work
                     // it begins now (indexing), or after a moment if it begins none
@@ -1208,10 +1255,10 @@ impl Editor {
     pub fn lsp_request(&mut self, kind: Kind, method: &str, extra: Value) -> bool {
         let Some(cid) = self.ready_client(&kind) else { return false };
         let doc = self.doc();
-        let Some(path) = &doc.path else { return false };
+        let Some(uri) = doc.lsp_uri() else { return false };
         let head = doc.selection().primary().cursor(&doc.text);
         let position = lsp::to_position(&doc.text, head, self.encoding_of(cid));
-        let mut params = json!({ "textDocument": { "uri": lsp::uri(path) }, "position": position });
+        let mut params = json!({ "textDocument": { "uri": uri }, "position": position });
         if let (Value::Object(p), Value::Object(e)) = (&mut params, extra) {
             p.extend(e);
         }
@@ -1373,12 +1420,28 @@ impl Editor {
                     t.step_at(format!("answered ({n})"), arrived.unwrap_or_else(std::time::Instant::now));
                     t.step("main loop");
                 }
+                // Places in this very document when it has no file (a web page: its own headings and links) — a
+                // move in it, or a list of its lines
+                if let Some(uri) =
+                    self.docs.iter().find(|d| d.id == p.doc && d.path.is_none()).and_then(|d| d.lsp_uri())
+                {
+                    let all = lsp::location_uris(result);
+                    if !all.is_empty() && all.iter().all(|(u, _)| *u == uri) {
+                        let at: Vec<Value> = all.into_iter().map(|(_, pos)| pos).collect();
+                        return self.places_here(goto, p.doc, cid, at);
+                    }
+                }
                 // A document of the server's own (jdtls: a library's class as `jdt://`) — its text into a
                 // read-only buffer (`virtualdoc.rs`)
                 if goto != Goto::References
                     && let Some(v) = self.client(cid).and_then(|c| c.traits.virtual_docs.as_ref())
                     && let Some((uri, pos)) = v.location(result)
                 {
+                    // (a web page's link: the page it names — its buffer, or fetched; the jump pushed as it opens)
+                    if self.client(cid).is_some_and(|c| c.own) {
+                        self.trace_ends("a page");
+                        return crate::web::serve::follow(self, &uri);
+                    }
                     self.push_jump();
                     self.trace_ends("its own document asked");
                     return self.open_server_doc(cid, uri, pos);
@@ -1389,7 +1452,12 @@ impl Editor {
                     [] => {
                         self.lsp.refs.answered |= goto == Goto::References;
                         self.trace_ends("none");
-                        self.set_status(format!("no {} found", goto.noun()))
+                        // (a web page's server: why, in the page's words — a link it doesn't follow, an anchor it hasn't)
+                        let why = match self.client(cid).is_some_and(|c| c.own) && goto != Goto::References {
+                            true => crate::web::serve::why_none(self, p.doc, p.head),
+                            false => None,
+                        };
+                        self.set_status(why.unwrap_or_else(|| format!("no {} found", goto.noun())))
                     }
                     // One place: go straight there (references always list — even one is worth seeing)
                     [(path, pos)] if goto != Goto::References => {
@@ -1448,6 +1516,7 @@ impl Editor {
         let p = Pending { kind, doc: doc.id, version: doc.version(), head, session: self.session.id };
         let id = self.client_mut(cid).filter(|c| c.ready)?.request(method, params);
         self.lsp.pending.insert((cid, id), p);
+        self.lsp_own_serve(cid);
         Some(id)
     }
 
@@ -1461,11 +1530,11 @@ impl Editor {
 
     /// `space s` — symbols in this file (functions·types·fields …).
     pub fn document_symbols(&mut self) {
-        let Some(path) = self.doc().path.clone() else { return self.set_status("no file") };
+        let Some(uri) = self.doc().lsp_uri() else { return self.set_status("no file") };
         self.lsp_request_raw(
             Kind::DocumentSymbols,
             "textDocument/documentSymbol",
-            json!({ "textDocument": { "uri": lsp::uri(&path) } }),
+            json!({ "textDocument": { "uri": uri } }),
         );
     }
 
@@ -1474,13 +1543,17 @@ impl Editor {
         if self.doc().id != doc_id {
             return;
         }
-        let Some(path) = self.doc().path.clone() else { return };
+        // (a document with no file — a web page — is gone to by its buffer)
+        let at = |line, col| match self.doc().path.clone() {
+            Some(path) => Action::Goto { path, line, col },
+            None => Action::Line { doc: doc_id, line, col },
+        };
         let mut items = Vec::new();
         let mut lines = Vec::new();
         fn walk(
             v: &Value,
             parents: &[String],
-            path: &std::path::Path,
+            at: &dyn Fn(usize, usize) -> Action,
             items: &mut Vec<Item>,
             lines: &mut Vec<usize>,
         ) {
@@ -1498,7 +1571,7 @@ impl Editor {
                 let hint = container.unwrap_or_else(|| parents.join(" › "));
                 items.push(Item {
                     label: name.clone(),
-                    action: Action::Goto { path: path.to_path_buf(), line, col },
+                    action: at(line, col),
                     hint,
                     glyph: Some(symbol_glyph(s["kind"].as_u64().unwrap_or(0))),
                 });
@@ -1506,11 +1579,11 @@ impl Editor {
                 if s["children"].is_array() {
                     let mut p = parents.to_vec();
                     p.push(name);
-                    walk(&s["children"], &p, path, items, lines);
+                    walk(&s["children"], &p, at, items, lines);
                 }
             }
         }
-        walk(result, &[], &path, &mut items, &mut lines);
+        walk(result, &[], &at, &mut items, &mut lines);
         if items.is_empty() {
             return self.set_status("no symbols in this file");
         }
@@ -2191,6 +2264,10 @@ impl Editor {
     /// the front, its Claude is answering) has its wait called off.
     pub(crate) fn lsp_rest(&mut self, resting: &[(ClientId, bool)]) {
         for &(cid, rest) in resting {
+            // (tarae's own runs no program: nothing to rest)
+            if self.client(cid).is_some_and(|c| c.own) {
+                continue;
+            }
             match (rest, self.lsp.resting.contains_key(&cid)) {
                 (true, false) => {
                     let since = std::time::Instant::now();
@@ -2272,7 +2349,8 @@ impl Editor {
         let mut out: Vec<ClientId> = Vec::new();
         for c in &self.lsp.clients {
             let outside = c.roots.iter().all(|r| !roots.iter().any(|s| r.starts_with(s) || s.starts_with(r)));
-            if !outside || in_sight.contains(&c.id) || self.lsp.share.incoming(c.id) {
+            // (tarae's own runs no program: nothing to stop)
+            if !outside || c.own || in_sight.contains(&c.id) || self.lsp.share.incoming(c.id) {
                 self.lsp.unseen.remove(&c.id);
             } else if !self.lsp.unseen.contains_key(&c.id) {
                 out.push(c.id);
@@ -3128,6 +3206,45 @@ impl Editor {
             return Err((format!("{} is starting", c.name), true));
         }
         Ok(cid)
+    }
+
+    /// A go-to's places `at` in document `doc`, one with no file (a web page): one place a move there (a jump), more —
+    /// or references — a list of its lines.
+    fn places_here(&mut self, goto: Goto, doc: DocId, cid: ClientId, at: Vec<Value>) {
+        self.lsp.refs.answered |= goto == Goto::References;
+        if self.doc().id != doc {
+            return;
+        }
+        if let [pos] = at.as_slice()
+            && goto != Goto::References
+        {
+            self.push_jump();
+            self.trace_ends("jumped");
+            let enc = self.encoding_of(cid);
+            let d = self.doc_mut();
+            if let Some(b) = lsp::from_position(&d.text, pos, enc) {
+                d.set_selection(Selection::point(b));
+            }
+            return;
+        }
+        self.trace_ends("listed");
+        let d = self.doc();
+        let items: Vec<Item> = at
+            .iter()
+            .map(|pos| {
+                let line = pos["line"].as_u64().unwrap_or(0) as usize;
+                let col = pos["character"].as_u64().unwrap_or(0) as usize;
+                let text = d.text.get_line(line).map(|l| l.to_string()).unwrap_or_default();
+                Item {
+                    label: format!("{}: {}", line + 1, text.trim()),
+                    action: Action::Line { doc, line, col },
+                    hint: String::new(),
+                    glyph: None,
+                }
+            })
+            .collect();
+        let title = format!("{} in {}", goto.noun(), d.display_name_short());
+        self.open_picker(Picker::of("places", title, items, false), None);
     }
 
     /// A go-to's places as a list (N2): each row the code there, the name it's about standing out, by file

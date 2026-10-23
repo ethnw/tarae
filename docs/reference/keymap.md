@@ -174,6 +174,7 @@ In the editor you don't need this page: `space ?` finds any command by what it d
 | `g d` | `goto_definition` | Go to definition (LSP) |
 | `g D` | `goto_declaration` | Go to declaration (LSP) |
 | `g e` | `goto_last_line` | Go to last line |
+| `g f` | `goto_file` | Open the path or URL here |
 | `g g` | `goto_file_start` | Go to file start (or line &lt;n>) |
 | `g h` | `goto_line_start` | Go to line start |
 | `g i` | `goto_implementation` | Go to implementation (LSP) |
@@ -590,7 +591,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:preflight-output` |  | A preflight step's output in a buffer |
 | `:open` | `:o` `:e` `:edit` | Open files |
 | `:new` | `:n` | New scratch buffer |
-| `:reload` |  | Reload the file from disk (u brings your version back) |
+| `:reload` |  | Reload the file from disk, a page from its address (u brings your version back) |
 | `:buffer-close` | `:bc` `:bclose` | Close this buffer |
 | `:buffer-close!` | `:bc!` `:bclose!` | Close this buffer, dropping changes |
 | `:buffer-next` | `:bn` `:bnext` | Next buffer |
@@ -683,7 +684,8 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:weave` |  | This file with every session's changes woven in |
 | `:web` |  | Fetch a web page, or read a saved one, as text |
 | `:web!` |  | Fetch a web page again, not the kept copy |
-| `:web-stop` |  | Stop the page being fetched |
+| `:web-reader` |  | Read the page as main\|article\|page |
+| `:web-open` |  | Open the page in your browser |
 | `:session-open` |  | Work in another checkout beside this one |
 | `:session-switch` |  | Bring another session to the front |
 | `:session-new` |  | New session: a branch in its own checkout |

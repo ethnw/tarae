@@ -2,7 +2,7 @@
 
 A tour of what tarae does. Every key is listed in the [default keymap](reference/keymap.md); every setting in the
 [settings reference](reference/settings.md). Tests and the debugger have [their own page](testing-and-debugging.md),
-and so does [Claude](claude-integration.md).
+and so do [Claude](claude-integration.md) and [web pages](web.md).
 
 - [First steps](#first-steps)
 - [Editing](#editing)
@@ -438,31 +438,16 @@ configs carry over as they are.
   `b` blame at the cursor line's end — author, age, commit summary — on by default (`editor.git-blame`), `b` flips it
 - **Large files** (≥ 1 MB) load in the background — a 100 MB file shows its first screen in 18 ms. Editing and saving
   wait until the file is fully read, so a half-loaded buffer can never overwrite it
-- **Web pages** `:web https://… [main|article|page]` — a page fetched and read as text: tarae's own HTTP/1.1 GET on a
-  worker, through the same egress proxy as Claude's commands (no card for yours — the address you typed is the yes —
-  but every address refusal: never a cloud metadata server, link-local, this machine's own addresses; your upstream
-  proxy as theirs), TLS by rustls verified as your system verifies (a company's own root works). `http://` is read
-  over https but on this machine (`localhost`, reached directly); redirects followed, five at most, another host's
-  said (`from github.com`); gzip unpacked; nothing of yours sent (no cookie, credentials or referrer). 20 s to the
-  last byte, `:web-stop` (or the next `:web`) stops it; a whole page fetched is the session's for 15 minutes (`read 2m
-  ago`) — never an error's page, one maybe cut short or this machine's — and `:web!` fetches it again. A user or
-  password in the address, a bare IP address and a host name that isn't ASCII are refused, said.
-  `:web <path> [address] [main|article|page]` reads a page saved as HTML. Either way, in markdown: its `<main>` when
-  it has one, else its article (a lone `<article>`, else the block its title heads or its text is
-  densest in), else the whole page; the site's chrome, what it runs and what it hides left out; each link where it
-  stands (resolved against the address given), each code block fenced with its language. In a read-only buffer of
-  its own (`web · docs.rs › Rope in ropey`), how it read on the status line (`main · 87k chars · 753 links · …`); a
-  page that needs JavaScript says so. Read on a worker, within limits (8 MB of page, 512 levels of nesting, 2 MB of
-  text — each said when hit)
-- **Claude reads pages** — its `read` takes an `https://` URL beside files: a page over 16 KB comes as its outline
-  (headings with their lines, links out), then `url:120-200` or `url#heading` its part; under it, whole. A host
-  Claude's commands don't reach asks on a card first (`y` this read · `a` this chat · `s` this session · `n`) — a
-  read's yes never lets a command reach it (a command can post and run what it downloads), while a command's yes
-  lets Claude read there; the fetch starts after your answer (30 s to the last byte), through the same proxy and
-  address refusals as yours, another host's redirect said, not followed. The page goes to Claude framed as someone
-  else's words, never instructions, lines that look like keys hidden; the session's copy is shared with `:web` (no
-  second fetch). `:granted` lists the hosts, `d` takes one back. Each page read is a replay stop: `]r`/`[r`, follow
-  and the chat's row show the copy Claude read, at the lines it read — never fetched again
+- **Web pages** ([their own page](web.md)) — `:web https://…` or `gf` on an address reads a page as markdown into a
+  read-only buffer of the pane you're in; its links answer the code's keys (`gd` follows one, `space k` says where it
+  goes, `space s` its headings, `gr` the links to a heading), `C-o`/`C-i` across pages and code alike. `:reload`,
+  `:web-reader main|article|page`, `:web-open` (your browser), `:w <path>` (a copy of its text). Fetched by tarae
+  through the same egress proxy as Claude's commands, nothing of yours sent
+- **Claude reads pages** — its `read` takes an `https://` URL beside files, a host its commands don't reach asked on a
+  card first; the page framed as someone else's words; each read a replay stop showing the copy Claude read
+  ([web pages](web.md#claude-reads-pages))
+- **`gf`** opens the path or address under the cursor (or each selection's): a file as `:open` does, from the file's
+  folder or the project's (`file:12:5` at its line), a folder as its file list, an address as a page
 
 ## Syntax highlighting
 

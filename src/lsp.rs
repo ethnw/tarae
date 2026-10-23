@@ -808,7 +808,21 @@ pub struct Client {
     /// The settings `workspace/configuration` is answered from (`Options.config`, set on the writer thread
     /// before `initialize` is written).
     pub config: std::sync::Arc<std::sync::OnceLock<Value>>,
+    /// tarae's own, in this process (`Client::own`): no program, no folder — a server's life (its process, its idle
+    /// stop, its restart) isn't its.
+    pub own: bool,
+    /// tarae's own: what's sent to it, and what answers it (`own_batch`).
+    own_io: Option<OwnIo>,
 }
+
+struct OwnIo {
+    rx: mpsc::Receiver<Out>,
+    serve: std::sync::Arc<std::sync::Mutex<Serve>>,
+}
+
+/// What tarae's own server answers (`Client::own`): a message from the client — a request's result (None: `null`),
+/// a notification's ignored. Run on a worker, in the order the messages were sent.
+pub type Serve = Box<dyn FnMut(&str, &Value) -> Option<Value> + Send>;
 
 impl Drop for Client {
     /// The process goes — killed now (if it hasn't exited; tarae quitting can't leave it running), then waited
@@ -959,6 +973,8 @@ impl Client {
             started: std::time::Instant::now(),
             ready_at: None,
             config: Default::default(),
+            own: false,
+            own_io: None,
         };
         let root_uri = uri(root);
         let folders: Vec<Value> = roots.iter().map(|r| folder(r)).collect();
@@ -1049,6 +1065,78 @@ impl Client {
             init.to_string()
         })));
         Ok(client)
+    }
+
+    /// A server of tarae's own, in this process (web-P3: a page's links and headings): what's sent to it waits until
+    /// the editor hands it to `serve` on a worker (`own_batch` — a job, as the simulation knows them), and its answers
+    /// come back as a server's reader thread brings them — events, to `on_lsp_message` — so every request takes the
+    /// one path: `server_for`, `Pending`, a late answer dropped, the kind's handler. Initialized as a server is
+    /// (`serve` answers `initialize` with its capabilities).
+    pub fn own(id: ClientId, name: &str, traits: &'static ServerTraits, serve: Serve) -> Client {
+        let (tx, rx) = mpsc::channel::<Out>();
+        let client = Client {
+            id,
+            name: name.to_string(),
+            spec: ServerSpec {
+                name: name.to_string(),
+                command: String::new(),
+                args: Vec::new(),
+                except: Vec::new(),
+            },
+            traits,
+            root: PathBuf::new(),
+            roots: Vec::new(),
+            share: None,
+            checks_off: false,
+            quiescent: None,
+            settled_once: false,
+            health: String::new(),
+            init_sent: Default::default(),
+            tx,
+            next_req: 1,
+            ready: false,
+            queue: Vec::new(),
+            encoding: Encoding::Utf8,
+            progress: HashMap::new(),
+            caps: Value::Null,
+            child: None,
+            started: crate::clock::now(),
+            ready_at: None,
+            config: Default::default(),
+            own: true,
+            own_io: Some(OwnIo { rx, serve: std::sync::Arc::new(std::sync::Mutex::new(serve)) }),
+        };
+        let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} });
+        let _ = client.tx.send(Out::Body(init.to_string()));
+        client
+    }
+
+    /// tarae's own: what was sent to it since the last batch, as work for a worker — each request's reply, in the
+    /// order sent (a notification heard, answered by nothing). None: nothing sent, or not tarae's own.
+    pub fn own_batch(&mut self) -> Option<impl FnOnce() -> Vec<Value> + Send + 'static> {
+        let io = self.own_io.as_ref()?;
+        let sent: Vec<Out> = io.rx.try_iter().collect();
+        if sent.is_empty() {
+            return None;
+        }
+        let serve = io.serve.clone();
+        Some(move || {
+            let mut serve = serve.lock().unwrap_or_else(|e| e.into_inner());
+            let mut replies = Vec::new();
+            for out in sent {
+                let body = match out {
+                    Out::Body(s) => s,
+                    Out::Lazy(f) => f(),
+                };
+                let Ok(msg) = serde_json::from_str::<Value>(&body) else { continue };
+                let method = msg["method"].as_str().unwrap_or_default().to_string();
+                let answer = serve(&method, &msg["params"]);
+                // (a request has an id and a method; a response to one of its own it never sends)
+                let Some(rid) = msg.get("id").filter(|_| !method.is_empty()).cloned() else { continue };
+                replies.push(json!({ "jsonrpc": "2.0", "id": rid, "result": answer.unwrap_or(Value::Null) }));
+            }
+            replies
+        })
     }
 
     fn send(&mut self, out: Out) {

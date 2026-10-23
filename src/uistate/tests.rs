@@ -336,6 +336,10 @@ const SCENES: &[Scene] = &[
     ("the code", |_| {}),
     // (collab C2b: its `enter` is its own — `a_woven_views_enter_goes_where_keys_to_says`)
     ("a woven view in front", |ed| crate::weave::stand_in(ed, "a.rs", "one\ntwo\n")),
+    // (web P3: its `C-c` while it's read — `a_pages_c_c_goes_where_keys_to_says`; `:web!`'s, a copy in it)
+    ("a web page being read", |ed| {
+        crate::web::page::stand_in(ed, "https://page.test/a", "# A\none\ntwo\n");
+    }),
     ("insert mode", |ed| feed(ed, &["i"])),
     ("select mode", |ed| feed(ed, &["v"])),
     ("a prefix under way", |ed| feed(ed, &["g"])),
@@ -1184,6 +1188,40 @@ fn a_woven_views_enter_goes_where_keys_to_says() {
         if said == Region::Weave {
             assert_ne!(ed.said, before, "{name}: said");
             assert!(ed.messages.iter().any(|m| m.2.contains("nobody changed this line")), "{name}");
+        }
+    }
+}
+
+/// A web page's `C-c` (`web::page::key`) goes where `keys_to` says — its own in normal mode while the page is read, the
+/// code's or the prompt's with a sequence under way, insert mode, the command line over it, the read over — and never
+/// in silence: it says it stopped.
+#[test]
+fn a_pages_c_c_goes_where_keys_to_says() {
+    if no_pty_here("a_pages_c_c_goes_where_keys_to_says") {
+        return;
+    }
+    let cases: &[(&str, &[&str], Region)] = &[
+        ("normal mode", &[], Region::Page),
+        ("a prefix under way", &["g"], Region::Code),
+        ("a character awaited", &["f"], Region::Code),
+        ("insert mode", &["i"], Region::Code),
+        ("the command line", &[":"], Region::Prompt),
+        ("stopped: the code's", &["<C-c>"], Region::Code),
+    ];
+    for (name, keys, want) in cases {
+        let mut ed = editor();
+        crate::web::page::stand_in(&mut ed, "https://page.test/a", "");
+        frame(&mut ed);
+        feed(&mut ed, keys);
+        let said = ed.keys_to().route(key("<C-c>"));
+        assert_eq!(said, *want, "{name}");
+        let before = ed.said;
+        TOOK.set(None);
+        ed.handle_key(key("<C-c>"));
+        assert_eq!(TOOK.get(), Some(said.handler()), "{name}");
+        if said == Region::Page {
+            assert_ne!(ed.said, before, "{name}: said");
+            assert!(ed.messages.iter().any(|m| m.2 == "web: stopped reading page.test"), "{name}");
         }
     }
 }

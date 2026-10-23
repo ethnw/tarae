@@ -1,11 +1,11 @@
 //! `:web` reading saved pages on a worker, simulated: a page asked (again: read anew, another part), a file that
 //! isn't a page asked, the session's copy of a fetched page asked (read on a worker, no network), a page fetched from
 //! a server of the test's own on this machine (its way a stand-in, its proxy made before the simulation: a proxy's
-//! threads outlive a step), an address the fetch refuses, `:web-stop`, the buffer in front closed, the user taking
-//! their time, a frame; Claude's `read` of a page (P4): the session's copy, this machine's page at a port runs reach, a
-//! host not let through (its card, answered `y`, `s` or `n`) — the reads' and fetches' jobs landing among them in any
-//! order. After every step: one buffer at most per page's title, none for what isn't a page, no fetch's step left once
-//! none is under way, no card for a host answered for the session or the conversation.
+//! threads outlive a step), an address the fetch refuses, `C-c` on the page in front, the buffer in front closed, the
+//! user taking their time, a frame; Claude's `read` of a page (P4): the session's copy, this machine's page at a port
+//! runs reach, a host not let through (its card, answered `y`, `s` or `n`) — the reads' and fetches' jobs landing
+//! among them in any order. After every step: one buffer at most per page's address, what isn't a page never read
+//! into its buffer, no step left by a read, no card for a host answered for the session or the conversation.
 
 use std::time::Duration;
 
@@ -106,7 +106,16 @@ fn input(sim: &mut Sim, ed: &mut Editor, fetched: &str, n: u64) -> String {
         // tests')
         4 => typed(ed, fetched).replace(fetched, "web http://localhost/"),
         5 => typed(ed, "web https://u:p@kept.test/"),
-        6 => typed(ed, "web-stop"),
+        6 => {
+            let reading = crate::web::page::takes(ed);
+            ed.handle_key(crate::key::Key {
+                code: crate::key::Code::Char('c'),
+                ctrl: true,
+                alt: false,
+                shift: false,
+            });
+            format!("C-c (a read under way: {reading})")
+        }
         7 if ed.docs.len() > 1 => typed(ed, "buffer-close"),
         7 => "(one buffer: none closed)".into(),
         8 => {
@@ -140,16 +149,20 @@ fn typed(ed: &mut Editor, line: &str) -> String {
     }
 }
 
-/// One buffer at most a page's title; none for the PDF; no fetch's step once none is under way.
+/// One buffer at most a page's address; the PDF's never read into; no step left by a read.
 fn held(ed: &Editor) -> Result<(), String> {
-    if ed.session.web_fetch.is_none() && ed.toasts.iter().any(|t| t.step == Some("web")) {
-        return Err("a fetch's step left with none under way".into());
+    if ed.toasts.iter().any(|t| t.step == Some("web")) {
+        return Err("a read's step left".into());
     }
-    let web: Vec<&str> =
-        ed.docs.iter().filter_map(|d| d.title.as_deref()).filter(|t| t.starts_with("web ·")).collect();
+    let pages: Vec<&crate::document::Document> =
+        ed.docs.iter().filter(|d| crate::web::page::of(d).is_some()).collect();
     let mut seen = std::collections::HashSet::new();
-    if let Some(twice) = web.iter().find(|t| !seen.insert(**t)) {
+    if let Some(twice) = pages.iter().filter_map(|d| d.virtual_uri.as_deref()).find(|u| !seen.insert(*u)) {
         return Err(format!("two buffers of {twice:?}"));
+    }
+    let pdf = pages.iter().find(|d| d.virtual_uri.as_deref().is_some_and(|u| u.ends_with(".pdf")));
+    if let Some(d) = pdf.filter(|d| crate::web::page::of(d).is_some_and(|p| p.read.is_some())) {
+        return Err(format!("what isn't a page read into {:?}", d.title));
     }
     // (a card a call; but none for a host this session or conversation answered)
     let answered = |h: &str| {
@@ -165,11 +178,8 @@ fn held(ed: &Editor) -> Result<(), String> {
         crate::offer::What::WebRead(a) => Some(a.host.as_str()),
         _ => None,
     });
-    if let Some(h) = cards.into_iter().find(|h| answered(h)) {
-        return Err(format!("a card for {h}, which was answered for good"));
-    }
-    match web.iter().find(|t| t.contains("pdf")) {
-        Some(t) => Err(format!("a buffer for what isn't a page: {t:?}")),
+    match cards.into_iter().find(|h| answered(h)) {
+        Some(h) => Err(format!("a card for {h}, which was answered for good")),
         None => Ok(()),
     }
 }

@@ -306,8 +306,6 @@ pub struct Session {
     /// The hosts whose pages Claude's `read` reaches unasked in it (`s` on a read's card, until you quit) — a read's
     /// answer opens no run (`web::tool`).
     pub web_hosts: Vec<(String, u16)>,
-    /// The fetch under way (`:web https://…`): what stops it (`:web-stop`, the next `:web`).
-    pub web_fetch: Option<crate::web::fetch::Stop>,
     /// Claude's reads of pages under way: what stops them (the turn's end, `web::tool::turn_over`).
     pub web_reads: Vec<crate::web::fetch::Stop>,
     /// The user's `y`s on read cards: the call each was for and the host its pages may reach — tarae's side, never
@@ -317,9 +315,15 @@ pub struct Session {
     /// yours (`fetch::yours`).
     #[cfg(test)]
     pub web_way: Option<crate::web::fetch::MakeWay>,
-    /// Tests: how many stopped or replaced fetches' results were dropped.
+    /// Tests: how many stopped or replaced reads' results were dropped (their page's buffer closed, read anew).
     #[cfg(test)]
     pub web_dropped: usize,
+    /// Tests: the addresses `:web-open` handed the system's opener (none is started).
+    #[cfg(test)]
+    pub web_opened: Vec<String>,
+    /// Tests: how many pages' fetches were started (`web::page::start` — copies and files not counted).
+    #[cfg(test)]
+    pub web_fetches: usize,
     /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
     /// host's, `hosts`), kept with it in `$state/sessions` until it ends or `:sandbox-disallow` takes it back.
     pub allowed: crate::allow::Allowed,
@@ -482,13 +486,16 @@ impl Session {
             hosts_given: Default::default(),
             pages: Default::default(),
             web_hosts: Vec::new(),
-            web_fetch: None,
             web_reads: Vec::new(),
             web_once: Vec::new(),
             #[cfg(test)]
             web_way: None,
             #[cfg(test)]
             web_dropped: 0,
+            #[cfg(test)]
+            web_opened: Vec::new(),
+            #[cfg(test)]
+            web_fetches: 0,
             allowed: Default::default(),
             caps: None,
             caps_asked: 0,

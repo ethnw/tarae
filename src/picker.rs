@@ -82,6 +82,13 @@ pub enum Action {
         token: u64,
         id: String,
     },
+    /// Line `line` (from 0) of open buffer `doc` — one with no file (a web page's heading, a link to it), byte `col`
+    /// within that line.
+    Line {
+        doc: DocId,
+        line: usize,
+        col: usize,
+    },
     /// Line `line` (from 0) of the file, byte `col` within that line.
     Goto {
         path: PathBuf,
@@ -1150,6 +1157,7 @@ impl Action {
             | Action::JumpParked { path, line, .. } => Some((path, Some(*line))),
             Action::Buffer(_)
             | Action::Jump { .. }
+            | Action::Line { .. }
             | Action::ReplaceFile(_)
             | Action::Dir(_)
             | Action::ChangedFile(_)

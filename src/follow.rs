@@ -1560,7 +1560,7 @@ pub fn page_read(
 /// read-only. Never fetched again: a copy the session no longer keeps is said.
 fn show_page(ed: &mut Editor, url: &str, at: std::time::Instant, lines: Range<usize>) {
     match ed.session.pages.kept(url, at) {
-        Some(f) => crate::web::open::show_copy(ed, f, crate::clock::since(at), lines),
+        Some(f) => crate::web::page::open_copy(ed, f, at, lines),
         None => ed.set_status(format!(
             "the page Claude read {} isn't kept — :web! {url} fetches it now",
             crate::term::ago(crate::clock::since(at), true)
