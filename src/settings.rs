@@ -670,6 +670,13 @@ pub static SETTINGS: &[Setting] = &[
         set: |c, v| c.shuttle_keys = crate::shuttle::Level::of(s(v)),
     },
     Setting {
+        path: "workspace.sync",
+        kind: Kind::Enum(crate::keepclose::MODES),
+        doc: "When a workspace's base branch moves: \"ask\" — one card for every workspace behind it (what would conflict, and where), y moving the clean ones onto its tip once each is idle, their changes in no commit taken along; \"idle\" — the clean ones moved unasked, a card for the conflicting ones; \"off\" — left where they are. Only your own config sets it",
+        get: |c| Value::from(c.workspace_sync.as_str()),
+        set: |c, v| c.workspace_sync = v.as_str().unwrap_or("ask").to_string(),
+    },
+    Setting {
         path: "session.worktrees",
         kind: Kind::Str,
         doc: "Where sessions' checkouts go, a folder per repository (\"\" = $XDG_DATA_HOME/tarae/worktrees)",

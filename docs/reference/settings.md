@@ -102,6 +102,12 @@ The name is also the `:set` path: `:set editor.scrolloff 8` changes it until you
 |---|---|---|---|
 | `ui.shuttle-keys` | `"off"` · `"light"` · `"weighty"` | `"off"` | Let a program you run (an assistant, a test script) type into tarae over its UI socket (tarae keys), each step saying where it must land — off · light: keys outside cards, light cards' answers, every n · weighty: weighty answers too, once read (not built yet: as light). A card asks once for each program; your own key pauses it, :shuttle-end ends it. Only your own config sets it |
 
+## `[workspace]`
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `workspace.sync` | `"ask"` · `"idle"` · `"off"` | `"ask"` | When a workspace's base branch moves: "ask" — one card for every workspace behind it (what would conflict, and where), y moving the clean ones onto its tip once each is idle, their changes in no commit taken along; "idle" — the clean ones moved unasked, a card for the conflicting ones; "off" — left where they are. Only your own config sets it |
+
 ## `[session]`
 
 | Setting | Type | Default | Description |

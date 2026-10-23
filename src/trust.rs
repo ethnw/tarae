@@ -62,8 +62,9 @@ pub const RISKY: [&str; 23] = [
 /// tarae (`ui.shuttle-keys`), whether your cards and your
 /// time on reviewed changes are kept (`llm.card-record`, `review.record`), whether pings spend your usage to keep
 /// a conversation warm (`llm.keep-warm*`), what the board's Claudes are asked (`review.angles`) and how many of
-/// them run on your credential and memory (`review.skeptics-max`, `review.board-at-once`) — a project never does.
-pub const YOURS_ONLY: [&str; 15] = [
+/// them run on your credential and memory (`review.skeptics-max`, `review.board-at-once`), whether your workspaces'
+/// trees are rewritten unasked (`workspace.sync`) — a project never does.
+pub const YOURS_ONLY: [&str; 16] = [
     "llm.card-record",
     "review.record",
     "llm.keep-warm",
@@ -82,6 +83,8 @@ pub const YOURS_ONLY: [&str; 15] = [
     // (how many of them: each is billed on your reviewer credential, ~200 MB while it reads)
     "review.skeptics-max",
     "review.board-at-once",
+    // (a base's move rebases every workspace on it: a project's "idle" would rewrite your trees unasked)
+    "workspace.sync",
 ];
 
 pub fn yours_only(setting: &str) -> bool {

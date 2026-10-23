@@ -244,6 +244,62 @@ const WEAVE: &[&str] = overlap_keys!(
     "@10?conflict 1 of 1",
     "@1"
 );
+/// collab C3: two more checkouts — fix's own commit on the `threads.insert` line, docs untouched — then main's own way
+/// of that line committed in the checkout tarae started in: main moved, and its one card names both workspaces behind
+/// it, fix's would-be conflict in words (`basemoved`).
+const BASE_MOVED: &[&str] = &[
+    "@1",
+    ":",
+    "sh git worktree add -q ../fix && git worktree add -q ../docs",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../docs",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../fix",
+    "\r",
+    "@3",
+    ":",
+    "e src/main.rs",
+    "\r",
+    "@1",
+    "/",
+    "threads.insert",
+    "\r",
+    "A",
+    " // fix's way",
+    "\x1b",
+    ":",
+    "w",
+    "\r",
+    "@1",
+    ":",
+    "sh git -c user.name=demo -c user.email=demo@example.com -c commit.gpgsign=false commit -qm fix src/main.rs",
+    "\r",
+    "@3",
+    " ",
+    "W",
+    "@1",
+    "1",
+    "@2",
+    "/",
+    "threads.insert",
+    "\r",
+    "A",
+    " // main's way",
+    "\x1b",
+    ":",
+    "w",
+    "\r",
+    "@1",
+    ":",
+    "sh git -c user.name=demo -c user.email=demo@example.com -c commit.gpgsign=false commit -qm main src/main.rs",
+    "\r",
+    "@20?main moved",
+    "@2",
+];
 /// Three checkouts changing `src/main.rs` far apart — main's `threads.insert` line saved, docs's `println!` saved, fix's
 /// `mod thread` unsaved — then `:weave` in fix: a clean merge, each change in its session's colour, its prefix in the
 /// sign column (`weaveclean`, collab C2b); the cursor on fix's change, `‹fix›` at its end.
@@ -1837,6 +1893,8 @@ const SCENES: &[Scene] = &[
     Scene { name: "weave", claude: "writemid", files: MAIN, keys: WEAVE },
     Scene { name: "weaveclean", claude: "writemid", files: MAIN, keys: WEAVE_CLEAN },
     Scene { name: "weavegone", claude: "writemid", files: MAIN, keys: WEAVE_GONE },
+    // (collab C3: main moved — one card for every workspace behind it, what would conflict where)
+    Scene { name: "basemoved", claude: "writemid", files: MAIN, keys: BASE_MOVED },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))

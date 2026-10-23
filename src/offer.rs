@@ -250,6 +250,10 @@ pub enum What {
     /// Sessions marked in `space W`, brought one after another (`bringqueue.rs`, frictions29 24 a): `y` starts the
     /// queue, `n` leaves them marked.
     BringQueue(Box<crate::bringqueue::Ask>),
+    /// A base moved, workspaces behind it (`keepclose.rs`, collab C3) — one card for all of them: `y` moves the clean
+    /// ones onto its tip, each once it's idle (all conflicting: rebases them), `c` the conflicting ones too through
+    /// the resolve loop, `v` the instruction files' changes, `n` leaves them.
+    BaseMoved(Box<crate::keepclose::Moves>),
     /// A git-tab action would run hooks from inside the checkout that its base doesn't have as they are
     /// (`hooks.rs`): `y` runs it as usual, `n` runs it with no hooks this time.
     Hooks(Box<crate::hooks::Ask>),
@@ -341,6 +345,7 @@ pub const KINDS: &[&str] = &[
     "instructions",
     "up-to",
     "bring-queue",
+    "base-moved",
     "hooks",
     "restart",
     "restart-same",
@@ -398,6 +403,8 @@ pub enum Act {
     RestartWait,
     Highs,
     Stuck,
+    /// `c` on a base's move: the conflicting workspaces rebased too (`keepclose.rs`).
+    KeepClose(char),
 }
 
 /// How the front card stands, for a weighty one's answers: drawn (its answers on screen), settled (not just
@@ -459,6 +466,8 @@ impl What {
             | What::RebaseResolved { .. }
             // (the queue is the editor's: its marks go with it — marked again after)
             | What::BringQueue(_)
+            // (the tips are read anew after it, as baselines: the next move asks again)
+            | What::BaseMoved(_)
             // (about the checkout as it was then — `:session-bring` looks at it afresh and raises it again)
             | What::RebaseHeld(_)
             // (Claude's: a run's job can't be run again blind — its call ends with the turn)
@@ -722,6 +731,7 @@ impl Offer {
                 | What::RebaseResolved { .. }
                 | What::UpTo(_)
                 | What::BringQueue(_)
+                | What::BaseMoved(_)
                 | What::Hooks(_)
                 | What::Restart(_)
                 | What::RestartSame { .. }
@@ -864,7 +874,7 @@ impl Offer {
                     || self.made()
                     || matches!(self.what, What::NotesStale { .. })))
             || (c == 'R' && self.end_dirty())
-            || (c == 'c' && (self.commits_first() || self.recovers()))
+            || (c == 'c' && (self.commits_first() || self.recovers() || self.moves_mixed()))
             || (c == 'D' && (self.recovers() || self.both()))
             || (c == 'Y' && !self.like.is_empty())
             || (c == 'a'
@@ -942,6 +952,7 @@ impl Offer {
             'R' if self.end_dirty() => A::Remove(false),
             'c' if self.commits_first() => A::CommitFirst,
             'c' if self.recovers() => A::Compare,
+            'c' if self.moves_mixed() => A::KeepClose('c'),
             'D' if self.recovers() => A::Discard,
             'y' => A::Accept,
             'Y' if !self.like.is_empty() => A::AcceptLike,
@@ -1010,6 +1021,11 @@ impl Offer {
             What::ChangeSet { whose, .. } => Some(whose),
             _ => None,
         }
+    }
+
+    /// Whether `c` answers it: a base's move with clean workspaces and conflicting ones behind it (`keepclose.rs`).
+    pub fn moves_mixed(&self) -> bool {
+        matches!(&self.what, What::BaseMoved(m) if m.mixed())
     }
 
     /// Whether `b` answers it: a new session's card with another base to make it from (#85).
@@ -1307,6 +1323,7 @@ impl Offer {
             }
             W::UpTo(_) => vec![('y', "Move it up"), ('n', "Leave it")],
             W::BringQueue(_) => vec![('y', "Bring them in turn"), ('n', "Not now")],
+            W::BaseMoved(m) => m.answers(self.output.is_some()),
             W::Hooks(a) if a.runnable() => {
                 vec![('y', if a.hooks.len() == 1 { "Run it" } else { "Run them" }), ('n', "Skip hooks")]
             }
@@ -1404,6 +1421,7 @@ impl Offer {
             W::Instructions(_) => "instructions",
             W::UpTo(_) => "up-to",
             W::BringQueue(_) => "bring-queue",
+            W::BaseMoved(_) => "base-moved",
             W::Hooks(_) => "hooks",
             W::Restart(_) => "restart",
             W::RestartSame { .. } => "restart-same",
@@ -1741,6 +1759,7 @@ impl crate::editor::Editor {
             Act::RestartOther => self.offer_restart_other(),
             Act::RestartWait => self.offer_restart_wait(),
             Act::Highs => crate::codereview::card_highs(self),
+            Act::KeepClose(c) => self.offer_keep_close(c),
             Act::Stuck => {
                 if let Some(s) = self.offers.first().and_then(Offer::stuck).cloned() {
                     crate::stuck::show(self, &s);
@@ -1899,6 +1918,10 @@ impl crate::editor::Editor {
                 self.rebase_answer(&root, true);
             }
             What::UpTo(m) => self.rebase_move_up(id, *m),
+            What::BaseMoved(m) => {
+                self.offer_finished(id, Ok(()));
+                crate::keepclose::answered(self, *m, 'y');
+            }
             What::BringQueue(ask) => {
                 self.offer_finished(id, Ok(()));
                 self.bring_queue_start(*ask);
@@ -2033,6 +2056,18 @@ impl crate::editor::Editor {
         self.offer_answered(&o, 'p');
         if let What::Rebased(m) = o.what {
             self.rebase_preflight_then_bring(*m);
+        }
+    }
+
+    /// `c` on a base's move: the clean workspaces and the conflicting ones too (`keepclose::answered`).
+    pub fn offer_keep_close(&mut self, c: char) {
+        if !self.offers.first().is_some_and(Offer::moves_mixed) {
+            return;
+        }
+        let o = self.offers.remove(0);
+        self.offer_answered(&o, c);
+        if let What::BaseMoved(m) = o.what {
+            crate::keepclose::answered(self, *m, c);
         }
     }
 
@@ -2529,6 +2564,7 @@ impl crate::editor::Editor {
             }
             What::UpTo(m) => self.set_status(format!("Left {} where it is, behind {}", m.name, m.base)),
             What::BringQueue(_) => self.set_status("Not brought — they stay marked: B in space W asks again"),
+            What::BaseMoved(m) => crate::keepclose::dismissed(self, &m),
             What::Hooks(ask) => self.hooks_answer(o.id, *ask, false),
             What::Restart(c) => crate::restart::chosen(self, o.id, *c, None),
             What::RestartSame { id } => crate::restart::same_answer(self, o.id, id, false),

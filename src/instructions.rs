@@ -302,6 +302,31 @@ pub fn look(root: &Path, main: &Path, dirty: &[PathBuf]) -> Found {
     found
 }
 
+/// The main checkout's changes to checkout `root`'s instruction files since their bases (a worker) — nothing
+/// written: each file the main checkout changed (only the checkout's own changes: none), with the changed lines (`- `
+/// taken out, `+ ` added) — what a base's move card names and its `v` shows (`keepclose.rs`); the move's `follow` takes
+/// them. A copy with no base is left out, as `look_out` leaves it: whose change is whose can't be told (diffed from
+/// the copy's own text, its own edits would read as the main checkout's taking them out).
+pub fn behind(root: &Path, main: &Path) -> Vec<(String, Vec<String>)> {
+    let Some(dir) = bases(root) else { return Vec::new() };
+    let untracked = crate::worktree::instructions(main);
+    let mut v = Vec::new();
+    for rel in crate::worktree::INSTRUCTIONS.iter().filter(|r| untracked.iter().any(|u| u == *r)) {
+        let (Some(main_text), Some(here)) = (plain(main, rel), plain(root, rel)) else { continue };
+        let Ok(base) = std::fs::read_to_string(dir.join(rel)) else { continue };
+        if here == main_text || base == main_text {
+            continue;
+        }
+        let mut lines = Vec::new();
+        for (_, _, old, new) in crate::editdiff::line_changes(&base, &main_text) {
+            lines.extend(old.lines().map(|l| format!("- {l}")));
+            lines.extend(new.lines().map(|l| format!("+ {l}")));
+        }
+        v.push((rel.to_string(), lines));
+    }
+    v
+}
+
 /// The other direction (frictions29 #79: carried to the main checkout by hand, a `cp` refused): the session's
 /// own changes to its copies since their base, each for the main checkout's — a worker. Only a copy with a base
 /// (whose change it is can be told) and changed here; one the main checkout's is the same as, nothing.

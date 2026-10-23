@@ -569,6 +569,10 @@ fn write(editor: &mut Editor, path: &str, force: bool) -> Result<(), String> {
         // Save as: the new file's own stamp counts (not the old file's), and the name changes only once
         // it's written
         Some(new) => {
+            // (into a checkout being moved onto its base: refused — `keepclose.rs`)
+            if let Some(why) = crate::keepclose::refused(editor, [new.as_path()], "write it") {
+                return Err(why);
+            }
             // (written here: a save of the old name still under way finishes first)
             editor.flush_saves();
             let doc = editor.doc_mut();

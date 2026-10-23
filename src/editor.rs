@@ -512,6 +512,8 @@ pub struct Editor {
     pub presence: crate::presence::State,
     /// Where two workspaces' changes would conflict, and what each was last taken as (`overlap.rs`).
     pub overlap: crate::overlap::State,
+    /// The workspaces kept close to their base: its tips watched, its moves asked and made (`keepclose.rs`).
+    pub keep_close: crate::keepclose::State,
     pub(crate) behind: bool,
     pub(crate) next_pane: crate::split::PaneId,
     pub mode: Mode,
@@ -928,6 +930,7 @@ impl Editor {
             next_session: 0,
             presence: Default::default(),
             overlap: Default::default(),
+            keep_close: Default::default(),
             behind: false,
             next_pane: 1 + crate::pane::IDS,
             mode: Mode::Normal,
@@ -2256,6 +2259,7 @@ impl Editor {
         crate::follow::watch(self);
         crate::presence::sync(self);
         crate::overlap::sync(self);
+        crate::keepclose::sync(self);
         crate::weave::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);

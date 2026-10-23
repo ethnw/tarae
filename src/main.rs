@@ -84,6 +84,7 @@ mod install;
 mod instructions;
 mod java;
 mod jumplist;
+mod keepclose;
 mod keepwarm;
 mod key;
 mod keymap;

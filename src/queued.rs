@@ -138,8 +138,12 @@ pub struct Next {
     pub trace: crate::trace::RunTrace,
 }
 
-/// Whether `slot` is running a run now.
+/// Whether `slot` is running a run now — or the checkout is being moved onto its base (`keepclose.rs`): every run
+/// waits for that.
 fn busy(l: &Session, slot: Slot) -> bool {
+    if l.moving.is_some() {
+        return true;
+    }
     match slot {
         Slot::Task => l.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running),
         Slot::Tests => l.test_run.as_ref().is_some_and(|r| r.state == crate::testing::RunState::Running),
@@ -148,6 +152,9 @@ fn busy(l: &Session, slot: Slot) -> bool {
 
 /// What runs in `slot` now, as a waiting row names it (`cargo test`, `tests editor::tests::undo`).
 fn holder(l: &Session, slot: Slot) -> Option<String> {
+    if let Some(base) = &l.moving {
+        return Some(format!("moving onto {base}"));
+    }
     match slot {
         Slot::Task => l
             .task_run
@@ -165,6 +172,10 @@ fn holder(l: &Session, slot: Slot) -> Option<String> {
 /// Whether Claude's run in `slot` is what runs there now — what the user's own run waits behind rather
 /// than stops.
 pub fn claudes_running(l: &Session, slot: Slot) -> bool {
+    // (the checkout moved onto its base: the user's run waits for that too — `keepclose.rs`)
+    if l.moving.is_some() {
+        return true;
+    }
     match slot {
         Slot::Task => {
             l.task_run.as_ref().is_some_and(|r| r.by_claude && r.state == crate::task::State::Running)

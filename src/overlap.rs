@@ -220,6 +220,10 @@ pub struct State {
     /// A round's wait (the quiet) or the round itself under way.
     waiting: bool,
     running: bool,
+    /// A round asked with nothing moved (`ask`: a base's tip moved — `keepclose.rs`).
+    asked: bool,
+    /// Rounds begun since tarae started — a round's number is this as it began (`keepclose::landed`).
+    pub started: u64,
     /// Merges worked out, by the two commits — those of the last round only.
     merges: HashMap<(String, String), Arc<Vec<Conflict>>>,
     /// Where the folders are (tarae's cache's `overlap`) — None: never a round (tests but those that set it).
@@ -247,6 +251,8 @@ impl Default for State {
             said: HashMap::new(),
             waiting: false,
             running: false,
+            asked: false,
+            started: 0,
             merges: HashMap::new(),
             dir: match cfg!(test) {
                 true => None,
@@ -340,14 +346,23 @@ pub fn moved(ed: &mut Editor, dir: &Path) {
     }
 }
 
-/// The quiet waited for, on a worker, while a workspace has moved and no round waits or runs.
+/// A round with no tree taken again — a base's tip moved (`keepclose.rs`): each take reads its base's tip anew.
+pub fn ask(ed: &mut Editor) {
+    ed.overlap.asked = true;
+    arm(ed);
+}
+
+/// The quiet waited for, on a worker, while a workspace has moved (or a round was asked) and no round waits or runs.
 fn arm(ed: &mut Editor) {
     let o = &ed.overlap;
     if o.waiting || o.running {
         return;
     }
-    let Some(last) = o.places.values().filter_map(|p| p.moved).max() else { return };
-    let wait = o.quiet.saturating_sub(crate::clock::since(last));
+    let last = o.places.values().filter_map(|p| p.moved).max();
+    if last.is_none() && !o.asked {
+        return;
+    }
+    let wait = last.map_or(Duration::ZERO, |l| o.quiet.saturating_sub(crate::clock::since(l)));
     ed.overlap.waiting = true;
     ed.events.shared_jobs().spawn(move || {
         crate::event::sleep(wait);
@@ -396,12 +411,15 @@ fn start(ed: &mut Editor) {
         p.moved = None;
     }
     ed.overlap.running = true;
+    ed.overlap.asked = false;
+    ed.overlap.started += 1;
+    let seq = ed.overlap.started;
     let merges = ed.overlap.merges.clone();
     // (the first round makes this tarae's folder and takes its lock — and prunes the gone taraes')
     let own = ed.overlap.dir.clone().filter(|_| ed.overlap.lock.is_none());
     ed.events.shared_jobs().spawn(move || {
         let r = round(ws, &merges, own.as_deref());
-        move |ed: &mut Editor| landed(ed, r)
+        move |ed: &mut Editor| landed(ed, r, seq)
     });
 }
 
@@ -945,8 +963,9 @@ fn hunks(base: &str, side: &str) -> Vec<(Range<u32>, Range<u32>)> {
 }
 
 /// A round landed: the snapshots kept (of workspaces still open), the overlaps now — a new one said once, one
-/// gone in `:messages` — and the quiet armed again if something moved meanwhile, or a take failed.
-fn landed(ed: &mut Editor, r: Round) {
+/// gone in `:messages` — and the quiet armed again if something moved meanwhile, or a take failed. A base's move
+/// it predicts on is looked at then (`keepclose::landed`; `seq`: the round's number).
+fn landed(ed: &mut Editor, r: Round, seq: u64) {
     ed.overlap.running = false;
     ed.overlap.rounds += 1;
     // (a take that failed: moved again, taken on the quiet as any change — `TRIES` in a row at most)
@@ -1034,6 +1053,7 @@ fn landed(ed: &mut Editor, r: Round) {
     }
     ed.overlap.now = now;
     arm(ed);
+    crate::keepclose::landed(ed, seq);
 }
 
 /// The other side as said: the base's tip as the session whose checkout has that branch (its name, its colour).

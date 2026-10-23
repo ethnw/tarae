@@ -293,13 +293,17 @@ impl Editor {
         self.save_job(id, false, then, Some(root))
     }
 
-    fn save_job(
+    pub(crate) fn save_job(
         &mut self,
         id: DocId,
         force: bool,
         then: Then,
         beneath: Option<PathBuf>,
     ) -> Result<(), String> {
+        // (into a checkout being moved onto its base: written once it lands — `keepclose::hold_save`)
+        if crate::keepclose::hold_save(self, id, force, &then, &beneath) {
+            return Ok(());
+        }
         let doc = self.docs.iter_mut().find(|d| d.id == id).ok_or("the buffer was closed")?;
         let path = doc.check_save(force).map_err(|e| format!("{e:#}"))?;
         doc.saving += 1;

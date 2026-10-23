@@ -518,6 +518,12 @@ pub fn step(ed: &mut Editor, undo: bool) -> Result<(), String> {
         });
         return Ok(());
     };
+    // (its checkout being moved onto its base: git's rebase would stop on a write, or its abort put the old text
+    // back — refused, nothing queued)
+    let then = if undo { "take it back" } else { "bring it back" };
+    if let Some(why) = crate::keepclose::refused(ed, files.iter().map(|f| f.path.as_path()), then) {
+        return Err(why);
+    }
     let question = list[i].question.clone();
     let mut changed = Vec::new();
     let mut kept = 0;

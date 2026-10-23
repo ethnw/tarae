@@ -542,6 +542,25 @@ yours). What of it Claude sees, you show it on purpose, each your own act: a quo
 the screen attached (`C-s`), or a `y` on Claude's screen card — the frame drawn as it is, the woven lines in it too
 (you chose to show it; nothing is blanked).
 
+**Kept close to the base.** The longer a session's workspace stays behind its base, the bigger its conflicts. tarae
+watches each base branch (its ref file, no git run) and, when it moves — a bring, a commit, a pull in the main
+checkout — asks once for every workspace behind it, on one card (`main moved`: `3 new commits — 3 workspaces behind
+it`), a row each (`fix — 4 behind, its 2 changed files go with it`, `db — 12 behind, would conflict in src/term.rs
+L210–260`), what would conflict found as overlaps are, on the new tip. `y` moves the clean ones onto the tip; `c`
+rebases the conflicting ones too, each through its own Claude as `:session-bring`'s rebase does, while it's small;
+`v` shows the main checkout's changes to their instruction files (taken as the move lands, never over a line the
+workspace changed); `n` leaves them — the base's next move asks again. A newer move takes the card's place, and the
+newest tip wins. A workspace moves only once it's idle — its Claude between turns, no review, rebase or run under
+way, no unsaved buffer there — one at a time: `git rebase --autostash` in its checkout, no hooks, its changes in no
+commit taken along (one that can't go back cleanly stays in git's stash, said); one that conflicts after all is put
+back as it was and said. While it moves, a message to its Claude, a run there and a save of a file there (`:w`,
+auto-save) wait for it — the save is written once it lands, unless the move changed that file; `space u`, `:w` to a
+new name there and a change set into it are refused until it lands, said (`fix is moving onto main — take it back
+once it lands`). Each is said once:
+`fix · moved onto main — 4 commits under it, now at 1a2b3c4`, its reloads one line. `workspace.sync` (your own
+config only): `"ask"` (the card), `"idle"` (the clean ones moved unasked, a card for the conflicting ones), `"off"`.
+Claude hears nothing of it: a file a move changed is one "changed since you last read it".
+
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,
 each note. `[r` and `]r` step back and forward through them at any time, during the turn or after it. The editor

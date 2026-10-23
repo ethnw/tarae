@@ -195,6 +195,8 @@ pub struct Session {
     /// Its checkout's rebase onto its base, under way (`rebase.rs`) · its bring waits for the preflight to
     /// pass (the bring card's `p`).
     pub rebase: Option<crate::rebase::Rebase>,
+    /// Its checkout being moved onto its base's tip (`keepclose.rs`) — that base: its messages and runs wait.
+    pub moving: Option<String>,
     pub bring_after_preflight: bool,
     /// The bring card whose `p` that preflight runs for: up again, with what failed, if it doesn't pass
     /// (frictions34 42 — a toast was all, and the output went with the task panel's next run).
@@ -420,6 +422,7 @@ impl Session {
             preflight: None,
             preflight_kept: if cfg!(test) { None } else { crate::preflight::kept_path() },
             rebase: None,
+            moving: None,
             bring_after_preflight: false,
             bring_card_after: None,
             bring_failed: None,

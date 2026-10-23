@@ -2327,8 +2327,10 @@ pub(crate) fn send_queued(ed: &mut Editor) {
     // (its claude not started yet, waiting for the settings' read: what waits goes as the gate opens,
     // `gate_opened`; a send now would only queue itself again, and this loop take it again, for good — the review
     // of frictions36. A re-read while it runs — the settings' watch — holds nothing: its claude is there)
+    // (nor while its checkout is moved onto its base: sent as the move lands — `keepclose::moved`)
     let held = |ed: &Editor| {
-        ed.session.chat.as_ref().is_some_and(|c| c.busy() || (c.settings.waiting() && !c.running()))
+        ed.session.moving.is_some()
+            || ed.session.chat.as_ref().is_some_and(|c| c.busy() || (c.settings.waiting() && !c.running()))
     };
     if held(ed) {
         return;
@@ -2389,12 +2391,14 @@ fn hold_queued(ed: &mut Editor) {
 /// Enter in the chat: the input goes as the next turn — or waits its turn while Claude works, or for the
 /// user's answer on a card their pointing raised (`reads::point`), said, the input kept.
 pub fn send(ed: &mut Editor) {
+    // (its checkout being moved onto its base: the message waits for that as for a turn — `keepclose.rs`)
+    let moving = ed.session.moving.is_some();
     let Some(c) = &mut ed.session.chat else { return };
     let question = c.input.text().trim().to_string();
     // Claude is working: it waits its turn (#23) — said over the input, sent when this turn ends; a second
     // one joins it. So it does while the project's settings are read (`claudetrust.rs` — their card doesn't
     // hold it: claude runs held back meanwhile): sent once it starts
-    if (c.busy() || c.settings.waiting()) && !question.is_empty() {
+    if (c.busy() || c.settings.waiting() || moving) && !question.is_empty() {
         // (what's over the input is this message's: it waits with it, the input free for the next one's — joined
         // to one queued before: a newer screen in place of its, the elements pointed at added, the quotes within
         // one message's limits — the newest past them stay over the input, said)

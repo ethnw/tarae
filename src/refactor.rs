@@ -196,6 +196,10 @@ pub fn land_told(
     let title = asked.unwrap_or_else(|| what.clone());
     let files: Vec<FileChange> =
         files.into_iter().filter(|f| f.before != f.after || f.op != Op::Text).collect();
+    // (its checkout being moved onto its base — `keepclose.rs`: never mid-turn, so a stand-in's guard)
+    if let Some(why) = crate::keepclose::refused(ed, moved_paths(&files), "try again") {
+        return answer(ed, call, Err(format!("nothing changed: {why}")));
+    }
     if files.is_empty() {
         return answer(
             ed,
@@ -263,6 +267,9 @@ pub fn land_yours(
     if files.is_empty() {
         return ed.set_status(format!("nothing to change — {what} leaves every file as it is"));
     }
+    if let Some(why) = crate::keepclose::refused(ed, moved_paths(&files), "apply it") {
+        return ed.set_warning(format!("{what}: nothing changed — {why}"));
+    }
     ed.session.applying = Some(Landing {
         stage: Stage::Fresh,
         whose: Whose::Yours,
@@ -283,6 +290,17 @@ pub fn land_yours(
         row: None,
     });
     next(ed);
+}
+
+/// Every path a change set writes — each file's, and a move's target.
+fn moved_paths(files: &[FileChange]) -> impl Iterator<Item = &Path> {
+    files.iter().flat_map(|f| {
+        let to = match &f.op {
+            Op::Move { to, .. } => Some(to.as_path()),
+            _ => None,
+        };
+        std::iter::once(f.path.as_path()).chain(to)
+    })
 }
 
 /// What a change's file was for `space u`: None — no file (one it makes).

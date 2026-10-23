@@ -374,8 +374,19 @@ impl Editor {
         let mut said: Vec<(DocId, String, bool)> = Vec::new();
         // (each reload or deletion, by document: counted into its own session's batch)
         let mut counted: Vec<(DocId, bool)> = Vec::new();
+        let moving: Vec<std::path::PathBuf> = std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .filter(|l| l.moving.is_some())
+            .map(|l| l.root.clone())
+            .collect();
         for (id, known, now, body) in stats {
             let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { continue };
+            // (your edits in a checkout being moved onto its base — `keepclose.rs`: git rewrites the file and puts
+            // it back; nothing written back, nothing said — looked at as it lands, against the stamp it had)
+            if doc.is_modified() && doc.path.as_ref().is_some_and(|p| moving.iter().any(|r| p.starts_with(r)))
+            {
+                continue;
+            }
             // Saved (or reloaded) since the stat started — the change it saw may be our own write; or a save
             // of ours is being written right now
             if doc.disk != known || doc.saving > 0 {
@@ -932,6 +943,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Your edits in a checkout being moved onto its base (`keepclose.rs`): git rewriting the file mid-rebase is
+    /// neither a conflict said nor a stamp taken — the move's landing looks at it; outside a move, the same is one.
+    #[test]
+    fn a_buffer_with_edits_in_a_moving_checkout_is_left_alone_by_the_watch() {
+        let dir = crate::scratch::Scratch::new("disk-moving");
+        let root = std::fs::canonicalize(dir.join("")).unwrap();
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.root = root.clone();
+        ed.open(&file).unwrap();
+        for c in ['i', 'x'] {
+            ed.handle_key(crate::key::Key::plain(crate::key::Code::Char(c)));
+        }
+        ed.handle_key(crate::key::Key::plain(crate::key::Code::Esc));
+        let (id, known) = (ed.doc().id, ed.doc().disk);
+        ed.session.moving = Some("main".into());
+        std::fs::write(&file, "one, mid-rebase\n").unwrap();
+        ed.on_disk(vec![(id, known, stamp(&file), Some("one, mid-rebase\n".into()))]);
+        assert!(!ed.doc().disk_conflict && ed.doc().disk == known, "left alone while it moves");
+        assert!(!ed.messages.iter().any(|m| m.2.contains("changed on disk")));
+        ed.session.moving = None;
+        ed.on_disk(vec![(id, known, stamp(&file), Some("one, mid-rebase\n".into()))]);
+        assert!(ed.doc().disk_conflict, "outside a move it's a conflict");
     }
 
     /// A write from outside that the buffer takes — reloaded, or Claude writing the edit it already holds —

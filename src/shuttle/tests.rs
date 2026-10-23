@@ -1131,6 +1131,29 @@ fn every_card() -> Vec<Offer> {
             ended: true,
         })),
         W::UpTo(Box::new(moved())),
+        // (one clean, one that would conflict: `c` too)
+        W::BaseMoved(Box::new(crate::keepclose::Moves {
+            base: (p(), "main".into()),
+            from: "a".into(),
+            to: "b".into(),
+            commits: 1,
+            ws: [Vec::new(), vec![("a.rs".to_string(), None)]]
+                .into_iter()
+                .enumerate()
+                .map(|(i, conflicts)| crate::keepclose::Ws {
+                    id: i as u64 + 1,
+                    name: format!("s{i}"),
+                    root: p(),
+                    branch: format!("s{i}"),
+                    behind: 1,
+                    ahead: 0,
+                    changed: 0,
+                    conflicts,
+                    instructions: Vec::new(),
+                })
+                .collect(),
+            unasked: Vec::new(),
+        })),
         W::BringQueue(Box::new(crate::bringqueue::Ask {
             ids: Vec::new(),
             names: vec!["s".into()],

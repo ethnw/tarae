@@ -235,7 +235,7 @@ impl Held {
 
 /// The files git has changed in the checkout at `root`, relative — new ones untracked don't count: git
 /// refuses only one in the way, and says so. None: git can't say.
-fn changed(root: &Path) -> Option<Vec<String>> {
+pub(crate) fn changed(root: &Path) -> Option<Vec<String>> {
     let status = git(root, &["status", "--porcelain", "-z", "--untracked-files=no"], None).ok()?;
     let mut v = Vec::new();
     let mut entries = status.split('\0').filter(|e| !e.is_empty());
@@ -884,9 +884,11 @@ impl Editor {
         });
     }
 
-    /// A run in the front session's task panel: the rebase waits its turn behind it — true if it does.
+    /// A run in the front session's task panel (or its checkout being moved onto its base — `keepclose.rs`): the
+    /// rebase waits its turn behind it — true if it does.
     fn rebase_queued(&mut self, m: &Moved, stash: bool) -> bool {
-        let busy = self.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running);
+        let busy = self.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running)
+            || self.session.moving.is_some();
         if busy {
             crate::queued::push(self, crate::queued::What::Rebase { moved: Box::new(m.clone()), stash });
         }
