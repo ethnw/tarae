@@ -11,8 +11,9 @@
 //! sides that meet or touch are a conflict, the same change twice is one. One merge at a time per view, the last
 //! one shown meanwhile; a buffer's version, a save, a snapshot or a HEAD moving asks again.
 //!
-//! Claude hears of it only where its own change meets another's, in the answer of the `edit` or `read` of that
-//! file (`told`, as C2's) — never the merged text, never another side's lines.
+//! It's the person's: Claude hears nothing of it, as of C2's overlaps — a message's context sends none of it, in front
+//! or on screen (`NOT_SENT`); what of it Claude sees the person shows on purpose: a quote (`space >`), the screen
+//! attached (`C-s`), a `y` on Claude's screen card (`seeing.rs`) — the frame as drawn, never blanked.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -167,6 +168,11 @@ struct Hunk {
     /// It meets the tip's own change (a side behind the tip): a conflict even alone.
     tip: bool,
 }
+
+/// What a message's context says of a woven view in front in place of it (`chat::context`): nothing of it goes to
+/// Claude by itself — not its name, text, selection or lines on screen; a quote, `C-s` or a screen card's `y` is the
+/// person's act.
+pub const NOT_SENT: &str = "a view of yours — not sent";
 
 /// The document's woven view, if it is one.
 pub fn of(doc: &crate::document::Document) -> Option<&Shown> {
@@ -433,12 +439,8 @@ fn key(ed: &Editor, rel: &str) -> Key {
 #[cfg(test)]
 pub fn settled(ed: &Editor, id: DocId) -> bool {
     let Some(m) = ed.docs.iter().find(|d| d.id == id).and_then(of) else { return false };
-    !m.asking && current(ed, m)
-}
-
-/// Whether `m`'s last merge is of what's there now: no buffer, save or snapshot of the file moved since it was asked.
-fn current(ed: &Editor, m: &Shown) -> bool {
-    m.of.as_ref() == Some(&key(ed, &m.rel))
+    // (its last merge of what's there now: no buffer, save or snapshot of the file moved since it was asked)
+    !m.asking && m.of.as_ref() == Some(&key(ed, &m.rel))
 }
 
 /// A workspace as the worker reads it.
@@ -1058,45 +1060,6 @@ pub fn hunks(m: &Shown) -> Vec<crate::git::Hunk> {
         .collect();
     crate::sorting::by_key(&mut out, |h| h.lines.start);
     out
-}
-
-/// What Claude's `edit` or `read` answer of `path` says of the woven view: where a merge of that file was worked
-/// out with its own session's change in it, a line per conflict its change is in — `src/a.rs: merged with fix's
-/// change: conflict at L30–34` (its own lines, the other's name) — nothing when it merges clean. Never the merged
-/// text, never another side's lines. None: no merge of it worked out (C2's line stands).
-pub fn told(ed: &Editor, path: &Path) -> Option<Vec<String>> {
-    let me = ed.session.id;
-    let rel = path.strip_prefix(&ed.session.root).ok()?.to_string_lossy().into_owned();
-    if crate::sandbox::key_named_in(&ed.session.root, path) {
-        return None;
-    }
-    let m = sessions(ed)
-        .flat_map(|l| ed.docs.iter().filter(|d| l.docs.contains(&d.id)))
-        .filter_map(of)
-        // (only a merge of what's there now: one from before Claude's own edit could tell it of a conflict it just
-        // resolved — C2's line stands meanwhile)
-        .find(|m| m.rel == rel && m.said.is_none() && current(ed, m))?;
-    let mine = m.sides.iter().position(|s| s.session == me)?;
-    let mut out = Vec::new();
-    for c in &m.merge.conflicts {
-        let Some(p) = c.parts.iter().find(|p| p.side == mine) else { continue };
-        let others: Vec<String> = c
-            .spans()
-            .filter(|(_, s)| *s != Some(mine))
-            .filter(|(_, s)| s.is_some() || c.tip)
-            .map(|(_, s)| crate::cut::fit_ellipsis(&m.part_name(c, s).0, 32))
-            .collect();
-        let who = match others.is_empty() {
-            true => "another".to_string(),
-            false => others.join(" and "),
-        };
-        let own = p.own.start..p.own.end.max(p.own.start + 1);
-        out.push(format!(
-            "{rel}: merged with {who}'s change: conflict at {}",
-            crate::overlap::lines_said(&own)
-        ));
-    }
-    Some(out)
 }
 
 /// `text` split in lines as the diff counts them (each with its `\n`).

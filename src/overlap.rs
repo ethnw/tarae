@@ -16,9 +16,9 @@
 //!
 //! Said (`landed`): a new overlap — a pair and a file not said while it lasts, or its lines elsewhere — is a toast
 //! once (`fix ≈ main · src/term.rs L210–260 — would conflict`); gone and back, it's said again; the strip and the session list say `≈ main` after the name, the other side in its
-//! colour; the side panel's file row `≈m` (`presence::file_marks`). One that goes is said in `:messages` only. Claude hears of
-//! an overlap only in the answer of the tool that touches that file (`edit`, `read` — `told`): one line, its own
-//! file's lines, the other side's name — never its lines or its text, never a feed of the others.
+//! colour; the side panel's file row `≈m` (`presence::file_marks`). One that goes is said in `:messages` only. Claude hears
+//! nothing of it (the user, 2026-10-23: a line in its `edit`/`read` answers changed nothing it did, measured): the
+//! person sees it and tells the session that should act.
 //!
 //! What another workspace changed is data here (`docs/threat-model.md`): a path is shown, never read as anything, and
 //! one named like a key is never named.
@@ -1016,8 +1016,8 @@ fn landed(ed: &mut Editor, r: Round) {
             let msg = toast(ed, o);
             let paint = toast_paint(ed, o);
             ed.set_warning(msg.clone());
-            // (yours: a Claude hears of it only in the tool that touches the file — never from the `ui:` line; the
-            // names in their colours, `≈` in warning, as the strip and the list say it)
+            // (yours: a Claude hears nothing of it — not from the `ui:` line either; the names in their colours, `≈`
+            // in warning, as the strip and the list say it)
             for t in ed.toasts.iter_mut().filter(|t| t.text.ends_with(&msg)) {
                 t.persons = true;
                 t.paint = paint.clone();
@@ -1256,34 +1256,6 @@ pub fn in_file(ed: &Editor, rel: &Path) -> Vec<(String, Option<u8>, Option<Range
         }
     }
     out
-}
-
-/// What Claude's `edit` or `read` answer says of `path` (in its session's checkout) — the woven view's words where
-/// one of the file was worked out (`weave::told`), else a line per other side its file would conflict with —
-/// `src/a.rs: fix's change would conflict here: L30–34` — its own lines, the other's name, nothing else. None: no
-/// overlap there.
-pub fn told(ed: &Editor, path: &Path) -> Vec<String> {
-    // (where the file was woven in memory — the buffers, unsaved too — that weave says it: `weave::told`)
-    if let Some(lines) = crate::weave::told(ed, path) {
-        return lines;
-    }
-    if ed.overlap.now.is_empty() {
-        return Vec::new();
-    }
-    let top = ed.overlap.places.get(&ed.session.id).and_then(|p| p.snap.as_ref()).map(|s| s.top.clone());
-    let top = top.unwrap_or_else(|| ed.session.root.clone());
-    let Ok(rel) = path.strip_prefix(&top) else { return Vec::new() };
-    let rel = rel.to_string_lossy();
-    in_file_of(ed, ed.session.id, &rel)
-        .into_iter()
-        .map(|(other, lines)| {
-            let who = crate::cut::fit_ellipsis(&name(ed, &other).0, 32);
-            match lines {
-                Some(l) => format!("{rel}: {who}'s change would conflict here: {}", lines_said(&l)),
-                None => format!("{rel}: {who}'s change would conflict with this file"),
-            }
-        })
-        .collect()
 }
 
 /// Session `id`'s workspace ended (`session_close`): its overlaps gone, its folder removed on a worker — once no

@@ -374,52 +374,111 @@ fn the_bases_tip_counts_and_a_key_named_file_is_never_named() {
     assert!(listed(&ed, ed.session.id).iter().all(|l| !l.contains("pem")));
 }
 
-/// The tool that touches the file tells its Claude, one line: `read` and `edit` of a file that would conflict, its
-/// own lines and the other's name — nothing in the answer of one that wouldn't, and nothing at Claude's level of the
-/// UI state.
-#[test]
-fn claude_hears_only_in_the_tool_that_touches_the_file() {
-    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("overlap-told");
-    let mut c = crate::chat::Chat::new();
-    let _ = crate::chat::stand_in(&mut c);
-    ed.session.chat = Some(c);
-    change(&mut ed, &main.join("a.rs"), 3, "three, main");
-    change(&mut ed, &fix.join("a.rs"), 3, "three, fix");
-    settle(&mut ed, 1);
-    let line = "a.rs: main's change would conflict here: L3";
-    assert_eq!(told(&ed, &fix.join("a.rs")), [line]);
-    assert!(told(&ed, &fix.join("b.rs")).is_empty());
-    let answer = |ed: &mut Editor, n: u64| {
-        let end = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let got = crate::tools::ANSWERED
-                .with(|a| a.borrow().iter().find(|(i, _)| *i == json!(n)).map(|(_, r)| r.clone()));
-            if let Some(r) = got {
-                return r.unwrap_or_else(|e| e);
-            }
-            assert!(std::time::Instant::now() < end, "call {n} answered");
-            if ed.session.review.as_ref().is_some_and(|r| r.ready) {
-                crate::llm::review_key(ed, Key::plain(Code::Char('y')));
-                crate::refactor::next(ed);
-            }
-            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
-                ed.handle_event(ev);
-            }
+/// Call `n`'s answer (a change's review answered `y` as it comes).
+fn answer(ed: &mut Editor, n: u64) -> String {
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let got = crate::tools::ANSWERED
+            .with(|a| a.borrow().iter().find(|(i, _)| *i == json!(n)).map(|(_, r)| r.clone()));
+        if let Some(r) = got {
+            return r.unwrap_or_else(|e| e);
         }
+        assert!(std::time::Instant::now() < end, "call {n} answered");
+        if ed.session.review.as_ref().is_some_and(|r| r.ready) {
+            crate::llm::review_key(ed, Key::plain(Code::Char('y')));
+            crate::refactor::next(ed);
+        }
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+}
+
+/// Claude's `read` of `file` (call `n`), answered.
+fn read(ed: &mut Editor, n: u64, file: &str) -> String {
+    crate::readtool::call(ed, crate::tools::Call::test(n), &json!({"files": [file]})).unwrap();
+    answer(ed, n)
+}
+
+/// Claude's `edit` of `file`, `from` → `to` (call `n`), answered.
+fn edit(ed: &mut Editor, n: u64, file: &str, from: &str, to: &str) -> String {
+    let args = json!({"edits": [{"file_path": file, "old_string": from, "new_string": to}]});
+    crate::edittool::call(ed, crate::tools::Call::test(n), &args).unwrap();
+    answer(ed, n)
+}
+
+/// A chat for the session in front (its claude a stand-in: what it's sent, read from the receiver).
+fn chat_in(ed: &mut Editor) -> std::sync::mpsc::Receiver<String> {
+    let mut c = crate::chat::Chat::new();
+    let rx = crate::chat::stand_in(&mut c);
+    ed.session.chat = Some(c);
+    rx
+}
+
+/// The last message the stand-in claude was sent (its context and text), its turn then over.
+fn message(ed: &mut Editor, rx: &std::sync::mpsc::Receiver<String>) -> String {
+    let got = rx.try_iter().filter(|l| l.contains("<editor-context>")).last().expect("a message sent");
+    crate::chat::stand_in_done(ed);
+    got
+}
+
+/// Claude hears nothing of the others (the user, 2026-10-23: the line its `edit`/`read` answers carried changed nothing
+/// it did in 18 live runs): with an overlap on the file and its woven view showing the conflict, Claude's `read` and
+/// `edit` of it — the conflicting line itself too — answer with the file and the change alone; nothing at Claude's
+/// level of the UI state either, while the person's toast and list say it. Nor does a message sent with the woven view in
+/// front carry any of it by itself — not its text, its lines on screen, nor a selection in it; a quote of it (`space
+/// >`) does: that's the person handing it over.
+#[test]
+fn claude_hears_nothing_of_the_others() {
+    let Scene { mut ed, main, dir: _dir, .. } = scene("overlap-unheard");
+    let rx = chat_in(&mut ed);
+    ed.session.git_branch = Some("fix".into());
+    change(&mut ed, &main.join("a.rs"), 3, "three, main");
+    // (fix's typed in its buffer and saved: the woven view reads the buffer)
+    press(&mut ed, "3ggA, three, fix<esc>:w<ret>");
+    settle(&mut ed, 1);
+    assert_eq!(ed.overlap.now.len(), 1, "the overlap");
+    // (the woven view of it, its conflict worked out)
+    crate::typed::execute(&mut ed, "weave").unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while crate::weave::of(ed.doc()).is_none_or(|m| m.merges == 0 || m.asking) {
+        assert!(std::time::Instant::now() < end, "the merge: {:?}", ed.messages);
+        if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+    assert_eq!(crate::weave::of(ed.doc()).unwrap().merge.conflicts.len(), 1, "the woven conflict");
+    // A message with the woven view in front, on screen: none of it goes
+    let of_it = |m: &str| {
+        ["three, main", "<file-content>", "<excerpt", "<selection", "on screen", "woven"]
+            .into_iter()
+            .filter(|w| m.contains(w))
+            .collect::<Vec<_>>()
     };
-    let read = |ed: &mut Editor, n: u64, file: &str| {
-        crate::readtool::call(ed, crate::tools::Call::test(n), &json!({"files": [file]})).unwrap();
-        answer(ed, n)
-    };
+    frame(&mut ed);
+    assert!(crate::chat::submit(&mut ed, "what's this?", None, None));
+    let m = message(&mut ed, &rx);
+    assert!(of_it(&m).is_empty() && m.contains(crate::weave::NOT_SENT), "{:?}: {m}", of_it(&m));
+    // Nor a selection in it
+    press(&mut ed, "%");
+    frame(&mut ed);
+    assert!(crate::chat::submit(&mut ed, "and this?", None, None));
+    let m = message(&mut ed, &rx);
+    assert!(of_it(&m).is_empty(), "{:?}: {m}", of_it(&m));
+    // Quoted, it goes: the person's act
+    press(&mut ed, "<space>>");
+    assert!(ed.session.chat.as_ref().is_some_and(|c| c.quotes.len() == 1), "quoted");
+    press(&mut ed, "see<ret>");
+    let m = message(&mut ed, &rx);
+    assert!(m.contains("<quoted") && m.contains("three, main"), "{m}");
+    ed.session.at = crate::session::At::Code;
+    let heard = |s: &str| ["conflict", "main's", "merged with"].iter().any(|w| s.contains(w));
     let a = read(&mut ed, 71, "a.rs");
-    assert!(a.contains("line 3, three") || a.contains("three, fix"), "{a}");
-    assert!(a.trim_end().ends_with(line), "{a}");
-    let b = read(&mut ed, 72, "b.rs");
-    assert!(!b.contains("would conflict"), "{b}");
-    let args = json!({"edits": [{"file_path": "a.rs", "old_string": "line 9", "new_string": "line nine"}]});
-    crate::edittool::call(&mut ed, crate::tools::Call::test(73), &args).unwrap();
-    let e = answer(&mut ed, 73);
-    assert!(e.contains(line), "{e}");
+    assert!(a.contains("three, fix") && !heard(&a), "{a}");
+    let e = edit(&mut ed, 72, "a.rs", "three, fix", "three, fixed");
+    assert!(!heard(&e), "{e}");
+    let a = read(&mut ed, 73, "a.rs");
+    assert!(a.contains("three, fixed") && !heard(&a), "{a}");
     // (the state at Claude's level: never — nor its toast, nor the context's `ui:` line)
     assert!(ed.ui_state_claude().sessions.iter().all(|l| l.overlaps.is_empty()));
     assert!(ed.toasts.iter().any(|t| t.text.contains("would conflict")), "the toast is up");

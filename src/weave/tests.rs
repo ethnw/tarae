@@ -1,10 +1,8 @@
 //! The woven view (`weave.rs`): the merge itself, and three checkouts of a fixture repository merged in memory —
-//! what's shown, in whose colour, what keys do there, and what Claude hears.
+//! what's shown, in whose colour, and what keys do there.
 
 use std::process::Command;
 use std::time::Duration;
-
-use serde_json::json;
 
 use super::*;
 use crate::config::Config;
@@ -593,60 +591,6 @@ fn space_v_w_and_the_lists_v_open_it() {
     assert!(on(&ed), "docs's row in hand");
     press(&mut ed, "v");
     assert!(ed.messages.iter().any(|m| m.2.contains("nothing of it to weave yet")), "{:?}", ed.messages);
-}
-
-/// Claude's `read` of a file in its workspace whose merge was worked out: a line where its change meets another's —
-/// its own lines, the other's name — nothing where it merges clean (C2's line held back too).
-#[test]
-fn claude_hears_where_its_change_meets_another_only() {
-    let Scene { mut ed, main, fix, dir: _dir, .. } = scene("weave-told");
-    let mut c = crate::chat::Chat::new();
-    let _ = crate::chat::stand_in(&mut c);
-    ed.session.chat = Some(c);
-    save_line(&mut ed, &main.join("a.rs"), 5, "five, main");
-    type_line(&mut ed, 5, "five, fix");
-    crate::typed::execute(&mut ed, "weave").unwrap();
-    woven_to(&mut ed, 1);
-    assert_eq!(
-        told(&ed, &fix.join("a.rs")),
-        Some(vec!["a.rs: merged with main's change: conflict at L5".to_string()])
-    );
-    assert_eq!(told(&ed, &fix.join("b.rs")), None, "no merge of it worked out");
-    assert_eq!(
-        crate::overlap::told(&ed, &fix.join("a.rs")),
-        ["a.rs: merged with main's change: conflict at L5"]
-    );
-    // Clean: nothing
-    let a = ed.docs.iter().position(|d| d.path.as_deref() == Some(fix.join("a.rs").as_path())).unwrap();
-    let n = shown(&ed).merges;
-    let merged = ed.current;
-    ed.current = a;
-    type_line(&mut ed, 5, "line 5");
-    type_line(&mut ed, 9, "nine, fix");
-    ed.current = merged;
-    // (its own edit just resolved it: the merge from before isn't told — C2's line stands, none here)
-    assert_eq!(told(&ed, &fix.join("a.rs")), None, "a merge from before the edit");
-    assert!(crate::overlap::told(&ed, &fix.join("a.rs")).is_empty());
-    woven_to(&mut ed, n + 1);
-    assert!(shown(&ed).merge.conflicts.is_empty());
-    assert_eq!(told(&ed, &fix.join("a.rs")), Some(Vec::new()));
-    let answer = |ed: &mut Editor, n: u64| {
-        let end = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let got = crate::tools::ANSWERED
-                .with(|a| a.borrow().iter().find(|(i, _)| *i == json!(n)).map(|(_, r)| r.clone()));
-            if let Some(r) = got {
-                return r.unwrap_or_else(|e| e);
-            }
-            assert!(std::time::Instant::now() < end, "call {n} answered");
-            if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
-                ed.handle_event(ev);
-            }
-        }
-    };
-    crate::readtool::call(&mut ed, crate::tools::Call::test(81), &json!({"files": ["a.rs"]})).unwrap();
-    let r = answer(&mut ed, 81);
-    assert!(!r.contains("merged with") && !r.contains("conflict"), "{r}");
 }
 
 /// The woven view of `view` in front again, in fix's workspace (after an `enter` took you elsewhere).

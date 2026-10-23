@@ -250,10 +250,6 @@ pub fn call(ed: &mut Editor, call: Call, args: &Value) -> Result<(), String> {
                 };
                 let mut note = r.told.clone();
                 note.extend(r.stale);
-                // (another workspace's change that would conflict with one of these files — collab C2)
-                for f in &r.files {
-                    note.extend(crate::overlap::told(ed, &f.path));
-                }
                 crate::refactor::land_told(
                     ed,
                     call,

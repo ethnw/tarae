@@ -143,8 +143,7 @@ pub struct Toast {
     /// The session it's news of, when that's one behind (said there, or about it) — Claude's level of the
     /// state leaves it out for any other session's Claude (other sessions are counts there).
     pub of: Option<crate::event::SessionId>,
-    /// The person's alone: never at any Claude's level (an overlap — a Claude hears of one only in the tool that
-    /// touches that file, `overlap.rs`).
+    /// The person's alone: never at any Claude's level (an overlap — a Claude hears nothing of one, `overlap.rs`).
     pub persons: bool,
     /// Words painted in a theme scope (`""`: as the text), in order — each the first found after the one before:
     /// an overlap's two names in their participant colours and its `≈` in warning.

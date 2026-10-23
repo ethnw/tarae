@@ -1003,7 +1003,7 @@ pub struct SessionState {
     /// None: between turns, or one session open. Claude's level never (collab C1: nothing of it reaches Claude).
     pub at: Option<String>,
     /// Where its changes would conflict with another workspace's or its base's tip (`overlap.rs`): `main · src/a.rs
-    /// L3–5`, its own lines. Claude's level never (it hears of one in the answer of the tool that touches that file).
+    /// L3–5`, its own lines. Claude's level never (a Claude hears nothing of one).
     pub overlaps: Vec<String>,
     /// Its panes (panes P2b, plan §5.2): every leaf of its tree, and over the front's the floating ones.
     pub panes: Vec<PaneState>,

@@ -76,8 +76,8 @@ impl Editor {
                 }
             }
         }
-        // (where each session is — presence, collab C1 — is the person's: what a Claude hears of the others is an
-        // overlap, in a tool's answer, C2)
+        // (where each session is — presence, collab C1 — and where they'd conflict — C2 — are the person's: a
+        // Claude hears nothing of the others)
         for l in s.sessions.iter_mut() {
             l.at = None;
             l.overlaps.clear();

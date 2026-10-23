@@ -513,10 +513,11 @@ side panel's file row `≈m` (`≈` in warning before main's initial), its foot 
 repository: the snapshots and merges are git objects in a folder of this tarae's own in its cache
 (`~/.cache/tarae/overlap/`), the repository's read through as an alternate; a session's folder goes when it ends,
 and a tarae's whole folder once it's gone (the next tarae removes it). No program of yours or the repository's runs
-for it — no hook, filter or merge driver: a file a filter takes (git-lfs's) is taken as HEAD has it. Claude hears of an overlap
-only in the answer of the tool that touches that file — its `edit` or `read` of it ends with one line,
-`src/term.rs: fix's change would conflict here: L30–34` (its own lines, the other's name, never the other's lines
-or text) — never as a note of its own, never a feed of what the others do.
+for it — no hook, filter or merge driver: a file a filter takes (git-lfs's) is taken as HEAD has it. Overlaps are for you, the
+one watching the sessions work: Claude hears nothing of them — not in a tool's answer, not as a note, not in the
+state it sees. You tell the session that should act. (Measured: a line in Claude's `edit` and `read` answers of the
+file, in 18 live runs, changed nothing it did — the same calls, the same code, never a look at the other checkout —
+and cost its tokens plus a paragraph retelling what the toast had said.)
 
 **The woven view.** `:weave` (or `space v w`, or `v` on a session in the list — at its conflict) shows the file in
 front as every session's changes weave onto the base's tip — every session's thread woven into one file, a view,
@@ -528,16 +529,18 @@ is a head where they went (`m ─ main · 3 lines removed ──`); a conflict i
 version, side by side where the pane is wide and stacked under a head each where it isn't (a selection over it opens
 it stacked, as a folded block); `]m`/`[m` go to the conflicts, `]g`/`[g` to each change. Its line numbers are where
 each line is, not the view's rows: the tip's lines by the tip's numbers, a change and a conflict's part by that
-session's own (a conflict's three parts can all be 10, the line after it 11, as in every workspace and as Claude is
-told); side by side, each side's column says its number at its head; the status line and `:N`/`NG` go by them too (the
+session's own (a conflict's three parts can all be 10, the line after it 11, as in every workspace); side by side, each side's column says its number at its head; the status line and `:N`/`NG` go by them too (the
 tip's line N). `enter` goes there: on a
 change, a conflict's part or the line under a removal's head, into that session's workspace, its file at that line of
 its own text; on the tip's part, into the checkout that has the base's branch; side by side, a click on a column picks
 the part `enter` goes to (its wash a step stronger). A session behind the base's tip has its change laid on the tip
 first; where it meets the tip's own change, the conflict's first part is the tip's, named by its branch. The path bar
-names whose changes it weaves, how far behind each is, which are unsaved, and `enter go there`. Where the file was
-woven, Claude's `edit` or `read` of it says so in plain words instead of the overlap's line — `src/a.rs: merged with
-fix's change: conflict at L30–34`, nothing when it weaves clean.
+names whose changes it weaves, how far behind each is, which are unsaved, and `enter go there`. It's yours, as the
+overlaps are: Claude hears nothing of it — a message you send with it in front or beside carries none of it (not its
+name, its text, the lines on screen nor a selection in it; the context says only that you're looking at a view of
+yours). What of it Claude sees, you show it on purpose, each your own act: a quote (`space >` on a selection there),
+the screen attached (`C-s`), or a `y` on Claude's screen card — the frame drawn as it is, the woven lines in it too
+(you chose to show it; nothing is blanked).
 
 **Replay.** Live, stops can come faster than anyone reads, so every stop of a turn is kept: each read with its
 range, each edit with its changes, each search with its first hit and count, each command with how it ended,

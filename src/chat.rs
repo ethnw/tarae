@@ -2729,13 +2729,20 @@ fn context(
         d.path.as_deref().filter(|p| crate::reads::key_shut(ed, p, pass)).map(Path::to_path_buf)
     };
     let mut withheld: Vec<PathBuf> = shut(doc).into_iter().collect();
-    let mut ctx = format!(
-        "<editor-context>\nfile: {name}{}{}{}\ncursor: line {}\n",
-        if lang.is_empty() { String::new() } else { format!(" ({lang})") },
-        if doc.is_modified() && doc.path.is_some() { " (unsaved)" } else { "" },
-        if withheld.is_empty() { String::new() } else { format!(" — {}", crate::reads::NOT_SENT) },
-        line + 1
-    );
+    // A woven view (`weave.rs`) is the person's: nothing of it goes by itself — not its name, text, selection or
+    // lines on screen (other workspaces' lines); what of it Claude sees the person shows on purpose (`space >`, `C-s`,
+    // a screen card's `y`)
+    let woven = doc.woven.is_some();
+    let mut ctx = match woven {
+        true => format!("<editor-context>\nfile: {}\n", crate::weave::NOT_SENT),
+        false => format!(
+            "<editor-context>\nfile: {name}{}{}{}\ncursor: line {}\n",
+            if lang.is_empty() { String::new() } else { format!(" ({lang})") },
+            if doc.is_modified() && doc.path.is_some() { " (unsaved)" } else { "" },
+            if withheld.is_empty() { String::new() } else { format!(" — {}", crate::reads::NOT_SENT) },
+            line + 1
+        ),
+    };
     // What the user is looking at: this file's lines on screen, and any other pane beside it
     let screen = on_screen(ed);
     let here = screen.iter().find(|s| s.0 == doc.id).map(|s| s.1.clone());
@@ -2762,8 +2769,8 @@ fn context(
         ed.session.chat.as_ref().and_then(|c| c.sent.get(&d.id)) == Some(&d.version())
     };
     // A file named like a key, not open to Claude: its name only — no selection, text or diagnostics (a
-    // diagnostic's message can quote a line)
-    let its_text = withheld.is_empty();
+    // diagnostic's message can quote a line); a woven view: not even its name
+    let its_text = withheld.is_empty() && !woven;
     if !its_text {
         chip.push_str(" · not sent");
     }
@@ -2860,13 +2867,16 @@ fn context(
 }
 
 /// Per pane on screen (last frame, the focused one first): its document and the lines it shows. A document
-/// in two panes counts once, as its first.
+/// in two panes counts once, as its first; a woven view never (`context`: the person's).
 fn on_screen(ed: &Editor) -> Vec<(DocId, Range<usize>)> {
     let mut panes: Vec<_> = ed.screen.panes.iter().collect();
     crate::sorting::by_key(&mut panes, |p| p.0 != ed.session.focus);
     let mut out: Vec<(DocId, Range<usize>)> = Vec::new();
     for (view, _, _, rows) in panes {
         let Some(doc) = ed.session.views.iter().find(|v| v.id == *view).map(|v| v.doc) else { continue };
+        if ed.docs.iter().any(|d| d.id == doc && d.woven.is_some()) {
+            continue;
+        }
         let (Some(a), Some(b)) = (rows.iter().map(|r| r.0).min(), rows.iter().map(|r| r.0).max()) else {
             continue;
         };
