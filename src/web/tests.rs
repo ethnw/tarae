@@ -136,6 +136,27 @@ fn docs_rs_keeps_every_heading_of_its_main() {
     assert!(p.text.lines().nth(line).unwrap().contains("pub fn remove"), "{line}");
 }
 
+/// rustdoc's toggle labels its CSS hides once open (`summary.hideme`: "Expand description") aren't the page's words;
+/// another page's `<summary>` is, and its `<details>` text either way.
+#[test]
+fn rustdocs_hidden_toggle_labels_go_and_other_summaries_stay() {
+    assert!(!page("docsrs").text.contains("Expand description"));
+    let p = guessed(
+        &format!(
+            "<main><details open><summary class=\"hideme\"><span>Expand description</span></summary>{}</details>\
+             <details><summary class=\"x\">Examples</summary><p>Shown.</p></details></main>",
+            para("rope")
+        ),
+        "t",
+    );
+    assert!(!p.text.contains("Expand description"), "{}", p.text);
+    assert!(
+        p.text.contains("rope said") && p.text.contains("Examples") && p.text.contains("Shown."),
+        "{}",
+        p.text
+    );
+}
+
 #[test]
 fn the_issue_keeps_its_comments_and_leaves_out_what_github_hid() {
     let p = page("issue");

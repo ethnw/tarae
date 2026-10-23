@@ -14,8 +14,6 @@ anchors: 225
 pub struct Rope { /* private fields */ }
 ```
 
-Expand description
-
 A utf8 text rope.
 
 The time complexity of nearly all edit and query operations on `Rope` are worst-case `O(log N)` in the length of the rope. `Rope` is designed to work efficiently even for huge (in the gigabytes) and pathological (all on one line) texts.

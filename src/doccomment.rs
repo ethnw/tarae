@@ -1,9 +1,10 @@
 //! Doc comment rendering (like IntelliJ's "Rendered documentation comments") — detection, unwrapping (pure).
 //!
 //! Strips the markers of `///` `//!` (Rust·C#·Swift …) and `/** … */` (Java·Kotlin·JS·TS·C++ …) and shows
-//! them as markdown. **One line stays one line** — only the display changes, so line numbers, scroll and
-//! cursor math hold. When the cursor (or selection) enters a block, that whole block shows as source (so it
-//! can be edited). Drawing: term.rs.
+//! them as markdown, **folded**: a block's text regrouped into chunks (`chunks`) and flowed to the width, its rows
+//! on its first line and none on the rest (`codeview::Measure`; `j`/`k` step over it as one line) — the document's
+//! lines are untouched, so line numbers hold. Where it's selected or edited, that whole block shows as source
+//! (`Editor::doc_block_folded`, the one rule). Drawing: term.rs.
 
 /// Whether `///`·`//!`·`/** */` are doc comments in this language (its pack's `doc-comments`) — `///` inside a
 /// markdown code block or in an unknown file is not a doc comment (must be left as is).

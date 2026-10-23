@@ -4,7 +4,8 @@
 //!
 //! - Left out by tag: what a page runs or styles, its forms and its chrome (`nav`, `aside`; a `header` or `footer`
 //!   of the page, not of an article or section inside it) — or by the ARIA role that says the same —, what it hides
-//!   (`hidden`, `aria-hidden`, `display:none`), and GitHub's interactive custom elements.
+//!   (`hidden`, `aria-hidden`, `display:none`), GitHub's interactive custom elements and rustdoc's toggle labels
+//!   (`summary.hideme`: "Expand description").
 //! - Code blocks are fences naming their language (`lang.rs`); a heading's own anchor link (rustdoc's `§`) goes,
 //!   the heading keeps the anchor; an image is its alt text in brackets; a table is a pipe table (a table holding a
 //!   table, of one column or `role=presentation` is laid out as blocks — it was layout).
@@ -665,6 +666,14 @@ pub fn left_out(t: &Tree, node: Id, name: &str) -> bool {
     SKIP.contains(&name)
         || hidden(t, node)
         || t.attr(node, "role").is_some_and(|r| SKIP_ROLES.contains(&r.trim().to_ascii_lowercase().as_str()))
+        || control_label(t, node, name)
+}
+
+/// A toggle's label its page's CSS hides, the only sign in the HTML its class: rustdoc's `<summary class="hideme">`
+/// ("Expand description", "Show 3 methods") — a browser draws a `<summary>` always, so other pages' (MDN's, a
+/// README's) are real words and kept.
+fn control_label(t: &Tree, node: Id, name: &str) -> bool {
+    name == "summary" && t.attr(node, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "hideme"))
 }
 
 fn up(t: &Tree, node: Id) -> impl Iterator<Item = Id> + '_ {
