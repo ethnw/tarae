@@ -1,0 +1,71 @@
+# The reader's fixtures (src/web/tests.rs): each page's bytes as they came (decompressed), where from, when, and the
+# Content-Type header it came with where it was kept (the first five were saved without their headers: none — the
+# reader then goes by the page's own <meta>). `hops`: the redirects before it, as the server said them. `made`: a
+# page made by hand, in a site's shape, its words ours. Whose each page is: NOTICE.
+
+[[page]]
+name = "blog"
+url = "https://blog.rust-lang.org/2024/11/28/Rust-1.83.0/"
+saved = "2026-10-23"
+what = "The Rust 1.83 announcement: no <main>, the densest block; code in Zola's <code data-lang>"
+
+[[page]]
+name = "blog-redirect"
+url = "https://blog.rust-lang.org/2024/11/28/Rust-1.83.0.html"
+saved = "2026-10-23"
+what = "The same post's old address: a script and a <meta refresh> inside <noscript>, not a 3xx"
+
+[[page]]
+name = "docsrs"
+url = "https://docs.rs/ropey/latest/ropey/struct.Rope.html"
+saved = "2026-10-23"
+what = "ropey 1.6.1's Rope on docs.rs: rustdoc, <main>, every method a heading with its anchor"
+
+[[page]]
+name = "issue"
+url = "https://github.com/ethnw/tarae/issues/12"
+saved = "2026-10-23"
+made = true
+content-type = "text/html; charset=utf-8"
+what = "A GitHub issue's shape, made by hand (no GitHub markup in it): <main>, the issue and its comments, two hidden as off-topic, inline SVG, embedded JSON, clipboard-copy and tool-tip"
+
+[[page]]
+name = "mdn"
+url = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy"
+saved = "2026-10-23"
+what = "MDN's Content-Security-Policy: <main>, code in <pre class=\"brush: http\">"
+
+[[page]]
+name = "spa"
+url = "https://excalidraw.com/"
+saved = "2026-10-23"
+what = "excalidraw: a single-page app — its text comes from scripts; <noscript> says so"
+
+[[page]]
+name = "table"
+url = "https://en.wikipedia.org/wiki/ISO_639"
+saved = "2026-10-23"
+content-type = "text/html; charset=UTF-8"
+what = "Wikipedia's ISO 639: seven tables — data with row and column spans, navboxes, a notice laid out in one"
+
+[[page]]
+name = "base"
+url = "https://www.php.net/manual/en/function.strlen.php"
+saved = "2026-10-23"
+content-type = "text/html; charset=utf-8"
+what = "PHP's manual: a <base href>, relative links resolved against it; no <main> — the manual (its title's block) is the article, not the user notes under it"
+
+[[page]]
+name = "chain"
+url = "https://go.dev/doc/"
+saved = "2026-10-23"
+content-type = "text/html; charset=utf-8"
+hops = ["302 http://golang.org/doc/ → https://golang.org/doc/", "301 https://golang.org/doc/ → https://go.dev/doc/"]
+what = "Go's docs, reached by a 3xx chain across hosts (golang.org → go.dev)"
+
+[[page]]
+name = "refresh"
+url = "https://docs.rs/ropey/latest/ropey/rope/struct.Rope.html"
+saved = "2026-10-23"
+content-type = "text/html; charset=utf-8"
+what = "rustdoc's redirect page for a re-exported item: <meta refresh> to a relative address"

@@ -52,6 +52,7 @@ mod stuckstop;
 mod termview;
 mod watchers;
 mod weave;
+mod web;
 mod writing;
 
 /// Where a job was spawned (`#[track_caller]` through `Jobs::spawn`, `Editor::step` …) — a schedule's steps

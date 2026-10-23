@@ -2985,6 +2985,100 @@ fn chat_reads_a_screenshot_ab() {
     assert!(tools.iter().any(|t| t == "mcp__tarae__read") && !tools.iter().any(|t| t == "Read"));
 }
 
+/// web-plan P0: the exact tokens of a page read each way (§3's columns) — each file of `TARAE_WEB_TOKENS`'s folder
+/// (`<page>.<column>.txt`, made by the plan's scratch `columns.sh`) after a one-word question, less that question
+/// alone: the file's own tokens (and the blank line before it). A file past 400 KB goes in parts (a request's
+/// window), cut at a newline, summed. By hand: `TARAE_WEB_TOKENS=target/sb/web/columns cargo test --test live
+/// web_page_tokens -- --ignored --nocapture`.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn web_page_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let Ok(dir) = std::env::var("TARAE_WEB_TOKENS") else { return };
+    let sb = Sandbox::live("web-tokens");
+    let ask = "Reply with the single word ok.";
+    let prompt = |text: &str| prompts(&bare_turn(&sb.work(), "", text)).first().copied().unwrap_or(0);
+    let alone = prompt(ask);
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.sort();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let mut parts = Vec::new();
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            let mut end = rest.len().min(400_000);
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end < rest.len() {
+                end = rest[..end].rfind('\n').map(|i| i + 1).unwrap_or(end);
+            }
+            parts.push(&rest[..end]);
+            rest = &rest[end..];
+        }
+        let n: u64 = parts.iter().map(|p| prompt(&format!("{ask}\n\n{p}")).saturating_sub(alone)).sum();
+        let name = f.file_name().unwrap().to_string_lossy().to_string();
+        eprintln!("TOKENS {name}: {n} tokens · {} chars · {} part(s)", text.chars().count(), parts.len());
+    }
+    eprintln!("TOKENS the question alone: {alone}");
+}
+
+/// web-plan P0: what Claude Code's WebFetch hands the model for the five pages — a small model's answer to the
+/// prompt Claude writes, not the page: the step from the request before the fetch's result to the one after (the
+/// result, and the call's own few tokens), and what came back.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn web_fetch_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let sb = Sandbox::live("web-fetch");
+    let asks = [
+        (
+            "blog",
+            "https://blog.rust-lang.org/2024/11/28/Rust-1.83.0/",
+            "What does Rust 1.83 newly allow in const contexts?",
+        ),
+        (
+            "docsrs",
+            "https://docs.rs/ropey/latest/ropey/struct.Rope.html",
+            "How costly is Rope::remove, and what does it panic on?",
+        ),
+        (
+            "ghissue",
+            "https://github.com/rust-lang/rust/issues/44265",
+            "Is this issue closed, by which pull request, and what did the last comments say?",
+        ),
+        (
+            "mdn",
+            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy",
+            "What does the default-src directive do?",
+        ),
+        ("spa", "https://excalidraw.com/", "What is on this page?"),
+    ];
+    for (name, url, question) in asks {
+        let ask = format!("Fetch {url} with WebFetch, once, and answer from it: {question}");
+        let stream = bare_turn(&sb.work(), "WebFetch", &ask);
+        let p = prompts(&stream);
+        let step = p.windows(2).map(|w| w[1].saturating_sub(w[0])).max().unwrap_or(0);
+        let result: String = stream
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "user")
+            .flat_map(|v| v["message"]["content"].as_array().cloned().unwrap_or_default())
+            .filter(|c| c["type"] == "tool_result")
+            .map(|c| c["content"].to_string())
+            .collect();
+        eprintln!(
+            "WEBFETCH {name}: requests {p:?} · the fetch's step {step} tokens · its result {} chars · said {:?}",
+            result.chars().count(),
+            result_of(&stream).chars().take(300).collect::<String>()
+        );
+    }
+}
+
 /// Step 1 of readimg, measured before any code: which MCP content blocks this Claude Code hands the model as
 /// something it sees. A word only the file carries; the model asked for it. Printed, not asserted — the
 /// answer is what decides `read`'s design (`readimg.rs`).

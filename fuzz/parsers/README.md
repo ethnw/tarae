@@ -21,6 +21,7 @@ tarae and the plugin fuzzer in `../` keep the pinned stable.
 | `head` | `parse::head` | `head` | what a client sends the proxy |
 | `sni` | `parse::server_name` | `sni` | a tunnel's first bytes |
 | `body` | `parse::Body` (chunked) | `body` | first byte: bytes given at a time (1 + 2n), then the body |
+| `web` | `web::read` (a page's bytes) | `web::check::page_input`: no panic, the limits, links and anchors in the text | first byte: which part read, the type given; then the page |
 
 `msghdr`'s input is a run's memory (`Fake::from_input`): a byte of flags (1: a datagram), where the header is
 (8 bytes), then pieces, each an address (8 bytes), a length (2 bytes) and its bytes. Numbers are little-endian.
@@ -51,11 +52,22 @@ The first folder is the corpus libFuzzer grows (git-ignored, kept between runs).
 which are read and never written. Builds are optimized with debug assertions and overflow checks on, as in
 tarae's test profile, so an overflow the release build would wrap is a crash here too. `-max_len` matters
 for targets whose limits are past libFuzzer's default of 4096 bytes: `head` 12288 (past `HEAD_MAX`),
-`sni` 40000 (past `HELLO_MAX` in records), `msghdr` 20000 (a full iovec array).
+`sni` 40000 (past `HELLO_MAX` in records), `msghdr` 20000 (a full iovec array), `web` 65536 (a page's pieces: the
+parser is fed 8 KB at a time).
+
+`web` reads what anyone's page holds, not what a sandboxed run sends; it's here as the same kind of reader — its
+module (`src/web/`, and `media.rs` for sniffing) included as the others are, its crates (html5ever and
+encoding_rs) in this folder's `Cargo.toml` at tarae's versions.
 
 `hour.sh` does all of it on Linux: it builds, then runs each target for an hour (`./hour.sh [seconds]`, `JOBS`
 at a time, one per core by default). It leaves `logs/<target>.log` and prints each target's crashes and last
 coverage line (`cov:`, `ft:`). The coverage line, compared over the hour, says whether a target plateaued.
+
+## Checking without the nightly
+
+`sh fuzz/parsers/check.sh` builds the targets' library — every reader's module under `--cfg fuzzing` — on tarae's
+pinned stable, offline, with libfuzzer-sys and the targets left out (a copy in a temp folder). It's the check that a
+change to a reader still compiles as the fuzzer includes it; running the targets needs the nightly above.
 
 ## A crash
 

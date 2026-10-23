@@ -2261,6 +2261,7 @@ impl Editor {
         crate::overlap::sync(self);
         crate::keepclose::sync(self);
         crate::weave::sync(self);
+        crate::web::open::sync(self);
         crate::notes::attach(self);
         crate::edits::next(self);
         crate::refactor::next(self);

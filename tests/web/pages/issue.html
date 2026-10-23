@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en" data-color-mode="auto">
+<head>
+  <meta charset="utf-8">
+  <title>web: read a saved page into a buffer · Issue #12 · ethnw/tarae · GitHub</title>
+  <meta name="viewport" content="width=device-width">
+  <link rel="stylesheet" href="https://github.githubassets.example/assets/primer.css">
+  <style>.sr-only{position:absolute;width:1px;height:1px;overflow:hidden}</style>
+  <script type="module" src="https://github.githubassets.example/assets/app.js"></script>
+</head>
+<body class="logged-out env-production page-responsive">
+  <div class="position-relative header-wrapper">
+    <a href="#start-of-content" class="skip-link">Skip to content</a>
+    <header class="AppHeader" role="banner">
+      <a href="/" aria-label="Homepage"><svg height="32" viewBox="0 0 24 24" width="32" aria-hidden="true"><circle cx="12" cy="12" r="11"></circle></svg></a>
+      <nav aria-label="Global">
+        <ul><li><a href="/features">Product</a></li><li><a href="/solutions">Solutions</a></li><li><a href="/pricing">Pricing</a></li></ul>
+      </nav>
+      <div role="search"><input type="text" placeholder="Search or jump to..."></div>
+      <a href="/login">Sign in</a>
+    </header>
+  </div>
+  <div id="start-of-content"></div>
+  <div class="application-main">
+    <main id="js-repo-pjax-container">
+      <div id="repository-container-header">
+        <strong><a href="/ethnw/tarae">tarae</a></strong>
+        <nav aria-label="Repository" class="UnderlineNav">
+          <ul><li><a href="/ethnw/tarae">Code</a></li><li><a href="/ethnw/tarae/issues" aria-current="page">Issues 4</a></li><li><a href="/ethnw/tarae/pulls">Pull requests</a></li></ul>
+        </nav>
+      </div>
+      <react-app app-name="issues-react" initial-path="/ethnw/tarae/issues/12">
+        <script type="application/json" data-target="react-app.embeddedData">{"payload":{"preloaded_records":{"issue":{"number":12,"title":"web: read a saved page into a buffer","state":"OPEN","body":"The reader can read a page tarae saved","comments":{"totalCount":5}},"viewer":{"login":null}},"preloadedQueries":[{"queryId":"a1b2c3d4e5f6","variables":{"owner":"ethnw","repo":"tarae","number":12}}]},"appPayload":{"helpUrl":"https://docs.github.example","enabled_features":{"issues_react_ui":true}}}</script>
+        <div data-target="react-app.reactRoot">
+          <div data-testid="issue-viewer-container">
+            <div class="HeaderViewer">
+              <h1 data-component="PH_Title"><bdi class="markdown-title">web: read a saved page into a buffer</bdi> <span class="issue-number">#12</span></h1>
+              <span data-testid="header-state"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16"><circle cx="8" cy="8" r="1.5"></circle><circle cx="8" cy="8" r="7"></circle></svg>Open</span>
+              <tool-tip for="header-state" popover="manual">Status: Open</tool-tip>
+            </div>
+            <div data-testid="sidebar">
+              <h3>Labels</h3>
+              <a href="/ethnw/tarae/issues?q=state%3Aopen%20label%3A%22web%22"><span>web</span></a>
+              <a href="/ethnw/tarae/issues?q=state%3Aopen%20label%3A%22reader%22"><span>reader</span></a>
+              <details-menu role="menu"><button role="menuitem">Subscribe</button></details-menu>
+            </div>
+            <div data-testid="issue-body">
+              <h2 class="sr-only">Description</h2>
+              <a href="/eth219" aria-label="@eth219's profile"><img alt="@eth219" width="40" height="40" src="https://avatars.githubusercontent.example/u/1?v=4"></a>
+              <a href="/eth219" data-testid="issue-body-header-author">eth219</a>
+              opened <a href="#issue-3001"><relative-time datetime="2026-10-23T05:00:00Z">on Oct 23, 2026</relative-time></a>
+              <div class="markdown-body" data-testid="markdown-body">
+                <p>The web reader turns a saved page into text tarae can show: its <code>&lt;main&gt;</code> when it has one, every link where it stands, each code block fenced with its language.</p>
+                <p>What it should leave out:</p>
+                <ul>
+                  <li>what the page runs, styles or draws (<code>script</code>, <code>style</code>, inline <code>svg</code>)</li>
+                  <li>the site's chrome: its header, its navigation, its footer</li>
+                  <li>comments the site hid</li>
+                </ul>
+                <div class="highlight highlight-source-rust notranslate position-relative overflow-auto" dir="auto"><pre>let page = web::read(&amp;bytes, url, None, Prefer::Guess);
+assert_eq!(page.read, Read::Main);</pre><div class="zeroclipboard-container"><clipboard-copy aria-label="Copy" value="let page = web::read(&amp;bytes, url, None, Prefer::Guess);"><svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16"><rect x="1" y="5" width="10" height="10" rx="2"></rect></svg></clipboard-copy></div></div>
+              </div>
+              <div data-testid="reactions"><button aria-label="thumbs up: 3 people">👍 3</button></div>
+            </div>
+            <h2 class="sr-only">Activity</h2>
+            <ol data-testid="issue-timeline">
+              <li data-wrapper-timeline-id="IC_3002">
+                <div class="timelineElement">
+                  <h3 class="sr-only">tarae-reviewer commented on Oct 23, 2026</h3>
+                  <a href="/tarae-reviewer"><img alt="@tarae-reviewer" width="40" height="40" src="https://avatars.githubusercontent.example/u/2?v=4"></a>
+                  <a href="/tarae-reviewer">tarae-reviewer</a>
+                  <a href="#issuecomment-3002"><relative-time datetime="2026-10-23T06:00:00Z">on Oct 23, 2026</relative-time></a>
+                  <clipboard-copy for="issuecomment-3002">Copy link</clipboard-copy>
+                  <div class="markdown-body">
+                    <p>A page's bytes are anyone's: the reader must never panic on them, whatever they hold, and say when a limit cut a page short.</p>
+                  </div>
+                </div>
+              </li>
+              <li data-wrapper-timeline-id="IC_3003">
+                <div class="timelineElement">
+                  <h3 class="sr-only">eth219 commented on Oct 23, 2026</h3>
+                  <a href="/eth219"><img alt="@eth219" width="40" height="40" src="https://avatars.githubusercontent.example/u/1?v=4"></a>
+                  <a href="/eth219">eth219</a>
+                  <a href="#issuecomment-3003"><relative-time datetime="2026-10-23T07:00:00Z">on Oct 23, 2026</relative-time></a>
+                  <clipboard-copy for="issuecomment-3003">Copy link</clipboard-copy>
+                  <div class="markdown-body">
+                    <p>Agreed. The reader goes into the core, so Claude's <code>read</code> always has it.</p>
+                    <blockquote><p>never panic on them, whatever they hold</p></blockquote>
+                    <p>Fuzzed beside the other readers of what anyone can send.</p>
+                  </div>
+                </div>
+              </li>
+              <li data-wrapper-timeline-id="REFE_3004">
+                <div class="timelineElement">
+                  <a href="/eth219">eth219</a> added a commit that references this issue <a href="#event-3004">on Oct 23, 2026</a>
+                  <a href="/ethnw/tarae/commit/0123456789abcdef0123456789abcdef01234567">web: the reader in the core</a>
+                  <a href="/ethnw/tarae/commit/0123456789abcdef0123456789abcdef01234567">0123456</a>
+                </div>
+              </li>
+              <li data-wrapper-timeline-id="IC_3005">
+                <div class="timelineElement">
+                  <h3 class="sr-only">spam-account commented on Oct 23, 2026</h3>
+                  <a href="/spam-account"><img alt="@spam-account" width="24" height="24" src="https://avatars.githubusercontent.example/u/3?v=4"></a>
+                  <a href="/spam-account">spam-account</a>
+                  <a href="#issuecomment-3005">on Oct 23, 2026</a> · Hidden as off-topic
+                  <div hidden><div class="markdown-body"><p>Buy followers here, a hidden comment's words.</p></div></div>
+                </div>
+              </li>
+              <li data-wrapper-timeline-id="IC_3006">
+                <div class="timelineElement">
+                  <h3 class="sr-only">other-account commented on Oct 23, 2026</h3>
+                  <a href="/other-account"><img alt="@other-account" width="24" height="24" src="https://avatars.githubusercontent.example/u/4?v=4"></a>
+                  <a href="/other-account">other-account</a>
+                  <a href="#issuecomment-3006">on Oct 23, 2026</a> · Hidden as off-topic
+                  <div style="display: none"><div class="markdown-body"><p>+1, another hidden comment's words.</p></div></div>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </div>
+      </react-app>
+      <template id="sign-in-prompt"><div>Sign in to comment</div></template>
+    </main>
+  </div>
+  <footer class="footer" role="contentinfo">
+    <ul><li>© 2026 GitHub, Inc.</li><li><a href="/site/terms">Terms</a></li><li><a href="/site/privacy">Privacy</a></li></ul>
+  </footer>
+  <script type="application/json" id="client-env">{"locale":"en","featureFlags":["issues_react_ui","primer_react_overlay"]}</script>
+  <script src="https://github.githubassets.example/assets/behaviors.js" defer></script>
+</body>
+</html>

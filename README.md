@@ -59,5 +59,6 @@ macOS or Linux (WSL on Windows), with rustup and a C compiler. Claude features n
 
 [GPL-3.0-or-later](LICENSE). The plugin SDK and the plugins in `plugin-sdk/` are MIT OR Apache-2.0
 ([MIT](plugin-sdk/LICENSE-MIT), [Apache](plugin-sdk/LICENSE-APACHE)); db's test transcripts hold servers' bytes
-([NOTICE](plugin-sdk/db/NOTICE)). Helix's query files stay MPL-2.0 ([NOTICE](runtime/queries/NOTICE)).
+([NOTICE](plugin-sdk/db/NOTICE)). The web reader's test pages are their sites' ([NOTICE](tests/web/NOTICE)); Helix's
+query files stay MPL-2.0 ([NOTICE](runtime/queries/NOTICE)).
 Contributions need a signed [CLA](CONTRIBUTING.md#license-and-the-cla).

@@ -210,6 +210,7 @@ mod virtualdoc;
 mod waits;
 mod wasm;
 mod weave;
+mod web;
 mod worktree;
 mod wrap;
 mod writing;

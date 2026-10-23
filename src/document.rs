@@ -365,6 +365,9 @@ pub struct Document {
     pub writing_align: Option<usize>,
     /// The woven view of a file this read-only document shows (`weave.rs`) — its sides, changes and conflicts.
     pub woven: Option<Box<crate::weave::Shown>>,
+    /// A read-only document's text as it's kept (a web page, `web/open.rs`): an edit is put back
+    /// (`hold_read_only`).
+    pub read_only: Option<Snapshot>,
     /// `review_base` parsed whole, for its removed rows' colours (`Editor::base_parse`, on a worker) — until it
     /// lands they're coloured one line at a time. It follows sight as the document's own trees do
     /// (`Editor::trees_follow_sight`: gone with them, parsed again when shown). `base_seq` tells a parse of an
@@ -472,6 +475,7 @@ impl Document {
             writing: None,
             writing_align: None,
             woven: None,
+            read_only: None,
         }
     }
 
@@ -661,6 +665,19 @@ impl Document {
     pub fn put_back(&mut self, before: Snapshot) {
         self.restore(before);
         (self.undo, self.redo) = (Vec::new(), Vec::new());
+    }
+
+    /// A read-only document (`read_only`) as it's kept: an edit since put back, the selection where it was before
+    /// it. Whether one was.
+    pub fn hold_read_only(&mut self) -> bool {
+        let Some(kept) = self.read_only.as_mut() else { return false };
+        if kept.version == self.version {
+            kept.selection = self.selection.clone();
+            return false;
+        }
+        let before = kept.clone();
+        self.put_back(before);
+        true
     }
 
     /// Its undo and redo steps let go — a document no key undoes (the chat's input, after each key).

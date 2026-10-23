@@ -178,6 +178,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["diff"], Arg::File, "Show changes against HEAD, a file, or a revision"),
     c(&["diff-off"], Arg::None, "Stop showing the diff"),
     c(&["weave"], Arg::File, "This file with every session's changes woven in"),
+    c(&["web"], Arg::File, "Read a saved web page as text"),
     c(&["session-open"], Arg::File, "Work in another checkout beside this one"),
     c(&["session-switch"], Arg::None, "Bring another session to the front"),
     c(&["session-new"], Arg::None, "New session: a branch in its own checkout"),

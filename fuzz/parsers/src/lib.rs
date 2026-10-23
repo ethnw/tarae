@@ -11,6 +11,14 @@ mod wire;
 #[allow(dead_code)]
 mod proxy;
 
+#[allow(dead_code, unused_imports)]
+#[path = "../../../src/web/mod.rs"]
+mod web;
+
+#[allow(dead_code)]
+#[path = "../../../src/media.rs"]
+mod media;
+
 use proxy::parse;
 
 /// A `struct sockaddr` as a call names it (`wire::parse`).
@@ -44,4 +52,9 @@ pub fn sni(b: &[u8]) {
 /// A chunked body, given a few bytes at a time (`parse::Body`) — the first byte says how many.
 pub fn body(b: &[u8]) {
     parse::check::body_input(b);
+}
+
+/// A web page's bytes (`web::read`) — the first byte says which part is read and the content type given.
+pub fn web(b: &[u8]) {
+    web::check::page_input(b);
 }

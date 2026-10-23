@@ -1,0 +1,17 @@
+tests/web/pages/*.html are the web reader's test fixtures (src/web/tests.rs), read only by tarae's tests; nothing of
+them is built into tarae. All but one are web pages saved as they came on 2026-10-23 (pages.toml has each address),
+each its site's, under the site's own terms — every one of them lets the page be passed on, with its source said:
+
+- blog, blog-redirect: the Rust Blog (blog.rust-lang.org) — MIT OR Apache-2.0
+- docsrs, refresh: docs.rs's pages of ropey's documentation — ropey MIT, docs.rs MIT
+- mdn: MDN Web Docs — prose CC-BY-SA 2.5, code samples CC0
+- spa: excalidraw.com — MIT
+- table: Wikipedia, "ISO 639" — CC BY-SA 4.0
+- base: the PHP Manual (php.net) — CC BY 3.0
+- chain: go.dev — CC BY 4.0, code BSD-3-Clause
+
+issue.html was made by hand in a GitHub issue page's shape (its <main>, comments, hidden ones, inline SVG, embedded
+data, interactive elements); no GitHub markup is copied into it, its drawings are plain shapes (circles, a
+rectangle) and its words are tarae's — GPL-3.0-or-later, as tarae.
+
+tests/web/snapshots/*.md are what the reader read of those pages: the same text, the same terms.

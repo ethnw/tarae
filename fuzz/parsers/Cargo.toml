@@ -22,6 +22,10 @@ doc = false
 [dependencies]
 libc = "0.2"
 libfuzzer-sys = "0.4"
+# The web reader's (src/web/) as tarae has them; media.rs's `kind` sniffs what isn't a page
+encoding_rs = "0.8"
+html5ever = "=0.39.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 # `fuzzing`: what cargo-fuzz sets, and what builds the readers' `check` modules
 [lints.rust]
@@ -69,6 +73,13 @@ bench = false
 [[bin]]
 name = "body"
 path = "fuzz_targets/body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web"
+path = "fuzz_targets/web.rs"
 test = false
 doc = false
 bench = false
