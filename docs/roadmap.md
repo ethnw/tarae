@@ -579,6 +579,13 @@ claude, so it can be recorded again when the UI changes. To do: the recording sc
 domain. The scenes are picked with the user: a chat edit and its card, the end-of-turn review, a commit from the
 git tab, search, a short Kubernetes one.
 
+The line over the tarae-makes-tarae video (the user's draft, 2026-10-23: "…an editor designed to be fully controlled
+by AI… let Tarae make Tarae — just sit back, watch, and enjoy"): keep "let tarae make tarae", lowercase as the brand
+is; not "fully controlled by AI" (the person keeps the cards, the brings and the say — what tarae is built around).
+Candidates: **"tarae is an editor built for working with AI — Claude does the work, you stay in charge. This is tarae
+making tarae. Sit back and watch."** (recommended) · "Claude writes. You decide. Here, tarae is making tarae — sit back
+and watch." · "An editor where AI does the work and you keep the say. Watch tarae make tarae."
+
 - Claude's startup program, applied for as the organization (the Claude Console organization, already made) once
   tarae is public and has users (decided 2026-10-09). The Cyber Verification Program moved to §1.
 
