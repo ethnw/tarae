@@ -591,13 +591,17 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
 
 ## Alongside, not ordered
 
-- **The web pane** (user, 2026-10-23; the web checkout's `target/sb/web-plan.md`): a page read as a document —
-  the reader a first-party plugin (`plugin-sdk/web`), the network, gate, document and keys the core's, Claude reading
-  a page through `read` with an `https://` URL. First, alone: plugins' `connect` got runs' resolved-address rule
-  (`5dcc5fa9`: one lookup, never a metadata server, link-local, multicast or broadcast, this machine only by its own
-  names). The user, later the same day: the reader is core Rust (`src/web/`, Claude's tool, always there — no plugin);
-  order: the reader in core → the fetch through the egress proxy → Claude's `read` of an `https://` URL → the pane →
-  its rendered view; **the goal is the text browser pane**, a real browser (carbonyl in the terminal pane) not now.
+- **The web pane** (user, 2026-10-23; the web checkout's `target/sb/web-plan.md`): a page read as a document,
+  Claude reading a page through `read` with an `https://` URL; the reader is core Rust (`src/web/`, Claude's tool,
+  always there — no plugin), on only the essential crates (html5ever, encoding_rs). Done: plugins' `connect` got
+  runs' resolved-address rule (`5dcc5fa9`); **the reader in the core** (`0914355d`: a tree of tarae's own on
+  html5ever, its article picked by tarae's rule, markdown with links and anchors, on a worker within limits, fuzzed;
+  +628 KB; `:web <path>` reads a saved page). Next: the fetch through the egress proxy → Claude's `read` of an
+  `https://` URL (followed as a file read is) → the pane → its rendered view; **the goal is the text browser pane**,
+  a real browser (carbonyl in the terminal pane) not now.
+- **Short videos, made ahead** (user, 2026-10-23): scripted scenes as docshots are — 16:9, English captions, no
+  voice — for YouTube, the homepage and the README; a live stream once orchestra drives (Part I) and there's a
+  homepage and a release to point at. Plan and a measured spike first (collab).
 
 - **The simulation harness's first piece** (§9.2) — done (detsim P1, `7a3f142b`): the simulated loop and one
   scenario. New code is tested in it from now on, so the harness grows with what's built instead of being fitted
