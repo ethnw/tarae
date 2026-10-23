@@ -598,8 +598,10 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   always there — no plugin), on only the essential crates (html5ever, encoding_rs). Done: plugins' `connect` got
   runs' resolved-address rule (`5dcc5fa9`); **the reader in the core** (`0914355d`: a tree of tarae's own on
   html5ever, its article picked by tarae's rule, markdown with links and anchors, on a worker within limits, fuzzed;
-  +628 KB; `:web <path>` reads a saved page). Next: the fetch through the egress proxy → Claude's `read` of an
-  `https://` URL (followed as a file read is) → the pane → its rendered view; **the goal is the text browser pane**,
+  +628 KB; `:web <path>` reads a saved page); **the fetch** (`60d415a4`: `:web https://…` through the egress proxy as a
+  run's connection — every address refusal held, no card for yours —, rustls on ring with the OS's trust, HTTP/1.1 and
+  gzip of tarae's own, fuzzed; the page the session's for 15 minutes; +858 KB). Next: Claude's `read` of an `https://`
+  URL (followed as a file read is; measured against WebFetch — answers, tokens, $) → the pane → its rendered view; **the goal is the text browser pane**,
   a real browser (carbonyl in the terminal pane) not now.
 - **Short videos, made ahead** (user, 2026-10-23): scripted scenes as docshots are — 16:9, English captions, no
   voice — for YouTube, the homepage and the README; a live stream once orchestra drives (Part I) and there's a
