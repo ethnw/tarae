@@ -135,6 +135,11 @@ Items 1–3 are done (2026-10-16); 4 is the user's: the repository made public. 
    into workspace crates — `tarae-wasm` first, its build times measured before and after — and move the first-party
    plugins (kubernetes, db, template) to `sinabro-io/tarae-plugins` once the SDK is first on crates.io, so they build
    against the published SDK as anyone's would (Zed's core/extensions split).
+7. **What tarae carries, audited** (user, 2026-10-23 — after the main line in flight, before the crate split): a
+   plan first — each feature's use (`:features`' counts, the card record), its code, its fit — keep · fold · a plugin
+   · gone, the user deciding. Decided ahead (CLAUDE.md's "Cleanup" bullet): `llm.edit-tools`' other modes gone, the
+   ask flow folded into the chat, keep-warm gone (Claude Code's own cache rule), the debugger and the diagram view
+   out of the core, Claude's rarely used tools measured.
 
 After it, the rest goes on in this order.
 
