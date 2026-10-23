@@ -54,6 +54,16 @@ pub fn body(b: &[u8]) {
     parse::check::body_input(b);
 }
 
+/// A server's response, its body a few bytes at a time (`parse::response`, `Body::data`) — the first byte says how many.
+pub fn response(b: &[u8]) {
+    parse::check::response_input(b);
+}
+
+/// A gzip body (`web::gzip::gunzip`, the fetch's) — the first byte says how much it may make.
+pub fn gzip(b: &[u8]) {
+    web::check::gzip_input(b);
+}
+
 /// A web page's bytes (`web::read`) — the first byte says which part is read and the content type given.
 pub fn web(b: &[u8]) {
     web::check::page_input(b);

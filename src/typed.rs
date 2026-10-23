@@ -143,7 +143,9 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             let path = Some(rest.trim()).filter(|p| !p.is_empty()).map(|p| editor.session.root.join(p));
             crate::weave::open(editor, path, None)
         }
-        "web" => crate::web::open::saved(editor, rest),
+        "web" => crate::web::open::web(editor, rest, false),
+        "web!" => crate::web::open::web(editor, rest, true),
+        "web-stop" => crate::web::open::stop(editor),
         "session-open" if !rest.trim().is_empty() => {
             let id = editor.session_open(Path::new(rest.trim()))?;
             let all = editor.sessions_in_order();

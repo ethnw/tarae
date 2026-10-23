@@ -731,7 +731,7 @@ fn toasts(ed: &crate::editor::Editor) -> Vec<String> {
 
 /// `:web <path>` from the project's folder, an ignored folder's as `:open` takes it: the page read on a worker into
 /// a buffer of its own, named by its title, in markdown; how it read on the status line. A file that isn't a page
-/// says what it is and opens nothing; an address alone says tarae doesn't fetch yet.
+/// says what it is and opens nothing.
 #[test]
 fn web_reads_a_saved_page_into_a_buffer_named_by_its_title() {
     let root = crate::scratch::Scratch::new("web-saved");
@@ -771,17 +771,160 @@ fn web_reads_a_saved_page_into_a_buffer_named_by_its_title() {
     feed(&mut ed, ":web saved/a.pdf<ret>");
     settle_until(&mut ed, |ed| toasts(ed).iter().any(|t| t.starts_with("web: a PDF")));
     assert_eq!((ed.doc().id, ed.docs.len()), (showing, docs), "no buffer for what isn't a page");
+}
 
-    feed(&mut ed, ":buffer-close<ret>");
-    let before = toasts(&ed).len();
-    feed(&mut ed, ":web https://docs.rs/<ret>");
-    assert!(
-        toasts(&ed)[before..]
-            .iter()
-            .any(|t| t.starts_with("tarae doesn't fetch pages yet: https://docs.rs/")),
-        "{:?}",
-        toasts(&ed)
+/// `:web https://…` with the session's copy of that page (fetched within `KEEP`, by the address asked or the one it
+/// came from) opens it with no network, said with its age; an address the fetch refuses is said at once, nothing
+/// fetched; `:web-stop` with nothing under way says so.
+#[test]
+fn web_fetches_a_page_or_takes_the_session_s_copy() {
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    let f = super::fetch::Fetched {
+        asked: "http://kept.test/a".into(),
+        url: "https://kept.test/a".into(),
+        status: 200,
+        content_type: Some("text/html".into()),
+        bytes: b"<title>Kept</title><main><h1>A kept page</h1><p>Its text.</p></main>".to_vec(),
+        from: Vec::new(),
+        hops: 0,
+        upgraded: true,
+        said: None,
+        cut: false,
+        took: std::time::Duration::from_millis(40),
+    };
+    let gone = ed.session.pages.put(std::sync::Arc::new(f), crate::clock::now());
+    assert!(gone.is_empty());
+    let first = ed.doc().id;
+    feed(&mut ed, ":web https://kept.test/a<ret>");
+    settle_until(&mut ed, |ed| ed.doc().id != first);
+    assert_eq!(ed.doc().title.as_deref(), Some("web · kept.test › Kept"));
+    assert!(ed.doc().text.to_string().contains("# A kept page"));
+    let said = |t: &String| t.ends_with(" · UTF-8 · read just now · over https");
+    assert!(toasts(&ed).iter().any(said), "{:?}", toasts(&ed));
+
+    for (typed, said) in [
+        (":web https://user:pw@kept.test/<ret>", "an address with a user or password in it isn't fetched"),
+        (":web https://10.0.0.1/<ret>", "a bare address isn't fetched"),
+        (":web-stop<ret>", "no page is being fetched"),
+    ] {
+        let before = toasts(&ed).len();
+        feed(&mut ed, typed);
+        assert!(toasts(&ed)[before..].iter().any(|t| t.starts_with(said)), "{typed}: {:?}", toasts(&ed));
+        assert!(ed.session.web_fetch.is_none(), "{typed}: nothing under way");
+    }
+}
+
+/// The session keeps only a whole 2xx page that isn't this machine's: the same address again opens the copy, but an
+/// error's page, one maybe cut short and a `localhost` one (a dev server changes under you) are fetched each time;
+/// `:web!` fetches again whatever was kept, the new copy kept in its place.
+#[test]
+fn web_keeps_only_whole_pages_and_web_bang_fetches_again() {
+    use super::fetch::tests::{Reply, ok, path, reply, server, way, yours_rules};
+    let (at, heads) = server(true, |head| match path(head) {
+        "/missing" => reply(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 11\r\n\r\n<p>gone</p>",
+        ),
+        "/cut" => Reply {
+            close_notify: false,
+            ..reply("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<p>to the close</p>")
+        },
+        _ => ok("<title>A</title><main><h1>A page</h1><p>Its text.</p></main>"),
+    });
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.web_way =
+        Some(std::sync::Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    // (how many requests the server had for what `typed` opened)
+    let asked = |ed: &mut crate::editor::Editor, typed: &str| {
+        let before = ed.doc().id;
+        feed(ed, &format!("{typed}<ret>"));
+        settle_until(ed, |ed| ed.doc().id != before && ed.session.web_fetch.is_none());
+        heads.try_iter().count()
+    };
+    let kept =
+        |ed: &crate::editor::Editor, url: &str| ed.session.pages.get(url, crate::clock::now()).is_some();
+    let local = format!("https://localhost:{}/a", at.port());
+    for (url, keeps) in [
+        ("https://page.test/a", true),
+        ("https://page.test/missing", false),
+        ("https://page.test/cut", false),
+        (local.as_str(), false),
+    ] {
+        assert_eq!(asked(&mut ed, &format!(":web {url}")), 1, "{url}: fetched");
+        assert_eq!(kept(&ed, url), keeps, "{url}");
+        assert_eq!(asked(&mut ed, &format!(":web {url}")), usize::from(!keeps), "{url}: again");
+    }
+    let before = ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(at, _)| at);
+    assert_eq!(asked(&mut ed, ":web! https://page.test/a"), 1, ":web! fetches again");
+    let after = ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(at, _)| at);
+    assert!(after > before, "the new copy kept in its place");
+}
+
+/// `:web https://…` through its way (servers and a proxy of the test's own standing in for yours): the step said while
+/// it runs and gone once it lands, the page in its buffer; `:web-stop` ends one under way — its late result dropped,
+/// no buffer, no error; a second `:web` replaces the first — the first's late result opens nothing and never takes
+/// the second's step —, the session's copy answering the second too: the first stopped all the same, its step gone.
+#[test]
+fn web_fetches_through_its_way_and_a_stop_or_a_newer_one_drops_the_older() {
+    use super::fetch::tests::{Reply, ok, path, reply, server, way, yours_rules};
+    use std::sync::{Arc, Mutex, mpsc};
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Arc::new(Mutex::new(gate));
+    let (at, heads) = server(true, move |head| match path(head) {
+        "/a" => ok("<title>A</title><main><h1>A page</h1><p>Its text.</p></main>"),
+        "/gated" => {
+            Reply { gate: Some(gate.clone()), ..ok("<title>Gated</title><main><h1>G</h1><p>t.</p></main>") }
+        }
+        _ => Reply { hold: true, ..reply("") },
+    });
+    let mut ed = crate::editor::Editor::new(crate::config::Config::default());
+    ed.session.web_way = Some(Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
+    let stepping = |ed: &crate::editor::Editor| ed.toasts.iter().any(|t| t.step.is_some());
+    let dropped = |n: usize| move |ed: &crate::editor::Editor| ed.session.web_dropped == n;
+
+    let first = ed.doc().id;
+    feed(&mut ed, ":web https://page.test/a<ret>");
+    assert!(toasts(&ed).iter().any(|t| t.starts_with("reading page.test…")), "{:?}", toasts(&ed));
+    settle_until(&mut ed, |ed| ed.doc().id != first);
+    assert_eq!(ed.doc().title.as_deref(), Some("web · page.test › A"));
+    assert!(!stepping(&ed) && ed.session.web_fetch.is_none(), "the step over once it landed");
+    assert_eq!(
+        ed.session.pages.get("https://page.test/a", crate::clock::now()).map(|(_, f)| f.status),
+        Some(200)
     );
+
+    let (showing, docs) = (ed.doc().id, ed.docs.len());
+    feed(&mut ed, ":web https://page.test/held<ret>");
+    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the first request came");
+    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the held one came");
+    feed(&mut ed, ":web-stop<ret>");
+    assert!(!stepping(&ed) && toasts(&ed).iter().any(|t| t == "web: stopped"), "{:?}", toasts(&ed));
+    let said = toasts(&ed).len();
+    settle_until(&mut ed, dropped(1));
+    assert_eq!((ed.doc().id, ed.docs.len(), toasts(&ed).len()), (showing, docs, said), "nothing of it shown");
+
+    feed(&mut ed, ":web https://page.test/held<ret>");
+    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the older came");
+    feed(&mut ed, ":web https://page.test/gated<ret>");
+    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the newer came");
+    settle_until(&mut ed, dropped(2));
+    assert!(stepping(&ed), "the older's late result left the newer's step: {:?}", toasts(&ed));
+    assert!(!toasts(&ed).iter().any(|t| t.starts_with("web: ") && t != "web: stopped"), "{:?}", toasts(&ed));
+    assert_eq!((ed.doc().id, ed.docs.len()), (showing, docs));
+    release.send(()).unwrap();
+    settle_until(&mut ed, |ed| ed.doc().id != showing);
+    assert_eq!(ed.doc().title.as_deref(), Some("web · page.test › Gated"));
+    assert!(!stepping(&ed));
+
+    // (the newer answered from the session's copy: the older stopped first all the same)
+    feed(&mut ed, ":web https://page.test/held<ret>");
+    heads.recv_timeout(std::time::Duration::from_secs(5)).expect("the older came");
+    assert!(stepping(&ed));
+    feed(&mut ed, ":web https://page.test/a<ret>");
+    assert!(!stepping(&ed) && ed.session.web_fetch.is_none(), "the older stopped, its step gone");
+    settle_until(&mut ed, |ed| ed.doc().title.as_deref() == Some("web · page.test › A"));
+    settle_until(&mut ed, dropped(3));
+    assert!(heads.try_recv().is_err(), "the copy answered: nothing fetched");
+    assert!(!stepping(&ed));
 }
 
 /// A FIFO with nothing writing to it: refused at once and said — never a worker held inside open(2).

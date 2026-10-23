@@ -22,6 +22,8 @@ tarae and the plugin fuzzer in `../` keep the pinned stable.
 | `sni` | `parse::server_name` | `sni` | a tunnel's first bytes |
 | `body` | `parse::Body` (chunked) | `body` | first byte: bytes given at a time (1 + 2n), then the body |
 | `web` | `web::read` (a page's bytes) | `web::check::page_input`: no panic, the limits, links and anchors in the text | first byte: which part read, the type given; then the page |
+| `response` | `parse::response`, `Body::data` (the fetch's) | `response_input`: a head ends at its blank line, a body only where its status has one; the data as its framing says (`dechunked` reads a chunked one apart) | first byte: bytes given at a time (1 + 2n), then the response |
+| `gzip` | `web::gzip::gunzip` (the fetch's) | `web::check::gzip_input`: no panic, never past its limit and one, a whole one ends with its CRC | first byte: the limit (64n), then the body |
 
 `msghdr`'s input is a run's memory (`Fake::from_input`): a byte of flags (1: a datagram), where the header is
 (8 bytes), then pieces, each an address (8 bytes), a length (2 bytes) and its bytes. Numbers are little-endian.
@@ -57,7 +59,9 @@ parser is fed 8 KB at a time).
 
 `web` reads what anyone's page holds, not what a sandboxed run sends; it's here as the same kind of reader — its
 module (`src/web/`, and `media.rs` for sniffing) included as the others are, its crates (html5ever and
-encoding_rs) in this folder's `Cargo.toml` at tarae's versions.
+encoding_rs) in this folder's `Cargo.toml` at tarae's versions. `response` and `gzip` read what a server sends the
+fetch — `gzip` with the inflate tarae has (miniz_oxide) and png's CRC (crc32fast), here too; `response` with
+`-max_len` 73728 (past `RESPONSE_HEAD_MAX`, 64 KB: a response's head gets its own, larger limit).
 
 `hour.sh` does all of it on Linux: it builds, then runs each target for an hour (`./hour.sh [seconds]`, `JOBS`
 at a time, one per core by default). It leaves `logs/<target>.log` and prints each target's crashes and last

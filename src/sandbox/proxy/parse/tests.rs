@@ -469,8 +469,134 @@ fn the_body_parser_never_panics() {
     assert!(done > 1000 && errors > 10_000, "{done} / {errors}");
 }
 
+/// A response's head is read to its blank line: its status, its fields, and how its body ends — none for a 1xx, 204
+/// and 304, a length, chunked, or until the close where nothing says; a framing a reader could take two ways, a
+/// status that isn't three digits or a version but 1.0 and 1.1 refused.
+#[test]
+fn a_response_is_read_to_its_blank_line() {
+    let sent = b"HTTP/1.1 301 Moved Permanently\r\nLocation: /x\r\nContent-Length: 0\r\n\r\nnext";
+    let r = response(sent).unwrap().unwrap();
+    assert_eq!((r.status, r.field("location"), r.body), (301, Some("/x"), Framing::Length(0)));
+    assert_eq!(&sent[r.len..], b"next");
+    let framed = [
+        (&b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"[..], Framing::Chunked),
+        (b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n", Framing::Close),
+        (b"HTTP/1.1 200\r\n\r\n", Framing::Close),
+        (b"HTTP/1.1 204 No Content\r\nContent-Length: 9\r\n\r\n", Framing::Empty),
+        (b"HTTP/1.1 304 Not Modified\r\n\r\n", Framing::Empty),
+        (b"HTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n", Framing::Empty),
+    ];
+    for (head, body) in framed {
+        assert_eq!(response(head).unwrap().unwrap().body, body, "{:?}", String::from_utf8_lossy(head));
+    }
+    assert_eq!(
+        response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"),
+        Ok(None),
+        "its blank line not yet come"
+    );
+    for head in [
+        &b"HTTP/2 200\r\n\r\n"[..],
+        b"HTTP/1.1 20 OK\r\n\r\n",
+        b"HTTP/1.1 2000 OK\r\n\r\n",
+        b"HTTP/1.1 700 What\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\n folded\r\n\r\n",
+    ] {
+        assert!(response(head).is_err(), "{:?}", String::from_utf8_lossy(head));
+    }
+    // (its own limits, a response's: a request's 8 KB and 100 lines would refuse heads real servers send)
+    let fields = |n: usize, pad: usize| {
+        let one = format!("X-F: {}\r\n", "v".repeat(pad));
+        format!("HTTP/1.1 200 OK\r\n{}\r\n", one.repeat(n)).into_bytes()
+    };
+    assert!(
+        response(&fields(HEADERS_MAX + 1, 100)).unwrap().is_some(),
+        "past a request's 100 lines and 8 KB"
+    );
+    assert!(response(&fields(RESPONSE_FIELDS_MAX, 200)).unwrap().is_some(), "its fields at their limit");
+    assert_eq!(response(&fields(RESPONSE_FIELDS_MAX + 1, 1)), Err(Refusal::AnswerFields));
+    assert_eq!(response(&vec![b'a'; RESPONSE_HEAD_MAX]), Err(Refusal::AnswerTooLong));
+    assert_eq!(response(&vec![b'a'; RESPONSE_HEAD_MAX - 1]), Ok(None));
+    assert_eq!(
+        response(&fields(1, RESPONSE_HEAD_MAX)),
+        Err(Refusal::AnswerTooLong),
+        "one field past its bytes"
+    );
+    assert!(Refusal::AnswerTooLong.said().contains("64 KB") && Refusal::AnswerFields.said().contains("256"));
+    let two = response(b"HTTP/1.1 200 OK\r\nX: 1\r\nx: 2\r\n\r\n").unwrap().unwrap();
+    assert_eq!(two.field("x"), None, "a field sent twice is no one value");
+}
+
+/// `Body::data` gives a body's data without its framing — a length's bytes, a chunked body's chunks (extensions and
+/// trailers left out), every byte until the close — however the bytes are split.
+#[test]
+fn a_body_s_data_is_read_without_its_framing() {
+    let chunked = b"3;ext=1\r\nabc\r\n2\r\nde\r\n0\r\nX-T: 1\r\n\r\nNEXT";
+    for chunk in [1, 2, 7, 100] {
+        for (f, bytes, want) in [
+            (Framing::Length(3), &b"abcdef"[..], &b"abc"[..]),
+            (Framing::Chunked, chunked, b"abcde"),
+            (Framing::Close, b"all of it", b"all of it"),
+            (Framing::Empty, b"none", b""),
+        ] {
+            let (mut b, mut out) = (Body::new(f), Vec::new());
+            for piece in bytes.chunks(chunk) {
+                if b.data(piece, &mut out).unwrap() < piece.len() {
+                    break;
+                }
+            }
+            assert_eq!(out, want, "{f:?} {chunk} at a time");
+            assert_eq!(b.done(), f != Framing::Close, "until the close: never done by itself");
+        }
+    }
+}
+
+/// A response: a status, a framing — a length, chunked, none (until the close) — and its body.
+fn a_response(rng: &mut Rng) -> Vec<u8> {
+    let status = [200, 301, 404, 204, 100, 500][rng.below(6)];
+    let mut b = format!("HTTP/1.1 {status} Reason\r\nContent-Type: text/html\r\n").into_bytes();
+    let data: Vec<u8> = (0..rng.below(200)).map(|_| rng.next() as u8).collect();
+    match rng.below(3) {
+        0 => {
+            b.extend_from_slice(format!("Content-Length: {}\r\n\r\n", data.len()).as_bytes());
+            b.extend_from_slice(&data);
+        }
+        1 => {
+            b.extend_from_slice(b"Transfer-Encoding: chunked\r\n\r\n");
+            b.extend_from_slice(&chunked(rng));
+        }
+        _ => {
+            b.extend_from_slice(b"\r\n");
+            b.extend_from_slice(&data);
+        }
+    }
+    b
+}
+
+/// Whatever a server sends, the response parser answers as `check::response` has it, and a body's data is what its
+/// framing says (`check::exchange`): responses mutated 100,000 times, their bodies given 1–512 bytes at a time.
+#[test]
+fn the_response_parser_never_panics() {
+    let mut rng = Rng(0x7e5b_0e5e_d1ce_0007);
+    let (mut read, mut refused) = (0, 0);
+    for _ in 0..100_000 {
+        let mut b = a_response(&mut rng);
+        mutate(&mut rng, &mut b, RESPONSE_HEAD_MAX);
+        check::response(&b);
+        match check::exchange(&b, || 1 + rng.below(512)) {
+            "read" => read += 1,
+            "refused" => refused += 1,
+            _ => {}
+        }
+    }
+    assert!(read > 10_000 && refused > 5000, "{read} / {refused}");
+}
+
 /// The fuzz targets' seeds (`fuzz/parsers/seeds/`): `head` the captured heads, `sni` the captured ClientHellos whole and in three records, `body` chunked bodies (`check::body_input`'s first
-/// byte: 1, 3, 255, 511 bytes at a time).
+/// byte: 1, 3, 255, 511 bytes at a time), `response` responses of each framing (`check::response_input`'s first byte
+/// likewise).
 #[test]
 #[ignore = "writes fuzz/parsers/seeds: by hand"]
 fn writes_fuzz_seeds() {
@@ -491,6 +617,11 @@ fn writes_fuzz_seeds() {
         .collect();
     assert!(bodies.iter().all(|(_, b)| check::body_input(b) == "done"), "each a whole body");
     fuzz_seeds("body", bodies);
+    let responses: Vec<(String, Vec<u8>)> = (0..6)
+        .map(|k| (format!("response-{k}"), [&[k as u8 * 40][..], &a_response(&mut rng)].concat()))
+        .collect();
+    assert!(responses.iter().all(|(_, b)| check::response_input(b) == "read"), "each a whole response");
+    fuzz_seeds("response", responses);
 }
 
 /// Each refusal is answered with its status (too long 431, a method 405, the rest 400) and said in words that

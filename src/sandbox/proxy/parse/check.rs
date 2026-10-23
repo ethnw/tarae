@@ -93,6 +93,99 @@ pub(crate) fn body(b: &[u8], mut size: impl FnMut() -> usize) -> &'static str {
     "more"
 }
 
+/// Whatever a server sends, the parser answers a response, "more", or a refusal — never a panic, never a byte past
+/// `RESPONSE_HEAD_MAX`: a response's head ends at its first blank line, its status is 100–599, a 1xx, 204 or 304 has
+/// no body and any other one some framing; "more" only while no blank line is in the first `RESPONSE_HEAD_MAX` bytes.
+pub(crate) fn response(b: &[u8]) -> &'static str {
+    let blank = find(&b[..b.len().min(RESPONSE_HEAD_MAX)], b"\r\n\r\n");
+    match super::response(b) {
+        Ok(Some(r)) => {
+            assert!(r.len <= RESPONSE_HEAD_MAX && Some(r.len - 4) == blank, "ends at its first blank line");
+            assert!((100..=599).contains(&r.status) && r.fields.len() <= RESPONSE_FIELDS_MAX);
+            let none = matches!(r.status, 100..=199 | 204 | 304);
+            assert_eq!(none, r.body == Framing::Empty, "a body only where its status has one");
+            "response"
+        }
+        Ok(None) => {
+            assert!(blank.is_none() && b.len() < RESPONSE_HEAD_MAX, "more only while no blank line came");
+            "more"
+        }
+        Err(Refusal::AnswerTooLong) => {
+            assert!(
+                blank.is_none() && b.len() >= RESPONSE_HEAD_MAX,
+                "past its bytes only without a blank line"
+            );
+            "refused"
+        }
+        Err(_) => "refused",
+    }
+}
+
+/// A chunked body read apart from the parser, as RFC 9112 §7.1 has it: its data, and its length to the trailers'
+/// blank line — None where it isn't one whole.
+pub(crate) fn dechunked(b: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let (mut out, mut at) = (Vec::new(), 0);
+    loop {
+        let eol = at + find(&b[at..], b"\r\n")?;
+        let hex = b[at..eol].split(|&c| c == b';').next()?;
+        let size = usize::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+        at = eol + 2;
+        if size == 0 {
+            loop {
+                let end = at + find(&b[at..], b"\r\n")?;
+                if end == at {
+                    return Some((out, at + 2));
+                }
+                at = end + 2;
+            }
+        }
+        out.extend_from_slice(b.get(at..at.checked_add(size)?)?);
+        at += size;
+        if b.get(at..at + 2)? != b"\r\n" {
+            return None;
+        }
+        at += 2;
+    }
+}
+
+/// A whole response, its body given `size()` bytes at a time to `Body::data`: whatever it holds, the data is what its
+/// framing says — a length's first bytes, everything until the close, a chunked body's data as `dechunked` reads it
+/// apart — and never more than the bytes taken. Read, refused, or "more" (the bytes ran out first).
+pub(crate) fn exchange(b: &[u8], mut size: impl FnMut() -> usize) -> &'static str {
+    let r = match super::response(b) {
+        Ok(Some(r)) => r,
+        Ok(None) => return "more",
+        Err(_) => return "refused",
+    };
+    let rest = &b[r.len..];
+    let mut body = Body::new(r.body);
+    let (mut out, mut at) = (Vec::new(), 0);
+    while at < rest.len() && !body.done() {
+        let piece = &rest[at..(at + size().max(1)).min(rest.len())];
+        let before = out.len();
+        let Ok(k) = body.data(piece, &mut out) else { return "refused" };
+        assert!(k <= piece.len() && out.len() - before <= k, "data only from what it took");
+        assert!(k == piece.len() || body.done(), "short only once done");
+        at += k;
+    }
+    match r.body {
+        Framing::Empty => assert!(out.is_empty() && at == 0),
+        Framing::Length(n) if body.done() => assert_eq!(out, &rest[..n as usize]),
+        Framing::Close => assert_eq!(out, rest, "until the close: every byte"),
+        Framing::Chunked if body.done() => assert_eq!(dechunked(rest), Some((out, at)), "as read apart"),
+        _ => return "more",
+    }
+    "read"
+}
+
+/// `response` and `exchange` on a fuzz input: its first byte how many bytes at a time (1 + twice it), the response
+/// after it.
+pub(crate) fn response_input(b: &[u8]) -> &'static str {
+    let Some((&n, rest)) = b.split_first() else { return "more" };
+    response(rest);
+    exchange(rest, || 1 + 2 * usize::from(n))
+}
+
 /// `body` on a fuzz input: its first byte how many bytes at a time (1 + twice it), the body after it.
 pub(crate) fn body_input(b: &[u8]) -> &'static str {
     let Some((&n, rest)) = b.split_first() else { return "more" };

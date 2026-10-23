@@ -26,6 +26,9 @@ libfuzzer-sys = "0.4"
 encoding_rs = "0.8"
 html5ever = "=0.39.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# The fetch's gzip (web/gzip.rs): the inflate tarae has (miniz_oxide) and png's CRC
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+crc32fast = "1.5"
 
 # `fuzzing`: what cargo-fuzz sets, and what builds the readers' `check` modules
 [lints.rust]
@@ -80,6 +83,20 @@ bench = false
 [[bin]]
 name = "web"
 path = "fuzz_targets/web.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response"
+path = "fuzz_targets/response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gzip"
+path = "fuzz_targets/gzip.rs"
 test = false
 doc = false
 bench = false

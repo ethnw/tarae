@@ -415,7 +415,8 @@ fn read_exactly(
 /// addresses (a container's, standing for the outside in the Linux tests): whatever a broken check above lets
 /// through shows as a failed connect, never a packet past this machine.
 fn dial(a: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
-    // (`TARAE_MEASURE_REACHES_NETWORK`: an `#[ignore]`d measurement run by hand on a VM — never `cargo test`)
+    // (`TARAE_MEASURE_REACHES_NETWORK`: an `#[ignore]`d test that needs the network — a measurement by hand on a VM,
+    // the page fetch in CI's network job — never plain `cargo test`)
     #[cfg(test)]
     if !a.ip().is_loopback()
         && !this_machines(a.ip())

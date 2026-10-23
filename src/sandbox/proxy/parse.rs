@@ -1,6 +1,7 @@
 //! The egress proxy's two parsers (`docs/design/sandbox-keeper.md` §The egress proxy, `target/sb/step5-plan.md`):
 //! a request's head — `CONNECT host:port`, or a plain-http request in absolute form — and the server name a TLS
-//! ClientHello carries. Pure: bytes in, an answer out, no I/O; the proxy reads, times and relays. Each is bounded —
+//! ClientHello carries. Beside them the fetch's (`web/fetch.rs`, `target/sb/web-fetch-plan.md` §2.2): a response's
+//! head (`response`), and a body's data without its framing (`Body::data`, the relay's machine). Pure: bytes in, an answer out, no I/O; the proxy reads, times and relays. Each is bounded —
 //! nothing read past its limit, nothing allocated by a claimed length before what it claims is there — and
 //! answers every input with what it found, "more bytes" (None), or a refusal: never a panic (a panic aborts
 //! tarae).
@@ -15,6 +16,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub const HEAD_MAX: usize = 8192;
 /// The most header lines a head holds.
 pub const HEADERS_MAX: usize = 100;
+/// The longest response head, to its blank line (the fetch's): a request's limits are a client's, and a server's head
+/// carries more — GitHub's is 5.6 KB in 24 lines (measured 2026-10-23, its policy fields 4 KB alone), 70 % of
+/// `HEAD_MAX` already. Eleven times that, still bounded and fuzzed.
+pub const RESPONSE_HEAD_MAX: usize = 64 << 10;
+/// The most fields a response head holds.
+pub const RESPONSE_FIELDS_MAX: usize = 256;
 /// The longest host name (RFC 1035's 253 in text form, without a trailing dot).
 pub const HOST_MAX: usize = 253;
 /// The longest ClientHello: its handshake body.
@@ -79,6 +86,8 @@ pub enum Framing {
     Length(u64),
     /// `Transfer-Encoding: chunked`.
     Chunked,
+    /// Until the connection closes: a response with neither (RFC 9112 §6.3) — never a request's.
+    Close,
 }
 
 /// A head read whole.
@@ -101,6 +110,10 @@ pub enum Refusal {
     Method,
     /// Its host isn't a name or an address, or its port isn't 1–65535.
     Host(&'static str),
+    /// A response's head past `RESPONSE_HEAD_MAX` bytes without its end (the fetch's).
+    AnswerTooLong,
+    /// A response's head of more than `RESPONSE_FIELDS_MAX` fields.
+    AnswerFields,
 }
 
 impl Refusal {
@@ -110,6 +123,7 @@ impl Refusal {
             Refusal::TooLong => 431,
             Refusal::Malformed(_) | Refusal::Host(_) => 400,
             Refusal::Method => 405,
+            Refusal::AnswerTooLong | Refusal::AnswerFields => 502,
         }
     }
 
@@ -120,6 +134,8 @@ impl Refusal {
             Refusal::Malformed(why) => format!("not a request a proxy takes: {why}"),
             Refusal::Method => format!("a method other than CONNECT and {}", METHODS.join(" ")),
             Refusal::Host(why) => format!("its host: {why}"),
+            Refusal::AnswerTooLong => format!("a head past {} KB without its end", RESPONSE_HEAD_MAX >> 10),
+            Refusal::AnswerFields => format!("a head of more than {RESPONSE_FIELDS_MAX} fields"),
         }
     }
 }
@@ -140,22 +156,7 @@ fn token(s: &[u8]) -> bool {
 /// A head in `buf` — what a client sent so far: the request, None while its blank line hasn't come (and
 /// `HEAD_MAX` isn't reached), or why it's refused.
 pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
-    let window = &buf[..buf.len().min(HEAD_MAX)];
-    let Some(end) = find(window, b"\r\n\r\n") else {
-        return if buf.len() >= HEAD_MAX { Err(Refusal::TooLong) } else { Ok(None) };
-    };
-    let mut lines = Vec::new();
-    let mut rest = &window[..end];
-    while let Some(i) = find(rest, b"\r\n") {
-        lines.push(&rest[..i]);
-        rest = &rest[i + 2..];
-    }
-    lines.push(rest);
-    // (no bare CR or LF, no control character but a tab: what a line means is only what it shows)
-    let line = |l: &'_ [u8]| match l.iter().all(|&c| c == b'\t' || (c >= 0x20 && c != 0x7f)) {
-        true => Ok(()),
-        false => Err(Refusal::Malformed("a control character in a line")),
-    };
+    let Some((end, lines)) = lines(buf, HEAD_MAX, Refusal::TooLong)? else { return Ok(None) };
     let first = lines[0];
     line(first)?;
     let mut parts = first.split(|&c| c == b' ');
@@ -167,25 +168,8 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
     if version != b"HTTP/1.1" && version != b"HTTP/1.0" {
         return Err(Refusal::Malformed("not HTTP/1.0 or 1.1"));
     }
-    let mut headers: Vec<(&[u8], &[u8])> = Vec::new();
-    for &l in &lines[1..] {
-        line(l)?;
-        if l.first().is_some_and(|&c| c == b' ' || c == b'\t') {
-            return Err(Refusal::Malformed("a folded header line"));
-        }
-        let colon = l.iter().position(|&c| c == b':').ok_or(Refusal::Malformed("a header without `:`"))?;
-        let (name, value) = (&l[..colon], l[colon + 1..].trim_ascii());
-        if !token(name) {
-            return Err(Refusal::Malformed("a header's name"));
-        }
-        if headers.len() == HEADERS_MAX {
-            return Err(Refusal::TooLong);
-        }
-        headers.push((name, value));
-    }
-    let named = |n: &'static str| -> Vec<&[u8]> {
-        headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(n.as_bytes())).map(|(_, v)| *v).collect()
-    };
+    let headers = fields(&lines[1..], HEADERS_MAX, Refusal::TooLong)?;
+    let named = |n: &'static str| named(&headers, n);
     let auth = match named("proxy-authorization")[..] {
         [] => Auth::None,
         [v] => basic(v).unwrap_or(Auth::Unreadable),
@@ -204,6 +188,121 @@ pub fn head(buf: &[u8]) -> Result<Option<Head>, Refusal> {
         plain(method, target, version, &headers, body)?
     };
     Ok(Some(Head { request, auth, len: end + 4 }))
+}
+
+/// A head's lines: where its blank line starts, and the lines before it.
+type Lines<'a> = (usize, Vec<&'a [u8]>);
+
+/// A field: its name, and its value without the spaces around it.
+type Field<'a> = (&'a [u8], &'a [u8]);
+
+/// A head's lines in `buf`, to its blank line — None while it hasn't come and `max` bytes haven't (`past` once they
+/// have).
+fn lines(buf: &[u8], max: usize, past: Refusal) -> Result<Option<Lines<'_>>, Refusal> {
+    let window = &buf[..buf.len().min(max)];
+    let Some(end) = find(window, b"\r\n\r\n") else {
+        return if buf.len() >= max { Err(past) } else { Ok(None) };
+    };
+    let mut lines = Vec::new();
+    let mut rest = &window[..end];
+    while let Some(i) = find(rest, b"\r\n") {
+        lines.push(&rest[..i]);
+        rest = &rest[i + 2..];
+    }
+    lines.push(rest);
+    Ok(Some((end, lines)))
+}
+
+/// No bare CR or LF, no control character but a tab: what a line means is only what it shows.
+fn line(l: &[u8]) -> Result<(), Refusal> {
+    match l.iter().all(|&c| c == b'\t' || (c >= 0x20 && c != 0x7f)) {
+        true => Ok(()),
+        false => Err(Refusal::Malformed("a control character in a line")),
+    }
+}
+
+/// A head's field lines — none folded, each name a token, at most `max` (`past` beyond).
+fn fields<'a>(lines: &[&'a [u8]], max: usize, past: Refusal) -> Result<Vec<Field<'a>>, Refusal> {
+    let mut headers = Vec::new();
+    for &l in lines {
+        line(l)?;
+        if l.first().is_some_and(|&c| c == b' ' || c == b'\t') {
+            return Err(Refusal::Malformed("a folded header line"));
+        }
+        let colon = l.iter().position(|&c| c == b':').ok_or(Refusal::Malformed("a header without `:`"))?;
+        let (name, value) = (&l[..colon], l[colon + 1..].trim_ascii());
+        if !token(name) {
+            return Err(Refusal::Malformed("a header's name"));
+        }
+        if headers.len() == max {
+            return Err(past);
+        }
+        headers.push((name, value));
+    }
+    Ok(headers)
+}
+
+/// The values of the fields named `n`, any case.
+fn named<'a>(headers: &[(&[u8], &'a [u8])], n: &str) -> Vec<&'a [u8]> {
+    headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case(n.as_bytes())).map(|(_, v)| *v).collect()
+}
+
+/// A response's head, as the fetch reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    /// Its fields as sent, in order (their bytes read as UTF-8, a byte that isn't as U+FFFD).
+    pub fields: Vec<(String, String)>,
+    /// How its body ends: none for a 1xx, 204 or 304; else as its fields say, until the close where they say nothing.
+    pub body: Framing,
+    /// Its length in what was read, the blank line's too: what follows is the body's.
+    pub len: usize,
+}
+
+impl Response {
+    /// The one field named `name` (any case) — None where there's none, or more than one.
+    pub fn field(&self, name: &str) -> Option<&str> {
+        let mut all = self.fields.iter().filter(|(k, _)| k.eq_ignore_ascii_case(name));
+        match (all.next(), all.next()) {
+            (Some((_, v)), None) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// A response's head in `buf` — what a server sent so far: `HTTP/1.x <3 digits>[ <reason>]` and its fields, None
+/// while its blank line hasn't come (and `RESPONSE_HEAD_MAX` isn't reached), or why it isn't read: past
+/// `RESPONSE_HEAD_MAX` or `RESPONSE_FIELDS_MAX`, said which. Its framing one way only, as a request's (`framing`): a
+/// server whose length a reader could take two ways is refused, never guessed.
+pub fn response(buf: &[u8]) -> Result<Option<Response>, Refusal> {
+    let Some((end, lines)) = lines(buf, RESPONSE_HEAD_MAX, Refusal::AnswerTooLong)? else { return Ok(None) };
+    let first = lines[0];
+    line(first)?;
+    let (version, rest) = first.split_at(first.len().min(8));
+    if version != b"HTTP/1.1" && version != b"HTTP/1.0" {
+        return Err(Refusal::Malformed("not an HTTP/1.0 or 1.1 status line"));
+    }
+    let three = |d: &[u8]| {
+        d.len() >= 3 && d[..3].iter().all(u8::is_ascii_digit) && d.get(3).is_none_or(|&c| c == b' ')
+    };
+    let status = match rest.split_first() {
+        Some((b' ', d)) if three(d) => d[..3].iter().fold(0u16, |a, c| a * 10 + u16::from(c - b'0')),
+        _ => return Err(Refusal::Malformed("a status that isn't three digits")),
+    };
+    if !(100..=599).contains(&status) {
+        return Err(Refusal::Malformed("a status outside 100–599"));
+    }
+    let headers = fields(&lines[1..], RESPONSE_FIELDS_MAX, Refusal::AnswerFields)?;
+    let body = match status {
+        100..=199 | 204 | 304 => Framing::Empty,
+        _ => match framing(&named(&headers, "content-length"), &named(&headers, "transfer-encoding"))? {
+            Framing::Empty => Framing::Close,
+            f => f,
+        },
+    };
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let fields = headers.iter().map(|(k, v)| (text(k), text(v))).collect();
+    Ok(Some(Response { status, fields, body, len: end + 4 }))
 }
 
 /// A plain request's body framed one way only, so the proxy and the server can't read its end differently: no
@@ -627,6 +726,8 @@ enum BodyState {
         line: usize,
         cr: bool,
     },
+    /// Every byte the body's, until the close (`Framing::Close`).
+    Rest,
     Done,
 }
 
@@ -638,6 +739,7 @@ impl Body {
             Framing::Empty | Framing::Length(0) => BodyState::Done,
             Framing::Length(n) => BodyState::Left { n, chunk: false },
             Framing::Chunked => SIZE_LINE,
+            Framing::Close => BodyState::Rest,
         })
     }
 
@@ -648,13 +750,29 @@ impl Body {
 
     /// How many of `b` — the client's next bytes — are the body's; Err: a framing it can't follow.
     pub fn take(&mut self, b: &[u8]) -> Result<usize, &'static str> {
+        self.feed(b, |_| {})
+    }
+
+    /// `take`, the body's data among them — without its chunks' framing — added to `out`: the same machine, so what
+    /// the fetch reads is what the relay would have counted.
+    pub fn data(&mut self, b: &[u8], out: &mut Vec<u8>) -> Result<usize, &'static str> {
+        self.feed(b, |d| out.extend_from_slice(d))
+    }
+
+    fn feed(&mut self, b: &[u8], mut data: impl FnMut(&[u8])) -> Result<usize, &'static str> {
         use BodyState::*;
         let mut i = 0;
         while i < b.len() {
             self.0 = match self.0 {
                 Done => break,
+                Rest => {
+                    data(&b[i..]);
+                    i = b.len();
+                    Rest
+                }
                 Left { n, chunk } => {
                     let k = n.min((b.len() - i) as u64);
+                    data(&b[i..i + k as usize]);
                     i += k as usize;
                     match (n - k, chunk) {
                         (0, true) => DataEnd(0),

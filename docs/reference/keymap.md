@@ -681,7 +681,9 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:diff` |  | Show changes against HEAD, a file, or a revision |
 | `:diff-off` |  | Stop showing the diff |
 | `:weave` |  | This file with every session's changes woven in |
-| `:web` |  | Read a saved web page as text |
+| `:web` |  | Fetch a web page, or read a saved one, as text |
+| `:web!` |  | Fetch a web page again, not the kept copy |
+| `:web-stop` |  | Stop the page being fetched |
 | `:session-open` |  | Work in another checkout beside this one |
 | `:session-switch` |  | Bring another session to the front |
 | `:session-new` |  | New session: a branch in its own checkout |

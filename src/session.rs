@@ -300,6 +300,18 @@ pub struct Session {
     pub hosts: Vec<(String, u16)>,
     /// The card's key each of `hosts` was given with (`hosts::keep_one`) — `:granted`'s stamp; none: none known.
     pub hosts_given: std::collections::BTreeMap<(String, u16), char>,
+    /// The pages fetched in it (`web::fetch::Pages`, D11): 15 minutes each, never on disk — Claude's `read` (P4) takes
+    /// them from here.
+    pub pages: crate::web::fetch::Pages,
+    /// The fetch under way (`:web https://…`): what stops it (`:web-stop`, the next `:web`).
+    pub web_fetch: Option<crate::web::fetch::Stop>,
+    /// Tests: the way `:web` fetches by — servers and a proxy of the test's own (`fetch::tests::way`) — instead of
+    /// yours (`fetch::yours`).
+    #[cfg(test)]
+    pub web_way: Option<crate::web::fetch::MakeWay>,
+    /// Tests: how many stopped or replaced fetches' results were dropped.
+    #[cfg(test)]
+    pub web_dropped: usize,
     /// What its Claude may do past the defaults by the user's `s` on a card (this session — every grant but a
     /// host's, `hosts`), kept with it in `$state/sessions` until it ends or `:sandbox-disallow` takes it back.
     pub allowed: crate::allow::Allowed,
@@ -460,6 +472,12 @@ impl Session {
             compacted: Default::default(),
             hosts: Vec::new(),
             hosts_given: Default::default(),
+            pages: Default::default(),
+            web_fetch: None,
+            #[cfg(test)]
+            web_way: None,
+            #[cfg(test)]
+            web_dropped: 0,
             allowed: Default::default(),
             caps: None,
             caps_asked: 0,

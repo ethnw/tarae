@@ -13,6 +13,29 @@ pub fn page_input(b: &[u8]) {
     page(bytes, content_type, prefer);
 }
 
+/// libFuzzer's input for `gzip`: its first byte says how much it may make (64 × it; 0: one byte), the rest the body.
+pub fn gzip_input(b: &[u8]) -> &'static str {
+    let Some((&m, rest)) = b.split_first() else { return "refused" };
+    gzip(rest, (64 * usize::from(m)).max(1))
+}
+
+/// Whatever a gzip body holds: never a panic, never more than `max` bytes and one; one unpacked whole ends with its
+/// CRC of what it made, one cut is `max` and one.
+pub fn gzip(b: &[u8], max: usize) -> &'static str {
+    match super::gzip::gunzip(b, max) {
+        Ok(super::gzip::Unpacked::Whole(out)) => {
+            assert!(out.len() <= max, "{} past {max}", out.len());
+            assert_eq!(b[b.len() - 8..b.len() - 4], crc32fast::hash(&out).to_le_bytes(), "its check");
+            "whole"
+        }
+        Ok(super::gzip::Unpacked::Cut(out)) => {
+            assert_eq!(out.len(), max + 1);
+            "cut"
+        }
+        Err(_) => "refused",
+    }
+}
+
 /// `bytes` read as `content_type` says: what's read holds.
 pub fn page(bytes: &[u8], content_type: Option<&str>, prefer: Prefer) {
     let p = read(bytes, "https://example.com/a/b.html?q#f", content_type, prefer);

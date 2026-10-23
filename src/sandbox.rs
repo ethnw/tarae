@@ -3958,8 +3958,8 @@ fn seatbelt_process(target: &str) -> Option<(&str, &str)> {
 const OWN_PROCESSES: [&str; 3] = ["signal", "process-info-pidinfo", "mach-priv-task-port"];
 
 /// A new run's id — one counter for both systems: the proxy's questions name it, and the main loop finds the run
-/// by it (`hosts.rs`).
-fn next_run() -> u64 {
+/// by it (`hosts.rs`). A page's fetch takes one too (`web/fetch.rs`): its connections are the proxy's as a run's.
+pub(crate) fn next_run() -> u64 {
     static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -4258,6 +4258,12 @@ pub(crate) fn env_in(
         env.reads.kept.dedup();
     }
     (env, above)
+}
+
+/// The upstream proxy tarae's environment names, as `setting` takes it — what a page's fetch goes out through, as a
+/// run does (`web/fetch.rs`). Reads the environment: a worker's.
+pub fn upstream_now(setting: proxy::upstream::Setting) -> proxy::upstream::Upstreams {
+    upstream_of(&Here::now(), setting)
 }
 
 /// The upstream proxy `here`'s environment names, as `setting` takes it (step 5g) — variables set in both cases

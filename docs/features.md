@@ -430,13 +430,22 @@ configs carry over as they are.
   `b` blame at the cursor line's end — author, age, commit summary — on by default (`editor.git-blame`), `b` flips it
 - **Large files** (≥ 1 MB) load in the background — a 100 MB file shows its first screen in 18 ms. Editing and saving
   wait until the file is fully read, so a half-loaded buffer can never overwrite it
-- **Saved web pages** `:web <path> [address] [main|article|page]` — a page saved as HTML read as text, in markdown:
-  its `<main>` when it has one, else its article (a lone `<article>`, else the block its title heads or its text is
+- **Web pages** `:web https://… [main|article|page]` — a page fetched and read as text: tarae's own HTTP/1.1 GET on a
+  worker, through the same egress proxy as Claude's commands (no card for yours — the address you typed is the yes —
+  but every address refusal: never a cloud metadata server, link-local, this machine's own addresses; your upstream
+  proxy as theirs), TLS by rustls verified as your system verifies (a company's own root works). `http://` is read
+  over https but on this machine (`localhost`, reached directly); redirects followed, five at most, another host's
+  said (`from github.com`); gzip unpacked; nothing of yours sent (no cookie, credentials or referrer). 20 s to the
+  last byte, `:web-stop` (or the next `:web`) stops it; a whole page fetched is the session's for 15 minutes (`read 2m
+  ago`) — never an error's page, one maybe cut short or this machine's — and `:web!` fetches it again. A user or
+  password in the address, a bare IP address and a host name that isn't ASCII are refused, said.
+  `:web <path> [address] [main|article|page]` reads a page saved as HTML. Either way, in markdown: its `<main>` when
+  it has one, else its article (a lone `<article>`, else the block its title heads or its text is
   densest in), else the whole page; the site's chrome, what it runs and what it hides left out; each link where it
   stands (resolved against the address given), each code block fenced with its language. In a read-only buffer of
   its own (`web · docs.rs › Rope in ropey`), how it read on the status line (`main · 87k chars · 753 links · …`); a
   page that needs JavaScript says so. Read on a worker, within limits (8 MB of page, 512 levels of nesting, 2 MB of
-  text — each said when hit). tarae fetching pages comes next
+  text — each said when hit)
 
 ## Syntax highlighting
 

@@ -63,8 +63,9 @@ jobs:
       - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
 
   # The tests that need the network, by name (`#[ignore = "network: …"]`): a grammar downloaded and built from
-  # GitHub, a new plugin built with the SDK's crates. The rest of `--ignored` isn't CI's — children run in a
-  # process of their own, measurements, checks by hand on a VM, the installed claude's
+  # GitHub, a new plugin built with the SDK's crates, a page fetched through tarae's proxy (which in a test dials
+  # past this machine only with TARAE_MEASURE_REACHES_NETWORK). The rest of `--ignored` isn't CI's — children run in
+  # a process of their own, measurements, checks by hand on a VM, the installed claude's
   # (preflight's cis_network_job_runs_every_network_test_and_only_those)
   network:
     runs-on: ubuntu-latest
@@ -72,4 +73,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --bin tarae -- --ignored --exact grammar::tests::grammar_install_e2e plugin::cli::tests::a_new_plugin_builds
+      - run: TARAE_MEASURE_REACHES_NETWORK=1 cargo test --locked --bin tarae -- --ignored --exact grammar::tests::grammar_install_e2e plugin::cli::tests::a_new_plugin_builds web::fetch::tests::a_real_page_is_fetched
