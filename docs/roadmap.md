@@ -469,7 +469,9 @@ main that has what it waits for, and the user says go:
   terminal → shells across `:restart`. After its own terminal engine, then images at full
   resolution (kitty graphics, iTerm2's inline images) where the terminal speaks them, the half-block view
   elsewhere (user, 2026-10-20).
-- **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`): a session's Claude starts
+- **Orchestra, Part I** (the orchestra checkout's `target/sb/orchestra-plan.md`; the user, 2026-10-23: main's Claude
+  is to do what the outside driver does today — Part III there lists the driver's steps, what covers each, and two
+  decisions it needs, which cards and whether the bring; order: after P3 steps 7–8, C0 and the cleanup audit): a session's Claude starts
   sessions of its own and steers them through session tools that act on the editor's model, never on the screen —
   nothing switches the front session or types into an input you can see. P1 children (start them on a card, send
   to them, read their reports, news told once), P2 watching (wakes, cost per child), P3 reviews and proposals.
