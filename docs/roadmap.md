@@ -595,7 +595,9 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   the reader a first-party plugin (`plugin-sdk/web`), the network, gate, document and keys the core's, Claude reading
   a page through `read` with an `https://` URL. First, alone: plugins' `connect` got runs' resolved-address rule
   (`5dcc5fa9`: one lookup, never a metadata server, link-local, multicast or broadcast, this machine only by its own
-  names). P0 (measurements) and P1 (the reader plugin) under way; P2, the plugin API, asked first.
+  names). The user, later the same day: the reader is core Rust (`src/web/`, Claude's tool, always there — no plugin);
+  order: the reader in core → the fetch through the egress proxy → Claude's `read` of an `https://` URL → the pane →
+  its rendered view; **the goal is the text browser pane**, a real browser (carbonyl in the terminal pane) not now.
 
 - **The simulation harness's first piece** (§9.2) — done (detsim P1, `7a3f142b`): the simulated loop and one
   scenario. New code is tested in it from now on, so the harness grows with what's built instead of being fitted
