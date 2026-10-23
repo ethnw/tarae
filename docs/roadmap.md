@@ -457,8 +457,8 @@ main that has what it waits for, and the user says go:
   over one italic preview buffer; the polish (`05037fbf`): a stacked group as tall as the member in sight, one run-time
   format; step 6 (`e864ba15`): a group docked beside the code — `C-w H L K`, `C-w J` back to the slot, its size its
   kind's, its members laid by its pane's shape (`C-w t`), folded into the slot when narrow, kept across `:restart`;
-  one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); next step 6b: every pane's top one line with its name
-  (user, 2026-10-23); step 7 adds the asks' bottom-right corner and the
+  one format for every time (`7c9ed828`: `1h 20m`, ages `3d ago`); step 6b (`345f0b09`): every pane's top one line with its
+  name, `editor.header` gone (user, 2026-10-23); step 7 adds the asks' bottom-right corner and the
   follow card as a floating pane — user, 2026-10-22), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
@@ -590,6 +590,12 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   tarae is public and has users (decided 2026-10-09). The Cyber Verification Program moved to §1.
 
 ## Alongside, not ordered
+
+- **The web pane** (user, 2026-10-23; the web checkout's `target/sb/web-plan.md`): a page read as a document —
+  the reader a first-party plugin (`plugin-sdk/web`), the network, gate, document and keys the core's, Claude reading
+  a page through `read` with an `https://` URL. First, alone: plugins' `connect` got runs' resolved-address rule
+  (`5dcc5fa9`: one lookup, never a metadata server, link-local, multicast or broadcast, this machine only by its own
+  names). P0 (measurements) and P1 (the reader plugin) under way; P2, the plugin API, asked first.
 
 - **The simulation harness's first piece** (§9.2) — done (detsim P1, `7a3f142b`): the simulated loop and one
   scenario. New code is tested in it from now on, so the harness grows with what's built instead of being fitted
