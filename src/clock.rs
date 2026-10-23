@@ -106,7 +106,7 @@ mod tests {
         ("dap.rs", 4),
         ("disk.rs", 3),
         ("dsyms.rs", 1),
-        ("editor.rs", 12),
+        ("editor.rs", 10),
         ("edits.rs", 1),
         ("features.rs", 3),
         ("fswatch.rs", 8),

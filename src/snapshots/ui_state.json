@@ -176,6 +176,7 @@
       "undecided": 1,
       "warnings": []
     },
+    "lists": [],
     "picker": null,
     "review": null,
     "side": null,
@@ -519,5 +520,5 @@
       "where": "waiting"
     }
   ],
-  "v": 13
+  "v": 14
 }

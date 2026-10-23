@@ -414,6 +414,12 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
     }
+    // (messages said while `:messages` is up: only a row where the finished frame shows it whole, else a toast — drawn
+    // again while one more comes, each round fewer waiting: `messages::rows_drawn`)
+    while crate::messages::rows_drawn(editor, &frame, w, h) {
+        frame.clear();
+        render_frame(editor, &mut frame, w, h)?;
+    }
     out.write_all(&frame)?;
     // (an error under a picker waits for the card — U7)
     let card = editor.screen.toast_card.get().is_some();
@@ -527,6 +533,12 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         popup: std::cell::Cell::new(None),
         offer_buttons: offer.as_ref().map(|c| c.buttons.clone()).unwrap_or_default(),
         offer_card: offer.as_ref().map(OfferCard::rect),
+        offer_held: offer.is_none()
+            && !editor.pending.is_empty()
+            && editor.picker.is_none()
+            && lay.text_rows >= 8
+            && lay.edit_w > 0
+            && editor.offers.first().is_some_and(|o| !o.installing()),
         offer_cut: offer.as_ref().filter(|c| !c.bar).map(|c| c.cut),
         chat_links: Default::default(),
         chat_calls: Default::default(),
@@ -584,6 +596,11 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         toast_said: Default::default(),
         prompt_card: Default::default(),
         spots: Default::default(),
+        // (kept from the frame before until the list draws again)
+        messages_room: std::cell::Cell::new(editor.screen.messages_room.get()),
+        toast_rows: Default::default(),
+        list_rows: Default::default(),
+        owned: Default::default(),
     };
     // (the conversation laid out for this frame, the transcript's document following it — keys act on what's drawn)
     if lay.chat_w > 0
@@ -862,10 +879,15 @@ fn floats(
     let mut out: Vec<_> = (editor.floats_up().into_iter())
         .filter_map(|g| Some((g.kind, g.host, g.place.frame()?.rect(w, rows))))
         .collect();
-    if let (Some(p), Some(r)) = (&editor.sessions_pane, editor.sessions_rect(w, rows)) {
-        let top = editor.float_in_hand().filter(|&k| k != GroupKind::Sessions).is_some();
-        let at = if top { out.len().saturating_sub(1) } else { out.len() };
-        out.insert(at, (GroupKind::Sessions, p.list, r));
+    // (the floating lists over the groups unless one of those has the keys; the one with the keys over the other)
+    let mut lists: Vec<GroupKind> = crate::floatlist::KINDS.to_vec();
+    crate::sorting::by_key(&mut lists, |&k| editor.float_list_keys(k));
+    for kind in lists {
+        if let (Some(p), Some(r)) = (editor.float_list(kind), editor.float_list_rect(kind, w, rows)) {
+            let top = editor.float_in_hand().filter(|&k| !crate::floatlist::is_list(k)).is_some();
+            let at = if top { out.len().saturating_sub(1) } else { out.len() };
+            out.insert(at, (kind, p.list, r));
+        }
     }
     match editor.zoomed() {
         None => out,
@@ -1034,7 +1056,7 @@ fn group_list_rows(editor: &Editor, g: &crate::pane::Group) -> usize {
         GroupKind::Task => editor.session.task_run.as_ref().map_or(0, |r| r.place_rows().len()),
         GroupKind::Preflight => crate::grouplist::preflight(editor).map_or(0, |p| p.steps.len()),
         GroupKind::Procs => 1 + editor.procs.rows.len() + 1 + editor.procs.checks.len().clamp(1, 4),
-        GroupKind::Git | GroupKind::Review | GroupKind::Sessions => 0,
+        GroupKind::Git | GroupKind::Review | GroupKind::Sessions | GroupKind::Messages => 0,
     }
 }
 
@@ -1277,8 +1299,7 @@ impl Layout {
                 leaves = vec![(z.0, body)];
             }
             // (a floating one: in its frame, the whole screen — `floats`)
-            let list = editor.sessions_pane.as_ref().map(|p| p.list);
-            if list == Some(z.0)
+            if editor.float_list_of(z.0).is_some()
                 || editor.session.groups.iter().any(|g| g.host == z.0 && editor.floating_in_sight(g.kind))
             {
                 leaves = Vec::new();
@@ -4326,17 +4347,15 @@ impl Region {
             Keys::Code | Keys::Change => Some(Region::Code),
             Keys::Side(_) | Keys::Review => Some(Region::Side),
             k if k.chat() => Some(Region::Chat),
-            // (the session list: its frame's own lines)
-            Keys::List(crate::pane::GroupKind::Sessions) => {
-                Some(Region::Dock(crate::pane::GroupKind::Sessions))
-            }
+            // (a floating list: its frame's own lines)
+            Keys::List(k) if crate::floatlist::is_list(k) => Some(Region::Dock(k)),
             Keys::Slot(_) | Keys::List(_) | Keys::Program | Keys::View(_) | Keys::Output(_) => {
                 match editor.slot_in_hand().and(editor.session.hand) {
                     Some(kind) => Some(Region::Dock(kind)),
                     None => Some(Region::Slot),
                 }
             }
-            Keys::Picker | Keys::Card | Keys::Point | Keys::Chat => None,
+            Keys::Picker | Keys::Card | Keys::Toast | Keys::Point | Keys::Chat => None,
         }
     }
 }
@@ -4767,9 +4786,9 @@ fn draw(
     let folded = toast_folded
         .then(|| {
             use crate::editor::ToastKind as K;
-            let waiting =
-                editor.toasts.iter().rev().find(|t| !t.shown && matches!(t.kind, K::Error | K::Warning));
-            waiting.or(editor.toasts.last())
+            let toasts = editor.card_toasts();
+            let waiting = toasts.iter().rev().find(|t| !t.shown && matches!(t.kind, K::Error | K::Warning));
+            waiting.or(toasts.last()).copied()
         })
         .flatten();
     draw_statusline(editor, ui, lay, folded, out)?;
@@ -4857,7 +4876,7 @@ fn draw_docked(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
 /// has them), its sides and its bottom line round it, lit in the accent while it has the keys, the faint wash else;
 /// inside, a group's panel as the slot draws it, the session list's rows (`draw_sessions_pane`). What's under a frame
 /// isn't seen through it: its cells cleared first.
-fn draw_floating(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> io::Result<()> {
+fn draw_floating(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut Vec<u8>) -> io::Result<()> {
     use crate::pane::GroupKind;
     use crate::sizes::Slot;
     for &(kind, _, r) in &lay.floats {
@@ -4875,6 +4894,9 @@ fn draw_floating(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -
         if kind == GroupKind::Sessions {
             let _fade = Fade::unless(has, &own);
             draw_sessions_pane(editor, &own, card, line, r, out)?;
+        } else if kind == GroupKind::Messages {
+            let _fade = Fade::unless(has, &own);
+            draw_messages_pane(editor, &own, card, line, r, out)?;
         } else {
             let floated = lay.floated(kind, r);
             let _fade = Fade::unless(has, &own);
@@ -4973,7 +4995,7 @@ fn draw_sessions_pane(
     let (name_w, cols) = crate::sessionpane::lay(&rows, room);
     let here = editor.sessions_here();
     let selected = rows.iter().position(|row| Some(row.id) == here).unwrap_or(0);
-    let p = editor.sessions_pane.as_ref();
+    let p = editor.float_list(crate::pane::GroupKind::Sessions);
     let top = p.map_or(0, |p| p.top.get());
     let top = crate::key::in_sight(0, top, selected, rows.len(), inner, 0).0;
     if let Some(p) = p {
@@ -4989,7 +5011,7 @@ fn draw_sessions_pane(
         Ink::Participant(c) => Style { fg: ui.participant(c, true), ..base },
     };
     // Its search's matches (its own `/`), as the code's: a faint accent ground, the selected row's stronger
-    let re = crate::sessionpane::lit(editor);
+    let re = crate::floatlist::lit(editor, crate::pane::GroupKind::Sessions);
     let hit = |on: bool, st: Style| match on {
         false => Style { bg: blend(ui.accent.fg, ui.tint, 0.22).or(st.bg), ..st },
         true => Style { bg: blend(ui.accent.fg, ui.tint, 0.5).or(st.bg), bold: true, ..st },
@@ -5040,6 +5062,131 @@ fn draw_sessions_pane(
         queue!(out, Spaces((r.w - 2).saturating_sub(used)))?;
     }
     Ok(())
+}
+
+/// `:messages` in its frame `r` (`messages.rs`): `╭─ messages ── 12 messages · 1 error ── …keys ─╮`, then a row a
+/// message, oldest first — the bar `▎` and `ui.menu.selected` on the one selected, `▲` before an error or a warning
+/// in its colour, its text cut to the row, its age right-aligned in a column as wide as the widest.
+fn draw_messages_pane(
+    editor: &Editor,
+    ui: &Ui,
+    card: Style,
+    line: Style,
+    r: crate::split::Rect,
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
+    use crate::editor::ToastKind;
+    use crate::pane::GroupKind;
+    let rows = crate::messages::rows(editor);
+    let dim = Style { fg: ui.virt.fg, ..card };
+    let faint = Style { fg: ui.linenr.fg, ..card };
+    let strong =
+        card.patch(editor.theme.try_get("ui.text.focus").unwrap_or(Style { bold: true, ..Style::default() }));
+    let warn = Style { fg: editor.theme.try_get("warning").and_then(|s| s.fg), ..card };
+    let error = Style { fg: ui.error.fg, ..card };
+    // Its top line: its name, how many, the errors and warnings among them, its keys while it has them
+    let count = |kind: ToastKind| rows.iter().filter(|m| m.kind == kind).count();
+    let mut details = vec![(crate::nav::count(rows.len(), "message"), dim)];
+    if count(ToastKind::Error) > 0 {
+        details.push((format!(" · {}", crate::nav::count(count(ToastKind::Error), "error")), error));
+    }
+    if count(ToastKind::Warning) > 0 {
+        details.push((format!(" · {}", crate::nav::count(count(ToastKind::Warning), "warning")), warn));
+    }
+    let has = ui.lit == Some(Region::Slot);
+    let pairs = if has { crate::messages::hints(editor) } else { Vec::new() };
+    let keys: Vec<(&str, &str)> = pairs.iter().map(|(k, d)| (*k, d.as_str())).collect();
+    let names = [("messages".to_string(), strong)];
+    let head = TopLine {
+        names: &names,
+        details: &details,
+        keys: &keys,
+        key: Style { bold: true, ..dim },
+        faint,
+        ..TopLine::default()
+    };
+    top_line(out, line, card, (r.x, r.y, r.w), ("╭", "╮", "┬"), &[], true, &head)?;
+    // The rows: `▎ ` (the bar's cell and a blank), `▲ ` or two blanks, the text, two cells, its age, a cell before the side
+    let (x0, y0, inner) = (r.x + 1, r.y + 1, r.h.saturating_sub(2));
+    let ages: Vec<String> = rows.iter().map(|m| ago(crate::clock::since(m.at), true)).collect();
+    let age_w = ages.iter().map(|a| a.width()).max().unwrap_or(0);
+    let room = r.w.saturating_sub(2 + 2 + 2 + age_w + 2 + 1);
+    editor.screen.messages_room.set(room);
+    let here = editor.float_list_here(GroupKind::Messages);
+    let selected = rows.iter().position(|m| Some(m.id) == here).unwrap_or(rows.len().saturating_sub(1));
+    let p = editor.float_list(GroupKind::Messages);
+    let top = p.map_or(0, |p| p.top.get());
+    let top = crate::key::in_sight(0, top, selected, rows.len(), inner, 0).0;
+    if let Some(p) = p {
+        p.top.set(top);
+    }
+    editor.screen.lists.borrow_mut().push((GroupKind::Messages, (y0, inner, top)));
+    let sel = selected_row(ui, editor, card);
+    // Its search's matches (its own `/`), as the session list's
+    let re = crate::floatlist::lit(editor, GroupKind::Messages);
+    let hit = |on: bool, st: Style| match on {
+        false => Style { bg: blend(ui.accent.fg, ui.tint, 0.22).or(st.bg), ..st },
+        true => Style { bg: blend(ui.accent.fg, ui.tint, 0.5).or(st.bg), bold: true, ..st },
+    };
+    let mut listed = editor.screen.list_rows.borrow_mut();
+    for (k, m) in rows.iter().enumerate().skip(top).take(inner) {
+        let y = y0 + k - top;
+        let on = k == selected;
+        let base = if on { sel } else { card };
+        let start = out.len();
+        queue!(out, MoveTo(x0 as u16, y as u16))?;
+        apply(out, Style { fg: ui.accent.fg, ..base })?;
+        queue!(out, Print(if on { "▎ " } else { "  " }))?;
+        let (mark, mark_st) = match m.kind {
+            ToastKind::Error => ("▲ ", Style { fg: error.fg, ..base }),
+            ToastKind::Warning => ("▲ ", Style { fg: warn.fg, ..base }),
+            _ => ("  ", base),
+        };
+        apply(out, mark_st)?;
+        queue!(out, Print(mark))?;
+        let text = Style { fg: if on { strong.fg } else { card.fg }, bold: on, ..base };
+        let shown = fit_ellipsis(&m.text, room);
+        let hits: Vec<(usize, usize)> = re.as_ref().map_or(Vec::new(), |re| {
+            re.find_iter(&m.text).filter(|h| !h.is_empty()).map(|h| (h.start(), h.end())).collect()
+        });
+        print_lit(out, (&shown, &m.text), (text, hit(on, text)), &hits)?;
+        apply(out, base)?;
+        queue!(out, Spaces(room.saturating_sub(shown.width()) + 2))?;
+        apply(out, Style { fg: faint.fg, ..base })?;
+        queue!(out, Print(pad_left(&ages[k], age_w)))?;
+        apply(out, base)?;
+        queue!(out, Spaces(r.w.saturating_sub(2 + 2 + 2 + room + 2 + age_w)))?;
+        // (its cells and bytes: what the finished frame still shows of it — `shown_whole`)
+        editor.screen.owned.borrow_mut().push(crate::editor::Owned {
+            id: format!("messages:toast#{}", m.id),
+            row: y,
+            cols: x0..x0 + r.w.saturating_sub(2),
+            bytes: start..out.len(),
+        });
+        listed.push((
+            GroupKind::Messages,
+            crate::uistate::panels::Row {
+                id: format!("messages:toast#{}", m.id),
+                label: shown,
+                selected: on,
+                viewed: None,
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// The ids of what `Screen.owned` recorded that finished frame `frame` (`w`×`h`) still shows whole: every cell of it
+/// last written by its own bytes — after every later layer (a floating pane over it, a card, which-key, a picker).
+/// A frame that can't be read shows none.
+pub(crate) fn shown_whole(editor: &Editor, frame: &[u8], w: u16, h: u16) -> Vec<String> {
+    let Some(last) = crate::screen::last_writes(frame, w, h) else { return Vec::new() };
+    let at = |y: usize, x: usize| (x < w as usize).then(|| last.get(y * w as usize + x)).flatten();
+    let owned = editor.screen.owned.borrow();
+    let whole = owned.iter().filter(|o| {
+        !o.cols.is_empty() && o.cols.clone().all(|x| at(o.row, x).is_some_and(|b| o.bytes.contains(b)))
+    });
+    whole.map(|o| o.id.clone()).collect()
 }
 
 /// `text` shown as `t` (cut or not) in `st`, the bytes of `hits` in it in `lit` (a list's search's matches).
@@ -8001,7 +8148,6 @@ fn draw_picker(
             | Action::Typed(_)
             | Action::Grant(_)
             | Action::Theme(_)
-            | Action::Message
             | Action::Branch { .. }
             | Action::Inbox(_)
             | Action::Plugin { .. }
@@ -8009,6 +8155,8 @@ fn draw_picker(
             | Action::Granted(_),
         )
         | None => String::new(),
+        #[cfg(test)]
+        Some(Action::Message) => String::new(),
     };
     let rows = b.list_rows + 4 + b.head;
     let head = p.head.as_ref().map(|h| head_rows(h, lw)).unwrap_or_default();
@@ -9153,7 +9301,7 @@ fn draw_statusline(
         let text = toast.text.lines().next().unwrap_or_default().to_string();
         // (a routine message folded for narrow code: it's said here — `SAID`, with the card's others counted)
         let said = editor.screen.toast_said.get();
-        let more = if said { editor.toasts.len().saturating_sub(1) } else { 0 };
+        let more = if said { editor.card_toasts().len().saturating_sub(1) } else { 0 };
         let text = if more > 0 { format!("{text} · +{more} earlier") } else { text };
         let rank = match toast.waiting() && editor.picker.is_some() {
             true => Some(FOLDED),
@@ -9905,7 +10053,7 @@ fn toast_place(
 }
 
 /// Older messages a card shows under the newest (one row each) — more are counted.
-const TOAST_OLDER: usize = 2;
+pub(crate) const TOAST_OLDER: usize = 2;
 
 /// The notification card: what came together is one card — the newest message on top (its kind's bar,
 /// wrapped up to three rows), the ones before it under it, dimmer, a row each, the rest counted. It fades
@@ -9930,7 +10078,10 @@ fn draw_toasts(
 ) -> io::Result<bool> {
     use crate::editor::ToastKind;
     editor.screen.toast_said.set(false);
-    let Some(newest) = editor.toasts.last() else {
+    // (a message said while `:messages` is up isn't on it until the finished frame says its row isn't in sight —
+    // `messages::rows_drawn`, the frame drawn again)
+    let toasts = editor.card_toasts();
+    let Some(&newest) = toasts.last() else {
         // (no card: the next one decides afresh where it goes)
         editor.screen.toast_narrow.set(None);
         return Ok(true);
@@ -9939,7 +10090,10 @@ fn draw_toasts(
     if editor.picker.is_some() {
         return Ok(false);
     }
-    let card = card_style(ui, editor, "ui.popup");
+    // (a floating pane that can take the keys: framed on the ground as a card is — its lines the faint wash, lit once
+    // focused; a line in a cell of the card's colour would leave half a cell of it outside the line all round, D3)
+    let focus = editor.toast_focus;
+    let card = on_ground(ui, card_style(ui, editor, "ui.popup"));
     let pad = CARD_PAD;
     let max_inner = (lay.edit_w / 2).clamp(24, 56).min(lay.edit_w.saturating_sub(8));
     let a = editor.toast_alpha();
@@ -9976,8 +10130,8 @@ fn draw_toasts(
     }
     let texts: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
     segs.extend(toast_paint(&texts, &newest.paint));
-    let older = editor.toasts.len() - 1;
-    for t in editor.toasts.iter().rev().skip(1).take(TOAST_OLDER) {
+    let older = toasts.len() - 1;
+    for t in toasts.iter().rev().skip(1).take(TOAST_OLDER) {
         let first = t.text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
         // An earlier error or warning keeps its weight — only the routine ones step back
         let (b, style) = match t.kind {
@@ -9997,7 +10151,23 @@ fn draw_toasts(
     }
     let scope_fg = |scope: &str| fade(editor.theme.try_get(scope).and_then(|s| s.fg));
     let inner = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
+    // Its air rows are its frame's lines (`toast.rs`), named `messages` — as wide as its messages, the name whole; the
+    // same rect focused or not (nothing moves): focused, its keys in the bottom line as many whole pairs as its width
+    // holds, the most useful first (`toast::hints`)
+    // (the way out — `esc close` — always said: the card at least as wide as it and the name)
+    let name = "messages";
+    let pair_w = |(k, d): &(&str, &str)| k.width() + 1 + d.width();
+    let floor = (name.width() + 6).max(pair_w(&crate::toast::ESC) + 6);
+    let inner = inner.max(floor.saturating_sub(5));
     let width = inner + 5; // margin 1 · bar · margin 1 · text · margin 2
+    // (in their order, one that doesn't fit skipped for the next that does)
+    let mut keys: Vec<(&str, &str)> = Vec::new();
+    for p in if focus.is_some() { crate::toast::hints(editor) } else { Vec::new() } {
+        let used = keys.iter().map(pair_w).sum::<usize>() + 3 * keys.len();
+        if used + pair_w(&p) + 6 <= width {
+            keys.push(p);
+        }
+    }
     let h = rows.len() + 2 * pad;
     let x0 = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
     let rows_at = (lay.text_top as usize, lay.text_top as usize + lay.text_rows);
@@ -10009,12 +10179,12 @@ fn draw_toasts(
     let narrow = match editor.screen.toast_narrow.get() {
         Some(narrow) => narrow,
         None => {
-            let narrow = editor.toasts.len() == 1 && 2 * width > lay.edit_w.saturating_sub(lay.rail_w);
+            let narrow = toasts.len() == 1 && 2 * width > lay.edit_w.saturating_sub(lay.rail_w);
             editor.screen.toast_narrow.set(Some(narrow));
             narrow
         }
     };
-    if narrow && editor.toasts.iter().all(|t| matches!(t.kind, ToastKind::Info | ToastKind::Success)) {
+    if narrow && toasts.iter().all(|t| matches!(t.kind, ToastKind::Info | ToastKind::Success)) {
         editor.screen.toast_said.set(true);
         return Ok(false);
     }
@@ -10023,18 +10193,28 @@ fn draw_toasts(
     let edge_card = Style { bg, ..card };
     card_edge(out, edge_card, x0, y0, width)?;
     let mut spots = editor.screen.spots.borrow_mut();
+    // (focused with more than one message: the one in hand on the selected row's ground)
+    let sel = selected_row(ui, editor, Style { bg, ..card });
+    let in_hand = focus.filter(|_| starts.iter().filter(|s| s.1 > 0).count() > 1).map(|f| f.selected);
     // (a toast's rows: from the one it starts on to the next one's — the `+N earlier` row is none's)
     let mut of = None;
+    let mut this = 0;
     for (i, (b, text, style)) in rows.iter().enumerate() {
         let y = y0 + pad + i;
         if let Some(&(_, id)) = starts.iter().find(|s| s.0 == i) {
             of = (id > 0).then(|| format!("toast#{id}"));
+            this = id;
             if id > 0 {
                 let of = crate::uistate::point::Of::Toast(id);
                 spots.push(crate::uistate::point::Spot { of, x: x0, y, w: width, at: (x0, y) });
+                editor.screen.toast_rows.borrow_mut().push((y, id));
             }
         }
-        let lit = |s: Style| of.as_deref().map_or(s, |id| flashed(ui, editor, id, s));
+        let held = this > 0 && in_hand == Some(this);
+        let lit = |s: Style| {
+            let s = if held { Style { bg: sel.bg, ..s } } else { s };
+            of.as_deref().map_or(s, |id| flashed(ui, editor, id, s))
+        };
         queue!(out, MoveTo(x0 as u16, y as u16))?;
         apply(out, lit(body))?;
         queue!(out, Print(" "))?;
@@ -10059,6 +10239,23 @@ fn draw_toasts(
         queue!(out, Spaces(inner - text.width() + 2))?;
     }
     card_edge(out, edge_card, x0, y0 + pad + rows.len(), width)?;
+    {
+        let key = Style { fg: ui.accent.fg, bold: true, ..body };
+        let mut spans: Vec<(String, Style)> = Vec::new();
+        for (i, (k, d)) in keys.iter().enumerate() {
+            if i > 0 {
+                spans.push((" · ".into(), faint));
+            }
+            spans.push((k.to_string(), key));
+            spans.push((format!(" {d}"), if i == 0 { body } else { dim }));
+        }
+        let named = [(name.to_string(), Style { bold: true, ..body })];
+        // (its lines fade with it, as its words do)
+        let mut faded = ui.clone();
+        faded.window = fade(ui.window);
+        faded.accent.fg = fade(ui.accent.fg);
+        draw_frame(out, &faded, edge_card, (x0, y0, width, h), &named, &spans, &[], focus.is_some())?;
+    }
     Ok(true)
 }
 

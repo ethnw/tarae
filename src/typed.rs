@@ -303,7 +303,7 @@ pub fn execute(editor: &mut Editor, line: &str) -> Result<(), String> {
             Ok(())
         }
         "messages" => {
-            editor.messages_picker();
+            editor.messages_open(None);
             Ok(())
         }
         "inbox" => {

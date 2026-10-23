@@ -180,7 +180,15 @@ configs carry over as they are.
   outside its checkout (`build 12.0 GB`) — one its end would remove — and `x` twice on a session behind with
   nothing running drops it (its next build starts cold)
 - **Toasts** — status messages fade in as cards at the top right, the left bar colored by kind (info, saved, warning,
-  error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png))
+  error). The more serious, the longer they stay ([screenshot](screenshots/ux-toasts-sync.png)). A toast floats in a
+  faint frame named `messages` and takes no key until you focus it — a click on it, or `C-w w`'s round (after a card
+  waiting): then it stays, its frame lit, its keys in its bottom line as its width holds them (`enter` `:messages` at
+  that message, `esc` closes, `y` copies it, `j`/`k` between its messages); let go, it fades out at once (a press as it fades takes it back)
+- **`:messages`** — everything said since tarae started, as a floating list in the session list's frame: oldest first,
+  opened at the newest, `▲` before an error or a warning, each one's age; `/` searches it, `y` copies a message,
+  `enter` opens one too long for its row whole in a buffer. Opened, the toasts go (their words are its rows); what's
+  said while it's up is a row of it where that row is in sight — else (another pane zoomed, something over it, the list
+  held off its newest row) a toast, as once it closes
 - **Rendered doc comments** — `///`, `//!`, and `/** */` blocks show as rewrapped prose: markers stripped, paragraphs
   joined, headings in accent, `code`, lists, `@param` tags, and example code set in, in its language's colors — on the
   code's own ground, a faint bar at the left (the accent's on the block the cursor is in) (`editor.render-doc-comments`, [folded](screenshots/ux-doc-comments.png) ·
@@ -544,7 +552,8 @@ your `PATH`.
 
 - **Sessions** `space W` — several branches of work side by side, each a checkout of its own with its own Claude,
   chat, terminal and tests; the session list a floating pane that stays while you work (`esc` gives the keys back,
-  `q` closes it), 3/5 of the screen wide and as tall as its rows up to half of it, its top at 1/4 of the screen's
+  `q` closes it) and closes once used — `enter`, a digit, `o`, `f` or `v` takes you to a session and the list goes, as
+  zellij's session manager and tmux's choose-tree do —, 3/5 of the screen wide and as tall as its rows up to half of it, its top at 1/4 of the screen's
   height as every floating pane's (growing downward as sessions come, its top never moving), searched with `/` as every pane is (`n`/`N`, its matches lit; its
   letters are keys: `o` new, `d` end, `b` bring, …) — the overview for whoever watches them: each row a session's name in its colour, its state
   (`working` · `▲ waits` · `◦ stuck?` · `done` · `queued 2nd`), what waits for you counted, `≈` whom it would

@@ -1397,6 +1397,8 @@ impl Editor {
         // (a card focused here lets go: in the other session nothing has the keys until something focuses it there —
         // `C-q` focuses the card it switched for, after this)
         (self.card_focus, self.card_next) = (None, None);
+        // (a focused toast lets go: the keys go where that session had them)
+        self.toast_let_go();
         std::mem::swap(&mut self.session, &mut self.sessions[i]);
         if waits {
             let msg = format!("{name} · waits for you — {}", self.c_q_says(out, true));

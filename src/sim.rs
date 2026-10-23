@@ -50,6 +50,7 @@ mod sessions;
 mod shuttle;
 mod stuckstop;
 mod termview;
+mod toasts;
 mod watchers;
 mod weave;
 mod web;

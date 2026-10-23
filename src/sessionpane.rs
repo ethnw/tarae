@@ -1,7 +1,9 @@
 //! The session list, a floating pane (panes P3 step 7, `target/sb/panes-P3-plan.md` §3.6; CLAUDE.md "The manager's
 //! view"): `space W` opens it in a named frame (`╭─ sessions ─…─╮`) over the code and the chat — not a modal
 //! picker: it stays while you work (`esc code` gives the keys back, it stays in sight; `space W`, a click or `C-w w`
-//! gives it them again; `q` closes it), and across switching sessions — it's the viewer's, not a workspace's.
+//! gives it them again; `q` closes it), and across switching sessions — it's the viewer's, not a workspace's. Done
+//! once used (`floatlist.rs`, user 2026-10-23): what takes you to a session from it — `enter`, a digit, a double
+//! click, `o`, `f`, `v` — closes it.
 //!
 //! It's the manager's overview: one row a session, its name in its colour, then what a person watching several
 //! sessions work needs — its state (`working` · `▲ waits` · `◦ stuck?` · `done` · `queued 2nd`), what waits for you
@@ -12,33 +14,14 @@
 //! waits for you and the state last, the name never. Built from the sessions every frame it's drawn (`rows`), nothing
 //! slow: git's part is read on a worker as it opens (`Editor::session_list`).
 //!
-//! Its keys are a list's (`key::list_move`), `enter` switches to the row's session, `/`·`?` and `n`·`N` its own
-//! search (`prompt_key`, its matches lit — never type-to-narrow: its letters are keys), and its letters as the
-//! picker's were (`Editor::session_list_key`: `o` new, `d` end, `b` bring, `v` woven, `f` follow, digits, …).
+//! Its keys are a floating list's (`floatlist.rs`: the moves, its own search, `esc code`, `q`), `enter` switches to
+//! the row's session, and its letters as the picker's were (`Editor::session_list_key`: `o` new, `d` end, `b` bring,
+//! `v` woven, `f` follow, digits, …).
 
 use crate::editor::Editor;
 use crate::event::SessionId;
-use crate::key::{Code, Key, ListMove};
 use crate::pane::GroupKind;
-use crate::session::At;
-use crate::split::PaneId;
 use unicode_width::UnicodeWidthStr as _;
-
-/// The list while it's up.
-#[derive(Clone, Debug)]
-pub struct SessionsPane {
-    /// Its pane's id (`At::List`, the state's `pane#N`).
-    pub list: PaneId,
-    /// The row selected, by its session — kept as rows come and go (one that ended: the row there now).
-    pub selected: SessionId,
-    /// Its first row in sight, as last drawn.
-    pub top: std::cell::Cell<usize>,
-    /// Its own search, as every pane's (never the code's): the last pattern, its matches lit while `hl`.
-    pub search: Option<String>,
-    pub hl: bool,
-    /// A `/`·`?` it opened is its until it closes: the row selected as it opened (`esc` goes back to it).
-    pub prompt: Option<SessionId>,
-}
 
 /// How a part of a row is inked (`term::draw_sessions_pane` maps it to the theme): the row's text, faint, what needs
 /// you (warning), done (the accent), a session's own colour.
@@ -296,38 +279,8 @@ impl Editor {
     /// the keys to it. Git's part of each row is read again on a worker (the last read shown meanwhile); the
     /// processes looked at once.
     pub fn session_list(&mut self) {
-        match self.sessions_pane.as_ref() {
-            Some(p) => self.session.at = At::List(p.list),
-            None => {
-                let list = self.next_pane;
-                self.next_pane += 1;
-                let selected = self.session.id;
-                let top = Default::default();
-                let (search, hl, prompt) = (None, false, None);
-                self.sessions_pane = Some(SessionsPane { list, selected, top, search, hl, prompt });
-                self.session.at = At::List(list);
-            }
-        }
+        self.float_list_open(GroupKind::Sessions, self.session.id, None);
         self.session_facts();
-    }
-
-    /// The list's frame: the one you set (moved or sized, kept with the sizes), else a list's (`Frame::LIST`: its top
-    /// at 1/4 of the screen) — `h` 0 while it's as tall as its rows.
-    pub fn sessions_frame(&self) -> Option<crate::pane::Frame> {
-        self.sessions_pane.as_ref()?;
-        Some(self.sizes.sessions.unwrap_or(crate::pane::Frame::LIST))
-    }
-
-    /// The list's cells on a screen `w` wide with `h` rows above the status line (`Frame::rect_rows`).
-    pub fn sessions_rect(&self, w: usize, h: usize) -> Option<crate::split::Rect> {
-        Some(self.sessions_frame()?.rect_rows(w, h, self.sessions_in_order().len()))
-    }
-
-    /// The keys to the session list, up (a press on it, `C-w w`).
-    pub fn sessions_focus(&mut self) {
-        if let Some(p) = &self.sessions_pane {
-            self.session.at = At::List(p.list);
-        }
     }
 
     /// The session list's rows as things are now.
@@ -336,182 +289,30 @@ impl Editor {
     }
 
     /// The session list has the keys.
+    #[cfg(test)]
     pub fn sessions_list_keys(&self) -> bool {
-        self.sessions_pane.as_ref().is_some_and(|p| self.session.docked() == At::List(p.list))
-    }
-
-    /// `q` on the session list: it goes, the keys to the code.
-    pub fn session_list_close(&mut self) {
-        if let Some(p) = self.sessions_pane.take() {
-            self.session.leave(At::List(p.list));
-        }
-        self.float_moving = self.float_moving.filter(|&k| k != GroupKind::Sessions);
+        self.float_list_keys(GroupKind::Sessions)
     }
 
     /// The session the list's selection is on (by its id, else the row it was on).
     pub fn sessions_here(&self) -> Option<SessionId> {
-        let p = self.sessions_pane.as_ref()?;
-        let order = self.sessions_in_order();
-        order.iter().any(|l| l.id == p.selected).then_some(p.selected).or_else(|| order.first().map(|l| l.id))
+        self.float_list_here(GroupKind::Sessions)
     }
 
-    /// The list's keys go back to the code — it stays in sight (an act that takes you elsewhere: a switch, follow).
-    pub(crate) fn sessions_list_leave(&mut self) {
-        if let Some(p) = &self.sessions_pane {
-            self.session.leave(At::List(p.list));
-        }
-    }
-
-    /// The selection on row `i` (in the list's order) — in sight, the view moved to it.
-    fn sessions_select(&mut self, i: usize, top: usize) {
-        let ids: Vec<SessionId> = self.sessions_in_order().iter().map(|l| l.id).collect();
-        if let (Some(p), Some(&id)) = (self.sessions_pane.as_mut(), ids.get(i)) {
-            p.selected = id;
-            p.top.set(top);
-        }
-    }
-
-    /// A press on row `i` of the list: the keys its, that row selected — the same row again within `DOUBLE_CLICK`
-    /// switches to it, as `enter`.
-    pub fn sessions_click(&mut self, i: usize) {
-        let Some(p) = self.sessions_pane.as_ref() else { return };
-        let top = p.top.get();
-        self.sessions_focus();
-        self.sessions_select(i, top);
-        if self.clicked_again("sessions", i) {
-            self.sessions_enter();
-        }
-    }
-
-    /// `enter` on the list (a digit, its row's): to the selected session (the list stays, the keys there to its code).
+    /// `enter` on the list (a digit, a double click): to the selected session — the list done once used, so it
+    /// closes (user, 2026-10-23: floating in the middle, it would cover the code); on the session in front too.
     pub(crate) fn sessions_enter(&mut self) {
         let Some(id) = self.sessions_here() else { return };
-        self.sessions_list_leave();
-        if id == self.session.id {
-            return self
-                .set_status(format!("{} is in front — the list stays, q closes it", self.session.label()));
+        self.float_list_used(GroupKind::Sessions);
+        if id != self.session.id {
+            self.session_switch(id);
         }
-        self.session_switch(id);
     }
 }
 
 /// Row `row`'s text `re` matches: its name, else a column's (its parts as one).
-fn matches(row: &Row, re: &regex::Regex) -> bool {
+pub(crate) fn matches(row: &Row, re: &regex::Regex) -> bool {
     re.is_match(&row.name) || COLS.iter().any(|&c| re.is_match(&row.text(c)))
-}
-
-/// The pattern the list lights: the one its `/` is typing, else its last search while lit.
-pub fn lit(ed: &Editor) -> Option<regex::Regex> {
-    let p = ed.sessions_pane.as_ref()?;
-    let typed = ed.prompt.as_ref().filter(|_| p.prompt.is_some()).map(|t| t.text.clone());
-    let pat = match typed {
-        Some(t) => Some(t).filter(|t| !t.is_empty()),
-        None => p.search.clone().filter(|_| p.hl),
-    }?;
-    crate::search::compile(&pat).ok()
-}
-
-impl Editor {
-    /// `/`·`?` on the list: its own search's prompt, from the row in hand.
-    fn sessions_search_open(&mut self, reverse: bool) {
-        let here = self.sessions_here();
-        if let Some(p) = self.sessions_pane.as_mut() {
-            p.prompt = here;
-        }
-        self.open_prompt(crate::editor::PromptKind::Search { reverse }, "");
-    }
-
-    /// The row `pat` matches next after `from`'s (before it, `reverse`), round the list's end (said). Typing: only
-    /// the selection moves, an unfinished pattern leaves it; entered: kept as the list's search, lit, and a pattern
-    /// that isn't one or matches nothing said.
-    fn sessions_search(&mut self, pat: &str, reverse: bool, from: SessionId, typing: bool) {
-        let re = match crate::search::compile(pat) {
-            Ok(re) => re,
-            Err(e) if !typing => return self.set_error(e),
-            Err(_) => return,
-        };
-        if !typing && let Some(p) = self.sessions_pane.as_mut() {
-            (p.search, p.hl) = (Some(pat.to_string()), true);
-        }
-        let rows = self.sessions_rows();
-        let at = rows.iter().position(|r| r.id == from).unwrap_or(0);
-        let n = rows.len();
-        let order: Vec<usize> = match reverse {
-            false => (1..=n).map(|k| (at + k) % n).collect(),
-            true => (1..=n).map(|k| (at + n - k) % n).collect(),
-        };
-        let Some(&i) = order.iter().find(|&&i| matches(&rows[i], &re)) else {
-            if !typing {
-                self.set_error(format!("no session matches /{pat}/"));
-            }
-            return;
-        };
-        if let Some(p) = self.sessions_pane.as_mut() {
-            p.selected = rows[i].id;
-        }
-        if !typing && if reverse { i >= at } else { i <= at } {
-            self.set_status("search wrapped around");
-        }
-    }
-
-    /// `n`·`N` on the list: its search's next row (the other way).
-    fn sessions_search_next(&mut self, reverse: bool) {
-        let (Some(pat), Some(here)) =
-            (self.sessions_pane.as_ref().and_then(|p| p.search.clone()), self.sessions_here())
-        else {
-            return self.set_status("no search in the list yet — / searches it");
-        };
-        self.sessions_search(&pat, reverse, here, false);
-    }
-}
-
-/// A key while the list's own `/`·`?` is up — false: the prompt isn't its. `esc` goes back to the row it opened on,
-/// `enter` searches (empty: its last pattern again), typing moves the selection to the next match as it goes.
-pub fn prompt_key(ed: &mut Editor, key: Key) -> bool {
-    use crate::editor::PromptKind;
-    let Some(from) = ed.sessions_pane.as_ref().and_then(|p| p.prompt) else { return false };
-    let Some(PromptKind::Search { reverse }) = ed.prompt.as_ref().map(|p| p.kind) else {
-        // (another prompt now: the list's went)
-        if let Some(p) = ed.sessions_pane.as_mut() {
-            p.prompt = None;
-        }
-        return false;
-    };
-    let empty = ed.prompt.as_ref().is_some_and(|p| p.text.is_empty());
-    let cancel = key.code == Code::Esc
-        || (key.ctrl && key.code == Code::Char('c'))
-        || (key.code == Code::Backspace && empty);
-    if cancel {
-        ed.prompt = None;
-        if let Some(p) = ed.sessions_pane.as_mut() {
-            (p.prompt, p.selected) = (None, from);
-        }
-        return true;
-    }
-    if crate::editor::prompt_submits(key) {
-        let text = ed.prompt.take().map(|p| p.text).unwrap_or_default();
-        let last = ed.sessions_pane.as_mut().and_then(|p| {
-            p.prompt = None;
-            p.search.clone()
-        });
-        let pat = if text.is_empty() { last.unwrap_or_default() } else { text };
-        if pat.is_empty() {
-            return true;
-        }
-        ed.sessions_search(&pat, reverse, from, false);
-        return true;
-    }
-    ed.handle_prompt_key(key);
-    let typed = ed.prompt.as_ref().map(|p| p.text.clone()).unwrap_or_default();
-    match typed.is_empty() {
-        true => {
-            if let Some(p) = ed.sessions_pane.as_mut() {
-                p.selected = from;
-            }
-        }
-        false => ed.sessions_search(&typed, reverse, from, true),
-    }
-    true
 }
 
 /// The list's keys for its top line, as they apply to the row in hand: `enter` switches, `/` searches, then what the row's session
@@ -545,72 +346,6 @@ pub fn hints(ed: &Editor) -> Vec<(&'static str, String)> {
         ("q", "close".into()),
     ]);
     v
-}
-
-/// The wheel over the list: its view three rows, the selection staying unless it would leave it (as `C-e`/`C-y`).
-pub fn wheel(ed: &mut Editor, up: bool) {
-    let ids: Vec<SessionId> = ed.sessions_in_order().iter().map(|l| l.id).collect();
-    let here = ed.sessions_here().and_then(|id| ids.iter().position(|&x| x == id)).unwrap_or(0);
-    let top = ed.sessions_pane.as_ref().map_or(0, |p| p.top.get());
-    let (top, at) = crate::key::in_sight(if up { -3 } else { 3 }, top, here, ids.len(), rows_in_sight(ed), 0);
-    ed.sessions_select(at, top);
-}
-
-/// The list's first row in sight, as last drawn.
-fn top_was(ed: &Editor) -> usize {
-    ed.sessions_pane.as_ref().map_or(0, |p| p.top.get())
-}
-
-/// The list's rows in sight, as last drawn (none before).
-fn rows_in_sight(ed: &Editor) -> usize {
-    ed.screen.list(GroupKind::Sessions).map_or(0, |l| l.1)
-}
-
-/// A key while the session list has the keys — false when it hasn't them.
-pub fn key(ed: &mut Editor, key: Key) -> bool {
-    if ed.mode != crate::editor::Mode::Normal || !ed.pending.is_empty() || ed.prompt.is_some() {
-        return false;
-    }
-    if !ed.sessions_list_keys() {
-        return false;
-    }
-    let ids: Vec<SessionId> = ed.sessions_in_order().iter().map(|l| l.id).collect();
-    let here = ed.sessions_here().and_then(|id| ids.iter().position(|&x| x == id)).unwrap_or(0);
-    let top = ed.sessions_pane.as_ref().map_or(0, |p| p.top.get());
-    let rows = rows_in_sight(ed);
-    if let Some(m) = crate::key::list_move(key, rows) {
-        let (selected, top) = match m {
-            ListMove::Scroll(by) => {
-                let (top, at) = crate::key::in_sight(by, top, here, ids.len(), rows, 0);
-                (at, top)
-            }
-            m => (m.from(here, ids.len()), top),
-        };
-        // (at its end, or one row: said — no silent key)
-        if (selected, top) == (here, top_was(ed)) {
-            ed.key_unused(key, "the session list", "it's at its end");
-        }
-        ed.sessions_select(selected, top);
-        return true;
-    }
-    match (key.code, key.ctrl, key.alt) {
-        (Code::Char(' ' | ':'), false, false) | (Code::Char('w'), true, false) => return false,
-        // (`esc` as the code's: its search's matches unlit too)
-        (Code::Esc, ..) => {
-            if let Some(p) = ed.sessions_pane.as_mut() {
-                p.hl = false;
-            }
-            ed.sessions_list_leave();
-        }
-        (Code::Char('q'), false, false) => ed.session_list_close(),
-        (Code::Enter, false, false) => ed.sessions_enter(),
-        // Its own search, as every pane's (user, 2026-10-23: never type-to-narrow — its letters are keys)
-        (Code::Char(c @ ('/' | '?')), false, false) => ed.sessions_search_open(c == '?'),
-        (Code::Char(c @ ('n' | 'N')), false, false) => ed.sessions_search_next(c == 'N'),
-        (Code::Char(c), false, false) => ed.session_list_key(c),
-        _ => ed.key_unused(key, "the session list", "esc code"),
-    }
-    true
 }
 
 #[cfg(test)]

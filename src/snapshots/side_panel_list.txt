@@ -1,9 +1,9 @@
 # side_panel_list · 112x24 · theme meok · cursor 6:40
 ## text
 00 ─ files · outline · list · g… ─┬─ tarae › src › demo.rs › ƒ word_counts ────────────────────────────────────────
-01     src/                       │  1 use std::collections::HashMap;
-02   │   demo.rs               2  │  2                                         ▎ 1/3 · unused variable: `counts`
-03 ▎ │ │ ▲ 6: unused variable: …  │  3 ▎ Counts how often each word appears.
+01     src/                       │  1 use std::collections::HashMap;         ╭─ messages ───────────────────────╮
+02   │   demo.rs               2  │  2                                        │▎ 1/3 · unused variable: `counts` │
+03 ▎ │ │ ▲ 6: unused variable: …  │  3 ▎ Counts how often each word appears.  ╰──────────────────────────────────╯
 04   │ │ ● 14: mismatched types   │    ▎
 05   │   ui/                      │    ▎ Words are split on whitespace; case is kept.
 06   │ │   card.rs             1  │  6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {   ▲ unused variab…
@@ -26,9 +26,9 @@
 23  ● normal                                                                                rust   utf-8 LF   6:5
 ## bg · surface per cell, blank = ui.background
 00
-01                                                                            pppppppppppppppppppppppppppppppppppp
-02                                                                            pppppppppppppppppppppppppppppppppppp
-03                                                                            pppppppppppppppppppppppppppppppppppp
+01
+02
+03
 04
 05
 06                                     ccccAccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -51,9 +51,9 @@
 23
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
 00 f ddddd f ddddddd f TTTT f dd faa ddddd f ddd f TTTTTTT f   ddddddddddd aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-01     dddf                       a  f
-02   f                         d  a  f                                         w
-03 a f f w ff TTTTTT TTTTTTTTT T  a  f f
+01     dddf                       a  f                                        ff BBBBBBBB ffffffffffffffffffffffff
+02   f                         d  a  f                                        fw                                 f
+03 a f f w ff TTTTTT TTTTTTTTT T  a  f f                                      ffffffffffffffffffffffffffffffffffff
 04   f f e fff                    a    f
 05   f   ddf                      a    f
 06   f f                       d  a  A                                                            w
@@ -75,5 +75,5 @@
 22   BBBBB B fffffff              a
 23  a TTTTTT                                                                                dddd   ddddd dd   TTT
 ## legend
-bg: c=ui.cursorline.primary  p=ui.popup  A=ui.cursor.primary  1=other
+bg: c=ui.cursorline.primary  A=ui.cursor.primary  1=other
 fg: a=ui.accent  t=ui.text.focus  d=ui.virtual  f=ui.linenr  e=error  w=warning  g=diff.plus  B=bold

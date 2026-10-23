@@ -50,6 +50,16 @@ const FOCUS_CARD_Y: &[&str] =
 const FOCUS_CARD_Q: &[&str] =
     &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", "j", "j", "\x11", "@1"];
 
+/// Three messages said one after another: a save, two commands that don't exist (errors, so they stay).
+const TOAST_THREE: &[&str] = &["@1", ":w\r", "@1", ":nope\r", "@1", ":wat\r", "@1"];
+
+/// `TOAST_THREE`, then `C-w w` to the card.
+const TOAST_THREE_FOCUS: &[&str] = &["@1", ":w\r", "@1", ":nope\r", "@1", ":wat\r", "@1", "\x17", "w", "@1"];
+
+/// `TOAST_THREE`, then `:messages`.
+const MESSAGES: &[&str] =
+    &["@1", ":w\r", "@1", ":nope\r", "@1", ":wat\r", "@1", ":messages\r", "@?messages", "@1"];
+
 /// `FOCUS_CARD`, then `:features-reset` — your own card over Claude's.
 const FOCUS_CARD_YOURS: &[&str] = &[
     "@1",
@@ -1870,6 +1880,21 @@ const SCENES: &[Scene] = &[
     Scene { name: "focus-card-q", claude: "card", files: MAIN, keys: FOCUS_CARD_Q },
     // (…a card your own key asked for over it — `:features-reset` — focused at once)
     Scene { name: "focus-card-yours", claude: "card", files: MAIN, keys: FOCUS_CARD_YOURS },
+    // (P3 step 7c: one toast as it comes — news, in its faint frame named `messages`, no keys of its own; `toast-focus`
+    // the same, focused)
+    Scene { name: "toast-one", claude: "idle", files: MAIN, keys: &["@1", ":w\r", "@1"] },
+    // (…three said together, two errors among them: one card, the newest on top)
+    Scene { name: "toast-three", claude: "idle", files: MAIN, keys: TOAST_THREE },
+    // (…`C-w w`'s round reaches it: its frame lit, named, its keys in the bottom line)
+    Scene {
+        name: "toast-focus",
+        claude: "idle",
+        files: MAIN,
+        keys: &["@1", ":w\r", "@1", "\x17", "w", "@1"],
+    },
+    Scene { name: "toast-three-focus", claude: "idle", files: MAIN, keys: TOAST_THREE_FOCUS },
+    // (`:messages`, a floating list at the newest — the session list's frame)
+    Scene { name: "messages", claude: "idle", files: MAIN, keys: MESSAGES },
     // (the same run asked again after a yes, the program it runs rebuilt since — git ignores it: the card's "Same as")
     Scene {
         name: "samebinary",

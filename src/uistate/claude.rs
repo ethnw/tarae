@@ -53,6 +53,9 @@ impl Editor {
             }
         }
         s.prompt = s.prompt.map(|(label, _)| (label, String::new()));
+        // (the floating lists are the person's: the session list names every session, `:messages` says what came of
+        // the others — none of it at Claude's level)
+        s.panels.lists.clear();
         if let Some(c) = s.panels.chat.as_mut() {
             c.draft.clear();
         }
@@ -122,6 +125,10 @@ impl Editor {
             .map(|t| format!("toast#{}", t.id))
             .collect();
         s.toasts.retain(|t| !others.contains(&t.id));
+        // (its card as a pane too — by the id it's known by: one that isn't its, none — and `:messages`, the person's)
+        for l in s.sessions.iter_mut() {
+            l.panes.retain(|p| !others.contains(&p.id) && p.shows != "list:messages");
+        }
         // (the inbox is every session's: only its own session's entries — the others are counts)
         s.inbox.retain(|e| e.session == own);
         // (a plugin's card, a repository's own git settings and its Claude settings, and the repository's card

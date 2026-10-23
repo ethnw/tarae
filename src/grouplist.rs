@@ -21,7 +21,7 @@ impl GroupKind {
             GroupKind::Tests => Some(Slot::Test),
             GroupKind::Task | GroupKind::Preflight => Some(Slot::Task),
             GroupKind::Procs => Some(Slot::Procs),
-            GroupKind::Git | GroupKind::Review | GroupKind::Sessions => None,
+            GroupKind::Git | GroupKind::Review | GroupKind::Sessions | GroupKind::Messages => None,
         }
     }
 
@@ -35,6 +35,7 @@ impl GroupKind {
             GroupKind::Git => "the git tab",
             GroupKind::Review => "the review's files",
             GroupKind::Sessions => "the session list",
+            GroupKind::Messages => "the messages",
         }
     }
 }

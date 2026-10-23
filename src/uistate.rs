@@ -40,7 +40,9 @@ use crate::sizes::Slot;
 /// `list:<kind>` / `detail:<kind>` (`tests:list` / `tests:detail` before).
 /// 13: a card takes the keys only once focused (P3 §3.8): a card's `settled` gone, `focused` in its place; its `waits`
 /// is `focus` (`keys quiet` and `session list` gone); `keys.waiting` names the front card waiting to be focused.
-pub const V: u64 = 13;
+/// 14: toasts are panes (P3 §3.9): `toast#N` in `panes` (`float`), `region` `toast`; `:messages` a floating list
+/// (`list:messages`, `panels.lists`), its picker gone.
+pub const V: u64 = 14;
 
 /// A card's `asks` in the one-line forms (the text form, a watch's lines): cut here — the JSON has it whole.
 const ASKS_MAX: usize = 300;
@@ -70,6 +72,8 @@ pub enum Region {
     Program,
     /// Card `id`: its answers (`offer_key`), or every key once `C-q` gave it them (`card_key`).
     Card(u64),
+    /// The notification card, focused (`toast.rs`): every key its but the window prefix — by its newest message.
+    Toast(u64),
     /// `C-q` to the one that has waited longest, elsewhere (`inbox.rs`).
     NextCard,
     /// Floating text (hover): Esc closes it, `C-d`/`C-u` scroll it.
@@ -102,6 +106,7 @@ impl Region {
             Region::List(k) => format!("list:{}", k.name()),
             Region::Program => "terminal-program".into(),
             Region::Card(_) => "card".into(),
+            Region::Toast(_) => "toast".into(),
             Region::NextCard => "next-card".into(),
             Region::Popup => "popup".into(),
             Region::Point => "point".into(),
@@ -130,6 +135,7 @@ impl Region {
             Region::List(_) => Handler::List,
             Region::Program => Handler::Program,
             Region::Card(_) => Handler::Card,
+            Region::Toast(_) => Handler::Toast,
             Region::NextCard => Handler::NextCard,
             Region::Popup => Handler::Popup,
             Region::Point => Handler::Point,
@@ -171,6 +177,7 @@ fn slot_name(s: Slot) -> &'static str {
 pub enum Handler {
     Point,
     Card,
+    Toast,
     NextCard,
     Program,
     Popup,
@@ -197,6 +204,7 @@ impl Handler {
         match self {
             Handler::Point => "point",
             Handler::Card => "card",
+            Handler::Toast => "toast",
             Handler::NextCard => "next-card",
             Handler::Program => "terminal-program",
             Handler::Popup => "popup",
@@ -392,6 +400,11 @@ impl Editor {
                 v.push(shortcut(Region::Card(o.id), Filter::Only(vec![ctrl('q')])));
             }
         }
+        // `toast::key`: the notification card focused — every key its but the window prefix (P3 §3.9)
+        if let Some(f) = self.toast_focus.filter(|_| !held) {
+            let prefix = self.keymaps.window_prefix().filter(|_| self.pending.is_empty());
+            v.push(layer(Region::Toast(f.id), Filter::Except(prefix.into_iter().collect())));
+        }
         // `C-q` to the one that has waited longest, elsewhere (the front's edit review takes its own) — nothing
         // waiting, to a session whose turn ended
         let elsewhere = matches!(
@@ -520,9 +533,9 @@ impl Editor {
             if self.plugin_panel_focused() {
                 v.push(layer(Region::Slot(Slot::Plugin), editors(&[ctrl('w')])));
             }
-            // (`sessionpane::key`: the session list, a floating pane)
-            if self.sessions_list_keys() {
-                v.push(layer(Region::List(crate::pane::GroupKind::Sessions), editors(&[ctrl('w')])));
+            // (`floatlist::key`: the session list, `:messages` — floating lists)
+            if let Some(k) = self.float_list_in_hand() {
+                v.push(layer(Region::List(k), editors(&[ctrl('w')])));
             }
             if let Some(g) = self.list_focused() {
                 v.push(layer(Region::List(g.kind), editors(&[ctrl('w')])));
@@ -636,6 +649,7 @@ impl Editor {
             Region::Slot(Slot::Plugin) => s.plugin_panel.get().is_some(),
             Region::Slot(Slot::Debug) => s.bottom_h > 0,
             Region::Card(id) => s.offer_card.is_some() && self.offers.first().is_some_and(|o| o.id == id),
+            Region::Toast(_) => s.toast_card.get().is_some(),
             Region::NextCard => true,
             Region::Popup => s.popup.get().is_some(),
             Region::Point => self.pointing.is_some(),
@@ -651,6 +665,7 @@ impl Editor {
     fn element_id(&self, r: Region) -> String {
         match r {
             Region::Card(id) => format!("card#{id}"),
+            Region::Toast(id) => format!("toast#{id}"),
             Region::Code | Region::Weave => format!("pane#{}", self.session.focus),
             Region::Side(crate::sidebar::Mode::Git) => "git".into(),
             Region::Side(_) => "side".into(),
@@ -658,9 +673,7 @@ impl Editor {
                 "terminal".into()
             }
             Region::Slot(s) => slot_name(s).into(),
-            Region::List(crate::pane::GroupKind::Sessions) if let Some(p) = &self.sessions_pane => {
-                format!("pane#{}", p.list)
-            }
+            Region::List(k) if let Some(p) = self.float_list(k) => format!("pane#{}", p.list),
             Region::List(k) => match self.session.group(k) {
                 Some(g) => format!("pane#{}", g.list),
                 None => r.name(),
@@ -1076,18 +1089,13 @@ impl Editor {
                 })
             })
             .collect();
-        // The session list, floating — the viewer's: listed with the front session's panes
-        if let Some(p) = self.sessions_pane.as_ref().filter(|_| is_front) {
-            let rect = self
-                .screen
-                .floating
-                .borrow()
-                .iter()
-                .find(|f| f.0 == crate::pane::GroupKind::Sessions)
-                .map(|f| f.1);
+        // The floating lists (the session list, `:messages`) — the viewer's: listed with the front session's panes
+        let lists = crate::floatlist::KINDS.iter().filter(|_| is_front);
+        for (kind, p) in lists.filter_map(|&k| self.float_list(k).map(|p| (k, p))) {
+            let rect = self.screen.floating.borrow().iter().find(|f| f.0 == kind).map(|f| f.1);
             out.push(PaneState {
                 id: format!("pane#{}", p.list),
-                shows: Shows::List(crate::pane::GroupKind::Sessions).name(),
+                shows: Shows::List(kind).name(),
                 rect: rect.map(|r| (r.x, r.y, r.w, r.h)),
                 at: l.at == At::List(p.list),
                 float: false,
@@ -1101,6 +1109,7 @@ impl Editor {
                 let has = pane.is_some_and(|p| l.at == At::Float(p));
                 let rect = match f {
                     crate::pane::Floating::Card(_) => self.screen.offer_card,
+                    crate::pane::Floating::Toast(_) => self.screen.toast_card.get(),
                     _ => None,
                 };
                 out.push(PaneState {

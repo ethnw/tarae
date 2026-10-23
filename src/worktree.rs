@@ -2146,7 +2146,8 @@ impl Editor {
     /// new one, `d` ends the one in hand, `b` brings it into its base, `m` marks it for the bring queue (`B` brings
     /// the marked ones in turn — `bringqueue.rs`), `x` drops its build folder, `w` marks its conversation to be
     /// kept warm (or not), `$` switches who pays for its Claude, `f` follows it (`follow::follow_session`), `v` its
-    /// changes woven. The list stays; what takes you elsewhere (a switch, follow, the woven view) gives the keys there.
+    /// changes woven. The list stays; what takes you elsewhere (a switch, a new session, follow, the woven view) is the
+    /// list used — it closes (`float_list_used`).
     pub(crate) fn session_list_key(&mut self, c: char) {
         if self.sessions_pane.is_none() {
             return;
@@ -2165,7 +2166,10 @@ impl Editor {
                 self.sessions_enter();
             }
             // (`n` is the list's search's next, as every pane's)
-            'o' => self.session_prompt(),
+            'o' => {
+                self.float_list_used(crate::pane::GroupKind::Sessions);
+                self.session_prompt();
+            }
             'd' | 'b' => {
                 let Some(id) = here else { return };
                 let which = id.to_string();
@@ -2215,7 +2219,7 @@ impl Editor {
                 let Some((path, land)) = file else {
                     return self.set_status("nothing of it to weave yet — it changed no file");
                 };
-                self.sessions_list_leave();
+                self.float_list_used(crate::pane::GroupKind::Sessions);
                 if let Err(e) = crate::weave::open(self, Some(path), land) {
                     self.set_status(e);
                 }
@@ -2223,7 +2227,7 @@ impl Editor {
             // Followed: into its checkout, the editor where its Claude is (`follow::follow_session`)
             'f' => {
                 let Some(id) = here else { return };
-                self.sessions_list_leave();
+                self.float_list_used(crate::pane::GroupKind::Sessions);
                 crate::follow::follow_session(self, id);
             }
             '$' => {

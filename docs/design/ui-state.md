@@ -65,7 +65,7 @@ JSON for programs, and a short text form for people and Claude, from the same st
 
 ```json
 {
-  "v": 12,
+  "v": 14,
   "tarae": { "pid": 4182, "boot": "9f3ac1d0", "version": "0.9.0" },
   "frame": 4812,
   "input": 1033,
@@ -97,7 +97,8 @@ JSON for programs, and a short text form for people and Claude, from the same st
   ],
   "toasts": [ { "id": "toast#311", "kind": "warning", "text": "…", "where": "card", "shown": true } ],
   "panels": { "code": {…}, "side": {…}, "review": {…}, "edit_review": null, "picker": null,
-              "slot": {…}, "chat": {…}, "follow": {…} },
+              "slot": {…}, "chat": {…}, "follow": {…},
+              "lists": [ { "kind": "messages", "rows": [ { "id": "messages:toast#311", "label": "…" } ] } ] },
   "runs": [ { "id": "run#7", "of": "claude", "label": "cargo test", "state": "waiting",
               "waiting": "cargo's lock · 0:37", "session": "s1" } ]
 }
@@ -298,7 +299,7 @@ Short, so they can be read in prose and typed. Unique within one tarae process.
 | Kind | Id | From |
 |---|---|---|
 | card | `card#12` | `Offer.id` (`offer_seq`) |
-| toast | `toast#311` | its index in `Editor.messages` (`:messages`) |
+| toast | `toast#311` | its count among the messages said (`Editor.said`) — a row of `:messages` (`messages:toast#311`), the notification card a floating pane by its newest (`panes`, `float: true`; `keys.region` `toast` while focused) |
 | session | `s1` | `SessionId` |
 | pane | `pane#3` | `PaneId` — one counter for every pane: the code's, the surfaces', the tests' two, a floating one's |
 | run | `run#7` | new sequence, given with the `RunTrace` |

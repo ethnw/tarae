@@ -148,6 +148,9 @@ pub struct Toast {
     /// Words painted in a theme scope (`""`: as the text), in order — each the first found after the one before:
     /// an overlap's two names in their participant colours and its `≈` in warning.
     pub paint: Vec<(String, &'static str)>,
+    /// Said while `:messages` was up: only its row there if the frame shows that row, else a toast as usual —
+    /// decided once, by the first frame that has it (`messages::rows_drawn`).
+    pub row: bool,
 }
 
 /// Two clicks on the same picker row this close together are a double click (it opens the row).
@@ -257,6 +260,7 @@ impl Toast {
             of: None,
             persons: false,
             paint: Vec::new(),
+            row: false,
         }
     }
 
@@ -476,6 +480,28 @@ pub struct Screen {
     pub spots: std::cell::RefCell<Vec<crate::uistate::point::Spot>>,
     /// The prompt's card (x, y, width, height) — a click on it is its own, not the code's under it.
     pub prompt_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// The front card wasn't drawn this frame only because a key sequence is under way (`C-w` of `C-w w`: a card
+    /// steps aside for which-key) — still in sight for the round (`cycle_view`).
+    pub offer_held: bool,
+    /// The messages list's text room as last drawn (cells) — its `enter` opens a row cut to it whole.
+    pub messages_room: std::cell::Cell<usize>,
+    /// The notification card's messages as drawn, top to bottom: (screen row, toast id) — a press on one when focused
+    /// selects it.
+    pub toast_rows: std::cell::RefCell<Vec<(usize, u64)>>,
+    /// The floating lists' rows on screen, for the state's panels (`messages:toast#N`).
+    pub list_rows: std::cell::RefCell<Vec<(crate::pane::GroupKind, crate::uistate::panels::Row)>>,
+    /// What an element drew of this frame, to tell whether the finished frame still shows it whole
+    /// (`term::shown_whole`): its id, its cells (row, columns) and the bytes of the frame that drew them.
+    pub owned: std::cell::RefCell<Vec<Owned>>,
+}
+
+/// An element's cells on a frame and the bytes that drew them (`Screen.owned`).
+#[derive(Clone, Debug, Default)]
+pub struct Owned {
+    pub id: String,
+    pub row: usize,
+    pub cols: std::ops::Range<usize>,
+    pub bytes: std::ops::Range<usize>,
 }
 
 /// One pane of a split: what it shows (a document) + its scroll. Cursor and selection are the document's.
@@ -850,8 +876,10 @@ pub struct Editor {
     /// `C-w m` under way: the floating pane its keys move (`Handler::Move`).
     pub float_moving: Option<crate::pane::GroupKind>,
     /// The session list, a floating pane while it's up (`space W`, `sessionpane.rs`) — the viewer's, across
-    /// sessions: switching to one keeps it in sight.
-    pub sessions_pane: Option<crate::sessionpane::SessionsPane>,
+    /// sessions: switching to one by other means keeps it in sight.
+    pub sessions_pane: Option<crate::floatlist::FloatList>,
+    /// `:messages`, a floating list while it's up (`messages.rs`) — the viewer's, as the session list.
+    pub messages_pane: Option<crate::floatlist::FloatList>,
     /// The last click on a picker's row (picker, row, when) — the same row again within `DOUBLE_CLICK` opens it.
     pub picker_click: Option<(u64, usize, std::time::Instant)>,
     /// The last click on the git tab's or the review rail's row (which list, row, when) — `clicked_again`.
@@ -867,9 +895,14 @@ pub struct Editor {
     /// The front card as the last frame drew it (id, `rev`) — a weighty card's answers count only for it
     /// (`Stands.drawn`).
     pub offer_drawn: std::cell::Cell<Option<(u64, u64)>>,
-    /// The card a window prefix just took the keys from (`card_key`): `C-w w` from it goes on round the panes, not
-    /// back to it.
-    pub card_left: Option<u64>,
+    /// The floating pane a window prefix just took the keys from (a card's `card_key`, a toast's `toast_key`): `C-w w`
+    /// from it goes on round the panes, not back to it.
+    pub float_left: Option<crate::pane::Floating>,
+    /// The notification card that has the keys (P3 §3.9, `toast.rs`): focused by a press on it or `C-w w`'s round —
+    /// its time held while it has them, its keys on its frame's bottom line; let go, it fades out.
+    pub toast_focus: Option<crate::toast::Focus>,
+    /// When the focused card was let go — it fades out over `toast::LETGO`, then goes.
+    pub toast_letgo: Option<std::time::Instant>,
     /// The terminal said its focus went elsewhere (CSI ?1004 — tmux passes it on only with `focus-events
     /// on`), and no input came since: the waiting animation rests (`tick_wanted`). A terminal that never
     /// says keeps it going.
@@ -1135,12 +1168,15 @@ impl Editor {
             float_dragging: None,
             float_moving: None,
             sessions_pane: None,
+            messages_pane: None,
             picker_click: None,
             list_click: None,
             card_focus: None,
             card_next: None,
             offer_drawn: Default::default(),
-            card_left: None,
+            float_left: None,
+            toast_focus: None,
+            toast_letgo: None,
             screen_sends: Vec::new(),
             frames: 0,
             ui_asks: Vec::new(),
@@ -1710,17 +1746,25 @@ impl Editor {
         if order.is_empty() {
             order = self.code_leaves();
         }
-        // A card waiting in sight is the round's last stop (P3 §3.8): `C-w w` from the last pane focuses it
-        // (not the card a window prefix just took the keys from: from it the round goes on round the panes)
-        let left = self.card_left.take();
-        let card = self.screen.offer_card.is_some()
+        // The floating panes in sight are the round's last stops (P3 §3.8–3.9): a card waiting, then the toast —
+        // `C-w w` from the last pane focuses the card, from the card the toast (backwards the other way round); from
+        // the one a window prefix just took the keys from the round goes on (never back to it)
+        use crate::pane::Floating;
+        let left = self.float_left.take();
+        let card = (self.screen.offer_card.is_some() || self.screen.offer_held)
             && self.card_waits()
-            && left.is_none_or(|l| self.offers.first().is_none_or(|o| o.id != l));
-        if card && delta > 0 && self.at_pane().is_some_and(|h| order.last() == Some(&h)) {
-            return self.card_focus_front();
-        }
-        if card && delta < 0 && self.at_pane().is_some_and(|h| order.first() == Some(&h)) {
-            return self.card_focus_front();
+            && !matches!(left, Some(Floating::Card(l)) if self.offers.first().is_some_and(|o| o.id == l));
+        let toast = self.toast_up() && !matches!(left, Some(Floating::Toast(_)));
+        let from_card = matches!(left, Some(Floating::Card(_)));
+        let from_toast = matches!(left, Some(Floating::Toast(_)));
+        let edge = |end: Option<&crate::split::PaneId>| self.at_pane().is_some_and(|h| end == Some(&h));
+        let (last, first) = (edge(order.last()) && left.is_none(), edge(order.first()) && left.is_none());
+        match delta > 0 {
+            true if last && card => return self.card_focus_front(),
+            true if (last || from_card) && toast => return self.toast_focus_take(),
+            false if first && toast => return self.toast_focus_take(),
+            false if (first || from_toast) && card => return self.card_focus_front(),
+            _ => {}
         }
         let mut here = self.at_pane().unwrap_or(self.session.focus);
         // (the slot's keys on a group: its detail's)
@@ -1838,9 +1882,9 @@ impl Editor {
     /// The keys to pane `id`, landing where its surface takes them.
     pub fn focus_pane(&mut self, id: crate::split::PaneId) {
         use crate::pane::Shows;
-        // (the session list, a floating pane of the viewer's)
-        if self.sessions_pane.as_ref().is_some_and(|p| p.list == id) {
-            return self.sessions_focus();
+        // (a floating list, a pane of the viewer's)
+        if let Some(k) = self.float_list_of(id) {
+            return self.float_list_focus(k);
         }
         let Some(shows) = self.session.shows(id) else { return };
         if !matches!(shows, Shows::Slot | Shows::List(_) | Shows::Detail(_) | Shows::Group(_)) {
@@ -1991,7 +2035,7 @@ impl Editor {
         };
         crate::log::line("tarae", level, &msg);
         self.said += 1;
-        self.messages.push((std::time::Instant::now(), kind, msg));
+        self.messages.push((crate::clock::now(), kind, msg));
         if self.messages.len() > MESSAGES_KEPT {
             self.messages.remove(0);
         }
@@ -2046,52 +2090,38 @@ impl Editor {
     }
 
     fn toast(&mut self, kind: ToastKind, text: String, of: Option<crate::event::SessionId>) {
-        // The card is gone (all had their time) → this one starts a new card
-        if !self.toasts.iter().any(Toast::alive) {
+        // (`:messages` up: said there, a row of it — never the same words twice — once the frame shows that row; else
+        // a toast as usual, an error never only on the status line: `messages::rows_drawn`)
+        let row = self.messages_pane.is_some();
+        // The card is gone (all had their time), or fading out after it lost the focus (`toast.rs`) → this one
+        // starts a new card
+        let fading = self.toast_letgo.take().is_some();
+        if fading || !self.toasts.iter().any(Toast::alive) {
             self.toasts.clear();
+            self.screen.toast_narrow.set(None);
         }
+        // (the card focused: what joins it is held with it)
+        let held = |mut t: Toast, focused: bool| {
+            if focused {
+                t.life = crate::toast::HELD;
+            }
+            t
+        };
+        let focused = self.toast_focus.is_some();
         // The same message again: its time starts over, where it is (moving it would make the card jump)
         let id = self.said;
         if let Some(t) = self.toasts.iter_mut().find(|t| t.text == text && t.kind == kind) {
-            *t = Toast { id, of, ..Toast::new(kind, text) };
+            *t = held(Toast { id, of, row, ..Toast::new(kind, text) }, focused);
+            if let Some(f) = self.toast_focus.as_mut().filter(|f| f.selected == t.id) {
+                f.selected = id;
+            }
             return;
         }
-        self.toasts.push(Toast { id, of, ..Toast::new(kind, text) });
+        self.toasts.push(held(Toast { id, of, row, ..Toast::new(kind, text) }, focused));
         // (the card shows the newest few and counts the rest — all of them are in `:messages`)
         if self.toasts.len() > MESSAGES_KEPT {
             self.toasts.remove(0);
         }
-    }
-
-    /// `:messages` — the notifications since tarae started, newest first: kind bar, text, how long ago.
-    pub fn messages_picker(&mut self) {
-        if self.messages.is_empty() {
-            return self.set_status("no messages yet");
-        }
-        let ago = |at: std::time::Instant| crate::term::ago(at.elapsed(), true);
-        let items = self
-            .messages
-            .iter()
-            .rev()
-            .map(|(at, kind, text)| crate::picker::Item {
-                label: text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" · "),
-                action: Action::Message,
-                hint: ago(*at),
-                glyph: Some((
-                    "▎",
-                    match kind {
-                        ToastKind::Info => "ui.accent",
-                        ToastKind::Success => "diff.plus",
-                        ToastKind::Warning => "warning",
-                        ToastKind::Error => "error",
-                    },
-                )),
-            })
-            .collect();
-        self.open_picker(
-            crate::picker::Picker::of("messages", "messages", items, false).without_preview(),
-            None,
-        );
     }
 
     /// After a frame (`term::render`): the card drawn, its messages have been seen; not drawn (a picker over
@@ -2117,14 +2147,26 @@ impl Editor {
         }
     }
 
+    /// The messages on the notification card, oldest first — not one said while `:messages` is up that the frame
+    /// hasn't found out of the list's sight yet (`Toast.row`, `messages::rows_drawn`).
+    pub fn card_toasts(&self) -> Vec<&Toast> {
+        self.toasts.iter().filter(|t| !t.row).collect()
+    }
+
     /// The card's opacity 0..1: fades in with its first message (150 ms), out with the last one's time (400 ms).
     /// Where nothing moves on a clock (`editor.motion`) it's there whole until it goes.
     pub fn toast_alpha(&self) -> f32 {
-        let Some(oldest) = self.toasts.iter().map(Toast::age).max() else { return 0.0 };
+        let toasts = self.card_toasts();
+        let Some(oldest) = toasts.iter().map(|t| t.age()).max() else { return 0.0 };
         if !self.moving() {
             return 1.0;
         }
-        let left = self.toasts.iter().map(|t| t.life.saturating_sub(t.age())).max().unwrap_or_default();
+        // (let go of the keys: its own short fade, from half strength — `toast::LETGO`)
+        if let Some(at) = self.toast_letgo {
+            let left = 1.0 - crate::clock::since(at).as_secs_f32() / crate::toast::LETGO.as_secs_f32();
+            return (0.5 * left).clamp(0.0, 0.5);
+        }
+        let left = toasts.iter().map(|t| t.life.saturating_sub(t.age())).max().unwrap_or_default();
         (oldest.as_secs_f32() / TOAST_FADE_IN.as_secs_f32())
             .min(left.as_secs_f32() / TOAST_FADE.as_secs_f32())
             .clamp(0.0, 1.0)
@@ -2480,6 +2522,24 @@ impl Editor {
         let on_card = s
             .offer_card
             .is_some_and(|(cx, cy, cw, ch)| (cx..cx + cw).contains(&x) && (cy..cy + ch).contains(&y));
+        // The notification card: a press on it focuses it, focused one on a message takes it in hand (`toast.rs`); a
+        // press anywhere else lets a focused one go
+        let on_toast = s
+            .toast_card
+            .get()
+            .is_some_and(|(tx, ty, tw, th)| (tx..tx + tw).contains(&x) && (ty..ty + th).contains(&y));
+        if m.kind == K::Down && on_toast && !on_card && button.is_none() && self.picker.is_none() {
+            // (a prompt open has the keys: the press is its — the code's under it isn't clicked either — said, never a
+            // focus the prompt takes back the same frame, `toast_sync`)
+            if self.prompt.is_some() {
+                return self
+                    .set_status("the prompt has the keys — esc close, then a press takes the message");
+            }
+            return self.toast_press(y);
+        }
+        if m.kind == K::Down && self.toast_focus.is_some() {
+            self.toast_let_go();
+        }
         if m.kind == K::Down && (button.is_some() || on_card) {
             let has = self.card_has_keys();
             match button {
@@ -2549,16 +2609,17 @@ impl Editor {
             self.float_focus(kind);
             return;
         }
-        // The session list: a press on a row selects it (again: switches), the wheel moves through it
-        if floated == Some(crate::pane::GroupKind::Sessions) {
+        // A floating list (the session list, `:messages`): a press on a row selects it (again: opens it), the wheel
+        // moves through it
+        if let Some(kind) = floated.filter(|&k| crate::floatlist::is_list(k)) {
             match m.kind {
-                K::Down => match s.list(crate::pane::GroupKind::Sessions) {
+                K::Down => match s.list(kind) {
                     Some((y0, rows, top)) if (y0..y0 + rows).contains(&y) => {
-                        self.sessions_click(top + y - y0)
+                        self.float_list_click(kind, top + y - y0)
                     }
-                    _ => self.float_focus(crate::pane::GroupKind::Sessions),
+                    _ => self.float_focus(kind),
                 },
-                K::ScrollDown | K::ScrollUp => crate::sessionpane::wheel(self, m.kind == K::ScrollUp),
+                K::ScrollDown | K::ScrollUp => crate::floatlist::wheel(self, kind, m.kind == K::ScrollUp),
                 _ => {}
             }
             return;
@@ -3117,7 +3178,15 @@ impl Editor {
     /// scheduled for when the fade-out starts. Nothing to wait for, no tick (an idle editor uses 0 CPU).
     /// When the notification card next needs a frame: a `TICK` while it fades in or out, else when its
     /// fade-out starts — None without one. One waiting for a card (`Toast::waiting`) needs none.
-    fn toast_wake(&self) -> Option<std::time::Duration> {
+    pub(crate) fn toast_wake(&self) -> Option<std::time::Duration> {
+        // (focused, it's held: no time runs — let go, one frame as its fade ends)
+        if self.toast_focus.is_some() {
+            return None;
+        }
+        if let Some(at) = self.toast_letgo.filter(|_| !self.toasts.is_empty()) {
+            let left = crate::toast::LETGO.saturating_sub(crate::clock::since(at));
+            return Some(left + std::time::Duration::from_millis(2));
+        }
         let running = || self.toasts.iter().filter(|t| !t.waiting());
         let oldest = running().map(Toast::age).max()?;
         let left = running().map(|t| t.life.saturating_sub(t.age())).max();
@@ -3238,10 +3307,13 @@ impl Editor {
             .then(|| "a UI-state ask".to_string())
     }
 
-    fn schedule_tick(&mut self) {
+    pub(crate) fn schedule_tick(&mut self) {
         if !self.toasts.is_empty() && !self.toasts.iter().any(Toast::alive) {
             self.toasts.clear();
             self.unchanged = false; // gone from the screen — whatever event this is, it's drawn
+        }
+        if self.toasts.is_empty() {
+            (self.toast_letgo, self.toast_focus) = (None, None);
         }
         self.tick_ask();
     }
@@ -3734,7 +3806,9 @@ impl Editor {
                 Ok(())
             }
             // (folders open in the picker: picker_key; `:granted`'s rows act by their keys)
-            Action::Dir(_) | Action::Message | Action::Heading | Action::Granted(_) => Ok(()),
+            Action::Dir(_) | Action::Heading | Action::Granted(_) => Ok(()),
+            #[cfg(test)]
+            Action::Message => Ok(()),
             Action::Plugin { token, id } => {
                 self.plugin_prompt_done(token, Some(id));
                 Ok(())
@@ -4065,9 +4139,10 @@ impl Editor {
     /// `C-q` again — gives them back unanswered (#25, #94), the card staying up, and the window prefix (`C-w`) goes
     /// on from where they were — other keys are said on it, what it asks. True if the key was the card's.
     fn card_key(&mut self, key: Key) -> bool {
-        // (a sequence's first key: the card a window prefix left is forgotten — `C-w w` reaches it again after)
+        // (a sequence's first key: the floating pane a window prefix left is forgotten — `C-w w` reaches it again
+        // after)
         if self.pending.is_empty() {
-            self.card_left = None;
+            self.float_left = None;
         }
         let up = self.offers.first().filter(|o| !o.installing()).map(|o| (o.id, o.rev));
         // (handed on to a card no longer in front as it was: nothing to hand)
@@ -4129,7 +4204,7 @@ impl Editor {
         // as from every pane (the card stays, waiting)
         if self.pending.is_empty() && self.keymaps.window_prefix() == Some(key) {
             self.card_focus = None;
-            self.card_left = Some(id);
+            self.float_left = Some(crate::pane::Floating::Card(id));
             return false;
         }
         // Its whole text open in its buffer, the one in sight (its bar): the keys that read it move it — `ge`
@@ -4208,7 +4283,8 @@ impl Editor {
         self.session_store.keyed = true;
         // A key of the person's after an error has been read (`ERROR_MIN`) lets it go — it fades out (a shuttle's
         // key isn't someone reading it)
-        let person = self.shuttles.stepping.is_none();
+        // (a focused card's are held: its own keys let it go)
+        let person = self.shuttles.stepping.is_none() && self.toast_focus.is_none();
         for t in self.toasts.iter_mut().filter(|t| person && t.kind == ToastKind::Error) {
             let age = t.age();
             if age >= ERROR_MIN && t.life > age + TOAST_FADE {
@@ -4224,6 +4300,11 @@ impl Editor {
         // A card is answered from anywhere (#24): `C-q` gives it the keys — what you were typing stays
         if self.card_key(key) {
             return took(Handler::Card);
+        }
+        // The notification card, focused (`toast.rs`): every key its but the window prefix
+        if crate::toast::key(self, key) {
+            took(Handler::Toast);
+            return self.focus_sync();
         }
         // …else to the next up — nothing here, the one that has waited longest, wherever it is (#7, #90, #94,
         // #198) — the front's own edit review
@@ -4404,7 +4485,7 @@ impl Editor {
         if crate::plugin::plugin_panel_key(self, key) {
             return took(Handler::PluginPanel);
         }
-        if crate::sessionpane::key(self, key) || crate::grouplist::key(self, key) {
+        if crate::floatlist::key(self, key) || crate::grouplist::key(self, key) {
             return took(Handler::List);
         }
         // Start screen: `r` = the files last open here
@@ -4430,7 +4511,7 @@ impl Editor {
         if self.prompt.is_some() {
             took(Handler::Prompt);
             // (the session list's own `/`, else the code's)
-            if !crate::sessionpane::prompt_key(self, key) {
+            if !crate::floatlist::prompt_key(self, key) {
                 self.handle_prompt_key(key);
             }
             return;
@@ -10439,7 +10520,12 @@ mod tests {
             c.msgs.iter().any(|m| m.role == crate::chat::Role::User && m.text == "hello"),
             "the rows are back"
         );
-        assert!(c.msgs.last().unwrap().text.starts_with("continued from just now"));
+        // (kept and reopened in whole seconds, `chats::now`: a second's turn between them says `1s ago`)
+        let note = &c.msgs.last().unwrap().text;
+        assert!(
+            note.strip_prefix("continued from ").is_some_and(|w| w == "just now" || w.ends_with("s ago")),
+            "{note}"
+        );
         assert_eq!(c.msgs.iter().filter(|m| m.text.starts_with("continued from")).count(), 1);
         let started = || std::fs::read_to_string(&argv).unwrap_or_default();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -12483,19 +12569,24 @@ mod tests {
         feed(&mut ed, "q");
         assert!(ed.sessions_pane.is_none(), "q closed it");
         feed(&mut ed, "<space>W");
-        // Letters don't type: `j` moves, Enter switches — the list stays, the keys there to the code
+        // Letters don't type: `j` moves, Enter switches — the list done once used, it closes (user, 2026-10-23), the
+        // keys to the code there
         feed(&mut ed, "j");
         assert_eq!(ed.sessions_here(), Some(feat));
         feed(&mut ed, "j<ret>");
-        assert_eq!((ed.session.id, ed.sessions_pane.is_some()), (two, true));
+        assert_eq!((ed.session.id, ed.sessions_pane.is_some()), (two, false));
         assert!(ed.session.is_at(At::Code), "the keys to its code");
-        // A digit: that row's
+        // A digit: that row's — and the list closes with it
         feed(&mut ed, "<space>W1");
-        assert_eq!(ed.session.id, 0);
+        assert_eq!((ed.session.id, ed.sessions_pane.is_some()), (0, false));
+        // On the row of the session in front, Enter is the list used too
+        feed(&mut ed, "<space>W<ret>");
+        assert_eq!((ed.session.id, ed.sessions_pane.is_some()), (0, false));
         assert!(ed.offers.is_empty(), "feat's card waits in feat");
         // n: the new one's name
         feed(&mut ed, "<space>Wo");
         assert!(matches!(ed.prompt.as_ref().map(|p| &p.kind), Some(PromptKind::Session)));
+        assert!(ed.sessions_pane.is_none(), "o: the list used");
         feed(&mut ed, "<esc><space>Wd");
         assert!(ed.messages.iter().any(|m| m.2.contains("is the checkout tarae started in — it stays")));
         ed.sessions.clear();
@@ -12556,7 +12647,7 @@ mod tests {
         let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
         assert!(ed.sessions_list_keys(), "the list");
-        ed.session_list_close();
+        ed.float_list_close(crate::pane::GroupKind::Sessions);
         // A name folded to its prefix is clicked as the name is
         ed.session_switch(0);
         let r = rows(&mut ed, 100);
@@ -16709,7 +16800,7 @@ q = \"delete_selection\"\n",
     /// marks and CRLF — no panics, and every selection endpoint always stays on a char boundary.
     /// Notifications: what comes together is one card (newest last); a long message stays longer than a short
     /// one; the same message again restarts its time where it is; once all have had their time the next
-    /// starts a new card. `:messages` keeps them all, newest first.
+    /// starts a new card. `:messages` keeps them all, a log's order: oldest first, opened at the newest.
     #[test]
     fn notifications_are_one_card_and_kept() {
         let mut ed = editor("");
@@ -16727,10 +16818,17 @@ q = \"delete_selection\"\n",
         ed.set_status("three");
         assert_eq!(ed.toasts.len(), 1);
         feed(&mut ed, ":messages<ret>");
-        let p = ed.picker.as_ref().expect("the messages list");
-        let labels: Vec<&str> = p.items().iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels[0], "three", "newest first");
-        assert_eq!(labels.len(), 5);
+        assert!(ed.float_list_keys(crate::pane::GroupKind::Messages), "the messages list, with the keys");
+        let rows = crate::messages::rows(&ed);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts.first(), Some(&"one"), "oldest first");
+        assert_eq!(texts.last(), Some(&"three"), "newest last");
+        assert_eq!(texts.len(), 5);
+        assert_eq!(
+            ed.float_list_here(crate::pane::GroupKind::Messages),
+            rows.last().map(|r| r.id),
+            "at the newest"
+        );
     }
 
     /// An error stays until a key is pressed — not one that's already on its way (the first seconds).

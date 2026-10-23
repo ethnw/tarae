@@ -101,7 +101,7 @@ pub const COMMANDS: &[TypedCmd] = &[
     c(&["quote"], Arg::None, "Quote the selection to the chat (space >) — none: view the chat"),
     c(&["log-open"], Arg::None, "Open tarae's log (language servers, errors)"),
     c(&["procs"], Arg::None, "What tarae runs and what it costs"),
-    c(&["messages"], Arg::None, "The notifications since tarae started, newest first"),
+    c(&["messages"], Arg::None, "The messages since tarae started"),
     c(&["inbox"], Arg::None, "What waits for your answer, every session's, oldest first"),
     c(&["usage"], Arg::None, "What Claude's turns cost here and today, and its cache"),
     c(&["keep-warm"], Arg::None, "Keep this session's Claude cache warm while it waits (on/off/now)"),

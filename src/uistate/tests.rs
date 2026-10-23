@@ -28,6 +28,17 @@ fn feed(ed: &mut Editor, keys: &[&str]) {
     }
 }
 
+/// A picker of one row, `label`, open.
+fn open_a_picker(ed: &mut Editor, label: &str) {
+    let items = vec![crate::picker::Item {
+        label: label.into(),
+        action: crate::picker::Action::Message,
+        hint: String::new(),
+        glyph: None,
+    }];
+    ed.open_picker(crate::picker::Picker::of("buffers", "things", items, false).without_preview(), None);
+}
+
 /// A frame, as the main loop draws one after an event (`focus_sync` ran in it).
 fn frame(ed: &mut Editor) {
     ed.focus_sync();
@@ -332,9 +343,11 @@ const SCENES: &[Scene] = &[
     ("a count", |ed| feed(ed, &["3"])),
     ("f waits for its character", |ed| feed(ed, &["f"])),
     ("the command line", |ed| feed(ed, &[":"])),
-    ("a picker", |ed| {
+    ("a picker", |ed| open_a_picker(ed, "one")),
+    // (P3 step 7c: `:messages`, a floating list focused as it opens)
+    ("the messages list", |ed| {
         ed.set_status("one");
-        ed.messages_picker();
+        ed.messages_open(None);
     }),
     ("hover text", |ed| ed.popup = Some(Vec::new())),
     // (bgreview: the reviewer reads in the background, no review open — its segment on the status line takes no key)
@@ -430,6 +443,29 @@ const SCENES: &[Scene] = &[
     ("a card in insert mode", |ed| {
         light_card(ed);
         feed(ed, &["i"]);
+    }),
+    // (P3 §3.9: a toast is a floating pane — unfocused it takes no key, `y` the code's yank)
+    ("a toast", |ed| {
+        ed.set_status("saved a.rs");
+        frame(ed);
+    }),
+    // (`C-w w`'s round: the code, then the toast — every key its but the window prefix)
+    ("a toast focused by C-w w", |ed| {
+        ed.set_status("saved a.rs");
+        frame(ed);
+        feed(ed, &["<C-w>", "w"]);
+    }),
+    ("a toast focused by a press", |ed| {
+        ed.set_status("saved a.rs");
+        frame(ed);
+        let (x, y, ..) = ed.screen.toast_card.get().unwrap();
+        let kind = crate::event::MouseKind::Down;
+        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16 + 2, y: y as u16 + 1, alt: false });
+    }),
+    ("a toast focused, then C-w", |ed| {
+        ed.set_status("saved a.rs");
+        frame(ed);
+        feed(ed, &["<C-w>", "w", "<C-w>"]);
     }),
     ("a card under the command line", |ed| {
         light_card(ed);
@@ -1017,6 +1053,20 @@ fn the_routing_test_sees_each_case_broken() {
     let waiting: Vec<Scene> = SCENES.iter().filter(|s| s.0 == "a light card").copied().collect();
     assert_eq!(waiting.len(), 1);
     assert!(!mismatches(&waiting, takes_answers).is_empty(), "a card that waits took y, and the test passes");
+    // A toast not focused taking `y` (P3 §3.9: it copies only once focused) — the test says so
+    let toast_takes = |ed: &Editor| {
+        let mut k = ed.keys_to();
+        if let Some(t) = ed.toasts.last().filter(|_| ed.toast_focus.is_none()) {
+            let layer =
+                Layer { region: Region::Toast(t.id), filter: Filter::Only(vec![ch('y')]), shortcut: false };
+            let at = main(&k);
+            k.chain.insert(at, layer);
+        }
+        k
+    };
+    let toast: Vec<Scene> = SCENES.iter().filter(|s| s.0 == "a toast").copied().collect();
+    assert_eq!(toast.len(), 1);
+    assert!(!mismatches(&toast, toast_takes).is_empty(), "an unfocused toast took y, and the test passes");
     // The shuttle's entrance, its check skipped: a step written for another place lands — and the test says so
     crate::shuttle::SKIP_EXPECT.set(true);
     let off = shuttle_mismatches(&SCENES[..2]);
@@ -1062,9 +1112,14 @@ fn no_key_is_refused_in_silence() {
     }
     let quiet = |k: &str, name: &str| match k {
         "<esc>" | "<C-w>" => true,
-        // (view mode's copy, an output's — `:procs`' detail is one: said once the clipboard has it, its job's toast)
+        // (view mode's copy, an output's — `:procs`' detail is one —, the messages list's, a focused toast's: said
+        // once the clipboard has it, its job's toast)
         "y" => {
-            (name.contains("view mode") || name.contains("output") || name.contains("its detail"))
+            (name.contains("view mode")
+                || name.contains("output")
+                || name.contains("its detail")
+                || name.contains("messages list")
+                || name.contains("a toast focused by"))
                 && !name.contains("prompt")
         }
         // (`x` again on the conversation's last row: no row below to take — `j` at a list's end)
@@ -2268,8 +2323,7 @@ fn every_row_the_state_lists_is_on_the_frame() {
     let rail = check(&mut ed, "the review's rail");
     assert!(rail.iter().any(|r| r.id == "review:src/main.rs" && r.label == "main.rs"), "{rail:?}");
     // A picker over it all
-    ed.set_status("first message");
-    ed.messages_picker();
+    open_a_picker(&mut ed, "first message");
     let picker = check(&mut ed, "a picker");
     assert!(picker.iter().any(|r| r.label.contains("first message")), "{picker:?}");
     // (found by this test: the rail's rows were drawn, then covered by the picker — and still listed)

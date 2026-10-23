@@ -621,7 +621,7 @@ Type `:` in normal mode. `Tab` completes command names and their arguments (path
 | `:quote` |  | Quote the selection to the chat (space >) — none: view the chat |
 | `:log-open` |  | Open tarae's log (language servers, errors) |
 | `:procs` |  | What tarae runs and what it costs |
-| `:messages` |  | The notifications since tarae started, newest first |
+| `:messages` |  | The messages since tarae started |
 | `:inbox` |  | What waits for your answer, every session's, oldest first |
 | `:usage` |  | What Claude's turns cost here and today, and its cache |
 | `:keep-warm` |  | Keep this session's Claude cache warm while it waits (on/off/now) |

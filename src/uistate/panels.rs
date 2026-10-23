@@ -44,6 +44,8 @@ pub struct Panels {
     pub picker: Option<Picker>,
     pub slot: Option<SlotPanel>,
     pub chat: Option<Chat>,
+    /// The floating lists' rows on screen, by kind (`messages`: `messages:toast#N`).
+    pub lists: Vec<(String, Vec<Row>)>,
     /// A picker covers the side panel and the review's rail: no rows of theirs are in sight.
     pub covered: bool,
 }
@@ -283,6 +285,12 @@ impl Editor {
                 loading: pk.loading || pk.searching || pk.filtering,
             });
         }
+        for (kind, row) in s.list_rows.borrow().iter() {
+            match p.lists.iter_mut().find(|l| l.0 == kind.name()) {
+                Some(l) => l.1.push(row.clone()),
+                None => p.lists.push((kind.name().to_string(), vec![row.clone()])),
+            }
+        }
         if s.bottom_h > 0 {
             let tabs = self
                 .slot_tabs()
@@ -467,6 +475,8 @@ impl Panels {
                 "focused": c.focused, "minimized": c.minimized, "busy": c.busy, "queued": c.queued,
                 "draft": c.draft, "follow": c.follow, "paused": c.paused,
             })),
+            "lists": self.lists.iter().map(|(kind, rows)| json!({ "kind": kind, "rows": rows_json(rows) }))
+                .collect::<Vec<_>>(),
         })
     }
 
@@ -514,6 +524,9 @@ impl Panels {
                 .collect();
             let keys = if s.keys { " (keys)" } else { "" };
             out.push(format!("slot {}{keys} · {}", s.front.as_deref().unwrap_or("-"), tabs.join(", ")));
+        }
+        for (kind, r) in &self.lists {
+            out.push(format!("list {kind} · {}", rows(r)));
         }
         if let Some(c) = &self.chat {
             let mut s = vec!["chat".to_string()];

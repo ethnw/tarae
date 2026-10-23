@@ -91,11 +91,15 @@ struct Grid {
     cursor: Option<(usize, usize)>,
     /// `CSI n SP q`
     shape: u8,
+    /// Kept only when asked (`last_writes`): each cell's last write, by the byte offset in the frame it came from.
+    writes: Option<Vec<usize>>,
+    /// The offset of the write being put.
+    at: usize,
 }
 
 impl Grid {
     fn new(w: usize, h: usize) -> Grid {
-        Grid { w, h, cells: vec![Cell::blank(PLAIN); w * h], cursor: None, shape: 0 }
+        Grid { w, h, cells: vec![Cell::blank(PLAIN); w * h], cursor: None, shape: 0, writes: None, at: 0 }
     }
 
     fn row(&self, y: usize) -> &[Cell] {
@@ -106,18 +110,29 @@ impl Grid {
     /// blank half, in the style being written.
     fn put(&mut self, x: usize, y: usize, cell: Cell) {
         let i = y * self.w + x;
+        let mut wrote = |k: usize, at: usize| {
+            if let Some(w) = self.writes.as_mut() {
+                w[k] = at;
+            }
+        };
+        let at = self.at;
         if self.cells[i].width == 0 && x > 0 {
             self.cells[i - 1] = Cell::blank(cell.style);
+            wrote(i - 1, at);
         }
         if self.cells[i].width == 2 && x + 1 < self.w {
             self.cells[i + 1] = Cell::blank(cell.style);
+            wrote(i + 1, at);
         }
         self.cells[i] = cell;
+        wrote(i, at);
         if cell.width == 2 {
             if self.cells[i + 1].width == 2 && x + 2 < self.w {
                 self.cells[i + 2] = Cell::blank(cell.style);
+                wrote(i + 2, at);
             }
             self.cells[i + 1] = Cell { len: 0, width: 0, ..cell };
+            wrote(i + 1, at);
         }
     }
 
@@ -128,6 +143,7 @@ impl Grid {
         let mut i = 0;
         while i < frame.len() {
             let b = frame[i];
+            self.at = i;
             if b == 0x1b {
                 if frame.get(i + 1) != Some(&b'[') {
                     return None;
@@ -538,6 +554,17 @@ impl Screen {
     }
 }
 
+/// Which write each cell of a whole `w`×`h` frame shows: the byte offset in `frame` of the text run (or erase) that
+/// last drew it, `usize::MAX` where nothing did. What the finished frame shows of an element is the cells its own bytes
+/// still hold after every later layer (`term::shown_whole`). None: a frame this doesn't read.
+pub fn last_writes(frame: &[u8], w: u16, h: u16) -> Option<Vec<usize>> {
+    let (w, h) = (w as usize, h as usize);
+    let mut g = Grid::new(w, h);
+    g.writes = Some(vec![usize::MAX; w * h]);
+    g.apply(frame)?;
+    g.writes
+}
+
 /// A whole frame as the text it shows (`w`×`h` cells, a row a line, trailing blanks and rows dropped) — what
 /// goes to Claude for "the screen" is this less what's hidden (`text_hiding`). None: a frame this doesn't read.
 #[cfg(test)]
@@ -652,6 +679,20 @@ mod tests {
             .filter(|c| c.width > 0)
             .map(|c| String::from_utf8_lossy(c.text()).into_owned())
             .collect()
+    }
+
+    /// Each cell says the write it shows: a later one over part of an earlier, an erase, a wide character over half of
+    /// one; never drawn, none.
+    #[test]
+    fn each_cell_names_the_write_it_shows() {
+        let frame = "\x1b[1;1Habcdef\x1b[1;3HXY\x1b[2;1Hgh\x1b[2;2H\x1b[K\x1b[1;6H界".as_bytes();
+        let w = last_writes(frame, 8, 3).expect("readable");
+        let at = |s: &str| frame.windows(s.len()).position(|x| x == s.as_bytes()).unwrap();
+        let (first, over, row2, erase, wide) = (at("abc"), at("XY"), at("gh"), at("\x1b[K"), at("界"));
+        assert_eq!(&w[0..8], &[first, first, over, over, first, wide, wide, usize::MAX]);
+        assert_eq!(&w[8..10], &[row2, erase]);
+        assert!(w[10..16].iter().all(|&b| b == erase), "erased to the line's end");
+        assert!(w[16..].iter().all(|&b| b == usize::MAX), "never drawn");
     }
 
     #[test]

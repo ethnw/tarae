@@ -62,6 +62,8 @@ pub struct Sizes {
     pub docked: [Option<u16>; 4],
     /// The session list's frame (`sessionpane.rs`) — where you put it, the viewer's (None: centred).
     pub sessions: Option<crate::pane::Frame>,
+    /// `:messages`' frame, as the session list's.
+    pub messages: Option<crate::pane::Frame>,
 }
 
 /// The dockable kinds by `GroupKind::dock_index`, as `sizes.json` names them.
@@ -87,8 +89,16 @@ impl Sizes {
         };
         let n = |v: &Value| v.as_u64().and_then(|n| u16::try_from(n).ok());
         let docked = DOCKED.map(|k| n(&v["docked"][k.name()]));
-        let sessions = crate::pane::Frame::of_json(&v["sessions"]);
-        Sizes { chat: n(&v["chat"]), side: n(&v["side"]), bottom: n(&v["bottom"]), docked, sessions }
+        let (sessions, messages) =
+            (crate::pane::Frame::of_json(&v["sessions"]), crate::pane::Frame::of_json(&v["messages"]));
+        Sizes {
+            chat: n(&v["chat"]),
+            side: n(&v["side"]),
+            bottom: n(&v["bottom"]),
+            docked,
+            sessions,
+            messages,
+        }
     }
 
     pub fn to_json(self) -> String {
@@ -96,9 +106,11 @@ impl Sizes {
             .iter()
             .filter_map(|k| Some((k.name().to_string(), json!(self.docked[k.dock_index()]?))))
             .collect();
-        let sessions = self.sessions.map(crate::pane::Frame::json);
-        json!({ "chat": self.chat, "side": self.side, "bottom": self.bottom, "docked": docked, "sessions": sessions })
-            .to_string()
+        let (sessions, messages) =
+            (self.sessions.map(crate::pane::Frame::json), self.messages.map(crate::pane::Frame::json));
+        json!({ "chat": self.chat, "side": self.side, "bottom": self.bottom, "docked": docked, "sessions": sessions,
+                "messages": messages })
+        .to_string()
     }
 }
 
@@ -628,7 +640,8 @@ impl crate::editor::Editor {
         if self.float_auto() {
             return;
         }
-        self.sizes = Sizes { sessions: self.sizes.sessions, ..Sizes::default() };
+        self.sizes =
+            Sizes { sessions: self.sizes.sessions, messages: self.sizes.messages, ..Sizes::default() };
         self.session.split.even();
         for g in &mut self.session.groups {
             g.laid = crate::pane::Laid::Auto;
@@ -734,7 +747,7 @@ impl crate::editor::Editor {
             Shows::Side
         } else if let Some(g) = self.slot_in_hand().and(s.hand).and_then(|k| s.group(k)) {
             return Some(Zoom(g.host));
-        } else if let Some(p) = self.sessions_pane.as_ref().filter(|_| self.sessions_list_keys()) {
+        } else if let Some(p) = self.float_list_in_hand().and_then(|k| self.float_list(k)) {
             return Some(Zoom(p.list));
         } else if self.bottom_has_keys() {
             Shows::Slot
@@ -796,7 +809,7 @@ impl crate::editor::Editor {
             At::Slot => matches!(self.slot(), Some(Slot::Terminal | Slot::Test | Slot::Task | Slot::Procs)),
             At::List(id) => {
                 s.groups.iter().any(|g| g.list == id && self.group_laid(g))
-                    || self.sessions_pane.as_ref().is_some_and(|p| p.list == id)
+                    || self.float_list_of(id).is_some()
             }
             At::Plugin => self.plugins.as_ref().is_some_and(|p| p.panel.is_some()),
             At::Side => s.sidebar.is_some(),
@@ -821,6 +834,8 @@ impl crate::editor::Editor {
         if self.session.zoom.is_some() && self.zoomed().is_none() {
             self.session.zoom = None;
         }
+        // (a focused toast lets go once something else takes the keys, or goes with its card)
+        self.toast_sync();
         // (a card, the picker, a prompt, which-key: the keys' while up, the docked pane's again once gone)
         self.float_sync();
     }
@@ -838,7 +853,8 @@ impl crate::editor::Editor {
 mod tests {
     use super::*;
 
-    const AUTO: Sizes = Sizes { chat: None, side: None, bottom: None, docked: [None; 4], sessions: None };
+    const AUTO: Sizes =
+        Sizes { chat: None, side: None, bottom: None, docked: [None; 4], sessions: None, messages: None };
 
     /// Panes P2a: where the keys are is one value (`Session.at`) — once what it names is gone (the chat closed,
     /// the side panel closed, the terminal hidden, the slot showing nothing that takes them) the next event
@@ -944,7 +960,14 @@ mod tests {
         assert_eq!(chat_beside(140, 36, AUTO), CHAT_MIN);
         assert_eq!(chat_beside(200, 36, AUTO), 64, "200: the code keeps 100");
         assert_eq!(chat_beside(260, 36, AUTO), CHAT_AUTO_MAX, "wide: no wider than without the rail");
-        let kept = Sizes { chat: Some(70), side: None, bottom: None, docked: [None; 4], sessions: None };
+        let kept = Sizes {
+            chat: Some(70),
+            side: None,
+            bottom: None,
+            docked: [None; 4],
+            sessions: None,
+            messages: None,
+        };
         assert_eq!(chat_beside(160, 36, kept), 70, "yours stays");
         assert_eq!(chat_beside(70, 36, AUTO), 70, "narrow: the chat takes it all, as without the rail");
     }
@@ -953,7 +976,14 @@ mod tests {
     /// touched (it's the caller's, unchanged), so a bigger screen gets it whole again.
     #[test]
     fn kept_widths_are_clamped_not_changed() {
-        let kept = Sizes { chat: Some(90), side: Some(40), bottom: None, docked: [None; 4], sessions: None };
+        let kept = Sizes {
+            chat: Some(90),
+            side: Some(40),
+            bottom: None,
+            docked: [None; 4],
+            sessions: None,
+            messages: None,
+        };
         assert_eq!(widths(200, true, true, kept), Widths { chat: 90, side: 40 });
         // 150: the chat keeps its 90; the panel's 40 would leave the code 20 — it gives way
         assert_eq!(widths(150, true, true, kept), Widths { chat: 90, side: 0 });
@@ -966,7 +996,14 @@ mod tests {
             "the bigger screen: whole again"
         );
         // Out of bounds kept values (an edited file): within them
-        let odd = Sizes { chat: Some(5), side: Some(500), bottom: None, docked: [None; 4], sessions: None };
+        let odd = Sizes {
+            chat: Some(5),
+            side: Some(500),
+            bottom: None,
+            docked: [None; 4],
+            sessions: None,
+            messages: None,
+        };
         assert_eq!(widths(240, true, true, odd), Widths { chat: CHAT_MIN, side: SIDE_MAX });
     }
 
@@ -985,7 +1022,14 @@ mod tests {
         let dir = crate::scratch::Scratch::new("sizes");
         let path = dir.join("sizes.json");
         assert_eq!(Sizes::read(Some(&path)), Sizes::default(), "missing: automatic");
-        let s = Sizes { chat: Some(70), side: None, bottom: Some(12), docked: [None; 4], sessions: None };
+        let s = Sizes {
+            chat: Some(70),
+            side: None,
+            bottom: Some(12),
+            docked: [None; 4],
+            sessions: None,
+            messages: None,
+        };
         save(&path, s, 1);
         assert_eq!(Sizes::read(Some(&path)), s);
         save(&path, Sizes::default(), 0);

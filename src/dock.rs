@@ -32,6 +32,7 @@ impl Editor {
             GroupKind::Preflight => self.session.task_run.is_some() && preflight,
             GroupKind::Procs => self.procs_up(),
             GroupKind::Sessions => self.sessions_pane.is_some(),
+            GroupKind::Messages => self.messages_pane.is_some(),
             GroupKind::Git | GroupKind::Review => false,
         }
     }
@@ -265,8 +266,9 @@ impl Editor {
     /// `C-w H J K L` (`swap_view_*`) from a group's member: docked on that side — left, above, right; below is the slot
     /// (`C-w J`). False: the keys aren't in a group (the code's panes trade places, `swap_view`).
     pub fn dock_key(&mut self, dx: i32, dy: i32) -> bool {
-        if self.sessions_list_keys() {
-            self.set_status("the session list floats — C-w m moves it, C-w < > - + size it");
+        if let Some(k) = self.float_list_in_hand() {
+            let what = if k == GroupKind::Messages { "the messages list" } else { "the session list" };
+            self.set_status(format!("{what} floats — C-w m moves it, C-w < > - + size it"));
             return true;
         }
         let Some(kind) = self.group_in_hand() else {

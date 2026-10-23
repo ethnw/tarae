@@ -32,8 +32,8 @@ pub enum Grip {
 impl Editor {
     /// Kind `kind`'s group floats in sight: floating, something to show, its own pane made (`float_groups_sync`).
     pub fn floating_in_sight(&self, kind: GroupKind) -> bool {
-        if kind == GroupKind::Sessions {
-            return self.sessions_pane.is_some();
+        if crate::floatlist::is_list(kind) {
+            return self.float_list(kind).is_some();
         }
         let Some(g) = self.session.group(kind) else { return false };
         matches!(g.place, Place::Floating(_)) && self.kind_there(kind) && self.float_host(&g)
@@ -88,8 +88,9 @@ impl Editor {
     /// said. One meaning (user, 2026-10-23): where nothing in hand can float — the code, the chat, the side panel —
     /// it says so (the side panel's keys are its own, `space e`, `space g`…).
     pub fn float_key(&mut self) {
-        if self.sessions_list_keys() {
-            return self.set_status("the session list floats — C-w m moves it, q closes it");
+        if let Some(k) = self.float_list_in_hand() {
+            return self
+                .set_status(format!("the {} list floats — C-w m moves it, q closes it", list_name(k)));
         }
         let Some(kind) = self.group_in_hand() else {
             if self.bottom_has_keys() || self.session.is_at(crate::session::At::Program) {
@@ -162,7 +163,7 @@ impl Editor {
     pub fn float_rect(&self, kind: GroupKind) -> Option<Rect> {
         let (w, h) = self.float_screen();
         match kind {
-            GroupKind::Sessions => self.sessions_rect(w, h),
+            k if crate::floatlist::is_list(k) => self.float_list_rect(k, w, h),
             _ => Some(self.session.group(kind)?.place.frame()?.rect(w, h)),
         }
     }
@@ -171,12 +172,12 @@ impl Editor {
     fn float_set(&mut self, kind: GroupKind, r: Rect) {
         let (w, h) = self.float_screen();
         let f = Frame::of_rect(r, w, h);
-        // (the session list's is the viewer's, kept with the sizes — as tall as its rows still unless its height
+        // (a floating list's is the viewer's, kept with the sizes — as tall as its rows still unless its height
         // changed)
-        if kind == GroupKind::Sessions {
-            let rows = self.sessions_frame().is_some_and(|f| f.h == 0)
+        if crate::floatlist::is_list(kind) {
+            let rows = self.float_list_frame(kind).is_some_and(|f| f.h == 0)
                 && self.float_rect(kind).is_some_and(|was| was.h == r.h);
-            self.sizes.sessions = Some(if rows { Frame { h: 0, ..f } } else { f });
+            self.float_list_frame_set(kind, Some(if rows { Frame { h: 0, ..f } } else { f }));
             return;
         }
         if let Some(g) = self.session.groups.iter_mut().find(|g| g.kind == kind)
@@ -190,7 +191,7 @@ impl Editor {
     /// detail.
     pub fn float_focus(&mut self, kind: GroupKind) {
         match kind {
-            GroupKind::Sessions => self.sessions_focus(),
+            k if crate::floatlist::is_list(k) => self.float_list_focus(k),
             k if crate::grouplist::listed(self, k) => self.list_focus(k),
             k => self.detail_focus(k),
         }
@@ -198,8 +199,8 @@ impl Editor {
 
     /// The floating group the keys are in, if they're in one.
     pub fn float_in_hand(&self) -> Option<GroupKind> {
-        if self.sessions_list_keys() {
-            return Some(GroupKind::Sessions);
+        if let Some(k) = self.float_list_in_hand() {
+            return Some(k);
         }
         self.group_in_hand().filter(|&k| self.floating_in_sight(k))
     }
@@ -314,7 +315,7 @@ impl Editor {
     pub fn float_auto(&mut self) -> bool {
         let Some(kind) = self.float_in_hand() else { return false };
         match kind {
-            GroupKind::Sessions => self.sizes.sessions = None,
+            k if crate::floatlist::is_list(k) => self.float_list_frame_set(k, None),
             _ => {
                 if let Some(g) = self.session.groups.iter_mut().find(|g| g.kind == kind) {
                     g.place = Place::Floating(Frame::CENTRED);
@@ -388,6 +389,14 @@ impl Editor {
         if let (Grip::Size { .. }, Some(r)) = (grip, self.float_rect(kind)) {
             self.say_size(format!("{} {} × {}", kind.name(), r.w, r.h));
         }
+    }
+}
+
+/// A floating list's name where it's said (`the session list floats`).
+fn list_name(kind: GroupKind) -> &'static str {
+    match kind {
+        GroupKind::Messages => "messages",
+        _ => "session",
     }
 }
 

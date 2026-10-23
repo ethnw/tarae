@@ -77,10 +77,12 @@ pub enum GroupKind {
     /// The session list (step 7, `sessionpane.rs`): a list alone (`Detail::None`), floating — the viewer's, not a
     /// session's: it's no member of `Session.groups`, its kind names it where the keys go and where it's drawn.
     Sessions,
+    /// `:messages` (step 7c, `messages.rs`): a floating list alone, the viewer's, as the session list.
+    Messages,
 }
 
 impl GroupKind {
-    pub const ALL: [GroupKind; 7] = [
+    pub const ALL: [GroupKind; 8] = [
         GroupKind::Tests,
         GroupKind::Task,
         GroupKind::Preflight,
@@ -88,6 +90,7 @@ impl GroupKind {
         GroupKind::Git,
         GroupKind::Review,
         GroupKind::Sessions,
+        GroupKind::Messages,
     ];
 
     /// Its name in the state (`list:tests`, `keys.region`) and the restart's file (`groups: [{kind}]`).
@@ -100,6 +103,7 @@ impl GroupKind {
             GroupKind::Git => "git",
             GroupKind::Review => "review",
             GroupKind::Sessions => "sessions",
+            GroupKind::Messages => "messages",
         }
     }
 
@@ -116,7 +120,7 @@ impl GroupKind {
     /// It can leave the slot and dock beside the code (§3.1): the slot's groups. The git tab and the review's rail
     /// are the left column's (§3.7: how you move, not what you look at) — their detail is the code itself.
     pub fn dockable(self) -> bool {
-        !self.detail_is_code() && self != GroupKind::Sessions
+        !self.detail_is_code() && !crate::floatlist::is_list(self)
     }
 
     /// Its index among the dockable kinds (`Sizes.docked`).
@@ -125,7 +129,11 @@ impl GroupKind {
             GroupKind::Tests => 0,
             GroupKind::Task => 1,
             GroupKind::Preflight => 2,
-            GroupKind::Procs | GroupKind::Git | GroupKind::Review | GroupKind::Sessions => 3,
+            GroupKind::Procs
+            | GroupKind::Git
+            | GroupKind::Review
+            | GroupKind::Sessions
+            | GroupKind::Messages => 3,
         }
     }
 }
@@ -390,7 +398,7 @@ impl Group {
     /// code.
     pub fn new(kind: GroupKind, host: PaneId, first: PaneId) -> Self {
         let detail = match kind {
-            GroupKind::Sessions => Detail::None,
+            GroupKind::Sessions | GroupKind::Messages => Detail::None,
             k if k.detail_is_code() => Detail::Code,
             _ => Detail::Pane(first + 1),
         };
@@ -409,7 +417,7 @@ impl Group {
 
     /// The ids it takes from `first` (`new`).
     pub fn ids(kind: GroupKind) -> u64 {
-        if kind.detail_is_code() || kind == GroupKind::Sessions { 1 } else { 2 }
+        if kind.detail_is_code() || crate::floatlist::is_list(kind) { 1 } else { 2 }
     }
 
     /// Its detail's pane, when it has one of its own.
@@ -482,6 +490,8 @@ pub fn default_layout(code: PaneId) -> (Vec<Pane>, Split) {
 pub enum Floating {
     /// A card — a pane that asks (`offer.rs`), by its id.
     Card(u64),
+    /// The notification card (`toast.rs`), by its newest message's id (`toast#N`).
+    Toast(u64),
     Picker,
     Prompt,
     WhichKey,
@@ -493,6 +503,7 @@ impl Floating {
     pub fn kind(self) -> &'static str {
         match self {
             Floating::Card(_) => "card",
+            Floating::Toast(_) => "toast",
             Floating::Picker => "picker",
             Floating::Prompt => "prompt",
             Floating::WhichKey => "which-key",
@@ -502,6 +513,7 @@ impl Floating {
     pub fn id(self) -> String {
         match self {
             Floating::Card(n) => format!("card#{n}"),
+            Floating::Toast(n) => format!("toast#{n}"),
             Floating::Picker => "picker".into(),
             Floating::Prompt => "prompt".into(),
             Floating::WhichKey => "which-key".into(),
@@ -515,6 +527,10 @@ impl crate::editor::Editor {
         let mut out = Vec::new();
         if let Some(o) = self.offers.first().filter(|_| self.screen.offer_card.is_some()) {
             out.push(Floating::Card(o.id));
+        }
+        // (the notification card: its newest message's id — focused, the one it was focused with)
+        if let Some(t) = self.toasts.last().filter(|_| self.screen.toast_card.get().is_some()) {
+            out.push(Floating::Toast(self.toast_focus.map_or(t.id, |f| f.id)));
         }
         let viewing = crate::view::viewing(self).is_some_and(|(_, k)| !k.pending.is_empty());
         let output = crate::rundoc::keyed(self).is_some_and(|(_, o)| !o.keys.pending.is_empty());
@@ -536,6 +552,7 @@ impl crate::editor::Editor {
         use crate::uistate::Region;
         match self.keys_region() {
             Region::Card(n) => Some(Floating::Card(n)),
+            Region::Toast(n) => Some(Floating::Toast(n)),
             Region::Picker => Some(Floating::Picker),
             Region::Prompt => Some(Floating::Prompt),
             _ => self.floating().into_iter().find(|f| *f == Floating::WhichKey),

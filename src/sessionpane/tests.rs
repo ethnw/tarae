@@ -1,5 +1,6 @@
 use super::*;
-use crate::session::Doing;
+use crate::key::{Code, Key};
+use crate::session::{At, Doing};
 use crate::worktree::{Facts, Shown};
 
 /// A session as the list says it, every column filled.
@@ -27,6 +28,11 @@ fn full(id: SessionId, name: &str, doing: Doing) -> Shown {
         report: "I will switch it to the entry API so a repeat keeps the first strand".into(),
         context: Some(84),
     }
+}
+
+/// The pattern the list lights (`floatlist::lit`).
+fn lit(ed: &Editor) -> Option<regex::Regex> {
+    crate::floatlist::lit(ed, GroupKind::Sessions)
 }
 
 fn cols(laid: &(usize, Vec<(Col, usize)>)) -> Vec<Col> {

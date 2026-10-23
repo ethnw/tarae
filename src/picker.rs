@@ -60,7 +60,8 @@ pub enum Action {
         id: String,
         store: PathBuf,
     },
-    /// A notification since tarae started (`:messages`) — nothing to do; the list is for reading.
+    /// A row with nothing to do on Enter — the tests' rows (`:messages`' went with its picker, P3 step 7c).
+    #[cfg(test)]
     Message,
     /// A plain list's group heading (`:granted`'s scopes) — drawn faint, never selected.
     Heading,
@@ -1154,7 +1155,6 @@ impl Action {
             | Action::ChangedFile(_)
             | Action::Commit { .. }
             | Action::Conversation { .. }
-            | Action::Message
             | Action::Branch { .. }
             | Action::Inbox(_)
             | Action::Plugin { .. }
@@ -1165,6 +1165,8 @@ impl Action {
             | Action::Theme(_)
             | Action::Heading
             | Action::Granted(_) => None,
+            #[cfg(test)]
+            Action::Message => None,
         }
     }
 }

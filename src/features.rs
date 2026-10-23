@@ -171,7 +171,6 @@ pub const PICKERS: &[&str] = &[
     "inbox",
     "jumps",
     "log",
-    "messages",
     "model",
     "notes",
     "notes-stale",

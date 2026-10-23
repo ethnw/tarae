@@ -113,6 +113,8 @@ pub enum Keys {
     Program,
     /// A card given the keys with `C-q` (#78: the status line still said CHAT).
     Card,
+    /// The notification card, focused (`toast.rs`).
+    Toast,
     /// Labels up for pointing at an element: letters pick one (`uistate/point.rs`).
     Point,
     /// A surface's view mode (`view.rs`).
@@ -146,6 +148,7 @@ impl Keys {
             Keys::Slot(Slot::Debug) => "DEBUG",
             Keys::Slot(Slot::Plugin) => "PANEL",
             Keys::Card => "CARD",
+            Keys::Toast => "MESSAGE",
             Keys::Point => "POINT",
             Keys::View(crate::view::Surface::Chat) => "CHAT",
             Keys::View(crate::view::Surface::Terminal) => "VIEW · TERMINAL",
@@ -161,6 +164,7 @@ impl Keys {
                 crate::pane::GroupKind::Git => "GIT",
                 crate::pane::GroupKind::Review => "REVIEW",
                 crate::pane::GroupKind::Sessions => "SESSIONS",
+                crate::pane::GroupKind::Messages => "MESSAGES",
             },
         })
     }
@@ -246,6 +250,7 @@ impl Editor {
         match region {
             R::Picker => Keys::Picker,
             R::Card(_) => Keys::Card,
+            R::Toast(_) => Keys::Toast,
             R::Chat | R::Unfold => Keys::Chat,
             R::Rail => Keys::Review,
             R::EditReview => Keys::Change,
@@ -254,7 +259,10 @@ impl Editor {
             // (moving a floating pane: its keys, its frame lit)
             R::Move => Keys::List(self.float_moving.unwrap_or(crate::pane::GroupKind::Sessions)),
             R::List(k) => match (k.slot(), k) {
-                (Some(_), _) | (None, crate::pane::GroupKind::Sessions) => Keys::List(k),
+                (Some(_), _)
+                | (None, crate::pane::GroupKind::Sessions | crate::pane::GroupKind::Messages) => {
+                    Keys::List(k)
+                }
                 (None, crate::pane::GroupKind::Git) => Keys::Side(crate::sidebar::Mode::Git),
                 (None, _) => Keys::Review,
             },
