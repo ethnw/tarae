@@ -201,6 +201,9 @@ pub enum What {
     RepoTrust { root: PathBuf, parts: Vec<Offer> },
     /// Claude asks to see the screen (`seeing.rs`): `y` once, `a` this chat, `n` no.
     Screen { call: crate::tools::Call },
+    /// Claude's `read` of a page at a host not let through (`web::tool`, P4): `y` this read, `a` this chat, `s`
+    /// this session (reads only — never a run), `n` no, for the chat.
+    WebRead(Box<crate::web::tool::Ask>),
     /// `:preflight`'s first run in a project with the packs' default steps (`preflight.rs`): `y` runs those
     /// of `set`.
     Preflight { root: PathBuf, steps: Vec<crate::preflight::Step>, set: crate::preflight::Set },
@@ -329,6 +332,7 @@ pub const KINDS: &[&str] = &[
     "git-trust",
     "repo-trust",
     "screen",
+    "web-read",
     "preflight",
     "branch-delete",
     "force-push",
@@ -477,6 +481,8 @@ impl What {
             | What::ReviewAtEnd
             | What::Read { .. }
             | What::Screen { .. }
+            // (Claude's call ends with the turn)
+            | What::WebRead(_)
             | What::ChangeSet { .. }
             | What::Commit(_)
             | What::NotesStale { .. }
@@ -530,6 +536,7 @@ impl Offer {
         match &self.what {
             What::Run(r) => Some(Asker::Tool(r.call.clone())),
             What::NoSandbox { call, .. } | What::Screen { call } => Some(Asker::Tool(call.clone())),
+            What::WebRead(a) => Some(Asker::Tool(a.call.clone())),
             // (one `also` raised: Claude's call waits on it — `tools::also_ask`)
             What::Grant { run, .. } if run.claude.is_some() => run.claude.clone().map(Asker::Tool),
             What::ProtectedMade { then, .. } => then.call().map(|c| Asker::Tool(c.clone())),
@@ -738,6 +745,8 @@ impl Offer {
                 | What::Recover(_)
                 | What::Stuck(_)
                 | What::Host(_)
+                // (what Claude read can go there in the address it asks for)
+                | What::WebRead(_)
                 | What::Containers(_)
                 // (one `y` closes every draft it lists — cardburden 6: answered once read, its list as it is)
                 | What::NotesStale { .. }
@@ -791,6 +800,7 @@ impl Offer {
     /// long (`top`).
     pub fn for_session(&self) -> bool {
         self.host().is_some()
+            || matches!(self.what, What::WebRead(_))
             || self.top() >= Some(crate::allow::Scope::Session)
             || matches!(self.what, What::NoSandbox { .. })
     }
@@ -1056,7 +1066,7 @@ impl Offer {
         match &self.what {
             What::Grant { .. } => self.top() >= Some(crate::allow::Scope::ThisChat),
             // (piece C: a host's `a` is this conversation's — `hosts::chat_ended`)
-            What::Host(_) => true,
+            What::Host(_) | What::WebRead(_) => true,
             What::Read { keep: true, .. } | What::Screen { .. } => true,
             // (what it reads outside, this command again, or its socket for the rest of the chat)
             What::Run(r) => {
@@ -1293,6 +1303,7 @@ impl Offer {
             // (it fell to the download's row once: `y Install` on a card whose `y` declines Claude's change)
             W::CloseReviewed { .. } => vec![('y', "Decline and close"), ('n', "Keep both")],
             W::Screen { .. } => vec![('y', "Once"), ('a', "This chat"), ('n', "No")],
+            W::WebRead(_) => vec![('y', "Once"), ('a', "This chat"), ('s', "This session"), ('n', "No")],
             W::ReviewEnd { .. } => vec![('y', "End it"), ('n', "Keep reviewing")],
             W::Rebase(_) => vec![('y', "Rebase first"), ('n', "Leave it")],
             W::RebaseHeld(_) if self.stashes() => {
@@ -1405,6 +1416,7 @@ impl Offer {
             W::GitTrust(_) => "git-trust",
             W::RepoTrust { .. } => "repo-trust",
             W::Screen { .. } => "screen",
+            W::WebRead(_) => "web-read",
             W::Preflight { .. } => "preflight",
             W::BranchDelete { .. } => "branch-delete",
             W::ForcePush(_) => "force-push",
@@ -1883,6 +1895,7 @@ impl crate::editor::Editor {
             }
             What::Outside { run } => crate::blocked::outside_answer(self, id, *run, true),
             What::Screen { call } => crate::seeing::answer(self, id, call, Some(crate::allow::Scope::Once)),
+            What::WebRead(a) => crate::web::tool::answer(self, id, *a, Some(crate::allow::Scope::Once)),
             What::Preflight { root, steps, set } => self.preflight_answer(id, root, (steps, set), true),
             What::BranchDelete { top, branch, tip } => self.git_branch_delete_answer(id, top, branch, tip),
             What::ForcePush(f) => self.git_force_push(id, *f),
@@ -1992,6 +2005,7 @@ impl crate::editor::Editor {
         let session = Some(crate::allow::Scope::Session);
         match o.what {
             What::Host(a) => crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Session),
+            What::WebRead(a) => crate::web::tool::answer(self, o.id, *a, session),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, session),
             What::Read { pending, keep, folder } => {
                 crate::reads::answer(self, o.id, *pending, session, keep, folder)
@@ -2448,6 +2462,7 @@ impl crate::editor::Editor {
             What::Run(card) => crate::tools::run_answer(self, o.id, *card, Some(scope)),
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, Some(scope)),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, Some(scope)),
+            What::WebRead(a) => crate::web::tool::answer(self, o.id, *a, Some(scope)),
             What::Host(a) if scope == crate::allow::Scope::Always => {
                 crate::hosts::answer(self, o.id, *a, crate::sandbox::proxy::Scope::Project)
             }
@@ -2538,6 +2553,7 @@ impl crate::editor::Editor {
             What::Grant { grant, run } => crate::blocked::grant_answer(self, o.id, grant, *run, None),
             What::Outside { run } => crate::blocked::outside_answer(self, o.id, *run, false),
             What::Screen { call } => crate::seeing::answer(self, o.id, call, None),
+            What::WebRead(a) => crate::web::tool::answer(self, o.id, *a, None),
             What::Preflight { root, steps, set } => self.preflight_answer(o.id, root, (steps, set), false),
             What::BranchDelete { branch, .. } => self.set_status(format!("Kept {branch}")),
             What::ForcePush(f) => self.set_status(format!("Not pushed — {} as it was", f.upstream())),

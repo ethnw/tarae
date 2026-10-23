@@ -44,14 +44,15 @@ pub fn schema() -> Value {
     or `src/a.rs:Editor::open` (a function, type or module by name, from its syntax tree), or a path alone (the \
     whole file — over 16 KB it comes as its outline with line numbers; then ask for ranges or names). Lines \
     come numbered (`12: …`). An image (PNG, JPEG, GIF, WebP) comes as a picture. Ask for enough in one \
-    call to skip another turn. Outside the project it asks the user, as Read does.",
+    call to skip another turn. Outside the project it asks the user, as Read does. An `https://` URL reads \
+    that web page as text, the same ways (`url:a-b`, `url#heading`); a new host asks the user.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "`path`, `path:a-b,c-d`, `path:-N` or `path:name` — from the project's root, or absolute"
+                    "description": "`path`, `path:a-b,c-d`, `path:-N` or `path:name` — from the project's root, or absolute; or a URL"
                 }
             },
             "required": ["files"]
@@ -139,10 +140,22 @@ pub fn again(ed: &mut Editor, t: crate::reads::Then) {
 }
 
 fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<PathBuf>) {
+    // (pages first, on their own gate — a card a host, asked before anything is read: `web::tool`)
+    let (urls, items): (Vec<Item>, Vec<Item>) =
+        items.into_iter().partition(|it| crate::web::tool::is_url(&it.given));
+    let urls: Vec<_> = urls.iter().map(|it| crate::web::tool::item(&it.given)).collect();
+    let pages = match urls.is_empty() {
+        true => None,
+        false => match crate::web::tool::plan(ed, urls, &call, &args) {
+            Some(p) => Some(p),
+            None => return,
+        },
+    };
     let root = crate::nav::project_root(ed);
     let unsaved: Vec<PathBuf> =
         ed.docs.iter().filter(|d| d.is_modified()).filter_map(|d| d.path.clone()).collect();
     let gate = crate::reads::Gate::of(ed, granted.clone());
+    let stop = pages.as_ref().map(|p| p.stop.clone());
     ed.events.jobs().spawn(move || {
         // (taken before it's read: a change while it reads counts as one since)
         let stamps: Vec<(PathBuf, Option<crate::disk::Stamp>)> = items
@@ -153,19 +166,48 @@ fn go(ed: &mut Editor, call: Call, items: Vec<Item>, args: Value, granted: Vec<P
                 (p, s)
             })
             .collect();
-        let r = read(&root, &items, &gate, &unsaved);
-        move |ed: &mut Editor| match r {
-            Ok(Ok(parts)) => {
-                for (p, s) in stamps {
-                    crate::edittool::saw(ed, &p, s);
+        let r = match items.is_empty() {
+            true => Ok(Ok(Vec::new())),
+            false => read(&root, &items, &gate, &unsaved),
+        };
+        // (a file's card asked first: no page is fetched for an answer that waits)
+        let (r, got) = match (r, pages) {
+            (Ok(Ok(mut parts)), Some(pages)) => {
+                let (text, got) = pages.fetch();
+                match parts.last_mut() {
+                    Some(Part::Text(t)) => {
+                        t.push_str(if t.is_empty() { "" } else { "\n" });
+                        t.push_str(text.trim_end());
+                    }
+                    _ => parts.push(Part::Text(text.trim_end().to_string())),
                 }
-                crate::tools::answer_parts(ed, call, Ok(parts))
+                (Ok(Ok(parts)), got)
             }
-            Ok(Err(ask)) => {
-                let then = crate::reads::Then { call, tool: "read", args, granted };
-                crate::reads::tool_ask(ed, then, *ask)
+            (r, _) => (r, Vec::new()),
+        };
+        move |ed: &mut Editor| {
+            if let Some(stop) = &stop {
+                ed.session.web_reads.retain(|s| !s.same(stop));
             }
-            Err(e) => answer(ed, call, Err(e)),
+            match r {
+                Ok(Ok(parts)) => {
+                    for (p, s) in stamps {
+                        crate::edittool::saw(ed, &p, s);
+                    }
+                    crate::web::tool::answered(ed, &call);
+                    crate::web::tool::landed(ed, got);
+                    crate::tools::answer_parts(ed, call, Ok(parts))
+                }
+                // (its pages' `y`s kept: they're read once the file's card is answered)
+                Ok(Err(ask)) => {
+                    let then = crate::reads::Then { call, tool: "read", args, granted };
+                    crate::reads::tool_ask(ed, then, *ask)
+                }
+                Err(e) => {
+                    crate::web::tool::answered(ed, &call);
+                    answer(ed, call, Err(e))
+                }
+            }
         }
     });
 }

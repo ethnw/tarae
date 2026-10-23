@@ -1085,6 +1085,13 @@ fn every_card() -> Vec<Offer> {
         })),
         W::RepoTrust { root: p(), parts: Vec::new() },
         W::Screen { call: call(4) },
+        W::WebRead(Box::new(crate::web::tool::Ask {
+            call: call(4),
+            args: serde_json::Value::Null,
+            url: "https://page.test/".into(),
+            host: "page.test".into(),
+            port: 443,
+        })),
         W::Preflight { root: p(), steps: Vec::new(), set: crate::preflight::Set::Quick },
         W::BranchDelete { top: p(), branch: "b".into(), tip: sha() },
         W::ForcePush(Box::new(crate::gitpanel::ForcePush {

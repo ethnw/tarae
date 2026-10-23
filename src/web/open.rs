@@ -143,9 +143,31 @@ fn fetched(ed: &mut Editor, got: Result<(Arc<Fetched>, Page), String>, ago: Opti
     }
 }
 
+/// The copy Claude read (`ago`), shown as `:web` shows a page and at `lines` (0-based) — follow and replay
+/// (`follow::page_read`, D14): read on a worker, never fetched again.
+pub fn show_copy(ed: &mut Editor, f: Arc<Fetched>, ago: Duration, lines: std::ops::Range<usize>) {
+    ed.events.jobs().spawn(move || {
+        let page = super::read(&f.bytes, &f.url, f.content_type.as_deref(), Prefer::Guess);
+        move |ed: &mut Editor| {
+            let how = vec![format!("the copy Claude read {}", crate::term::ago(ago, true))];
+            let before = ed.doc().id;
+            shown(ed, Ok(page), &f.url, &f.url, how);
+            if ed.doc().id == before {
+                return;
+            }
+            let doc = ed.doc_mut();
+            let line = lines.start.min(crate::movement::last_line(&doc.text));
+            doc.set_selection(crate::selection::Selection::point(crate::movement::line_start(
+                &doc.text, line,
+            )));
+            ed.show_range(lines);
+        }
+    });
+}
+
 /// Whether the session keeps `f` for the next `:web` of it: a whole 2xx page — never one cut at the limit or maybe
 /// cut short, never an error's page — and never this machine's (a dev server changes under you).
-fn keeps(f: &Fetched) -> bool {
+pub(super) fn keeps(f: &Fetched) -> bool {
     let here = super::http::target(&f.url).is_ok_and(|t| t.loopback);
     (200..300).contains(&f.status) && f.said.is_none() && !f.cut && !here
 }

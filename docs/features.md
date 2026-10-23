@@ -446,6 +446,15 @@ configs carry over as they are.
   its own (`web · docs.rs › Rope in ropey`), how it read on the status line (`main · 87k chars · 753 links · …`); a
   page that needs JavaScript says so. Read on a worker, within limits (8 MB of page, 512 levels of nesting, 2 MB of
   text — each said when hit)
+- **Claude reads pages** — its `read` takes an `https://` URL beside files: a page over 16 KB comes as its outline
+  (headings with their lines, links out), then `url:120-200` or `url#heading` its part; under it, whole. A host
+  Claude's commands don't reach asks on a card first (`y` this read · `a` this chat · `s` this session · `n`) — a
+  read's yes never lets a command reach it (a command can post and run what it downloads), while a command's yes
+  lets Claude read there; the fetch starts after your answer (30 s to the last byte), through the same proxy and
+  address refusals as yours, another host's redirect said, not followed. The page goes to Claude framed as someone
+  else's words, never instructions, lines that look like keys hidden; the session's copy is shared with `:web` (no
+  second fetch). `:granted` lists the hosts, `d` takes one back. Each page read is a replay stop: `]r`/`[r`, follow
+  and the chat's row show the copy Claude read, at the lines it read — never fetched again
 
 ## Syntax highlighting
 

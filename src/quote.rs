@@ -153,8 +153,9 @@ pub fn cut(text: &str, max: usize) -> (String, Option<String>) {
     (out.join("\n"), Some(format!("kept the first {head} and the last {tail} of {} lines", all.len())))
 }
 
-/// A fresh id, `q` and five hex digits, that `text` doesn't close.
-fn id_for(text: &str) -> String {
+/// A fresh id, `q` and five hex digits, that `text` doesn't close (a page Claude reads is framed so too —
+/// `web::tool`).
+pub(crate) fn id_for(text: &str) -> String {
     use std::hash::{BuildHasher, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);

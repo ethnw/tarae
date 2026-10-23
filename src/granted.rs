@@ -38,6 +38,8 @@ pub enum Taken {
     Preflight(Vec<String>),
     /// The session's no-sandbox card's `s` (`Session.no_sandbox`).
     NoSandbox,
+    /// Claude's reads of a host's pages (`web::tool`), the session's (true) or this chat's: asked again.
+    Reads(String, u16, bool),
 }
 
 /// What the list shows past Claude's answers — read on a worker (`More::look`).
@@ -54,6 +56,9 @@ pub struct More {
     pub preflight: Vec<String>,
     /// Answers the repository's other checkouts keep as their own, not used here.
     pub elsewhere: usize,
+    /// The hosts whose pages Claude's `read` reaches by a read's own card (`web::tool`): host, port, whether it's
+    /// the session's (`s`, else this chat's `a`) — listed apart from the runs' hosts, never opening a run.
+    pub reads: Vec<(String, u16, bool)>,
 }
 
 /// Where `More` is read from, taken on the main thread.
@@ -86,6 +91,7 @@ impl More {
             plugins,
             preflight,
             elsewhere,
+            reads: Vec::new(),
         }
     }
 }
@@ -222,6 +228,23 @@ pub fn items(
                 rows.push((0, answer(label, "you · until you quit".into(), Taken::NoSandbox, Some('s'))));
             }
         }
+        // (a read's own answers: pages only, never a run's reach)
+        let group = match title {
+            "this session" => Some(true),
+            "this chat" => Some(false),
+            _ => None,
+        };
+        for (h, p, of_session) in &more.reads {
+            if group == Some(*of_session) {
+                let hint = if *of_session { "you · until you quit" } else { "you · this conversation" };
+                let key = if *of_session { 's' } else { 'a' };
+                let label = format!("read pages at {h}:{p}");
+                rows.push((
+                    0,
+                    answer(label, hint.into(), Taken::Reads(h.clone(), *p, *of_session), Some(key)),
+                ));
+            }
+        }
         if rows.is_empty() {
             continue;
         }
@@ -288,7 +311,8 @@ pub fn count(s: &crate::session::Session) -> usize {
             seen.push(g);
         }
     }
-    seen.len() + s.hosts.len()
+    let reads = s.web_hosts.len() + s.chat.as_ref().map_or(0, |c| c.web_hosts.len());
+    seen.len() + s.hosts.len() + reads
 }
 
 impl Editor {
@@ -308,6 +332,11 @@ impl Editor {
             .iter()
             .map(|(h, p)| (h.clone(), *p, given.get(&(h.clone(), *p)).copied()))
             .collect();
+        let chat_reads = self.session.chat.as_ref().map(|c| c.web_hosts.clone()).unwrap_or_default();
+        let reads: Vec<(String, u16, bool)> =
+            (self.session.web_hosts.iter().map(|(h, p)| (h.clone(), *p, true)))
+                .chain(chat_reads.into_iter().map(|(h, p)| (h, p, false)))
+                .collect();
         let look = Look {
             root: self.session.root.clone(),
             no_sandbox: self.session.no_sandbox == Some(crate::tools::NoSandbox::Unasked),
@@ -322,7 +351,7 @@ impl Editor {
         };
         self.events.jobs().spawn(move || {
             let caps = basis.build();
-            let more = More::look(&look);
+            let more = More { reads, ..More::look(&look) };
             let answers = [&basis.kept().1.all, &basis.session, &basis.chat];
             let items = items(&caps, answers, &hosts, &more, crate::allow::now_s());
             move |ed: &mut Editor| ed.granted_open(items, again)
@@ -385,6 +414,27 @@ impl Editor {
             Taken::NoSandbox => {
                 self.session.no_sandbox = None;
                 self.set_status("Without a sandbox, each run asks again");
+            }
+            // (only the row picked: the session's, or this chat's — the other, if there, still holds)
+            Taken::Reads(h, p, of_session) => {
+                let at = (h.clone(), p);
+                let in_chat = self.session.chat.as_ref().is_some_and(|c| c.web_hosts.contains(&at));
+                let (was, other) = match of_session {
+                    true => ("This session", in_chat),
+                    false => ("This conversation", self.session.web_hosts.contains(&at)),
+                };
+                match of_session {
+                    true => self.session.web_hosts.retain(|a| *a != at),
+                    false => {
+                        if let Some(c) = self.session.chat.as_mut() {
+                            c.web_hosts.retain(|a| *a != at);
+                        }
+                    }
+                }
+                self.set_status(match other {
+                    false => format!("Claude's reads of pages at {h} ask again"),
+                    true => format!("{was}'s yes for pages at {h} taken back — the other still lets them"),
+                });
             }
             Taken::Preflight(keys) => {
                 self.preflight_told.remove(&self.session.root);
@@ -862,6 +912,25 @@ mod tests {
         until(&mut ed, "the told line gone", |_| std::fs::read_to_string(&told).unwrap() == "other\n");
         assert!(!ed.preflight_told.contains(&root), "nor kept since tarae started");
         until(&mut ed, "the list again", |ed| rows(ed).iter().any(|r| r.0 == NONE_PAST));
+    }
+
+    /// A read's host granted both for the session and for this chat is two rows: `d` takes back the one picked, the
+    /// other still holds, and the toast says so.
+    #[test]
+    fn d_takes_back_only_the_reads_row_picked() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.chat = Some(crate::chat::Chat::new());
+        let at = ("docs.rs".to_string(), 443);
+        ed.session.web_hosts.push(at.clone());
+        ed.session.chat.as_mut().unwrap().web_hosts.push(at.clone());
+        ed.granted_take(Taken::Reads(at.0.clone(), at.1, true)).unwrap();
+        assert!(ed.session.web_hosts.is_empty());
+        assert_eq!(ed.session.chat.as_ref().unwrap().web_hosts, vec![at.clone()], "this chat's stays");
+        let said = |ed: &Editor, s: &str| ed.toasts.iter().any(|t| t.text.contains(s));
+        assert!(said(&ed, "This session's yes for pages at docs.rs taken back — the other still"));
+        ed.granted_take(Taken::Reads(at.0.clone(), at.1, false)).unwrap();
+        assert!(ed.session.chat.as_ref().unwrap().web_hosts.is_empty());
+        assert!(said(&ed, "Claude's reads of pages at docs.rs ask again"));
     }
 
     /// The schema step (plan §2.2): a kept read a default covers now — here, in the checkout — is dropped from

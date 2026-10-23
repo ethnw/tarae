@@ -2,8 +2,10 @@
 //! isn't a page asked, the session's copy of a fetched page asked (read on a worker, no network), a page fetched from
 //! a server of the test's own on this machine (its way a stand-in, its proxy made before the simulation: a proxy's
 //! threads outlive a step), an address the fetch refuses, `:web-stop`, the buffer in front closed, the user taking
-//! their time, a frame — the reads' and fetches' jobs landing among them in any order. After every step: one buffer at
-//! most per page's title, none for what isn't a page, no fetch's step left once none is under way.
+//! their time, a frame; Claude's `read` of a page (P4): the session's copy, this machine's page at a port runs reach, a
+//! host not let through (its card, answered `y`, `s` or `n`) — the reads' and fetches' jobs landing among them in any
+//! order. After every step: one buffer at most per page's title, none for what isn't a page, no fetch's step left once
+//! none is under way, no card for a host answered for the session or the conversation.
 
 use std::time::Duration;
 
@@ -36,6 +38,8 @@ fn run(choices: Choices) -> Vec<String> {
     let mut sim = Sim::new("a_page_read_twice_is_one_buffer", choices, LIMIT);
     let mut ed = Editor::new(crate::config::Config::default());
     ed.session.root = dir.path().to_path_buf();
+    ed.session.chat = Some(crate::chat::Chat::new());
+    ed.config.llm.sandbox_ports.push(at.port());
     ed.session.web_way =
         Some(std::sync::Arc::new(move |stop| crate::web::fetch::Way { stop, ..base.clone() }));
     let fetched = format!("web http://localhost:{}/", at.port());
@@ -51,9 +55,14 @@ fn run(choices: Choices) -> Vec<String> {
         said: None,
         cut: false,
         took: Duration::from_millis(30),
+        elsewhere: None,
     };
     let _ = ed.session.pages.put(std::sync::Arc::new(kept), crate::clock::now());
-    let input = move |sim: &mut Sim, ed: &mut Editor| input(sim, ed, &fetched);
+    let mut n = 0u64;
+    let input = move |sim: &mut Sim, ed: &mut Editor| {
+        n += 1;
+        input(sim, ed, &fetched, n)
+    };
     sim.walk(&mut ed, INPUTS, input, held, |ed| {
         let titles: Vec<&str> = ed.docs.iter().filter_map(|d| d.title.as_deref()).collect();
         format!("front {:?} · titled {titles:?}", ed.doc().title)
@@ -64,11 +73,31 @@ fn run(choices: Choices) -> Vec<String> {
     trace
 }
 
-fn input(sim: &mut Sim, ed: &mut Editor, fetched: &str) -> String {
+fn input(sim: &mut Sim, ed: &mut Editor, fetched: &str, n: u64) -> String {
     let c = &mut sim.choices;
     // (by arm: the page 3, another part of it 2, the PDF 1, the session's copy 2, a fetch 2, a refused address 1, a
-    // stop 1, a close 1, time 2, a frame 1)
-    match c.weighted(&[3, 2, 1, 2, 2, 1, 1, 1, 2, 1]) {
+    // stop 1, a close 1, time 2, a frame 1; Claude reading the copy 1, this machine's page 1, a new host 2, a card's
+    // answer 2)
+    match c.weighted(&[3, 2, 1, 2, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2]) {
+        10 => claude_reads(ed, n, "https://kept.test/"),
+        11 => {
+            let url = fetched.replace("web ", "");
+            claude_reads(ed, n, &url).replace(&url, "http://localhost/")
+        }
+        // (a host the stand-in's resolver doesn't know: refused at once once let through — the server is plain http)
+        12 => claude_reads(ed, n, "https://new.test/p"),
+        13 => {
+            let Some(o) = ed.offers.first().filter(|o| o.kind() == "web-read") else {
+                return "(no read's card up)".into();
+            };
+            let title = o.title.clone();
+            match *c.pick(&['y', 's', 'n']) {
+                'y' => ed.offer_accept(),
+                's' => ed.offer_for_session(),
+                _ => ed.offer_dismiss(),
+            }
+            format!("answered {title:?}")
+        }
         0 => typed(ed, "web a.html"),
         1 => typed(ed, "web a.html page"),
         2 => typed(ed, "web b.pdf"),
@@ -92,6 +121,18 @@ fn input(sim: &mut Sim, ed: &mut Editor, fetched: &str) -> String {
     }
 }
 
+/// Claude's `read` of `url`, call `n`.
+fn claude_reads(ed: &mut Editor, n: u64, url: &str) -> String {
+    let Some(generation) = ed.session.chat.as_ref().map(|c| c.generation()) else {
+        return "(no chat)".into();
+    };
+    let call = crate::tools::Call::of(generation, "", serde_json::json!(n));
+    match crate::readtool::call(ed, call, &serde_json::json!({ "files": [url] })) {
+        Ok(()) => format!("Claude reads {url}"),
+        Err(e) => format!("Claude reads {url} — {e}"),
+    }
+}
+
 fn typed(ed: &mut Editor, line: &str) -> String {
     match crate::typed::execute(ed, line) {
         Ok(()) => format!(":{line}"),
@@ -109,6 +150,23 @@ fn held(ed: &Editor) -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
     if let Some(twice) = web.iter().find(|t| !seen.insert(**t)) {
         return Err(format!("two buffers of {twice:?}"));
+    }
+    // (a card a call; but none for a host this session or conversation answered)
+    let answered = |h: &str| {
+        let at = (h.to_string(), 443);
+        ed.session.web_hosts.contains(&at)
+            || ed
+                .session
+                .chat
+                .as_ref()
+                .is_some_and(|c| c.web_refused.contains(&at) || c.web_hosts.contains(&at))
+    };
+    let cards = ed.offers.iter().filter_map(|o| match &o.what {
+        crate::offer::What::WebRead(a) => Some(a.host.as_str()),
+        _ => None,
+    });
+    if let Some(h) = cards.into_iter().find(|h| answered(h)) {
+        return Err(format!("a card for {h}, which was answered for good"));
     }
     match web.iter().find(|t| t.contains("pdf")) {
         Some(t) => Err(format!("a buffer for what isn't a page: {t:?}")),

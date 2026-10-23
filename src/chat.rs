@@ -471,6 +471,10 @@ pub struct Chat {
     /// card · how many such cards this turn put up (`tools::ALSO_MAX` at most).
     pub also_refused: Vec<crate::allow::Grant>,
     pub also_asked: usize,
+    /// The hosts whose pages Claude's `read` reaches unasked for the rest of this conversation (`a` on its card),
+    /// and those the user said no to (`n`: refused with no card) — reads' answers, never a run's (`web::tool`).
+    pub web_hosts: Vec<(String, u16)>,
+    pub web_refused: Vec<(String, u16)>,
     /// The user said yes to the terminals on an `also` card this turn: asked again, they take none of its
     /// `ALSO_MAX` (frictions29 23: each e2e or scenes run asked, and the turn ran out of cards).
     pub also_yes: bool,
@@ -814,6 +818,8 @@ impl Chat {
         self.run_scripts.clear();
         self.sees = false;
         self.hosts_next.clear();
+        self.web_hosts.clear();
+        self.web_refused.clear();
     }
 
     pub(crate) fn new() -> Self {
@@ -848,6 +854,8 @@ impl Chat {
             run_again: Vec::new(),
             also_refused: Vec::new(),
             also_asked: 0,
+            web_hosts: Vec::new(),
+            web_refused: Vec::new(),
             also_yes: false,
             run_scripts: Vec::new(),
             queued: None,
@@ -3031,16 +3039,27 @@ fn look(root: &Path, name: &str, input: &serde_json::Value) -> Look {
                 .flatten()
                 .filter_map(serde_json::Value::as_str)
                 .collect();
+            let more = match files.len() {
+                0 | 1 => String::new(),
+                n => format!("+{} more", n - 1),
+            };
+            // (a page: its address as asked, no file to link — its stop shows the copy read: `follow::page_read`)
+            if let Some(url) = files.first().filter(|f| crate::web::tool::is_url(f)) {
+                let what = url.trim().trim_start_matches("https://").trim_start_matches("http://");
+                return Look {
+                    verb: "read",
+                    what: what.to_string(),
+                    pattern: false,
+                    range: more,
+                    link: None,
+                };
+            }
             // (read as the tool reads it — `readtool::item`)
             let it = crate::readtool::item(files.first().copied().unwrap_or_default());
             let path = resolve(&it.path);
             let line = match &it.want {
                 crate::readtool::Want::Lines(r) => r.first().map_or(0, |r| r.0 - 1),
                 _ => 0,
-            };
-            let more = match files.len() {
-                0 | 1 => String::new(),
-                n => format!("+{} more", n - 1),
             };
             let asked = it.given.strip_prefix(it.path.as_str()).unwrap_or_default();
             let what = format!("{}{asked}", shown(&path));

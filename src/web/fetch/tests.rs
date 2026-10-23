@@ -265,6 +265,7 @@ pub(crate) fn way(at: SocketAddr, rules: Egress) -> Way {
         deadline: Duration::from_secs(10),
         max: 1 << 20,
         process: ":web".into(),
+        others: true,
         stop: Stop::default(),
     }
 }
@@ -533,6 +534,7 @@ fn the_session_keeps_its_pages_a_while() {
             said: None,
             cut: false,
             took: Duration::ZERO,
+            elsewhere: None,
         };
         Arc::new(f)
     };

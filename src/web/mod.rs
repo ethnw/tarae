@@ -12,7 +12,7 @@
 //! property, its loop in every `cargo test`, and `fuzz/parsers`' `web` target.
 //!
 //! `:web https://… [main|article|page]` fetches a page into a buffer, `:web <path> [url] […]` reads a saved one
-//! (`open.rs`).
+//! (`open.rs`). Claude's `read` takes an `https://` URL (`tool.rs`): its own gate, the page framed as data.
 
 mod charset;
 #[cfg(any(test, fuzzing))]
@@ -28,6 +28,8 @@ mod lang;
 pub mod open;
 mod pick;
 mod reader;
+#[cfg(not(fuzzing))]
+pub mod tool;
 mod tree;
 mod url;
 

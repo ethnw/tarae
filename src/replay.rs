@@ -36,6 +36,16 @@ pub struct Stop {
     pub hunks: Vec<Hunk>,
     /// What Claude said right before the call (the card says it at this stop).
     pub why: String,
+    /// A page's read (`read` of a URL, web-plan D14): shown from the copy Claude read, never fetched again.
+    pub page: Option<PageAt>,
+}
+
+/// A page Claude read: the address asked, and — once its answer landed — the copy read: its address after redirects
+/// and when it was fetched (the session's `Pages` key it by both).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageAt {
+    pub url: String,
+    pub copy: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Default)]
@@ -283,7 +293,8 @@ mod tests {
     fn stop(path: &str, lines: Range<usize>) -> Stop {
         let look = Look { verb: "read", what: path.into(), pattern: false, range: String::new(), link: None };
         let path = Some(PathBuf::from(path));
-        Stop { call: String::new(), look, path, lines: Some(lines), hunks: Vec::new(), why: String::new() }
+        let why = String::new();
+        Stop { call: String::new(), look, path, lines: Some(lines), hunks: Vec::new(), why, page: None }
     }
 
     /// An edit's hunks: the lines it left, the ones they replaced — and the old ranges, for moving others.

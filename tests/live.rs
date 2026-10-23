@@ -2985,6 +2985,284 @@ fn chat_reads_a_screenshot_ab() {
     assert!(tools.iter().any(|t| t == "mcp__tarae__read") && !tools.iter().any(|t| t == "Read"));
 }
 
+/// web-plan P4's A/B: questions a coder asks of a real page, each naming its page, each with its answer key written
+/// before any run (exact where it's a signature or a value; each entry met when the answer has any of its words).
+const WEB_QUESTIONS: [Question; 10] = [
+    Question {
+        name: "ropey-remove",
+        ask: "Read https://docs.rs/ropey/1.6.1/ropey/struct.Rope.html and tell me Rope::remove's exact signature \
+              and when it panics.",
+        key: &[&["RangeBounds<usize>"], &["len_chars"]],
+    },
+    Question {
+        name: "abort-timeout",
+        ask: "Read https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static and tell me the \
+              name of the error the signal aborts with when the time runs out.",
+        key: &[&["TimeoutError"]],
+    },
+    Question {
+        name: "swap-remove",
+        ask: "Read https://doc.rust-lang.org/std/vec/struct.Vec.html and tell me Vec::swap_remove's time \
+              complexity and when it panics.",
+        key: &[&["O(1)"], &["out of bounds", "index >= len", "len <= index"]],
+    },
+    Question {
+        name: "cargo-target-dir",
+        ask: "Read https://doc.rust-lang.org/cargo/reference/config.html and tell me the config key that sets \
+              where build output goes, and its environment variable.",
+        key: &[&["build.target-dir"], &["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"]],
+    },
+    Question {
+        name: "unsafe-op-lint",
+        ask: "Read https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html and tell me the \
+              level the unsafe_op_in_unsafe_fn lint has in the 2024 edition.",
+        key: &[&["warn"]],
+    },
+    Question {
+        name: "pep8-lines",
+        ask: "Read https://peps.python.org/pep-0008/ and tell me the maximum line length it sets for code, and \
+              the one for docstrings and comments.",
+        key: &[&["79"], &["72"]],
+    },
+    Question {
+        name: "retry-after",
+        ask: "Read https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Retry-After and tell me the \
+              two forms its value can take.",
+        key: &[&["http-date", "HTTP date", "date"], &["delay-seconds", "seconds"]],
+    },
+    Question {
+        name: "subprocess-check",
+        ask: "Read https://docs.python.org/3/library/subprocess.html and tell me what subprocess.run raises when \
+              check=True and the process exits non-zero.",
+        key: &[&["CalledProcessError"]],
+    },
+    Question {
+        name: "strings-cut",
+        ask: "Read https://pkg.go.dev/strings and tell me strings.Cut's signature and the Go version it was \
+              added in.",
+        key: &[&["found bool"], &["1.18"]],
+    },
+    Question {
+        name: "rust-1-80",
+        ask: "Read https://blog.rust-lang.org/2024/07/25/Rust-1.80.0.html and tell me which two lazy types it \
+              stabilized.",
+        key: &[&["LazyCell"], &["LazyLock"]],
+    },
+];
+
+/// Every model's tokens in a turn, as its result's `modelUsage` bills them — WebFetch's small model too: input
+/// (cache written and read included) and output.
+fn models_usage(stream: &str) -> (u64, u64) {
+    let mut lines = stream.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
+    let Some(r) = lines.rfind(|v| v["type"] == "result") else { return (0, 0) };
+    let models = r["modelUsage"].as_object().cloned().unwrap_or_default();
+    models.values().fold((0, 0), |(i, o), m| {
+        let n = |k: &str| m[k].as_u64().unwrap_or(0);
+        (
+            i + n("inputTokens") + n("cacheReadInputTokens") + n("cacheCreationInputTokens"),
+            o + n("outputTokens"),
+        )
+    })
+}
+
+/// web-plan P4: is tarae's `read` of a URL better than Claude Code's WebFetch? The same questions (`WEB_QUESTIONS`)
+/// both ways, one turn each in tarae's chat: `webfetch` — the build before P4 (`TARAE_AB_BASE`: its `read` takes no
+/// URL) with WebFetch armed (`--tools WebFetch`, allowed up front, by the tee script — that arm only) — and `read`
+/// — this build (or `TARAE_AB_NEW`) as it is, the questions' hosts in `llm.sandbox-hosts` with the network open (a
+/// run's grant opens reads: no card), another host a card the turn answers `n`. Per run: right (against the key),
+/// tool calls, input and output tokens (every model's — WebFetch's small one too), $ (claude's `total_cost_usd`),
+/// wall time. Runs alternate between the arms. `TARAE_AB_RUNS` (1), `TARAE_AB_QUESTIONS`, `TARAE_AB_BUDGET` ($, 15),
+/// `TARAE_AB_MODEL` ("opus"). Rows to `target/live/web-ab.tsv`, streams to `target/live/web-ab/`. It reaches the
+/// network: run by hand, outside tarae's sandbox — `cargo live chat_web_ab --nocapture`.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude and the network)"]
+fn chat_web_ab() {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let Some(base) = var("TARAE_AB_BASE") else {
+        skip("TARAE_AB_BASE names the build before P4 (the WebFetch arm's)");
+        return;
+    };
+    if !have("claude") {
+        return;
+    }
+    let new = var("TARAE_AB_NEW");
+    let runs: usize = var("TARAE_AB_RUNS").and_then(|r| r.parse().ok()).unwrap_or(1);
+    let budget: f64 = var("TARAE_AB_BUDGET").and_then(|b| b.parse().ok()).unwrap_or(15.0);
+    let model = var("TARAE_AB_MODEL").unwrap_or_else(|| "opus".into());
+    let only = var("TARAE_AB_QUESTIONS");
+    let questions: Vec<&Question> = WEB_QUESTIONS
+        .iter()
+        .filter(|q| only.as_deref().is_none_or(|o| o.split(',').any(|n| n == q.name)))
+        .collect();
+    let hosts: Vec<String> = {
+        let mut h: Vec<String> = WEB_QUESTIONS
+            .iter()
+            .filter_map(|q| q.ask.split("https://").nth(1)?.split('/').next().map(|h| format!("\"{h}\"")))
+            .collect();
+        h.sort();
+        h.dedup();
+        h
+    };
+    let tsv = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/web-ab.tsv");
+    let kept = tsv.with_file_name("web-ab");
+    std::fs::create_dir_all(&kept).unwrap();
+    let mut rows: Vec<(&str, &str, Measured, (u64, u64))> = Vec::new();
+    let mut spent = 0.0;
+    'runs: for run in 0..runs {
+        for q in &questions {
+            let order = if run % 2 == 0 { ["webfetch", "read"] } else { ["read", "webfetch"] };
+            for arm in order {
+                if spent > budget {
+                    eprintln!("WEB_AB budget: ${spent:.2} spent, past ${budget} — no more runs");
+                    break 'runs;
+                }
+                let mut sb = Sandbox::live(&format!("web-ab-{}-{arm}", q.name));
+                let llm = match arm {
+                    "webfetch" => {
+                        sb = sb.with_bin(Path::new(&base));
+                        format!("model = \"{model}\"\n")
+                    }
+                    _ => {
+                        if let Some(n) = &new {
+                            sb = sb.with_bin(Path::new(n));
+                        }
+                        format!(
+                            "model = \"{model}\"\nsandbox-network = true\nsandbox-hosts = [{}]\n",
+                            hosts.join(", ")
+                        )
+                    }
+                };
+                sb.write("notes.txt", "web questions\n");
+                let stream = teed(&sb, &llm);
+                if arm == "webfetch" {
+                    arm_webfetch(&sb, &stream);
+                }
+                let mut t = sb.spawn(&["notes.txt"]);
+                let started = Instant::now();
+                let (cards, capped) = ab_turn(&mut t, q.ask, &stream);
+                let text = std::fs::read_to_string(&stream).unwrap_or_default();
+                let mut m = measure(&text, sb.work().to_str().unwrap());
+                m.wall_ms = started.elapsed().as_millis() as u64;
+                (m.cards, m.capped) = (cards, capped);
+                m.right = web_right(q, &m.answer);
+                let io = models_usage(&text);
+                spent += m.cost;
+                let said = format!(
+                    "WEB_AB {} {arm} run {}: right {:.2} · calls {} {:?} · input {} · output {} · ${:.3} · {} ms · \
+                     requests {} · cards {} · capped {}\n  answer: {}",
+                    q.name,
+                    run + 1,
+                    m.right,
+                    m.calls,
+                    m.tools,
+                    io.0,
+                    io.1,
+                    m.cost,
+                    m.wall_ms,
+                    m.requests,
+                    m.cards,
+                    m.capped,
+                    m.answer.replace('\n', " ⏎ "),
+                );
+                eprintln!("{said}");
+                let name = format!("{}-{arm}-{}-{}", q.name, run + 1, std::process::id());
+                let _ = std::fs::copy(&stream, kept.join(format!("{name}.jsonl")));
+                std::fs::write(kept.join(format!("{name}.txt")), &said).unwrap();
+                let row = format!(
+                    "{}\t{arm}\t{}\t{:.2}\t{}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{:?}\n",
+                    q.name,
+                    run + 1,
+                    m.right,
+                    m.calls,
+                    io.0,
+                    io.1,
+                    m.cost,
+                    m.wall_ms,
+                    m.cards,
+                    m.capped,
+                    m.tools,
+                );
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&tsv).unwrap();
+                f.write_all(row.as_bytes()).unwrap();
+                rows.push((q.name, arm, m, io));
+            }
+        }
+    }
+    eprintln!("WEB_AB sums — arm: right · calls · input · output · $ · wall s");
+    for arm in ["webfetch", "read"] {
+        let of: Vec<_> = rows.iter().filter(|r| r.1 == arm).collect();
+        eprintln!(
+            "WEB_AB {arm} ({} runs): {:.1} · {} · {} · {} · ${:.3} · {:.0}",
+            of.len(),
+            of.iter().map(|r| r.2.right).sum::<f64>(),
+            of.iter().map(|r| r.2.calls).sum::<usize>(),
+            of.iter().map(|r| r.3.0).sum::<u64>(),
+            of.iter().map(|r| r.3.1).sum::<u64>(),
+            of.iter().map(|r| r.2.cost).sum::<f64>(),
+            of.iter().map(|r| r.2.wall_ms).sum::<u64>() as f64 / 1000.0,
+        );
+    }
+    eprintln!("WEB_AB spent ${spent:.2}");
+    assert!(!rows.is_empty(), "no run");
+}
+
+/// Share of `q`'s key `answer` names — markdown's emphasis and code marks (`*`, `_`, backticks) taken out of both
+/// first, case aside: `*O*(1)` names `O(1)`.
+fn web_right(q: &Question, answer: &str) -> f64 {
+    let plain =
+        |s: &str| s.chars().filter(|c| !matches!(c, '*' | '_' | '`')).collect::<String>().to_lowercase();
+    let answer = plain(answer);
+    let met = q.key.iter().filter(|alts| alts.iter().any(|a| answer.contains(&plain(a))));
+    met.count() as f64 / q.key.len() as f64
+}
+
+/// `chat_web_ab`'s runs graded again from their saved streams (`target/live/web-ab/<question>-<arm>-<run>-<pid>.jsonl`)
+/// by today's `web_right` — no new run, no network, no Claude. By hand: `cargo test --test live chat_web_ab_rescore --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "by hand: reads chat_web_ab's saved streams"]
+fn chat_web_ab_rescore() {
+    let kept = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/live/web-ab");
+    let Ok(dir) = std::fs::read_dir(&kept) else {
+        skip("no target/live/web-ab: run chat_web_ab first");
+        return;
+    };
+    let mut names: Vec<String> = dir.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+    names.retain(|n| n.ends_with(".jsonl"));
+    names.sort();
+    let mut sums: std::collections::BTreeMap<&str, (f64, usize)> = Default::default();
+    for name in &names {
+        let Some((q, arm)) = WEB_QUESTIONS.iter().find_map(|q| {
+            let rest = name.strip_prefix(q.name)?.strip_prefix('-')?;
+            ["webfetch", "read"].into_iter().find(|a| rest.starts_with(&format!("{a}-"))).map(|a| (q, a))
+        }) else {
+            continue;
+        };
+        let text = std::fs::read_to_string(kept.join(name)).unwrap_or_default();
+        let right = web_right(q, &measure(&text, "").answer);
+        eprintln!("WEB_AB_RESCORED {} {arm}: right {right:.2}", q.name);
+        let s = sums.entry(arm).or_default();
+        (s.0, s.1) = (s.0 + right, s.1 + 1);
+    }
+    for (arm, (right, runs)) in &sums {
+        eprintln!("WEB_AB_RESCORED {arm} ({runs} runs): right {right:.1}");
+    }
+    assert!(!sums.is_empty(), "no saved stream in {}", kept.display());
+}
+
+/// The tee script of `teed` with Claude Code's WebFetch armed: `--tools ""` made `--tools WebFetch`, WebFetch added
+/// to `--allowedTools` (tarae's chat passes both once) — the WebFetch arm's only difference besides its build.
+fn arm_webfetch(sb: &Sandbox, stream: &Path) {
+    let script = sb.outside("claude-tee.sh");
+    let body = format!(
+        "#!/bin/sh\np=\nfor a in \"$@\"; do\n  shift\n  o=$a\n  case \"$p\" in\n    --tools) a=WebFetch ;;\n    \
+         --allowedTools) a=\"$a,WebFetch\" ;;\n  esac\n  set -- \"$@\" \"$a\"\n  p=$o\ndone\nclaude \"$@\" | tee -a '{}'\n",
+        stream.display()
+    );
+    std::fs::write(&script, body).unwrap();
+}
+
 /// web-plan P0: the exact tokens of a page read each way (§3's columns) — each file of `TARAE_WEB_TOKENS`'s folder
 /// (`<page>.<column>.txt`, made by the plan's scratch `columns.sh`) after a one-word question, less that question
 /// alone: the file's own tokens (and the blank line before it). A file past 400 KB goes in parts (a request's

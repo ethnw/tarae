@@ -5566,6 +5566,7 @@ fn snapshot_granted() {
         plugins: vec![("k8s".into(), "run kubectl, read ~/.kube/config, reach 2 hosts".into())],
         preflight: vec!["0".repeat(64)],
         elsewhere: 4,
+        reads: Vec::new(),
     };
     let full = [&kept, &session, &chat];
     let mut s = scene(100, 30, full, &hosts);
@@ -7358,6 +7359,7 @@ fn granted_rows_cut_the_same_when_scrolled() {
         plugins: Vec::new(),
         preflight: Vec::new(),
         elsewhere: 0,
+        reads: Vec::new(),
     };
     let bare = |r: &String| r.trim_start_matches(['▎', ' ']).to_string();
     let mut compared = 0;
@@ -7524,6 +7526,7 @@ fn granted_rows_cut_keep_what_differs() {
         plugins: Vec::new(),
         preflight: Vec::new(),
         elsewhere: 0,
+        reads: Vec::new(),
     };
     s.ed.granted_open(crate::granted::items(&caps, [&none, &none, &none], &[], &more, 1_792_000_000), false);
     let rows: Vec<String> =

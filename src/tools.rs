@@ -52,6 +52,11 @@ pub struct Call {
 }
 
 impl Call {
+    /// Whether `other` is this call (the same chat process, the same MCP id).
+    pub(crate) fn same(&self, other: &Call) -> bool {
+        self.generation == other.generation && self.id == other.id
+    }
+
     /// A step on its run's way (`trace.rs`), if it's a run's.
     pub(crate) fn step(&self, what: &str) {
         if let Some(t) = &self.trace {
@@ -124,7 +129,13 @@ pub fn mcp(ed: &mut Editor, generation: u64, request_id: &str, msg: &Value) -> O
             ed.session.usage.tally.mcp_came();
             let params = &msg["params"];
             let args = &params["arguments"];
+            // (a key in tarae's own namespace is never Claude's to send — what a call was granted stays on tarae's
+            // side, `Session.web_once`)
+            let ours = args.as_object().and_then(|o| o.keys().find(|k| k.starts_with("tarae-")));
             let r = match params["name"].as_str() {
+                _ if ours.is_some() => {
+                    Err(format!("`{}` isn't an argument of {tool}", ours.map_or("", |k| k.as_str())))
+                }
                 Some("note") => crate::notes::tool_call(ed, args),
                 Some("plan") => crate::plan::tool_call(ed, args),
                 Some("ui") => crate::uistate::claude::tool_call(ed),
@@ -709,8 +720,11 @@ pub fn turn_over(ed: &mut Editor) -> Vec<Left> {
             || matches!(w, What::ProtectedMade { then, .. } if then.call().is_some())
             // (one `also` raised: Claude's call waited on it)
             || matches!(w, What::Grant { run, .. } if run.claude.is_some())
+            // (a read of a page waited on it)
+            || matches!(w, What::WebRead(_))
     });
     crate::seeing::turn_over(ed);
+    crate::web::tool::turn_over(ed);
     crate::committool::turn_over(ed);
     crate::refactor::turn_over(ed);
     // (its edits and runs may have changed what the session's reviewer read)

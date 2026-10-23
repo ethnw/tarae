@@ -303,8 +303,16 @@ pub struct Session {
     /// The pages fetched in it (`web::fetch::Pages`, D11): 15 minutes each, never on disk — Claude's `read` (P4) takes
     /// them from here.
     pub pages: crate::web::fetch::Pages,
+    /// The hosts whose pages Claude's `read` reaches unasked in it (`s` on a read's card, until you quit) — a read's
+    /// answer opens no run (`web::tool`).
+    pub web_hosts: Vec<(String, u16)>,
     /// The fetch under way (`:web https://…`): what stops it (`:web-stop`, the next `:web`).
     pub web_fetch: Option<crate::web::fetch::Stop>,
+    /// Claude's reads of pages under way: what stops them (the turn's end, `web::tool::turn_over`).
+    pub web_reads: Vec<crate::web::fetch::Stop>,
+    /// The user's `y`s on read cards: the call each was for and the host its pages may reach — tarae's side, never
+    /// in Claude's arguments; gone as that read lands or the turn ends.
+    pub web_once: Vec<(crate::tools::Call, (String, u16))>,
     /// Tests: the way `:web` fetches by — servers and a proxy of the test's own (`fetch::tests::way`) — instead of
     /// yours (`fetch::yours`).
     #[cfg(test)]
@@ -473,7 +481,10 @@ impl Session {
             hosts: Vec::new(),
             hosts_given: Default::default(),
             pages: Default::default(),
+            web_hosts: Vec::new(),
             web_fetch: None,
+            web_reads: Vec::new(),
+            web_once: Vec::new(),
             #[cfg(test)]
             web_way: None,
             #[cfg(test)]

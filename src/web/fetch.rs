@@ -11,6 +11,10 @@
 //! said past it; one deadline to the last byte. Nothing of the user's sent (D7, `http.rs`). `Stop` ends it: its socket
 //! shut, its worker's read returns. Fetched pages are the session's for `KEEP` (`Pages`, D11) — Claude's `read` (P4)
 //! takes them from there.
+//!
+//! Claude's (`claudes`, P4 — `tool.rs`): the one host its card let through named in its rules (asked before the
+//! fetch starts, on the main loop, so the deadline runs from the answer), `DEADLINE_CLAUDE`, and another host's
+//! redirect or refresh not followed — said instead (`Fetched.elsewhere`), its next read asked at its own host.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -28,6 +32,9 @@ pub const REDIRECTS_MAX: usize = 5;
 
 /// Yours: to the last byte (D6).
 pub const DEADLINE: Duration = Duration::from_secs(20);
+
+/// Claude's: to the last byte (D6) — from after its card's answer.
+pub const DEADLINE_CLAUDE: Duration = Duration::from_secs(30);
 
 /// A fetched page is the session's this long (D11).
 pub const KEEP: Duration = Duration::from_secs(15 * 60);
@@ -53,6 +60,8 @@ pub struct Way {
     pub max: usize,
     /// What the proxy's refusals name it by.
     pub process: String,
+    /// Another host's redirect followed (yours) — else not, said in `Fetched.elsewhere` (Claude's, D5).
+    pub others: bool,
     pub stop: Stop,
 }
 
@@ -82,8 +91,27 @@ pub fn yours(
         deadline: DEADLINE,
         max: super::PAGE_MAX,
         process: ":web".into(),
+        others: true,
         stop,
     })
+}
+
+/// Claude's way (`read` of a URL, P4): only `host:port` — the host its card (or a run's grant) let through, a
+/// same-host redirect with it — every address rule and the user's upstream proxy as a run's; another host's redirect
+/// said, not followed. Blocks (it may make the TLS config): a worker's.
+pub fn claudes(
+    root: &std::path::Path,
+    upstream: proxy::upstream::Upstreams,
+    (host, port): (&str, u16),
+    stop: Stop,
+) -> Result<Way, String> {
+    let mut way = yours(root, upstream, stop)?;
+    let name = crate::sandbox::proxy::parse::name(host).map_err(|e| format!("{host}: {e}"))?;
+    let rules =
+        Egress { any: false, hosts: vec![egress::Pattern::Name(name, Some(port))], ..(*way.rules).clone() };
+    (way.rules, way.deadline, way.process, way.others) =
+        (Arc::new(rules), DEADLINE_CLAUDE, "read".into(), false);
+    Ok(way)
 }
 
 /// The one TLS config: rustls on ring, the OS's verifier, TLS 1.2 and 1.3, http/1.1 alone — made once, on the first
@@ -162,6 +190,9 @@ pub struct Fetched {
     /// Its body went past the limit: `bytes` is its first `max` and one.
     pub cut: bool,
     pub took: Duration,
+    /// Where another host's redirect (then `bytes` is empty) or refresh sends it, not followed (`Way.others`
+    /// off — Claude's: its next read is asked at that host).
+    pub elsewhere: Option<String>,
 }
 
 /// `url` fetched and read (`super::read`), a `<meta refresh>` within 5 s followed as a redirect is (D5) — one
@@ -180,6 +211,12 @@ pub fn page(url: &str, way: &Way, prefer: super::Prefer) -> Result<(Fetched, sup
             return Ok((f, page));
         };
         let here = http::target(&f.url).is_ok_and(|t| t.loopback);
+        let host = |u: &str| http::target(u).map(|t| t.host).unwrap_or_default();
+        if !way.others && host(&next) != host(&f.url) {
+            f.elsewhere = Some(next);
+            f.took = crate::clock::since(started);
+            return Ok((f, page));
+        }
         let not = match http::target(&next) {
             _ if f.hops >= REDIRECTS_MAX => Some(format!("more than {REDIRECTS_MAX} redirects")),
             Err(e) => Some(e),
@@ -193,7 +230,6 @@ pub fn page(url: &str, way: &Way, prefer: super::Prefer) -> Result<(Fetched, sup
             return Ok((f, page));
         }
         let mut n = get_by(&next, way, by, f.hops + 1)?;
-        let host = |u: &str| http::target(u).map(|t| t.host).unwrap_or_default();
         if host(&next) != host(&f.url) {
             f.from.push(host(&f.url));
         }
@@ -230,6 +266,23 @@ fn hops(url: &str, way: &Way, run: u64, by: Instant, used: usize) -> Result<Fetc
             if n.loopback && !t.loopback {
                 return Err(format!("{}: a redirect from {} to this machine isn't followed", next, t.host));
             }
+            // (Claude's: another host is its own read, asked at its own gate — said, not followed)
+            if n.host != t.host && !way.others {
+                return Ok(Fetched {
+                    asked: url.trim().to_string(),
+                    url: t.url(),
+                    status: r.status,
+                    content_type: None,
+                    bytes: Vec::new(),
+                    from,
+                    hops: hop,
+                    upgraded,
+                    said,
+                    cut: false,
+                    took: Duration::ZERO,
+                    elsewhere: Some(next),
+                });
+            }
             if n.host != t.host {
                 from.push(t.host.clone());
             }
@@ -250,6 +303,7 @@ fn hops(url: &str, way: &Way, run: u64, by: Instant, used: usize) -> Result<Fetc
             said,
             cut,
             took: Duration::ZERO,
+            elsewhere: None,
         });
     }
 }
@@ -518,30 +572,51 @@ fn authority(t: &Target) -> String {
 }
 
 /// The session's pages (D11): each fetched page by the address asked and the one it came from, for `KEEP`, at most
-/// `PAGES_MAX` and `PAGES_BYTES` of them, the oldest out first; never on disk, never restored.
+/// `PAGES_MAX` and `PAGES_BYTES` of them, the oldest out first; never on disk, never restored. A page Claude read
+/// that isn't one to read again (an error's, one cut short, this machine's) is kept too, for follow and replay alone
+/// (`kept`, D14: the copy Claude read) — never given for another read (`get`).
 #[derive(Default)]
-pub struct Pages(Vec<(Instant, Arc<Fetched>)>);
+pub struct Pages(Vec<Kept>);
+
+/// A page kept: when it was fetched, the page, whether a read may take it again.
+type Kept = (Instant, Arc<Fetched>, bool);
 
 impl Pages {
     /// The page fetched for `url` within `KEEP` of `now`, and when.
     pub fn get(&self, url: &str, now: Instant) -> Option<(Instant, Arc<Fetched>)> {
         let url = url.trim();
         let fresh = |at: &Instant| now.saturating_duration_since(*at) < KEEP;
-        let found = self.0.iter().rev().find(|(at, f)| fresh(at) && (f.asked == url || f.url == url));
-        found.cloned()
+        let found = self
+            .0
+            .iter()
+            .rev()
+            .find(|(at, f, again)| *again && fresh(at) && (f.asked == url || f.url == url));
+        found.map(|(at, f, _)| (*at, f.clone()))
+    }
+
+    /// The copy of `url` fetched at `at`, while it's still kept, fresh or not (follow shows what Claude read).
+    pub fn kept(&self, url: &str, at: Instant) -> Option<Arc<Fetched>> {
+        let found = self.0.iter().find(|(t, f, _)| *t == at && (f.url == url || f.asked == url));
+        found.map(|(_, f, _)| f.clone())
     }
 
     /// `f` kept from `now`: what goes for it (stale, or past the limits) handed back — to be freed off the main loop.
     pub fn put(&mut self, f: Arc<Fetched>, now: Instant) -> Vec<Arc<Fetched>> {
+        self.keep(f, now, true)
+    }
+
+    /// `put`, `again` saying whether a read may take it again (else it's for follow and replay alone).
+    pub fn keep(&mut self, f: Arc<Fetched>, now: Instant, again: bool) -> Vec<Arc<Fetched>> {
         let mut gone = Vec::new();
-        let (keep, old): (Vec<_>, Vec<_>) = std::mem::take(&mut self.0).into_iter().partition(|(at, g)| {
-            now.saturating_duration_since(*at) < KEEP && g.asked != f.asked && g.url != f.url
-        });
-        gone.extend(old.into_iter().map(|(_, g)| g));
+        let (keep, old): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.0).into_iter().partition(|(at, g, _)| {
+                now.saturating_duration_since(*at) < KEEP && g.asked != f.asked && g.url != f.url
+            });
+        gone.extend(old.into_iter().map(|(_, g, _)| g));
         self.0 = keep;
-        self.0.push((now, f));
+        self.0.push((now, f, again));
         while self.0.len() > PAGES_MAX
-            || self.0.iter().map(|(_, g)| g.bytes.len()).sum::<usize>() > PAGES_BYTES
+            || self.0.iter().map(|(_, g, _)| g.bytes.len()).sum::<usize>() > PAGES_BYTES
         {
             if self.0.len() == 1 {
                 break;

@@ -215,12 +215,29 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
     let said = ed.session.chat.as_ref().map(crate::edits::reason).unwrap_or_default();
     let Some(f) = follow(ed) else { return };
     f.calls.push((id.to_string(), name.to_string(), input.clone()));
+    let mut page = None;
     let (path, lines, line) = match name {
         "Read" => {
             let n = |k: &str| input[k].as_u64().map(|v| v as usize);
             let from = n("offset").unwrap_or(1).max(1) - 1;
             let lines = n("offset").or(n("limit")).map(|_| from..from + n("limit").unwrap_or(2000));
             (look.link.as_ref().map(|l| l.path.clone()), lines, from)
+        }
+        // tarae's `read`: its first item — a file at its first range, a page once its copy is in (`page_read`)
+        "mcp__tarae__read" => {
+            let first = input["files"][0].as_str().unwrap_or_default();
+            if crate::web::tool::is_url(first) {
+                let url = crate::web::tool::item(first).url;
+                page = Some(crate::replay::PageAt { url, copy: None });
+                (None, None, 0)
+            } else {
+                let lines = match crate::readtool::item(first).want {
+                    crate::readtool::Want::Lines(r) => r.first().map(|&(a, b)| a - 1..b),
+                    _ => None,
+                };
+                let from = lines.as_ref().map_or(0, |l| l.start);
+                (look.link.as_ref().map(|l| l.path.clone()), lines, from)
+            }
         }
         // A test run: to the test (the file's top for all of them); references: to the name asked about
         "mcp__tarae__run_tests"
@@ -259,6 +276,7 @@ pub fn on_tool(ed: &mut Editor, id: &str, name: &str, input: &serde_json::Value,
             lines: lines.clone().or_else(|| path.as_ref().map(|_| line..line + 1)),
             hunks: Vec::new(),
             why: said,
+            page,
         });
     }
     // (a `name` still being looked for is older than this)
@@ -539,6 +557,7 @@ pub fn point(
         lines: Some(lines.clone()),
         hunks: Vec::new(),
         why: why.clone().unwrap_or_default(),
+        page: None,
     });
     f.gaze = Some(Gaze { why, ..Gaze::new(look, Some(path.to_path_buf()), Some(lines.clone())) });
     go_range(ed, path, lines);
@@ -1424,8 +1443,12 @@ pub fn replay_call(ed: &mut Editor, call: &str) -> bool {
     let Some(at) = ed.session.chat.as_ref().and_then(|c| c.follow.replay.place_of(call)) else {
         return false;
     };
-    let has_place =
-        ed.session.chat.as_ref().and_then(|c| c.follow.replay.get(at)).is_some_and(|s| s.path.is_some());
+    let has_place = ed
+        .session
+        .chat
+        .as_ref()
+        .and_then(|c| c.follow.replay.get(at))
+        .is_some_and(|s| s.path.is_some() || s.page.is_some());
     if has_place {
         show_stop(ed, at);
     }
@@ -1489,6 +1512,12 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
         } else {
             ed.goto_after_load = Some((ed.doc().id, lines.start, 0));
         }
+    } else if let Some(p) = &stop.page {
+        sync_shown(ed);
+        match &p.copy {
+            Some((url, fetched)) => show_page(ed, url, *fetched, stop.lines.clone().unwrap_or(0..1)),
+            None => ed.set_status(format!("no copy of {} — Claude's read of it didn't get the page", p.url)),
+        }
     } else {
         sync_shown(ed);
     }
@@ -1497,6 +1526,46 @@ fn show_stop(ed: &mut Editor, at: (usize, usize)) {
         f.replay_placed = Some(now);
     }
     arm_resume(ed);
+}
+
+/// Claude's read of the page at `asked` landed (`web::tool::landed`): its stop takes the copy read — `url` after
+/// redirects, fetched `at` — and the lines the answer gave; while follow is on that read, the page is shown.
+pub fn page_read(
+    ed: &mut Editor,
+    asked: &str,
+    url: &str,
+    at: std::time::Instant,
+    lines: Option<Range<usize>>,
+) {
+    let Some(f) = follow(ed) else { return };
+    let waiting =
+        |s: &crate::replay::Stop| s.page.as_ref().is_some_and(|p| p.url == asked && p.copy.is_none());
+    let stops = f.replay.turns.iter_mut().rev().flat_map(|t| t.stops.iter_mut().rev());
+    let Some(stop) = stops.into_iter().find(|s| waiting(s)) else { return };
+    if let Some(p) = stop.page.as_mut() {
+        p.copy = Some((url.to_string(), at));
+    }
+    if lines.is_some() {
+        stop.lines = lines.clone();
+    }
+    let call = stop.call.clone();
+    let live = f.active() && f.replay.at.is_none() && f.gaze.as_ref().is_some_and(|g| g.call == call);
+    if live && !ed.background() {
+        show_page(ed, url, at, lines.unwrap_or(0..1));
+    }
+}
+
+/// The copy of `url` Claude read (fetched `at`) shown at `lines` — the one place follow goes outside the project
+/// (web-plan D14): it was fetched through the gate the user answered, opens no file and runs nothing, and shows
+/// read-only. Never fetched again: a copy the session no longer keeps is said.
+fn show_page(ed: &mut Editor, url: &str, at: std::time::Instant, lines: Range<usize>) {
+    match ed.session.pages.kept(url, at) {
+        Some(f) => crate::web::open::show_copy(ed, f, crate::clock::since(at), lines),
+        None => ed.set_status(format!(
+            "the page Claude read {} isn't kept — :web! {url} fetches it now",
+            crate::term::ago(crate::clock::since(at), true)
+        )),
+    }
 }
 
 /// Where the cursor is now isn't you moving (a review of Claude's edit moved it — not the user).

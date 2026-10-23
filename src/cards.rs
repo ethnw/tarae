@@ -162,6 +162,8 @@ pub enum Why {
     Blocked,
     /// A host a run's rules don't name, held by tarae's proxy (`hosts.rs`).
     Host,
+    /// A page at a host Claude's `read` of a URL wasn't let reach (`web::tool`) — a read, not a run's.
+    Web,
     /// A warning of it asks each time, whatever was allowed before (`cardwarn.rs`, `asks` — D2, D4): its ids.
     Asks(String),
     /// Claude's `also`: one thing past the session's capabilities its command asks for (cardauto P3).
@@ -196,6 +198,7 @@ impl Why {
             Why::Commit => "commit".into(),
             Why::Blocked => "blocked".into(),
             Why::Host => "host".into(),
+            Why::Web => "web".into(),
             Why::Asks(ids) => format!("asks:{ids}"),
             Why::Also => "also".into(),
             Why::Own => "own".into(),
@@ -235,6 +238,7 @@ impl Why {
             | Why::Blocked
             | Why::Also
             | Why::Host
+            | Why::Web
             | Why::Own
             | Why::Spend => return None,
         })
