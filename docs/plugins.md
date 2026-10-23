@@ -170,7 +170,7 @@ fn permissions() -> Vec<Permission> {
 | `run(program)` | `spawn` that program (a plain name, found on `PATH`): argv, no shell, in your home folder, in a process group of its own, with a plain environment — `PATH`, `HOME`, `USER`, the locale, `TERM`, `TMPDIR`, and the variables it may read (which it may also set for it: `AWS_PROFILE`) | — |
 | `read(pattern)` | `read-file` what the pattern covers (up to 16 MB) | a file outside the patterns, once — `..` and symlinks don't lead out |
 | `env(name)` | `read-env` that variable | — |
-| `network` | `connect` over TCP | each new host:port, once |
+| `network` | `connect` over TCP — never to a cloud metadata server, link-local, multicast or broadcast; this machine only by its own names (below) | each new host:port, once |
 | `project` | `read-file` in the project tarae started in, and `find` there (`"**/kustomization.yaml"`: absolute paths back, as the file picker lists them) — not files named like keys and tokens (`.env`, `*.pem`, `id_rsa` …, the list in `runtime/secret-names.txt`): `find` leaves them out | reading one of those, once |
 
 Requests are actions, and what they bring comes back later to `on-events(events, now)`, in the order it happened:
@@ -185,6 +185,17 @@ Requests are actions, and what they bring comes back later to `on-events(events,
 | `offer-install` (id, tool) | `installed` once you've installed it from the card (a tool a language pack knows how to install; once until tarae quits), or `failed` |
 | `timer` (id, ms) | `tick` |
 | `stop` (id) | nothing more: the program is stopped, the connection closed, the timer dropped |
+
+Where a connection goes is checked as tarae's proxy checks a run's: the name is looked up once, every address it
+gives is checked, and only those are dialled — so an answer that changes after the check (DNS rebinding) changes
+nothing. A cloud metadata server's own name (`metadata.google.internal`) and an address written out that is never
+reached (`169.254.169.254`, multicast, broadcast) fail at once, before any card, and so does an address written in
+any form but a.b.c.d (`2852039166`, `0xa9fea9fe`, `127.1` — the resolver takes them, a card couldn't show where
+they lead); a name's addresses of those kinds are dropped. This machine is reached by its own names only: `localhost` (and names under it), an address written out
+(`127.0.0.1:6443`), or a name your hosts file gives it (Docker Desktop's `kubernetes.docker.internal`) — never
+by another name whose DNS answer leads here. A private network's addresses (`10.1.2.3`) are reached as the card lets
+them. Every address dropped is said with why in tarae's log, one line under the plugin's name, whether the
+connection goes through or not; a `failed` names the first three (`+2 more` after them).
 
 Anything refused or failing comes back as `failed`, with why. Each request has an id of yours; one still in use is
 replaced. A plugin has at most 16 programs, 16 connections and 256 timers at once, and 16 MB waiting to be sent on

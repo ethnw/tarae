@@ -901,6 +901,23 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A host never reached — an address `route::never` refuses, a metadata server's own name, an address in a form
+    /// other than a.b.c.d — fails at once, before any card: no answer of yours would let it go.
+    #[test]
+    fn a_host_never_reached_fails_with_no_card() {
+        let (mut ed, dir) = setup("never", "x\n");
+        answer(&mut ed, approval, true);
+        let seen = Seen { doc: ed.docs[0].id, version: ed.docs[0].version(), ranges: Vec::new() };
+        let to = |id, host: &str| Action::Connect(abi::Connect { id, host: host.into(), port: 80 });
+        let hosts = vec![to(23, "169.254.169.254"), to(24, "metadata.google.internal"), to(25, "2852039166")];
+        ed.plugin_apply("demo", &seen, hosts);
+        assert!(ed.offers.is_empty(), "no card");
+        until_said(&mut ed, "failed 23 169.254.169.254 is never reached");
+        until_said(&mut ed, "failed 24 “metadata.google.internal” is a cloud metadata server's own name");
+        until_said(&mut ed, "failed 25 “2852039166” is an address in a form other than a.b.c.d");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// `shown` goes out when the buffer in front changes — switching buffers, opening one — and not again
     /// while it stays.
     #[test]

@@ -33,7 +33,8 @@ lines and starting environments.
 
 Out of scope: another local user or root; malware already running as you; a hostile kernel or OS; a tampered tarae
 binary or toolchain; what *you* run (your terminal, your tasks, `:sh`, preflight after its card) — tarae doesn't
-sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.md)); not covered here.
+sandbox you. Plugins have their own runtime and permissions ([plugins](plugins.md)); not covered here, but where their
+connections may go (§1.5, the proxy's address rule).
 
 ## The pieces, and who trusts whom
 
@@ -411,6 +412,21 @@ Kept:
   test: `sandbox::tests::runs_never_see_the_upstream` · `sandbox::proxy::tests::upstream::upstream_credentials_go_only_to_the_upstream`
 - Each session's host rules are its own.
   test: `sandbox::proxy::tests::two_sessions_rules_stay_apart`
+- **A plugin's connection** (not a run's: its own card a host:port, [plugins](plugins.md)) keeps the proxy's address
+  rule (srt's resolved-address check): the name looked up once, every address checked, only the checked ones
+  dialled — an answer changed after the check (DNS rebinding) changes nothing. Never reached, before any card: a
+  metadata server's own name, an address written out that runs never reach, an IPv4 address in inet_aton's other
+  forms (`2852039166`, `0xa9fea9fe`, `169.254.43518`, `127.1` — a card couldn't show where it leads); by a name's
+  answer, those addresses dropped. This machine (loopback, its own addresses beyond it) only by its own names — `localhost`, an address
+  written out, the hosts file's entry (Docker Desktop's `kubernetes.docker.internal`) — never another name's DNS
+  answer; a private network's addresses as the card lets them (a database or cluster there is what plugins are
+  for). This machine's own addresses unread: only its own names.
+  test: `plugin::io::tests::a_name_leading_where_runs_never_go_is_refused` ·
+  `plugin::io::tests::an_address_in_another_form_is_refused_before_any_card` ·
+  `plugin::io::tests::this_machine_is_reached_only_by_its_own_names` ·
+  `plugin::io::tests::a_name_is_looked_up_once_and_its_checked_address_dialled` ·
+  `plugin::io::tests::with_this_machines_addresses_unread_only_its_own_names_go` ·
+  `plugin::tests::a_host_never_reached_fails_with_no_card`
 
 Not kept:
 - **A host you said yes to is a channel**: what the run read can be sent there (a registry takes uploads; a code

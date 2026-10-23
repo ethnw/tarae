@@ -8,7 +8,8 @@
 //!   time, then its end with the last lines of stderr (all of stderr goes to the log).
 //! - **Connections** (`connect`, `send`): TCP, opened on a worker (each address in turn, 10 s in all),
 //!   read on a thread of their own (`data`, up to 64 KB at a time), written on another (a big `send` never
-//!   holds the editor up; 16 MB may wait to go out).
+//!   holds the editor up; 16 MB may wait to go out). Where to, as runs' proxy decides it (`reachable`): the
+//!   name looked up once, the addresses checked dialed, never a second lookup.
 //! - **Files** (`read-file`): regular files only, read whole on a worker, up to 16 MB.
 //! - **Timers** (`timer`): a `tick` later — every plugin's on one clock thread.
 //!
@@ -23,7 +24,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,6 +37,8 @@ use super::host::Call;
 use super::shown;
 use crate::editor::Editor;
 use crate::event::Event;
+use crate::sandbox::proxy::egress::{self, Resolve};
+use crate::sandbox::route;
 
 /// How many of a program's last stderr lines its end carries.
 const ERR_TAIL: usize = 20;
@@ -313,10 +316,145 @@ fn read_file(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Connects to each address `host` names in turn, until one answers — 10 s in all.
-fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
+/// How a plugin's connection finds where a name is: the system's resolver and hosts file, stand-ins in tests.
+pub(super) struct Lookup {
+    pub resolve: Resolve,
+    /// The hosts file's text — read only when a name leads to this machine.
+    pub hosts: Arc<dyn Fn() -> String + Send + Sync>,
+    /// This machine's own addresses beyond loopback (`getifaddrs`; None: they couldn't be read).
+    pub own: Arc<dyn Fn() -> Option<Vec<IpAddr>> + Send + Sync>,
+}
+
+impl Lookup {
+    pub(super) fn system() -> Lookup {
+        Lookup {
+            resolve: egress::system(),
+            hosts: Arc::new(|| std::fs::read_to_string("/etc/hosts").unwrap_or_default()),
+            own: Arc::new(|| egress::addresses().ok()),
+        }
+    }
+}
+
+/// `host` as names are compared: lowercase, no trailing dot.
+fn plain_name(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Why `host` is never connected to, whatever its card said: a cloud metadata server's own name, an address
+/// written out that `route::never` refuses (link-local, the metadata servers, multicast, broadcast), or an IPv4
+/// address in another of the resolver's forms (`loose_address`) — refused before anything is asked or looked up.
+pub(super) fn never_reached(host: &str) -> Option<String> {
+    let name = plain_name(host);
+    if route::never_named(&name) {
+        return Some(format!("“{}” is a cloud metadata server's own name — never reached", shown(host)));
+    }
+    if loose_address(&name) {
+        return Some(format!(
+            "“{}” is an address in a form other than a.b.c.d (a number, hex, octal or fewer parts) — never \
+             reached; written as a.b.c.d it's judged as the address it is",
+            shown(host)
+        ));
+    }
+    match name.parse::<IpAddr>() {
+        Ok(ip) if route::never(ip) => Some(format!("{ip} is never reached ({NEVER})")),
+        _ => None,
+    }
+}
+
+const NEVER: &str = "link-local, a cloud metadata server, multicast or broadcast";
+
+/// Whether `name` is an IPv4 address the resolver takes in inet_aton's forms but not the dotted four decimals
+/// (`2852039166`, `0xa9fea9fe`, `169.254.43518`, `127.1`, `010.0.0.1`): one to four parts, each decimal, octal or
+/// `0x` hex. Refused rather than read as the address it is: the card shows the host as written, and you can't
+/// tell `2852039166` is the metadata server — one form for an address keeps what you're asked readable, with no
+/// parser of tarae's own to differ from the system's.
+fn loose_address(name: &str) -> bool {
+    let number = |p: &str| match p.strip_prefix("0x") {
+        Some(hex) => hex.bytes().all(|c| c.is_ascii_hexdigit()),
+        None => !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()),
+    };
+    let parts = name.split('.').count();
+    (1..=4).contains(&parts) && name.split('.').all(number) && name.parse::<std::net::Ipv4Addr>().is_err()
+}
+
+/// Whether `name` is this machine's by itself: `localhost` and the names under it, or an address written out — what
+/// the card showed is then where it goes.
+fn named_here(name: &str) -> bool {
+    name == "localhost" || name.ends_with(".localhost") || name.parse::<IpAddr>().is_ok()
+}
+
+/// The addresses the hosts file gives `name` (its owner's entries, not a DNS answer someone else controls).
+fn hosts_entries(text: &str, name: &str) -> Vec<IpAddr> {
+    text.lines()
+        .filter_map(|l| {
+            let mut words = l.split('#').next().unwrap_or_default().split_whitespace();
+            let ip = words.next()?.parse::<IpAddr>().ok()?;
+            words.any(|n| plain_name(n) == name).then_some(ip)
+        })
+        .collect()
+}
+
+/// Of the addresses `host`'s one lookup `found`, those a plugin may connect to — srt's resolved-address rule, as
+/// runs' proxy has it (`egress::connect`): never what `route::never` refuses; this machine (loopback, none, its own
+/// addresses beyond loopback) only by a name that is this machine's by itself (`named_here`) or the hosts file's
+/// for it (Docker Desktop's `kubernetes.docker.internal`) — the card named that host, and a DNS answer leading
+/// here (a rebinding) isn't it: a local database or cluster is reached as `localhost:5432` or `127.0.0.1:6443`.
+/// The rest — the internet's, a private network's — as the card let it. Each dropped one is said with why.
+fn reachable(host: &str, found: Vec<SocketAddr>, look: &Lookup) -> Reach {
+    let name = plain_name(host);
+    let own = (look.own)();
+    let mut listed = None;
+    let mut refused = Vec::new();
+    let mut ok = Vec::new();
+    for a in found {
+        let ip = a.ip().to_canonical();
+        let here = route::this_machine(ip) || own.as_ref().is_some_and(|o| o.contains(&ip));
+        let why = if route::never(ip) {
+            Some(NEVER)
+        } else if here && !named_here(&name) {
+            let listed = listed.get_or_insert_with(|| hosts_entries(&(look.hosts)(), &name));
+            (!listed.contains(&ip)).then_some(
+                "this machine — reached only by its own names: localhost, an address, the hosts file's",
+            )
+        } else if own.is_none() && !named_here(&name) {
+            Some("this machine's own addresses couldn't be read, so only its own names are reached")
+        } else {
+            None
+        };
+        match why {
+            Some(why) => refused.push(format!("{ip} ({why})")),
+            None => ok.push(SocketAddr::new(ip, a.port())),
+        }
+    }
+    Reach { go: ok, dropped: refused }
+}
+
+/// What `reachable` makes of one lookup's addresses: those that go, and each dropped one with why (`10.0.0.1 (…)`).
+struct Reach {
+    go: Vec<SocketAddr>,
+    dropped: Vec<String>,
+}
+
+/// The dropped addresses a `failed` names: the first three, then how many more (the log has them all).
+const FAILED_NAMES: usize = 3;
+
+/// Connects to `host:port` for `plugin`: looked up once, the addresses `reachable` lets through tried in turn until
+/// one answers — 10 s in all — the address checked, never the name again. Every address dropped goes to tarae's
+/// log, one line under the plugin's name, whether the connection goes through or not.
+fn connect(plugin: &str, host: &str, port: u16, look: &Lookup) -> Result<TcpStream, String> {
     let addr = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
-    let addrs: Vec<_> = (host, port).to_socket_addrs().map_err(|e| format!("{addr}: {e}"))?.collect();
+    let found = (look.resolve)(host, port).map_err(|e| format!("{addr}: {e}"))?;
+    let Reach { go: addrs, dropped } = reachable(host, found, look);
+    if !dropped.is_empty() {
+        crate::log::line(plugin, "connect", &format!("{addr}: dropped {}", dropped.join(", ")));
+    }
+    if addrs.is_empty() && !dropped.is_empty() {
+        let mut named = dropped[..dropped.len().min(FAILED_NAMES)].join(", ");
+        if dropped.len() > FAILED_NAMES {
+            named += &format!(" +{} more", dropped.len() - FAILED_NAMES);
+        }
+        return Err(format!("{addr}: it leads only to addresses never reached: {named}"));
+    }
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut why = format!("{addr}: no address");
     for (i, a) in addrs.iter().enumerate() {
@@ -326,12 +464,22 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
         }
         // (an address that doesn't answer leaves time for the others)
         let turn = (left / (addrs.len() - i) as u32).max(Duration::from_secs(1)).min(left);
-        match TcpStream::connect_timeout(a, turn) {
+        match dial(a, turn) {
             Ok(s) => return Ok(s),
             Err(e) => why = format!("{addr}: {e}"),
         }
     }
     Err(why)
+}
+
+/// The one place a plugin's connection is made. In tests only loopback is dialled: whatever a broken check lets
+/// through shows as a failed connect, never a packet past this machine (a metadata server answers on a cloud VM).
+fn dial(a: &SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    #[cfg(test)]
+    if !a.ip().is_loopback() {
+        return Err(std::io::Error::other(format!("a test's connection to {a}, held back")));
+    }
+    TcpStream::connect_timeout(a, timeout)
 }
 
 impl Editor {
@@ -388,7 +536,10 @@ impl Editor {
         p.pending.insert(key, serial);
         let plugin = plugin.to_string();
         self.events.jobs().spawn(move || {
-            let opened = connect(&c.host, c.port as u16);
+            let opened = connect(&plugin, &c.host, c.port as u16, &Lookup::system());
+            if let Err(why) = &opened {
+                crate::log::line(&plugin, "connect", why);
+            }
             move |ed: &mut Editor| ed.plugin_connected(&plugin, c.id, serial, opened)
         });
     }
@@ -845,6 +996,209 @@ mod tests {
             assert!(why.contains("isn't a regular file"), "{why}");
         }
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A stand-in lookup: each name's answers, the first list at its first lookup, the next at the next (the last
+    /// again once they run out), lookups counted; the hosts file's text and this machine's own addresses as given.
+    fn stand_in(
+        answers: &[(&str, &[&[IpAddr]])],
+        hosts: &str,
+        own: Option<Vec<IpAddr>>,
+    ) -> (Lookup, Arc<AtomicUsize>) {
+        let answers: Vec<(String, Vec<Vec<IpAddr>>)> =
+            answers.iter().map(|(n, a)| (n.to_string(), a.iter().map(|l| l.to_vec()).collect())).collect();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let count = asked.clone();
+        let resolve: Resolve = Arc::new(move |name: &str, port: u16| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let (_, lists) = answers
+                .iter()
+                .find(|(n, _)| n == name)
+                .ok_or_else(|| std::io::Error::other(format!("{name}: not known")))?;
+            let mut seen = seen.lock().unwrap();
+            let at = seen.entry(name.to_string()).or_default();
+            let list = &lists[(*at).min(lists.len() - 1)];
+            *at += 1;
+            Ok(list.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+        });
+        let hosts = hosts.to_string();
+        let look =
+            Lookup { resolve, hosts: Arc::new(move || hosts.clone()), own: Arc::new(move || own.clone()) };
+        (look, asked)
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// What `route::never` refuses for runs is never a plugin's either — by the name's answer, by an address written
+    /// out, by a metadata server's own name — and nothing is dialled (in tests only loopback could be: `dial`).
+    #[test]
+    fn a_name_leading_where_runs_never_go_is_refused() {
+        let meta = [ip("169.254.169.254")];
+        let multicast = [ip("224.0.0.251")];
+        let link6 = [ip("fe80::1")];
+        // (the metadata server carried to a NAT64 gateway, and Alibaba's outside link-local)
+        let carried = [ip("64:ff9b::a9fe:a9fe"), ip("100.100.100.200")];
+        let (look, _) = stand_in(
+            &[
+                ("meta.example", &[&meta]),
+                ("mdns.example", &[&multicast]),
+                ("link6.example", &[&link6]),
+                ("carried.example", &[&carried]),
+            ],
+            "",
+            Some(Vec::new()),
+        );
+        for name in ["meta.example", "mdns.example", "link6.example", "carried.example"] {
+            let why = connect("demo", name, 80, &look).unwrap_err();
+            assert!(why.contains("never reached") && why.contains(NEVER), "{name}: {why}");
+        }
+        // Before any card or lookup: the names and addresses themselves
+        for host in ["metadata.google.internal", "Metadata.Google.Internal.", "169.254.169.254", "ff02::fb"] {
+            assert!(never_reached(host).is_some(), "{host}");
+        }
+        for host in ["127.0.0.1", "localhost", "db.example", "10.0.0.5"] {
+            assert_eq!(never_reached(host), None, "{host}");
+        }
+    }
+
+    /// An IPv4 address in inet_aton's other forms — the resolver takes them, a person can't read them — is refused
+    /// before any card, whatever it leads to: `2852039166`, `0xa9fea9fe` and `169.254.43518` are 169.254.169.254,
+    /// `127.1` and `010.0.0.1` this machine and 8.0.0.1. The dotted four decimals and names with numbers in them go on.
+    #[test]
+    fn an_address_in_another_form_is_refused_before_any_card() {
+        for host in
+            ["2852039166", "0xa9fea9fe", "0XA9FEA9FE", "169.254.43518", "127.1", "010.0.0.1", "0x7f.1", "1."]
+        {
+            let why = never_reached(host).unwrap_or_default();
+            assert!(why.contains("a form other than a.b.c.d"), "{host}: {why}");
+        }
+        for host in
+            ["8.8.8.8", "10.0.0.5", "127.0.0.1", "1password.example", "v1.2.example", "0xabc.example", "::1"]
+        {
+            assert_eq!(never_reached(host), None, "{host}");
+        }
+    }
+
+    /// This machine is reached by its own names — `localhost`, an address written out, the hosts file's — never by
+    /// another name's DNS answer leading here (a rebinding): the db plugin's `localhost:5432` and a kind cluster's
+    /// `127.0.0.1:6443` go, Docker Desktop's `kubernetes.docker.internal` too; `rebind.example` → 127.0.0.1 doesn't,
+    /// nor a name leading to one of this machine's own addresses beyond loopback. A private network's address does.
+    #[test]
+    fn this_machine_is_reached_only_by_its_own_names() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let lo = [ip("127.0.0.1")];
+        let lan_own = [ip("10.9.8.7")];
+        let private = [ip("10.1.2.3")];
+        let (look, _) = stand_in(
+            &[
+                ("localhost", &[&lo]),
+                ("127.0.0.1", &[&lo]),
+                ("kubernetes.docker.internal", &[&lo]),
+                ("rebind.example", &[&lo]),
+                ("lan.example", &[&lan_own]),
+                ("db.internal", &[&private]),
+            ],
+            "127.0.0.1\tlocalhost\n# Added by Docker Desktop\n127.0.0.1 Kubernetes.Docker.Internal. # k8s\n",
+            Some(vec![ip("10.9.8.7")]),
+        );
+        for name in ["localhost", "127.0.0.1", "kubernetes.docker.internal"] {
+            connect("demo", name, port, &look).unwrap_or_else(|e| panic!("{name}: {e}"));
+            listener.accept().unwrap();
+        }
+        for name in ["rebind.example", "lan.example"] {
+            let why = connect("demo", name, port, &look).unwrap_err();
+            assert!(why.contains("this machine — reached only by its own names"), "{name}: {why}");
+        }
+        // (not dialled here — a test dials loopback only — but let through)
+        let to = |name: &str, ips: &[IpAddr]| {
+            reachable(name, ips.iter().map(|i| SocketAddr::new(*i, 5432)).collect(), &look)
+        };
+        assert_eq!(to("db.internal", &private).go.len(), 1, "a private network's address");
+        assert_eq!(to("10.9.8.7", &lan_own).go.len(), 1, "this machine's own address, written out");
+        // Of a mixed answer, what passed: the refused one isn't dialled
+        let mixed = [ip("169.254.169.254"), ip("10.1.2.3")];
+        assert_eq!(to("db.internal", &mixed).go, [SocketAddr::new(ip("10.1.2.3"), 5432)]);
+    }
+
+    /// Every address dropped is in tarae's log, one line under the plugin's name, with why — also when another of
+    /// the name's goes through; a `failed` names the first three and how many more.
+    #[test]
+    fn every_dropped_address_is_logged_whether_the_connect_goes_through_or_not() {
+        let log = crate::log::capture();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mixed = [ip("169.254.169.254"), ip("127.0.0.1")];
+        let never: Vec<IpAddr> = (1..=5).map(|n| ip(&format!("169.254.0.{n}"))).collect();
+        let (look, _) = stand_in(
+            &[("mixed.test", &[&mixed]), ("never.test", &[&never])],
+            "127.0.0.1 mixed.test\n",
+            Some(Vec::new()),
+        );
+        let ours = |plugin: &str| {
+            let lines = log.lines();
+            lines.into_iter().filter(|l| l.starts_with(&format!("{plugin}  connect  "))).collect::<Vec<_>>()
+        };
+        // One passes, one dropped: it goes through, and the log names the dropped one
+        connect("dropped-mixed", "mixed.test", port, &look).unwrap();
+        listener.accept().unwrap();
+        let said = ours("dropped-mixed");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("dropped 169.254.169.254 (") && said[0].contains(NEVER), "{said:?}");
+        assert!(!said[0].contains("127.0.0.1"), "what went isn't dropped: {said:?}");
+        // None passes: the failed names three and how many more, the log all five
+        let why = connect("dropped-never", "never.test", port, &look).unwrap_err();
+        assert!(
+            why.contains("169.254.0.3 (") && why.ends_with(" +2 more") && !why.contains("169.254.0.4"),
+            "{why}"
+        );
+        let said = ours("dropped-never");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(never.iter().all(|ip| said[0].contains(&format!("{ip} ("))), "{said:?}");
+    }
+
+    /// The address checked is the one dialled: the name is looked up once, so an answer that changes after the check
+    /// (DNS rebinding) changes nothing — either way round.
+    #[test]
+    fn a_name_is_looked_up_once_and_its_checked_address_dialled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (lo, meta) = ([ip("127.0.0.1")], [ip("169.254.169.254")]);
+        let hosts = "127.0.0.1 here.test there.test\n";
+        // Fine at the check, the metadata server at a second lookup: the first is dialled
+        let (look, asked) = stand_in(&[("here.test", &[&lo, &meta])], hosts, Some(Vec::new()));
+        connect("demo", "here.test", port, &look).unwrap();
+        listener.accept().unwrap();
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "looked up once");
+        // Refused at the check, fine at a second: refused
+        let (look, asked) = stand_in(&[("there.test", &[&meta, &lo])], hosts, Some(Vec::new()));
+        assert!(connect("demo", "there.test", port, &look).unwrap_err().contains("never reached"));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "looked up once");
+    }
+
+    /// This machine's own addresses unread (`getifaddrs` failed): no address can be told from one of them, so only
+    /// this machine's own names go — as runs' proxy refuses then.
+    #[test]
+    fn with_this_machines_addresses_unread_only_its_own_names_go() {
+        let (look, _) = stand_in(&[], "", None);
+        let at = |name: &str, s: &str| reachable(name, vec![SocketAddr::new(ip(s), 443)], &look);
+        let dropped = at("example.com", "93.184.216.34");
+        assert!(dropped.go.is_empty() && dropped.dropped[0].contains("couldn't be read"));
+        assert_eq!(at("localhost", "127.0.0.1").go.len(), 1);
+        assert_eq!(at("93.184.216.34", "93.184.216.34").go.len(), 1, "an address written out");
+    }
+
+    #[test]
+    fn the_hosts_file_is_read_by_name_comments_and_zones_aside() {
+        let text = "# 127.0.0.1 commented.test\n127.0.0.1 a.test B.test.  # 10.0.0.1 c.test\nfe80::1%lo0 z.test\n\n::1 a.test\n";
+        assert_eq!(hosts_entries(text, "a.test"), [ip("127.0.0.1"), ip("::1")]);
+        assert_eq!(hosts_entries(text, "b.test"), [ip("127.0.0.1")]);
+        for none in ["commented.test", "c.test", "z.test", "localhost"] {
+            assert!(hosts_entries(text, none).is_empty(), "{none}");
+        }
     }
 
     #[test]

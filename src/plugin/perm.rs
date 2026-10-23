@@ -543,6 +543,10 @@ impl Editor {
         {
             return Err(Some(format!("“{}” port {} isn't a host to connect to", shown(&c.host), c.port)));
         }
+        // (never reached whatever you'd answer: no card for it)
+        if let Some(why) = super::io::never_reached(&c.host) {
+            return Err(Some(why));
+        }
         let target = target(c);
         let known = self
             .plugins
