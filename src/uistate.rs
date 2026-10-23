@@ -747,6 +747,16 @@ pub struct UiState {
     pub limits: Vec<crate::limits::Reading>,
     /// The front session's notes (`notes.rs`), in the order pinned — where each is, never what it says.
     pub notes: Vec<NoteState>,
+    /// Motions on a clock under way (`motion.rs`) — a driver waits for one to end, never sleeps; never Claude's.
+    pub motions: Vec<MotionState>,
+}
+
+/// A motion as the state lists it: its kind (`flash`), what it shows (`undo`, `yank`, …), the ms until it's gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionState {
+    pub kind: &'static str,
+    pub act: &'static str,
+    pub until_ms: u64,
 }
 
 /// A note as the state lists it: by id and place, who began it, and how its thread stands.
@@ -1645,6 +1655,18 @@ impl Editor {
             procs: ProcsState::of(&self.procs),
             limits: self.limits.known(now_ms).into_iter().cloned().collect(),
             notes: front.notes.list.iter().map(|n| NoteState::of(&front.root, n)).collect(),
+            motions: self
+                .motions
+                .iter()
+                .map(|m| MotionState {
+                    kind: m.kind(),
+                    act: match m.what {
+                        crate::motion::What::Flash { act, .. } => act.name(),
+                    },
+                    until_ms: crate::motion::shown_for(m.life).saturating_sub(self.motion_age(m)).as_millis()
+                        as u64,
+                })
+                .collect(),
         }
     }
 
@@ -1897,6 +1919,11 @@ impl UiState {
             "procs": self.procs.json(),
             "limits": crate::limits::json(&self.limits.iter().collect::<Vec<_>>()),
             "notes": self.notes.iter().map(NoteState::json).collect::<Vec<_>>(),
+            "motions": self
+                .motions
+                .iter()
+                .map(|m| json!({ "kind": m.kind, "act": m.act, "until_ms": m.until_ms }))
+                .collect::<Vec<_>>(),
         })
     }
 

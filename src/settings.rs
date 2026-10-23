@@ -275,7 +275,7 @@ pub static SETTINGS: &[Setting] = &[
     Setting {
         path: "editor.motion",
         kind: Kind::Enum(crate::motion::VALUES),
-        doc: "How much moves: full; calm — nothing on a clock (the waiting wave still, toasts without fading), the head of what Claude writes still wet; none — nothing wet either, what Claude writes shown as it comes. macOS's Reduce Motion makes full calm",
+        doc: "How much moves: full; calm — nothing on a clock (the waiting wave still, toasts without fading, what undo or . touched flashed whole), the head of what Claude writes still bleeding (번짐); none — no flash and nothing bleeding either (so a yank's \"yanked …\" is a toast again, not only in `:messages`), what Claude writes shown as it comes. macOS's Reduce Motion makes full calm. Your own config only",
         get: |c| Value::from(c.motion.as_str()),
         set: |c, v| c.motion = v.as_str().unwrap_or("full").to_string(),
     },

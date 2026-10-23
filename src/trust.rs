@@ -63,8 +63,9 @@ pub const RISKY: [&str; 23] = [
 /// time on reviewed changes are kept (`llm.card-record`, `review.record`), whether pings spend your usage to keep
 /// a conversation warm (`llm.keep-warm*`), what the board's Claudes are asked (`review.angles`) and how many of
 /// them run on your credential and memory (`review.skeptics-max`, `review.board-at-once`), whether your workspaces'
-/// trees are rewritten unasked (`workspace.sync`) — a project never does.
-pub const YOURS_ONLY: [&str; 16] = [
+/// trees are rewritten unasked (`workspace.sync`), how much moves on your screen (`editor.motion`) — a project
+/// never does.
+pub const YOURS_ONLY: [&str; 17] = [
     "llm.card-record",
     "review.record",
     "llm.keep-warm",
@@ -85,6 +86,8 @@ pub const YOURS_ONLY: [&str; 16] = [
     "review.board-at-once",
     // (a base's move rebases every workspace on it: a project's "idle" would rewrite your trees unasked)
     "workspace.sync",
+    // (how much moves on your screen is an accessibility choice: a project's `full` over your `calm`)
+    "editor.motion",
 ];
 
 pub fn yours_only(setting: &str) -> bool {

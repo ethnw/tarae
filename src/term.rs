@@ -410,6 +410,8 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
         | crate::chatdoc::resized(editor)
         // (and the mark the mouse was over gone from under it: its tag with it — `presence::hover_drawn`)
         | crate::presence::hover_drawn(editor)
+        // (and a flash's words that it didn't draw: their toast — `motion.rs`)
+        | editor.words_drawn()
     {
         frame.clear();
         render_frame(editor, &mut frame, w, h)?;
@@ -5476,6 +5478,20 @@ fn draw_text(
     let accent_bg = |t: f32| blend(ui.accent.fg, ui.tint, t);
     let hit_style = Style { bg: accent_bg(0.22), ..Style::default() };
     let hit_current = Style { bg: accent_bg(0.5), bold: true, ..Style::default() };
+    // What an invisible act touched flashing (`motion.rs`, a pane's own text only): the accent over each cell's
+    // ground, drying to it — over the selection, under the cursor
+    // (drawn here: told to the flash, whose words are then a note — `Editor::words_drawn`)
+    let (flashed, flash_k) =
+        match editor.flash_on(doc).filter(|_| shows.cursor && std::ptr::eq(text, &doc.text)) {
+            Some((r, k, seen)) => {
+                let r = &r[r.partition_point(|r| r.end <= vis_from)..];
+                if r.first().is_some_and(|r| r.start < vis_to) && flash_bg(ui, None, k).is_some() {
+                    seen.set(true);
+                }
+                (r, k)
+            }
+            None => (&[][..], 0.0),
+        };
     let visible_hits: &[(usize, usize)] = match src.hits.or(editor.search_hits.as_ref()) {
         Some(h) if shows.search && hit_style.bg.is_some() => {
             let m = &h.matches;
@@ -5810,16 +5826,16 @@ fn draw_text(
                     None => (shows.left, usize::MAX, 0),
                 };
                 let paint = other_paint(doc, gone, from, &mut qcursor);
-                // The line being written: its last words wet (번짐 — a function of the stream's head, no clock)
-                let wet_at = match kind {
-                    OtherKind::Writing { head: true } if editor.wet() => wet_from(gone),
+                // The line being written: its last words bleeding (번짐 — a function of the stream's head, no clock)
+                let bleed_at = match kind {
+                    OtherKind::Writing { head: true } if editor.bleeds() => bleed_from(gone),
                     _ => None,
                 };
-                if let Some(_w) = wet_at {
+                if let Some(_w) = bleed_at {
                     #[cfg(test)]
-                    WET_SEEN.with_borrow_mut(|s| s.push(("code", gone[_w..].to_string())));
+                    BLEED_SEEN.with_borrow_mut(|s| s.push(("code", gone[_w..].to_string())));
                 }
-                let wet = wet_ink(base.fg, ui.virt.fg, base.bg.or(ui.tint));
+                let bled = bleed_ink(base.fg, ui.virt.fg, base.bg.or(ui.tint));
                 apply(out, base)?;
                 queue!(out, Spaces(x0))?;
                 let mut room = lay.text_cols.saturating_sub(x0);
@@ -5835,7 +5851,7 @@ fn draw_text(
                     let cap = paint.get(c.bytes.start).copied().unwrap_or(u32::MAX);
                     let syn = capture_styles.get(cap as usize).copied().flatten().unwrap_or_default();
                     let st = base.patch(Style { bg: None, ..syn });
-                    apply(out, if wet_at.is_some_and(|w| c.bytes.start >= w) { wet(st) } else { st })?;
+                    apply(out, if bleed_at.is_some_and(|w| c.bytes.start >= w) { bled(st) } else { st })?;
                     match &gone[c.bytes.clone()] {
                         "\t" => queue!(out, Spaces(c.width))?,
                         g if g.chars().next().is_some_and(char::is_control) => {
@@ -6114,6 +6130,13 @@ fn draw_text(
             if let Some(i) = selected {
                 st = st.patch(if i == primary_idx { ui.selection_primary } else { ui.selection });
             }
+            let k = flashed.partition_point(|r| r.end <= c.pos);
+            let in_flash = flashed.get(k).is_some_and(|r| r.start <= c.pos);
+            if in_flash {
+                st.bg = flash_bg(ui, st.bg, flash_k).or(st.bg);
+                #[cfg(test)]
+                MOTION_SEEN.with_borrow_mut(|s| s.push(("flash", c.pos, g.to_string())));
+            }
             let drawn_at = || editor.screen.cursors.borrow_mut().push((lay.x0 + lay.gutter + x, y as usize));
             match hit {
                 Some(i) if i == primary_idx && shows.primary => {
@@ -6127,7 +6150,7 @@ fn draw_text(
                 _ => {}
             }
             let eol = g == "\n" || g == "\r\n";
-            if eol && selected.is_none() && hit.is_none() {
+            if eol && selected.is_none() && hit.is_none() && !in_flash {
                 col = c.col;
                 continue;
             }
@@ -6139,6 +6162,7 @@ fn draw_text(
                 && c.col % unit == 0
                 && selected.is_none()
                 && hit.is_none()
+                && !in_flash
             {
                 let gs = line_base.patch(guide_at(c.col));
                 apply(out, gs)?;
@@ -7215,6 +7239,51 @@ fn draw_scrollbar(
 /// A scroll thumb's (or mark's) glyph: a quarter block against the text's side, clear of a line beside it (a half
 /// block there read as a lump on the line — friction 92).
 const THUMB: &str = "▎";
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: what each motion drew in the last frames — (kind, byte, the cell's text): `flash`.
+    pub(crate) static MOTION_SEEN: std::cell::RefCell<Vec<(&'static str, usize, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// Dried colours already worked out: (wet, rest, strength in thousandths) → the colour.
+    static DRIED: std::cell::RefCell<HashMap<(Rgb, Rgb, u16), Rgb>> = Default::default();
+}
+
+/// How many dried colours `DRIED` keeps before it starts over — a motion's are a few grounds × ≤ 10 steps.
+const DRIED_MAX: usize = 1024;
+
+/// The drying, the one way (`motion.rs`, CLAUDE.md's motion bullet): `wet` toward `rest` as the motion's strength `k`
+/// (`motion::strength`, an ease-out) falls — a linear mix, as fades are; worked out once a step and pair (`DRIED`).
+fn drying(wet: Rgb, rest: Rgb, k: f32) -> Rgb {
+    let key = (wet, rest, (k.clamp(0.0, 1.0) * 1000.0) as u16);
+    DRIED.with_borrow_mut(|m| {
+        if m.len() >= DRIED_MAX && !m.contains_key(&key) {
+            m.clear();
+        }
+        *m.entry(key).or_insert_with(|| {
+            let t = f32::from(key.2) / 1000.0;
+            let mix = |w: u8, r: u8| (f32::from(r) + (f32::from(w) - f32::from(r)) * t).round() as u8;
+            [mix(wet[0], rest[0]), mix(wet[1], rest[1]), mix(wet[2], rest[2])]
+        })
+    })
+}
+
+/// How strong a flash's accent is over its ground at its peak — above a search match's (.22), under the current
+/// one's (.5): at .16 its step after the peak was unseen on the contact sheets.
+const FLASH_MIX: f32 = 0.3;
+
+/// A flashed cell's ground (§1): the accent at `FLASH_MIX` over `ground` (the cell's own, else the theme's, else
+/// `ui.tint` — a transparent theme), dried by `k`. None where a colour is a named one (no mix to dry through).
+fn flash_bg(ui: &Ui, ground: Option<Color>, k: f32) -> Option<Color> {
+    use crate::chrome::rgb;
+    let rest = rgb(ground.or(ui.base.bg).or(ui.tint)?)?;
+    let accent = rgb(ui.accent.fg?)?;
+    let wet = drying(accent, rest, FLASH_MIX);
+    let [r, g, b] = drying(wet, rest, k);
+    Some(Color::Rgb { r, g, b })
+}
 
 /// Blend two colors (truecolor only — None for named colors).
 fn blend(
@@ -11581,7 +11650,7 @@ fn draw_ask_stream(
     // (the code's room: from the rail's edge — a cell of it kept — to the code's right edge)
     let room = lay.edit_w.saturating_sub(lay.rail_w + 1);
     let inner = (lay.edit_w / 2).clamp(30, 72).min(room.saturating_sub(5));
-    // (each line cut to the card first: a line wider than it shows its start, and its wet head is the end of
+    // (each line cut to the card first: a line wider than it shows its start, and its bleeding head is the end of
     // what shows)
     for row in &mut code {
         let mut used = 0;
@@ -11591,9 +11660,9 @@ fn draw_ask_stream(
         }
     }
     // (번짐: the head of what it writes, ink not yet dry)
-    if !rev.thinking && editor.wet() {
+    if !rev.thinking && editor.bleeds() {
         let drawn = vec![crate::markdown::Drawn { code: true, ..Default::default() }; code.len()];
-        wet_head("ask", &mut code, &drawn, ui, card);
+        bleed_head("ask", &mut code, &drawn, ui, card);
     }
     // (how to stop it, when Esc does — `llm::esc_stops`: a row of its own under the text)
     let faint = Style { fg: ui.linenr.fg, ..card };
@@ -13588,7 +13657,7 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
         [card, dim, faint, accent, strong, string, warn_fg],
         ui.base.bg,
         ui.tint,
-        editor.wet(),
+        editor.bleeds(),
     ));
     let lang_hash = hash_of(&lang);
     // (the last turn's end: no question after it and Claude done — its time row offers the replay)
@@ -13662,8 +13731,8 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
                 let (mut rows, drawn) = chat_markdown_drawn(&rendered, (w, mw), (faint, dim), ui.base.bg);
                 let writing = i + 1 == n && c.state == State::Writing;
                 // (번짐: its head ink not yet dry while it's written — laid out again as text comes, dry at the end)
-                if writing && editor.wet() {
-                    wet_head("chat", &mut rows, &drawn, ui, card);
+                if writing && editor.bleeds() {
+                    bleed_head("chat", &mut rows, &drawn, ui, card);
                 }
                 // (a code well's edge isn't the text's, nor a wrapped row's hanging indent — a list's bullet is)
                 lines.extend(rows.into_iter().zip(drawn).map(|(spans, d)| ChatRow {
@@ -14871,7 +14940,7 @@ fn marks_at(marks: &[(usize, usize, Style)], at: usize, base: Style) -> Style {
     marks.iter().filter(|m| (m.0..m.1).contains(&at)).fold(base, |s, m| s.patch(m.2))
 }
 
-/// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what wet ink
+/// `chat_markdown`, and what of each row it drew rather than the text wrote (`markdown::Drawn`) — what bleeding ink
 /// leaves alone. Text wraps at `measure` (≤ `w`), code rows take `w`.
 fn chat_markdown_drawn(
     lines: &[crate::markdown::Line],
@@ -15052,7 +15121,7 @@ fn knot(look: &crate::chat::Look, in_hand: bool, st: &TrailStyles) -> crate::mar
     crate::markdown::Span { text: glyph.into(), style: if in_hand { st.accent } else { st.dim } }
 }
 
-/// A change's stamps (`Msg.stamps`) as its knot row ends with them — wet only on the row in hand, a cell apart.
+/// A change's stamps (`Msg.stamps`) as its knot row ends with them — lit only on the row in hand, a cell apart.
 fn knot_stamps(
     ui: &Ui,
     stamps: &[crate::stamp::Stamp],
@@ -15280,8 +15349,8 @@ fn follow_thread(
                         chat_markdown_drawn(&rendered, (inner, inner), (st.faint, st.dim), ui.base.bg);
                     // (번짐: the answer being written, its head ink not yet dry)
                     let head = c.msgs.last().is_some_and(|l| std::ptr::eq(l, m));
-                    if head && c.state == crate::chat::State::Writing && editor.wet() {
-                        wet_head("follow", &mut rows, &drawn, ui, card);
+                    if head && c.state == crate::chat::State::Writing && editor.bleeds() {
+                        bleed_head("follow", &mut rows, &drawn, ui, card);
                     }
                     rows
                 };
@@ -15387,35 +15456,35 @@ fn blank(row: &[crate::markdown::Span]) -> bool {
     row.iter().all(|s| s.text.trim().is_empty())
 }
 
-/// Units at the head of text being written that are ink not yet dry (`wet`, `Unit`).
-const WET_WORDS: usize = 2;
-/// The most of them wet, in cells — a long run with no break (a URL, a hash) wets only its end.
-const WET_CELLS: usize = 12;
+/// Units at the head of text being written that are ink not yet dry (`bleeding`, `Unit`).
+const BLEED_WORDS: usize = 2;
+/// The most of them bleeding, in cells — a long run with no break (a URL, a hash) bleeds only its end.
+const BLEED_CELLS: usize = 12;
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: the spans `wet_head` drew wet, by surface (`chat`, `follow`, `ask`; `code`: an edit being written) —
+    /// Tests: the spans `bleed_head` drew bleeding, by surface (`chat`, `follow`, `ask`; `code`: an edit being written) —
     /// test frames carry no colour.
-    pub(crate) static WET_SEEN: std::cell::RefCell<Vec<(&'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BLEED_SEEN: std::cell::RefCell<Vec<(&'static str, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// `wet` as every surface draws it: the dim level is `ui.virtual`'s, the paper the card's ground or `ui.tint`.
-/// `drawn`: what of each row its layout drew (never wet).
-fn wet_head(
+/// `bleeding` as every surface draws it: the dim level is `ui.virtual`'s, the paper the card's ground or `ui.tint`.
+/// `drawn`: what of each row its layout drew (never bleeding).
+fn bleed_head(
     surface: &'static str,
     rows: &mut [Vec<crate::markdown::Span>],
     drawn: &[crate::markdown::Drawn],
     ui: &Ui,
     card: Style,
 ) {
-    wet(surface, rows, drawn, wet_ink(card.fg, ui.virt.fg, card.bg.or(ui.tint)));
+    bleed(surface, rows, drawn, bleed_ink(card.fg, ui.virt.fg, card.bg.or(ui.tint)));
 }
 
-/// 번짐 (S1): the head of text being written as ink not yet dry — its last `WET_WORDS` words restyled by `to`
-/// (`wet_ink`). A function of where the stream's head is, never of time: it moves only as text comes, asks no
+/// 번짐 (S1): the head of text being written as ink not yet dry — its last `BLEED_WORDS` words restyled by `to`
+/// (`bleed_ink`). A function of where the stream's head is, never of time: it moves only as text comes, asks no
 /// frame of its own, and the frame that ends the turn draws it dry. A row's end is a space between words.
-/// (`_surface` names it for the tests' record, `WET_SEEN`.)
-fn wet(
+/// (`_surface` names it for the tests' record, `BLEED_SEEN`.)
+fn bleed(
     _surface: &'static str,
     rows: &mut [Vec<crate::markdown::Span>],
     drawn: &[crate::markdown::Drawn],
@@ -15450,7 +15519,7 @@ fn wet(
         }
         out
     };
-    // From the end: the first character of the last `WET_WORDS` units, at most `WET_CELLS` cells of them
+    // From the end: the first character of the last `BLEED_WORDS` units, at most `BLEED_CELLS` cells of them
     let (mut units, mut cells) = (0, 0);
     let mut unit: Option<(usize, usize)> = None;
     let mut from: Option<(usize, usize)> = None;
@@ -15460,13 +15529,13 @@ fn wet(
             let Some(start) = start else { continue };
             if unit != Some((r, start)) {
                 units += 1;
-                if units > WET_WORDS {
+                if units > BLEED_WORDS {
                     break 'rows;
                 }
                 unit = Some((r, start));
             }
             cells += c.width().unwrap_or(0);
-            if cells > WET_CELLS {
+            if cells > BLEED_CELLS {
                 break 'rows;
             }
             from = Some((r, i));
@@ -15475,33 +15544,33 @@ fn wet(
     let Some((r0, i0)) = from else { return };
     let seen = |_text: &str| {
         #[cfg(test)]
-        WET_SEEN.with_borrow_mut(|w| w.push((_surface, _text.to_string())));
+        BLEED_SEEN.with_borrow_mut(|w| w.push((_surface, _text.to_string())));
     };
-    // What the text wrote from there on is wet, the spaces between too; what the layout drew stays
+    // What the text wrote from there on is bleeding, the spaces between too; what the layout drew stays
     for (r, row) in rows.iter_mut().enumerate().skip(r0) {
         let d = drawn.get(r).cloned().unwrap_or_default();
         let n: usize = row.iter().map(|s| s.text.chars().count()).sum();
-        let wet_at = |i: usize| !d.whole && i >= d.lead && i + d.tail < n && (r > r0 || i >= i0);
+        let bleed_at = |i: usize| !d.whole && i >= d.lead && i + d.tail < n && (r > r0 || i >= i0);
         let mut out: Vec<Span> = Vec::with_capacity(row.len() + 2);
         let mut at = 0;
         for s in std::mem::take(row) {
             let mut run = String::new();
-            let mut run_wet = None;
+            let mut run_bleeds = None;
             for c in s.text.chars() {
-                let w = wet_at(at);
-                if run_wet.is_some_and(|x| x != w) {
+                let w = bleed_at(at);
+                if run_bleeds.is_some_and(|x| x != w) {
                     let text = std::mem::take(&mut run);
                     if !w {
                         seen(&text);
                     }
                     out.push(Span { text, style: if w { s.style } else { to(s.style) } });
                 }
-                run_wet = Some(w);
+                run_bleeds = Some(w);
                 run.push(c);
                 at += 1;
             }
             if !run.is_empty() {
-                let w = run_wet == Some(true);
+                let w = run_bleeds == Some(true);
                 if w {
                     seen(&run);
                 }
@@ -15512,10 +15581,10 @@ fn wet(
     }
 }
 
-/// Where a line of code being written is wet from (`wet`'s rule on one row — the live edit's head line,
-/// `OtherKind::Writing`): the first byte of its last `WET_WORDS` tokens, at most `WET_CELLS` cells of them, the
+/// Where a line of code being written is bleeding from (`bleeding`'s rule on one row — the live edit's head line,
+/// `OtherKind::Writing`): the first byte of its last `BLEED_WORDS` tokens, at most `BLEED_CELLS` cells of them, the
 /// spaces between too. None: nothing written on it yet.
-fn wet_from(line: &str) -> Option<usize> {
+fn bleed_from(line: &str) -> Option<usize> {
     let (mut units, mut cells) = (0, 0);
     let (mut from, mut prev) = (None, None);
     for (i, c) in line.char_indices().rev() {
@@ -15530,12 +15599,12 @@ fn wet_from(line: &str) -> Option<usize> {
         }
         if prev != Some(u) || u == Unit::Alone {
             units += 1;
-            if units > WET_WORDS {
+            if units > BLEED_WORDS {
                 break;
             }
         }
         cells += c.width().unwrap_or(0);
-        if cells > WET_CELLS {
+        if cells > BLEED_CELLS {
             break;
         }
         prev = Some(u);
@@ -15544,7 +15613,7 @@ fn wet_from(line: &str) -> Option<usize> {
     from
 }
 
-/// What a character is to wet ink's units (`wet`): prose is words between spaces; code is tokens — an
+/// What a character is to bleeding ink's units (`bleeding`): prose is words between spaces; code is tokens — an
 /// identifier, a run of punctuation, a word in a string; a script written without spaces (Chinese, Japanese)
 /// is a character each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15566,12 +15635,12 @@ fn unit_of(c: char, code: bool) -> Unit {
     }
 }
 
-/// What ink not yet dry looks like (`wet`): a span's colour (`ink` where it has none) moved toward the paper it's
+/// What ink not yet dry looks like (`bleeding`): a span's colour (`ink` where it has none) moved toward the paper it's
 /// on until it has the contrast `ui.virtual` has there — the dim level, a coloured span keeping its hue; one
 /// already at it or fainter (a comment, a quote) stays as it is: never a third dim level. `paper` is the span's
 /// own ground (a code block's well), else the card's, else `ui.tint` (a transparent theme paints none). Named
 /// colours: `ui.virtual` for the ink, the rest as they are.
-fn wet_ink(ink: Option<Color>, virt: Option<Color>, paper: Option<Color>) -> impl Fn(Style) -> Style {
+fn bleed_ink(ink: Option<Color>, virt: Option<Color>, paper: Option<Color>) -> impl Fn(Style) -> Style {
     use crate::chrome::{contrast, fade, rgb};
     move |st: Style| {
         let fg = st.fg.or(ink);
@@ -15926,11 +15995,11 @@ const STAMP_LIST_MIN: usize = 60;
 /// A stamp (`stamp.rs`) stamped on `on`, the one way it's drawn — `STAMP_W` cells, its letter the key that decided.
 /// Where `on` has a colour it's filled, `▐y▌`: the ground in its ink, the letter bold in `on`'s own colour, cut out
 /// of it (음각); where it has none (a transparent theme) there's nothing to cut the letter out of, so it's carved the
-/// other way, `▌y▐`: the letter bold and its frame in the ink, nothing painted (양각). Its ink is the accent when `wet` — the row in hand, where the
-/// accent's bar already is: one mark a region — else the dim (dry).
-fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, wet: bool, on: Style) -> [crate::markdown::Span; 3] {
+/// other way, `▌y▐`: the letter bold and its frame in the ink, nothing painted (양각). Its ink is the accent when `lit` — the row in hand,
+/// where the accent's bar already is: one mark a region — else the dim.
+fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, lit: bool, on: Style) -> [crate::markdown::Span; 3] {
     use crate::markdown::Span;
-    let ink = if wet { ui.accent.fg } else { ui.virt.fg };
+    let ink = if lit { ui.accent.fg } else { ui.virt.fg };
     let edge = Style { fg: ink, bg: on.bg, ..Style::default() };
     let sp = |text: &str, style: Style| Span { text: text.into(), style };
     let key = stamp.0.to_string();
@@ -18693,6 +18762,34 @@ mod tests {
         assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
     }
 
+    /// The flash (`motion.rs`) on the key path, drawn: undo, redo, `.`, yanks in the 200k-line file — a line's, three
+    /// cursors', and the whole file's (`%d` then `u`: past `LINES_MAX`, none) — each key to its finished frame within
+    /// one frame.
+    #[test]
+    fn perf_budget_key_to_frame_while_it_flashes() {
+        if crate::test_results::unoptimized("term::tests::perf_budget_key_to_frame_while_it_flashes") {
+            return;
+        }
+        let budget = frame_budget();
+        let text: String =
+            (0..200_000).map(|i| format!("line {i} 타래 fn main() {{ let x = {i}; }}\n")).collect();
+        let keys = [
+            "x", "d", "u", "U", "x", "y", "i", "a", "esc", "j", ".", "u", "C", "C", "i", "b", "esc", "u",
+            "U", "j", "j", ".", "%", "d", "u", "U", "u",
+        ];
+        let rope = Rope::from_str(&text);
+        let (worst, key) = worst_of_best(&keys, || {
+            let mut ed = Editor::new(Config::default());
+            ed.docs[0].text = rope.clone();
+            ed.motion_drawn = true;
+            let mut buf = Vec::with_capacity(1 << 16);
+            render(&mut ed, &mut buf, 120, 40).unwrap();
+            keys.iter().map(|k| key_to_frame(&mut ed, &mut buf, k, 120, 40)).collect()
+        });
+        measured("key_to_frame_while_it_flashes", worst, budget);
+        assert!(worst < budget, "key {key:?} took {worst:?} (budget {budget:?})");
+    }
+
     /// The same keys (and a run of `j`) in a Rust file thick with doc comments — a block every 20 lines, its first
     /// line long, as `term.rs` has them — soft-wrapped and not: what counting the folded blocks' rows costs the
     /// key path (`codeview::Measure`, every frame's scroll). The worst key within one frame, and the keys' sum.
@@ -19230,8 +19327,8 @@ mod tests {
         let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
         let (worst, delta) = worst_of_best(&keys, || {
             let mut ed = long_chat(200);
-            // (번짐 as a user sees it: the head of the answer being written wet)
-            ed.wet_ink = true;
+            // (번짐 as a user sees it: the head of the answer being written bleeding)
+            ed.bleed_ink = true;
             let mut buf = Vec::with_capacity(1 << 16);
             render(&mut ed, &mut buf, 160, 45).unwrap();
             assert!(String::from_utf8_lossy(&buf).contains("Starting"), "the chat's panel is drawn");
@@ -19304,7 +19401,7 @@ mod tests {
         let keys: Vec<&str> = deltas.iter().map(String::as_str).collect();
         let (worst, _) = worst_of_best(&keys, || {
             let mut ed = long_chat(2000);
-            ed.wet_ink = true;
+            ed.bleed_ink = true;
             let mut buf = Vec::with_capacity(1 << 16);
             render(&mut ed, &mut buf, 160, 45).unwrap();
             keys.iter()
@@ -19488,50 +19585,50 @@ mod tests {
         assert_eq!(drawn[0].rest.as_deref(), Some("宽zz"));
     }
 
-    /// 번짐: the last two words of text being written — across spans and rows, a span split where the wet part
+    /// 번짐: the last two words of text being written — across spans and rows, a span split where the bleeding part
     /// starts; trailing space isn't a word; a row's end is a space between words.
     #[test]
-    fn the_last_two_words_are_wet() {
+    fn the_last_two_words_bleed() {
         let th = crate::theme::Theme::builtin();
         let (rule, label) = (th.get("ui.linenr"), th.get("ui.virtual"));
-        // (an answer laid out as the chat lays it out — what's wet, a run at a time, `|` between)
-        let wet_of = |md: &str, w: usize| -> String {
+        // (an answer laid out as the chat lays it out — what's bleeding, a run at a time, `|` between)
+        let bleed_of = |md: &str, w: usize| -> String {
             let lines = crate::markdown::render(md, &th, None);
             let (mut rows, drawn) = chat_markdown_drawn(&lines, (w, w), (rule, label), None);
-            WET_SEEN.with_borrow_mut(Vec::clear);
-            wet("test", &mut rows, &drawn, |s| Style { underline: true, ..s });
+            BLEED_SEEN.with_borrow_mut(Vec::clear);
+            bleed("test", &mut rows, &drawn, |s| Style { underline: true, ..s });
             for (row, d) in rows.iter().zip(&drawn) {
                 let chars: Vec<(char, bool)> =
                     row.iter().flat_map(|s| s.text.chars().map(move |c| (c, s.style.underline))).collect();
                 let n = chars.len();
                 for (i, &(c, u)) in chars.iter().enumerate() {
                     let laid = d.whole || i < d.lead || i + d.tail >= n;
-                    assert!(!(u && laid), "{md:?}: {c:?}, drawn by the layout, wet");
+                    assert!(!(u && laid), "{md:?}: {c:?}, drawn by the layout, bleeding");
                 }
             }
-            WET_SEEN.with_borrow(|w| w.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("|"))
+            BLEED_SEEN.with_borrow(|w| w.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("|"))
         };
-        assert_eq!(wet_of("Starting the answer so far", 40), "so far");
-        assert_eq!(wet_of("alone", 40), "alone", "fewer than two: all of it");
+        assert_eq!(bleed_of("Starting the answer so far", 40), "so far");
+        assert_eq!(bleed_of("alone", 40), "alone", "fewer than two: all of it");
         // (a row's end parts words)
-        assert_eq!(wet_of("alpha beta gamma", 11), "beta|gamma");
-        // (what the layout drew is never wet nor a word: a list's bullets and numbers, a quote's bar, a table's
+        assert_eq!(bleed_of("alpha beta gamma", 11), "beta|gamma");
+        // (what the layout drew is never bleeding nor a word: a list's bullets and numbers, a quote's bar, a table's
         // rule, a cut code row's `…`)
-        assert_eq!(wet_of("- one\n- two", 40), "one|two");
-        assert_eq!(wet_of("1. one\n2. two", 40), "one|two");
-        assert_eq!(wet_of("> quoted words", 40), "quoted words");
+        assert_eq!(bleed_of("- one\n- two", 40), "one|two");
+        assert_eq!(bleed_of("1. one\n2. two", 40), "one|two");
+        assert_eq!(bleed_of("> quoted words", 40), "quoted words");
         // (a table's gaps are spans of their own)
-        assert_eq!(wet_of("| a | b |\n|---|---|\n| one | two |", 40), "one|  |two");
-        assert_eq!(wet_of("| a | b |\n|---|---|", 40), "a|  |b", "a table ending on its rule: the header");
-        let cut = wet_of("```\nlet total = items.iter().map(|x| x * 2).sum();\n```", 24);
+        assert_eq!(bleed_of("| a | b |\n|---|---|\n| one | two |", 40), "one|  |two");
+        assert_eq!(bleed_of("| a | b |\n|---|---|", 40), "a|  |b", "a table ending on its rule: the header");
+        let cut = bleed_of("```\nlet total = items.iter().map(|x| x * 2).sum();\n```", 24);
         assert!(!cut.is_empty() && !cut.contains('…'), "{cut:?}");
         // (code: tokens — an identifier, a punctuation run, a string's word)
-        assert_eq!(wet_of("```\nlet n = parse(text);\n```", 40), "text);");
-        assert_eq!(wet_of("```\nsay(\"hello wide world\");\n```", 40), "world\");");
-        // (a script written without spaces: a character each; a long run: its end, at most `WET_CELLS`)
-        assert_eq!(wet_of("這是一個很長的句子", 40), "句子");
-        assert_eq!(wet_of("これは長い文です", 40), "です");
-        assert_eq!(wet_of("see https://example.com/a/very/long/path/to/somewhere", 80), "to/somewhere");
+        assert_eq!(bleed_of("```\nlet n = parse(text);\n```", 40), "text);");
+        assert_eq!(bleed_of("```\nsay(\"hello wide world\");\n```", 40), "world\");");
+        // (a script written without spaces: a character each; a long run: its end, at most `BLEED_CELLS`)
+        assert_eq!(bleed_of("這是一個很長的句子", 40), "句子");
+        assert_eq!(bleed_of("これは長い文です", 40), "です");
+        assert_eq!(bleed_of("see https://example.com/a/very/long/path/to/somewhere", 80), "to/somewhere");
     }
 
     /// A turn of three stops: words, a read, words, an edit (its stamp `y`), a run, the answer and its time.
@@ -19805,19 +19902,19 @@ mod tests {
         assert!(under > 0 && beside > 0, "lines under the card: {under}, beside it: {beside}");
     }
 
-    /// What `wet_head` drew wet in a frame of `ed`, by surface.
-    fn wet_in_frame(ed: &mut Editor, surface: &str) -> Vec<String> {
-        WET_SEEN.with_borrow_mut(Vec::clear);
+    /// What `bleed_head` drew bleeding in a frame of `ed`, by surface.
+    fn bleed_in_frame(ed: &mut Editor, surface: &str) -> Vec<String> {
+        BLEED_SEEN.with_borrow_mut(Vec::clear);
         chat_frame(ed, 160);
-        WET_SEEN.with_borrow(|w| w.iter().filter(|(s, _)| *s == surface).map(|(_, t)| t.clone()).collect())
+        BLEED_SEEN.with_borrow(|w| w.iter().filter(|(s, _)| *s == surface).map(|(_, t)| t.clone()).collect())
     }
 
-    /// Follow's card while the answer is written (the chat minimized): its newest answer's head wet; once the
-    /// turn ends, nothing wet.
+    /// Follow's card while the answer is written (the chat minimized): its newest answer's head bleeding; once the
+    /// turn ends, nothing bleeding.
     #[test]
-    fn the_follow_cards_answer_has_its_head_wet() {
+    fn the_follow_cards_answer_bleeds_at_its_head() {
         let mut ed = long_chat(4);
-        ed.wet_ink = true;
+        ed.bleed_ink = true;
         // (some code, not the start screen: the card sits on it)
         ed.docs[0].text = Rope::from_str("fn main() {}\n");
         let c = ed.session.chat.as_mut().unwrap();
@@ -19825,52 +19922,52 @@ mod tests {
         c.follow.on = true;
         assert!(c.compact(), "follow's card, the chat minimized");
         c.msgs[4].text = "Starting the answer so far".into();
-        let wet = wet_in_frame(&mut ed, "follow");
-        assert_eq!(wet, ["so far"], "the head of the answer being written");
+        let bleeding = bleed_in_frame(&mut ed, "follow");
+        assert_eq!(bleeding, ["so far"], "the head of the answer being written");
         // (an older answer of the turn, shown above it, stays dry)
         ed.session.chat.as_mut().unwrap().msgs.push(crate::chat::Msg::new(
             crate::chat::Role::Note,
             "4.6s",
             "",
         ));
-        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "no longer the head");
+        assert_eq!(bleed_in_frame(&mut ed, "follow"), [""; 0], "no longer the head");
         ed.session.chat.as_mut().unwrap().msgs.pop();
         // (Claude thinking again, the answer still last: the card is up, its words dry)
         ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
-        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "not being written: dry");
+        assert_eq!(bleed_in_frame(&mut ed, "follow"), [""; 0], "not being written: dry");
         ed.session.chat.as_mut().unwrap().state = crate::chat::State::Idle;
-        assert_eq!(wet_in_frame(&mut ed, "follow"), [""; 0], "the turn ended: dry");
+        assert_eq!(bleed_in_frame(&mut ed, "follow"), [""; 0], "the turn ended: dry");
     }
 
-    /// `space i`'s card while it writes: the head of the code wet; while it thinks, nothing.
+    /// `space i`'s card while it writes: the head of the code bleeding; while it thinks, nothing.
     #[test]
-    fn the_ask_cards_code_has_its_head_wet() {
+    fn the_ask_cards_code_bleeds_at_its_head() {
         let mut ed = Editor::new(Config::default());
-        ed.wet_ink = true;
+        ed.bleed_ink = true;
         let mut rev = crate::llm::Review::new(1, ed.docs[0].id, "name it", Vec::new());
         rev.streamed = "fn total(a: u32) -> u32 {\n    a + 1\n".into();
         rev.thinking = false;
         ed.session.review = Some(rev);
-        // (no grammar for the scratch buffer: the line is one span, `+ 1` its wet part)
-        assert_eq!(wet_in_frame(&mut ed, "ask"), ["+ 1"], "`a + 1`'s last two words");
-        // (a line wider than the card: the end of what shows of it is wet, not the end past the cut)
+        // (no grammar for the scratch buffer: the line is one span, `+ 1` its bleeding part)
+        assert_eq!(bleed_in_frame(&mut ed, "ask"), ["+ 1"], "`a + 1`'s last two words");
+        // (a line wider than the card: the end of what shows of it is bleeding, not the end past the cut)
         let line =
             "    let numbers = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];";
         ed.session.review.as_mut().unwrap().streamed = format!("{line}\n");
-        let wet = wet_in_frame(&mut ed, "ask").concat();
+        let bleeding = bleed_in_frame(&mut ed, "ask").concat();
         let shown = &line[..72];
         assert!(
-            line.len() > 72 && !wet.is_empty() && shown.ends_with(&wet),
-            "{wet:?} not the end of {shown:?}"
+            line.len() > 72 && !bleeding.is_empty() && shown.ends_with(&bleeding),
+            "{bleeding:?} not the end of {shown:?}"
         );
         ed.session.review.as_mut().unwrap().thinking = true;
-        assert_eq!(wet_in_frame(&mut ed, "ask"), [""; 0], "thinking: nothing written to be wet");
+        assert_eq!(bleed_in_frame(&mut ed, "ask"), [""; 0], "thinking: nothing written to be bleeding");
     }
 
-    /// Wet ink keeps `ui.virtual`'s contrast with the paper it's on — the card's ground, a code well's own,
+    /// Bleeding ink keeps `ui.virtual`'s contrast with the paper it's on — the card's ground, a code well's own,
     /// `ui.tint` where a transparent theme paints none — a coloured span its hue; named colours: `ui.virtual`.
     #[test]
-    fn wet_ink_is_the_dim_level_against_its_paper() {
+    fn bleeding_ink_is_the_dim_level_against_its_paper() {
         use crate::chrome::{contrast, rgb};
         let c = |r, g, b| Color::Rgb { r, g, b };
         let virt = c(130, 126, 118);
@@ -19880,7 +19977,7 @@ mod tests {
             (c(220, 214, 200), c(24, 24, 28), c(90, 90, 100), c(250, 160, 110)),
             (c(40, 38, 34), c(244, 238, 222), c(170, 165, 150), c(150, 50, 10)),
         ] {
-            let to = wet_ink(Some(ink), Some(virt), Some(paper));
+            let to = bleed_ink(Some(ink), Some(virt), Some(paper));
             let p = rgb(paper).unwrap();
             let fg = rgb(to(Style::default()).fg.unwrap()).unwrap();
             let want = contrast(rgb(virt).unwrap(), p) / contrast(rgb(ink).unwrap(), p);
@@ -19909,11 +20006,11 @@ mod tests {
             let st = Style { fg: Some(faint), italic: true, ..Style::default() };
             assert_eq!(to(st), st, "fainter than the dim level: as it is");
         }
-        let named = wet_ink(Some(Color::White), Some(Color::DarkGrey), None);
+        let named = bleed_ink(Some(Color::White), Some(Color::DarkGrey), None);
         assert_eq!(named(Style::default()).fg, Some(Color::DarkGrey), "named colours: ui.virtual");
     }
 
-    /// The chat's answer being written has its head wet — the last two words in other ink than the rest — and
+    /// The chat's answer being written has its head bleeding — the last two words in other ink than the rest — and
     /// the frame that ends the turn draws it dry, as a conversation drawn first after it has it; nothing asks a
     /// frame for it. In both papers, transparent too.
     #[test]
@@ -19921,7 +20018,7 @@ mod tests {
         for theme in ["meok", "hanji", "meok-transparent", "hanji-transparent"] {
             let at = |state| {
                 let mut ed = long_chat(4);
-                ed.wet_ink = true;
+                ed.bleed_ink = true;
                 ed.theme = crate::theme::load(theme).unwrap();
                 let c = ed.session.chat.as_mut().unwrap();
                 c.state = state;
@@ -19958,20 +20055,20 @@ mod tests {
         let tint = rgb(th.try_get("ui.tint").and_then(|s| s.bg).unwrap()).unwrap();
         let virt = rgb(th.get("ui.virtual").fg.unwrap()).unwrap();
         let mut ed = long_chat(4);
-        ed.wet_ink = true;
+        ed.bleed_ink = true;
         ed.theme = th;
         ed.session.chat.as_mut().unwrap().msgs[4].text = "Starting the answer so far".into();
         chat_frame(&mut ed, 160);
         let rows = kept_rows(&ed)[4].clone().unwrap();
-        let wet = rows.iter().flat_map(|r| &r.spans).find(|s| s.text == "so far").unwrap();
-        let got = contrast(rgb(wet.style.fg.unwrap()).unwrap(), tint);
+        let bleeding = rows.iter().flat_map(|r| &r.spans).find(|s| s.text == "so far").unwrap();
+        let got = contrast(rgb(bleeding.style.fg.unwrap()).unwrap(), tint);
         assert!(
             (got - contrast(virt, tint)).abs() < 0.2,
             "against ui.tint: {got} for {}",
             contrast(virt, tint)
         );
         assert_ne!(
-            rgb(wet.style.fg.unwrap()),
+            rgb(bleeding.style.fg.unwrap()),
             Some(virt),
             "the ink faded toward ui.tint, not ui.virtual's own colour"
         );

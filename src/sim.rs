@@ -35,6 +35,7 @@ mod diskwatch;
 mod hosts;
 mod instructions;
 mod keepclose;
+mod motion;
 mod overlap;
 mod panes;
 mod presence;

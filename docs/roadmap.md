@@ -674,7 +674,7 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   the rest, `▲` a change with its stamp — in the chat's rows and the follow card; no thread line (tried in the
   margin, it read as a border or a quote bar; the user chose the knots alone). P7 done (2026-10-21, `4d39285a`): live edits — what
   Claude writes into a file is drawn there as it's written (`input_json_delta` read as it streams, the place found
-  on a worker, provisional rows on the proposed wash, the head of the line in progress wet; nothing applied, no key
+  on a worker, provisional rows on the proposed wash, the head of the line in progress bleeding (번짐); nothing applied, no key
   taken; the review opens on the same rows), `editor.motion` full · calm · none with macOS's Reduce Motion read once
   at start; a stream batch with live rows in a big file 0.3 ms, a native Write over 5,000 lines 1.4 ms (was 8).
   P8, 코드멍's reveal, is dropped — an invented delay, and a key eaten to end it.

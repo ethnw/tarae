@@ -56,7 +56,7 @@ pub struct EditorConfig {
     pub soft_wrap: String,
     /// The hints say a key zellij takes by its twin (`zellij.rs`): "auto" (inside zellij) | "on" | "off".
     pub zellij_hints: String,
-    /// How much moves on screen (`motion.rs`): "full" | "calm" (nothing on a clock) | "none" (no wet ink either).
+    /// How much moves on screen (`motion.rs`): "full" | "calm" (nothing on a clock) | "none" (no bleeding ink either).
     pub motion: String,
     /// The letters zellij takes with `C-` (`zellij::DEFAULT_KEYS` — yours only, `trust::YOURS_ONLY`).
     pub zellij_keys: Vec<char>,
@@ -930,6 +930,39 @@ Z = ["move_line_down", ":sh touch marker"]
                 && l.edit_tools == crate::edittool::Arm::Native,
             "{w:?}"
         );
+    }
+
+    /// How much moves on your screen is yours to say (`editor.motion`, `trust::YOURS_ONLY`): a project's `.tarae.toml`
+    /// — trusted or not — and its `.tarae.local.toml` asking `full` are refused and said; your `calm` stays.
+    #[test]
+    fn a_project_cannot_set_how_much_moves() {
+        use crate::trust::Store;
+        let scratch = crate::scratch::Scratch::new("config-motion");
+        let dir = scratch.to_path_buf();
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output().unwrap();
+        assert!(ok.status.success());
+        let (user, project, local) =
+            (dir.join("user.toml"), dir.join(".tarae.toml"), dir.join(".tarae.local.toml"));
+        // (a risky setting beside it, so the project has a trust card to answer)
+        fs::write(&project, "[llm]\nrun-allow = [\"make\"]\n[editor]\nmotion = \"full\"\n").unwrap();
+        fs::write(&local, "[editor]\nmotion = \"full\"\n").unwrap();
+        fs::write(dir.join(".gitignore"), ".tarae.local.toml\n").unwrap();
+        fs::write(&user, "[editor]\nmotion = \"calm\"\n").unwrap();
+        let load = |store: &Store| {
+            load_layers(Some(user.clone()), Some(project.clone()), Some((dir.clone(), local.clone())), store)
+        };
+        let (c, w) = load(&Store::default());
+        assert_eq!(c.editor.motion, "calm", "{w:?}");
+        for said in [
+            ".tarae.toml:4: editor.motion is set only in your own config",
+            ".tarae.local.toml:2: editor.motion is set only in your own config",
+        ] {
+            assert!(w.iter().any(|w| w.contains(said)), "{said}: {w:?}");
+        }
+        let mut trusted = Store::default();
+        trusted.answer(crate::trust::Kind::Tarae, &project, c.project.as_ref().unwrap().hash, true, 0);
+        let (t, _) = load(&trusted);
+        assert!(t.editor.llm.run_allow == ["make"] && t.editor.motion == "calm", "trusted: still refused");
     }
 
     /// What the board's Claudes are asked is yours to say: a project's `[[review.angles]]` is refused and said,

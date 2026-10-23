@@ -8,14 +8,20 @@
 //! next frame (`Editor::term_out`) — never written from a worker. Reading through OSC 52 is refused by most
 //! terminals, so a paste there says to use the terminal's own paste (it comes in as a bracketed paste).
 
-use crate::editor::Editor;
+use crate::editor::{Editor, ToastKind};
 use crate::event::Jobs;
 
 /// Copies `text`; once done, one toast says so, naming it (`what`: "1 selection") and how.
 pub fn copy(jobs: &Jobs, text: String, what: String) {
+    copy_flashing(jobs, text, what, None)
+}
+
+/// `copy`, and a yank's `flash` (`motion.rs`) once the clipboard took it — this copy's own, carried with it (another
+/// copy landing first never takes it), saying it where it's drawn.
+pub fn copy_flashing(jobs: &Jobs, text: String, what: String, flash: Option<crate::motion::What>) {
     jobs.spawn(move || {
         let r = system::write(&text);
-        move |ed: &mut Editor| copied(ed, &what, r)
+        move |ed: &mut Editor| copied(ed, &what, r, flash)
     });
 }
 
@@ -43,10 +49,15 @@ pub enum Why {
 }
 
 /// The result of a copy, on the main loop: the terminal's bytes go out after the next frame.
-fn copied(ed: &mut Editor, what: &str, r: Result<Wrote, String>) {
+fn copied(ed: &mut Editor, what: &str, r: Result<Wrote, String>, flash: Option<crate::motion::What>) {
+    // (a yank's flash once the copy is in, saying it where it's drawn — none when it failed: the error says so;
+    // through the terminal a toast too, for how: the terminal may not take it)
     match r {
-        Ok(Wrote::Program) => ed.set_success(format!("copied {what}")),
+        Ok(Wrote::Program) => ed.flash_saying(flash, ToastKind::Success, format!("copied {what}")),
         Ok(Wrote::Terminal(bytes, why)) => {
+            if let Some(f) = flash {
+                ed.motion_start(f);
+            }
             ed.term_out.extend_from_slice(&bytes);
             ed.set_success(match why {
                 Why::Ssh => format!("copied {what} — through the terminal (OSC 52)"),
@@ -535,12 +546,12 @@ mod tests {
     fn a_copy_says_once_what_was_done_and_how() {
         use crate::editor::ToastKind as Severity;
         let mut ed = Editor::new(crate::config::Config::default());
-        copied(&mut ed, "1 selection", Ok(Wrote::Program));
+        copied(&mut ed, "1 selection", Ok(Wrote::Program), None);
         assert_eq!(said(&ed), [("copied 1 selection".to_string(), Severity::Success)]);
         assert!(ed.term_out.is_empty());
 
         let mut ed = Editor::new(crate::config::Config::default());
-        copied(&mut ed, "1 selection", Ok(Wrote::Terminal(b"\x1b]52;c;YQ==\x1b\\".to_vec(), Why::Ssh)));
+        copied(&mut ed, "1 selection", Ok(Wrote::Terminal(b"\x1b]52;c;YQ==\x1b\\".to_vec(), Why::Ssh)), None);
         assert_eq!(
             said(&ed),
             [("copied 1 selection — through the terminal (OSC 52)".to_string(), Severity::Success)]
@@ -549,9 +560,50 @@ mod tests {
 
         // A failure is only that: no success beside it
         let mut ed = Editor::new(crate::config::Config::default());
-        copied(&mut ed, "1 selection", Err("xclip failed (exit status: 1)".into()));
+        copied(&mut ed, "1 selection", Err("xclip failed (exit status: 1)".into()), None);
         assert_eq!(said(&ed), [("not copied — xclip failed (exit status: 1)".to_string(), Severity::Error)]);
         assert!(ed.term_out.is_empty());
+    }
+
+    /// A yank's copy carries its own flash: another copy landing first takes none of it; landed and drawn, its words
+    /// a note (in `:messages`, no toast); the buffer moved before it landed — nothing drawn — the toast after the
+    /// frame; failed, an error toast and no flash.
+    #[test]
+    fn a_yanks_copy_flashes_its_own_and_says_it_where_drawn() {
+        use crate::editor::ToastKind as Severity;
+        use crate::key::{Code, Key};
+        let frame = |ed: &mut Editor| crate::term::render(ed, &mut Vec::new(), 80, 12).unwrap();
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.motion_drawn = true;
+        ed.docs[0].text = ropey::Rope::from_str("one\n");
+        let yank = |ed: &Editor| ed.flash_of(crate::motion::Act::Yank, std::iter::once(0..3).collect());
+        let mine = yank(&ed);
+        copied(&mut ed, "the message", Ok(Wrote::Program), None);
+        assert_eq!(
+            (said(&ed), ed.motions.len()),
+            (vec![("copied the message".to_string(), Severity::Success)], 0),
+            "another copy first: the yank's flash isn't its"
+        );
+        ed.toasts.clear();
+        copied(&mut ed, "1 selection", Ok(Wrote::Program), mine);
+        frame(&mut ed);
+        assert_eq!((said(&ed), ed.motions.len()), (vec![], 1), "its own: flashed and drawn, no toast");
+        assert_eq!(ed.messages.last().map(|m| m.2.as_str()), Some("copied 1 selection"), "in :messages");
+        // (the buffer moved before the copy landed: its flash draws nothing — the toast)
+        let moved = yank(&ed);
+        for k in [Key::plain(Code::Char('i')), Key::plain(Code::Char('a')), "esc".parse().unwrap()] {
+            ed.handle_event(crate::event::Event::Key(k));
+        }
+        copied(&mut ed, "1 selection", Ok(Wrote::Program), moved);
+        assert!(said(&ed).is_empty(), "not before the frame");
+        frame(&mut ed);
+        assert_eq!(said(&ed), [("copied 1 selection".to_string(), Severity::Success)], "not drawn: a toast");
+        ed.toasts.clear();
+        ed.motions.clear();
+        let failed = yank(&ed);
+        copied(&mut ed, "1 selection", Err("xclip failed (exit status: 1)".into()), failed);
+        assert_eq!(said(&ed), [("not copied — xclip failed (exit status: 1)".to_string(), Severity::Error)]);
+        assert!(ed.motions.is_empty(), "nothing flashes");
     }
 
     #[test]

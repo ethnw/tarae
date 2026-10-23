@@ -1609,12 +1609,12 @@ fn a_watcher_hears_a_turn_begin_and_end() {
     );
 }
 
-/// 번짐 asks no frame of its own: an answer streamed in parts, its head wet as it comes (on in the binary: the
+/// 번짐 asks no frame of its own: an answer streamed in parts, its head bleeding as it comes (on in the binary: the
 /// head in other ink than the words before it while the answer waits mid-way), then the turn's end — the head
 /// in the ink of the rest, and after that frame nothing is drawn.
 #[test]
-fn wet_ink_draws_no_frame_after_the_turn() {
-    let sb = Sandbox::new("wet-ink");
+fn bleeding_ink_draws_no_frame_after_the_turn() {
+    let sb = Sandbox::new("bleeding-ink");
     let delta = |t: &str| {
         format!(
             r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":"{t}"}}}}}}"#
@@ -1627,7 +1627,7 @@ fn wet_ink_draws_no_frame_after_the_turn() {
         delta("the key by value."),
         r#"{"type":"result","subtype":"success","result":"done","session_id":"c1"}"#.to_string(),
     ];
-    // (each part a moment after the one before: frames drawn with the head wet; mid-way it waits a while)
+    // (each part a moment after the one before: frames drawn with the head bleeding; mid-way it waits a while)
     let body: Vec<String> = lines
         .iter()
         .enumerate()
@@ -1646,10 +1646,10 @@ fn wet_ink_draws_no_frame_after_the_turn() {
     t.send("why?\r");
     // (single words: the follow card or the panel may wrap the line anywhere)
     t.wait_for("the answer mid-way", |s| s.contains("takes"));
-    let (dry, wet) = (t.fg_of("cloned"), t.fg_of("takes"));
+    let (dry, bleeding) = (t.fg_of("cloned"), t.fg_of("takes"));
     assert!(
-        dry.is_some() && wet != dry,
-        "mid-way, the head in other ink: {wet:?} after {dry:?}\n{}",
+        dry.is_some() && bleeding != dry,
+        "mid-way, the head in other ink: {bleeding:?} after {dry:?}\n{}",
         t.screen()
     );
     t.wait_for("the answer, whole", |s| s.contains("the key by value."));
@@ -1676,6 +1676,38 @@ fn wet_ink_draws_no_frame_after_the_turn() {
         "after the turn's end: {drawn} frames, {used:?}\n{}",
         t.screen()
     );
+}
+
+/// A flash on its own clock, then sleep: `u` flashes what it took back — its key's frame, a step as it dries, one as it
+/// goes (`calm` under Reduce Motion: the key's and the going's) — and once it's gone (the state's `motions` empty)
+/// nothing is drawn and nothing wakes the loop.
+#[test]
+fn a_motion_ends_and_tarae_sleeps() {
+    let sb = Sandbox::new("motion");
+    sb.write("a.txt", "one two\n");
+    let mut t = sb.spawn(&["a.txt"]);
+    // (what undo brings back flashes: `one ` again, the cursor on one of its cells)
+    t.send("wd");
+    t.wait_for("the word gone", |s| !s.contains("one two"));
+    let before = t.frames();
+    t.send("u");
+    t.wait_for("undone", |s| s.contains("one two"));
+    t.wait_state("the flash gone", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
+    let drawn = t.frames() - before;
+    assert!(drawn >= 2, "the key's frame and the flash's going: {drawn} frames\n{}", t.screen());
+    // Settled (what the edit asks for after a pause — a save, the gutter) — then nothing: no tick for the flash
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let frames = t.frames();
+        std::thread::sleep(Duration::from_secs(1));
+        if t.frames() == frames || std::time::Instant::now() > end {
+            break;
+        }
+    }
+    let (frames, before) = (t.frames(), t.usage());
+    std::thread::sleep(Duration::from_secs(2));
+    let (drawn, used) = (t.frames() - frames, t.usage() - before);
+    assert!(drawn == 0 && used.switches < 30, "after the flash: {drawn} frames, {used:?}\n{}", t.screen());
 }
 
 /// A chat turn's usage on screen: a stand-in claude streaming what claude does (a request writing 4k to

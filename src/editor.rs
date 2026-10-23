@@ -679,9 +679,15 @@ pub struct Editor {
     pub offer_read: std::cell::RefCell<std::collections::HashSet<u64>>,
     /// Whether to show offers (off in tests — so they don't swallow y/n keys).
     pub offer_popups: bool,
-    /// 번짐: the head of text being written drawn as ink not yet dry (`term::wet`) — off in tests, as the
+    /// 번짐: the head of text being written drawn as ink not yet dry (`term::bleed`) — off in tests, as the
     /// animation is (a test that looks at it turns it on).
-    pub wet_ink: bool,
+    pub bleed_ink: bool,
+    /// Motions on a clock under way (`motion.rs`): flashes, … — each let go once over (`motions_prune`).
+    pub motions: Vec<crate::motion::Moving>,
+    /// Whether motions are drawn — off in tests, as the animation is (a test that looks at one turns it on).
+    pub motion_drawn: bool,
+    /// `TARAE_MOTION_AT`: every motion drawn at this age, none ending (shots — read once at start).
+    pub motion_at: Option<std::time::Duration>,
     /// macOS's Reduce Motion is on (read once at start — `motion::reduce_motion`): `editor.motion = "full"`
     /// behaves as `calm`.
     pub reduce_motion: bool,
@@ -1038,7 +1044,10 @@ impl Editor {
             offer_seq: 0,
             hook_waits: Vec::new(),
             offer_popups: !cfg!(test),
-            wet_ink: !cfg!(test),
+            bleed_ink: !cfg!(test),
+            motions: Vec::new(),
+            motion_drawn: !cfg!(test),
+            motion_at: if cfg!(test) { None } else { crate::motion::pinned_age() },
             reduce_motion: false,
             diag_card_hidden: None,
             cmd_loading: Default::default(),
@@ -2090,6 +2099,26 @@ impl Editor {
     /// diagnostic at the cursor, the selections just made); anything else the user has to see is a toast.
     pub fn note(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Severity::Info));
+    }
+
+    /// Words a flash says at the eye (`Editor::flash_saying`): kept in `:messages` and the log, and a note — their
+    /// toast waits on the frame (`Editor::words_drawn`). The words as said.
+    pub(crate) fn flashed_note(&mut self, kind: ToastKind, msg: String) -> String {
+        let msg = self.said_by_session(msg);
+        self.recorded(kind, msg.clone());
+        self.note(msg.clone());
+        msg
+    }
+
+    /// Words a flash was to say that no frame drew it saying: their toast after all (kept already).
+    pub(crate) fn flash_unseen(&mut self, kind: ToastKind, msg: String) {
+        let of = self.behind.then_some(self.session.id);
+        self.toast(kind, msg, of);
+    }
+
+    /// `msg` as a toast of `kind` — `set_status`, `set_success`, … by its kind.
+    pub(crate) fn say(&mut self, kind: ToastKind, msg: String) {
+        self.report(kind, msg);
     }
 
     fn toast(&mut self, kind: ToastKind, text: String, of: Option<crate::event::SessionId>) {
@@ -3268,7 +3297,9 @@ impl Editor {
         let tag = crate::presence::tag_wake(self);
         // Claude's writing shown at its pace: a frame each `REVEAL_EVERY` while there's text left to show
         let reveal = crate::writing::reveal_wake(self).filter(|_| !self.unfocused);
-        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle, tag, reveal]
+        // A motion on its own clock (`motion.rs`): a frame each step while it dries, one as it goes
+        let motion = self.motion_wake();
+        [next, flash, self.silent_wake(), crate::shuttle::lit_wake(self), settle, tag, reveal, motion]
             .into_iter()
             .flatten()
             .min()
@@ -3314,6 +3345,9 @@ impl Editor {
     }
 
     pub(crate) fn schedule_tick(&mut self) {
+        if self.motions_prune() {
+            self.unchanged = false; // gone from the screen: drawn
+        }
         if !self.toasts.is_empty() && !self.toasts.iter().any(Toast::alive) {
             self.toasts.clear();
             self.unchanged = false; // gone from the screen — whatever event this is, it's drawn
@@ -16786,9 +16820,10 @@ q = \"delete_selection\"\n",
     fn clipboard_roundtrip() {
         let mut ed = run("ab", " y");
         settle(&mut ed); // write job done
-        // One toast, said once the copy is done (not before: it might fail)
-        let said: Vec<_> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(said, ["copied 1 selection"]);
+        // Said once the copy is done (not before: it might fail) — kept in `:messages`, a toast only once a frame
+        // didn't draw its flash (`motion::words_drawn`)
+        let said: Vec<_> = ed.messages.iter().map(|m| m.2.as_str()).collect();
+        assert_eq!((said, ed.toasts.len()), (vec!["copied 1 selection"], 0));
         feed(&mut ed, "l p");
         settle(&mut ed); // read → paste
         assert_eq!(text(&ed), "aba");

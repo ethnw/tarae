@@ -48,13 +48,18 @@ fn press(ed: &mut Editor, x: usize, y: usize) {
 #[test]
 fn a_toast_takes_the_keys_only_once_focused() {
     let mut ed = editor();
-    ed.set_status("saved a.rs");
+    // (the flash drawn, so `y`'s words are a note, no toast of theirs on the card — `motion.rs`; the message is the
+    // card's width, long enough for its keys)
+    ed.motion_drawn = true;
+    ed.set_status("saved a.rs, 3 lines written");
     frame(&mut ed);
     feed(&mut ed, "y");
     assert!(
         ed.toast_focus.is_none() && ed.messages.last().unwrap().2.starts_with("yanked"),
         "y: the code's yank"
     );
+    let texts: Vec<&str> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, ["saved a.rs, 3 lines written"], "y's words a note: its flash drawn");
     let before = frame(&mut ed);
     let rect = ed.screen.toast_card.get();
     let rows = card(&before, &ed);

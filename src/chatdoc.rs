@@ -6,7 +6,7 @@
 //!
 //! What the drawer adds is never text: the user's bar, a thought's bar, a note's `· `/`≈ `, a code well's edge, a
 //! wrapped row's hanging indent (`ChatRow.skip`), a tool row's knot, a change's stamps, the writing caret
-//! (`ChatRow.tail`), the wet head (a style). The air before a question or a run of tool rows is an empty line; the
+//! (`ChatRow.tail`), the bleeding head (a style). The air before a question or a run of tool rows is an empty line; the
 //! frame's own rows — what a live run waits on, `thinking…`, the empty chat's words (`Of::Own`) — aren't in it,
 //! never under the cursor. A message's lines are made again only when its rows are (`Msg.cache`: the `Arc` the
 //! layout keeps) — the one being written, mostly — and replace only its own lines when their text changed.

@@ -62,6 +62,13 @@ impl Editor {
 
     pub fn repeat_last_insert(&mut self, times: usize) {
         let Some(last) = self.last_insert.clone() else { return self.set_status("nothing to repeat yet") };
+        // (what it typed again flashes, at every cursor: it ends after the insert, nothing marks it)
+        let armed = self.record_touched();
+        self.repeat_insert(&last, times);
+        self.flash_touched(armed, crate::motion::Act::Repeat);
+    }
+
+    fn repeat_insert(&mut self, last: &LastInsert, times: usize) {
         self.repeating_insert = true;
         for _ in 0..times {
             self.run(&last.cmds, last.count);

@@ -805,14 +805,22 @@ fn yank(cx: &mut Context) {
     let texts = yanked_texts(cx);
     let n = texts.len();
     let reg = cx.editor.register_name();
-    cx.editor.write_register(reg, texts);
+    // (what went in flashes once it's in, saying so where it's drawn: a register at once, the clipboard once it
+    // took it — the flash goes with its own copy, `clipboard::copy_flashing`; the black hole takes nothing in)
+    let doc = cx.editor.doc();
+    let ranges = doc.selection().ranges().iter().map(|r| r.min_width_1(&doc.text)).map(|r| r.from()..r.to());
+    let flash = cx.editor.flash_of(crate::motion::Act::Yank, ranges.collect()).filter(|_| reg != '_');
+    let what = crate::clipboard::selections(n);
     let to = match reg {
         '"' => String::new(),
-        // (the copy says so once it's done, and how — `clipboard::copy`)
-        '+' => return,
+        // (the copy says so once it's done, and how)
+        '+' => {
+            return crate::clipboard::copy_flashing(&cx.editor.events.jobs(), texts.join("\n"), what, flash);
+        }
         r => format!(" to register {r}"),
     };
-    cx.editor.set_status(format!("yanked {}{to}", crate::clipboard::selections(n)));
+    cx.editor.write_register(reg, texts);
+    cx.editor.flash_saying(flash, crate::editor::ToastKind::Info, format!("yanked {what}{to}"));
 }
 
 /// Pastes from a register. Reading `+` (clipboard) is an external command, so it pastes once the
@@ -1608,21 +1616,28 @@ fn replay_macro(cx: &mut Context) {
 
 fn undo(cx: &mut Context) {
     cx.editor.abandon_undo_group();
+    let before = cx.editor.doc().text.clone();
     for _ in 0..cx.count() {
         if !cx.editor.doc_mut().undo() {
             cx.editor.set_status("already at oldest change");
             break;
         }
     }
+    // (what it took back or brought back flashes: the selection it restores says nothing of it)
+    let ranges = crate::motion::undone(&before, &cx.editor.doc().text);
+    cx.editor.flash(crate::motion::Act::Undo, ranges);
 }
 fn redo(cx: &mut Context) {
     cx.editor.abandon_undo_group();
+    let before = cx.editor.doc().text.clone();
     for _ in 0..cx.count() {
         if !cx.editor.doc_mut().redo() {
             cx.editor.set_status("already at newest change");
             break;
         }
     }
+    let ranges = crate::motion::undone(&before, &cx.editor.doc().text);
+    cx.editor.flash(crate::motion::Act::Redo, ranges);
 }
 
 // ── Selection manipulation ───────────────────────────────────────────────
@@ -2750,7 +2765,14 @@ fn insert_register(cx: &mut Context) {
 }
 
 /// Each cursor gets its own value if there's one per cursor, else the last one.
+/// What it put in flashes (`motion.rs`): its cursors end after it, nothing selected says where it went.
 fn insert_texts(cx: &mut Context, values: &[String]) {
+    let armed = cx.editor.record_touched();
+    insert_texts_at_cursors(cx, values);
+    cx.editor.flash_touched(armed, crate::motion::Act::Paste);
+}
+
+fn insert_texts_at_cursors(cx: &mut Context, values: &[String]) {
     let ranges = cx.editor.doc().selection().ranges().to_vec();
     let items = ranges
         .iter()

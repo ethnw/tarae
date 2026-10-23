@@ -1309,7 +1309,7 @@ const SCENES: &[Scene] = &[
         keys: &["@1", " ", "l", "@1", "why does insert clone the name?", "\r", "@?Change 1 of 1", "@1"],
     },
     // (글타래 P7: Claude's edit of three changes as it's written — two whole, the third's new line mid-way, its head
-    // wet; nothing applied, no review yet)
+    // bleeding; nothing applied, no review yet)
     Scene {
         name: "writing",
         claude: "writemid",

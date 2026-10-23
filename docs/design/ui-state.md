@@ -192,6 +192,9 @@ side git · 4 rows · in hand git:src/term.rs
   `comment` yours · `claude` its Claude's), `sent` (not a draft `space v s` hasn't sent), `state` (`waiting` for
   Claude's answer · `answered` · `open`). Claude's level lists only the sent ones (`notes sent to you: …`) —
   what `reply_to` answers; `reply_to` on a draft is refused.
+- **`motions`** (motion, `motion.rs`) — motions on a clock under way: `kind` (`flash`), `act` (`undo` · `redo` ·
+  `repeat` · `yank` · `paste`), `until_ms` (left until it's gone) — a driver waits for one to end, never sleeps.
+  Not at Claude's level.
 - **`limits`** (apibill, `limits.rs`) — the account's plan limits as any claude said them: each window known now
   by Claude Code's name (`five_hour`, `seven_day`, `seven_day_<family>`, `seven_day:<model_scoped name>`) →
   `percent` (whole), `resets_at` and `seen_at` (unix ms), `status` (`allowed` · `allowed_warning` · `rejected`,

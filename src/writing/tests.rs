@@ -160,11 +160,11 @@ fn the_stream_s_edit_input_is_read_as_it_comes() {
 }
 
 /// What Claude writes is drawn where it goes as it comes — the line it replaces washed, the lines written so far on
-/// the proposed wash, the head wet — and nothing else: the buffer as it was, unsaved nothing, the keys the code's.
+/// the proposed wash, the head bleeding — and nothing else: the buffer as it was, unsaved nothing, the keys the code's.
 #[test]
 fn an_edit_is_drawn_as_it_is_written() {
     let (mut ed, _dir, g) = scene("writing-drawn");
-    ed.wet_ink = true;
+    ed.bleed_ink = true;
     let v0 = ed.doc().version();
     let input = edit_input("    let b = 20;\n    let c = a + b;\n");
     // (to the middle of the second line it writes)
@@ -184,16 +184,16 @@ fn an_edit_is_drawn_as_it_is_written() {
         "the view on the line it rewrites, your cursor where it was, the screen still"
     );
     ed.session.leave(crate::session::At::Chat);
-    crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
+    crate::term::BLEED_SEEN.with_borrow_mut(Vec::clear);
     let rows = frame(&mut ed, 100, 30);
     let at =
         |t: &str| rows.iter().position(|r| r.ends_with(t)).unwrap_or_else(|| panic!("{t:?} in {rows:#?}"));
     let (gone, b, c) = (at("let b = 2;"), at("let b = 20;"), at("let c = a"));
     assert_eq!((b, c), (gone + 1, gone + 2), "under the line it replaces: {rows:#?}");
     assert!(rows[c + 1].ends_with(r#"println!("{a} {b}");"#), "then the file as it is: {rows:#?}");
-    let wet = crate::term::WET_SEEN
+    let bleeding = crate::term::BLEED_SEEN
         .with_borrow(|w| w.iter().filter(|w| w.0 == "code").map(|w| w.1.clone()).collect::<Vec<_>>());
-    assert_eq!(wet, ["= a"], "its head's last words wet");
+    assert_eq!(bleeding, ["= a"], "its head's last words bleeding");
     let doc = ed.doc();
     assert_eq!((doc.text.to_string().as_str(), doc.version()), (TEXT, v0), "nothing applied");
     assert!(!doc.is_modified());
@@ -210,9 +210,12 @@ fn an_edit_is_drawn_as_it_is_written() {
     assert!(ed.ui_state_claude().text_claude(false).contains("writing (drawn as it comes"));
     // Its text whole: dry
     w.send(&mut ed, g, &input[mid..], &[], true);
-    crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
+    crate::term::BLEED_SEEN.with_borrow_mut(Vec::clear);
     frame(&mut ed, 100, 30);
-    assert!(crate::term::WET_SEEN.with_borrow(|w| w.iter().all(|w| w.0 != "code")), "nothing wet once whole");
+    assert!(
+        crate::term::BLEED_SEEN.with_borrow(|w| w.iter().all(|w| w.0 != "code")),
+        "nothing bleeding once whole"
+    );
     // The turn's end takes it away
     crate::chat::stream_event(&mut ed, g, StreamEv::Done(Ok(String::new())));
     assert!(ed.doc().writing.is_none());
@@ -1440,21 +1443,21 @@ fn a_place_found_after_its_review_is_not_drawn() {
     assert!(shown(ed.doc()).is_none(), "the rejected change drawn again");
 }
 
-/// macOS's Reduce Motion on the frame: `full` drawn as `calm` — the head still wet, the wait's frames a second
+/// macOS's Reduce Motion on the frame: `full` drawn as `calm` — the head still bleeding, the wait's frames a second
 /// apart — and a toast's frames when nothing moves on a clock: none to fade it, one as its time is up.
 #[test]
 fn reduce_motion_and_calm_on_the_frame() {
     let (mut ed, _dir, g) = scene("writing-reduce");
-    ed.wet_ink = true;
+    ed.bleed_ink = true;
     ed.reduce_motion = true;
     let input = edit_input("    let b = 20;\n");
     Writer::new("t1", Tool::Edit).send(&mut ed, g, &input[..input.find("20").unwrap() + 2], &[], false);
     settle(&mut ed, |ed| shown(ed.doc()).is_some());
-    crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
+    crate::term::BLEED_SEEN.with_borrow_mut(Vec::clear);
     frame(&mut ed, 100, 30);
     assert!(
-        crate::term::WET_SEEN.with_borrow(|w| w.iter().any(|w| w.0 == "code")),
-        "wet under Reduce Motion"
+        crate::term::BLEED_SEEN.with_borrow(|w| w.iter().any(|w| w.0 == "code")),
+        "bleeding under Reduce Motion"
     );
     assert!(ed.tick_wanted().unwrap() > crate::editor::TICK * 2, "the wait's frames a second apart");
     // A toast with nothing waited on: its one frame as its time is up — at `full`, frames while it fades in
@@ -1525,28 +1528,28 @@ fn a_write_is_drawn_over_the_whole_file() {
     assert!(rows.iter().any(|r| r.ends_with("todo!()")), "{rows:#?}");
 }
 
-/// `editor.motion`: `none` draws nothing wet (the rows stay), `calm` keeps wet ink but moves nothing on a clock —
+/// `editor.motion`: `none` draws nothing bleeding (the rows stay), `calm` keeps bleeding ink but moves nothing on a clock —
 /// the wave still, a frame a second while waiting, a toast whole at once; macOS's Reduce Motion makes `full` calm,
 /// never `none` less.
 #[test]
 fn the_motion_setting_holds_still_what_moves() {
     let (mut ed, _dir, g) = scene("writing-motion");
-    ed.wet_ink = true;
+    ed.bleed_ink = true;
     let input = edit_input("    let b = 20;\n");
     let cut = input.find("20").unwrap() + 2;
     Writer::new("t1", Tool::Edit).send(&mut ed, g, &input[..cut], &[], false);
     settle(&mut ed, |ed| shown(ed.doc()).is_some());
-    let wet = |ed: &mut Editor| {
-        crate::term::WET_SEEN.with_borrow_mut(Vec::clear);
+    let bleeding = |ed: &mut Editor| {
+        crate::term::BLEED_SEEN.with_borrow_mut(Vec::clear);
         let rows = frame(ed, 100, 30);
         assert!(rows.iter().any(|r| r.ends_with("let b = 20")), "the rows stay: {rows:#?}");
-        crate::term::WET_SEEN.with_borrow(|w| w.iter().any(|w| w.0 == "code"))
+        crate::term::BLEED_SEEN.with_borrow(|w| w.iter().any(|w| w.0 == "code"))
     };
-    assert!(wet(&mut ed), "full: wet");
+    assert!(bleeding(&mut ed), "full: bleeding");
     crate::typed::execute(&mut ed, "set editor.motion none").unwrap();
-    assert!(!wet(&mut ed), "none: nothing wet");
+    assert!(!bleeding(&mut ed), "none: nothing bleeding");
     crate::typed::execute(&mut ed, "set editor.motion calm").unwrap();
-    assert!(wet(&mut ed), "calm: wet ink stays");
+    assert!(bleeding(&mut ed), "calm: bleeding ink stays");
     assert!(!ed.moving());
     let tick = ed.tick_wanted().unwrap();
     assert!(tick > crate::editor::TICK * 2, "waiting, a frame a second: {tick:?}");
@@ -1590,7 +1593,7 @@ fn an_edit_ending_in_a_wide_character_is_placed() {
     c.follow.on = true;
     let g = c.generation();
     ed.session.chat = Some(c);
-    ed.wet_ink = true;
+    ed.bleed_ink = true;
     let s = |t: &str| serde_json::to_string(t).unwrap();
     let input = format!(
         r#"{{"edits":[{{"file_path":"a.rs","old_string":{},"new_string":{}}}]}}"#,

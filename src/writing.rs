@@ -2,7 +2,7 @@
 //! (`input_json_delta`, read on the reader thread a piece at a time — `scan.rs`); once an item's `old_string` has
 //! closed and is in the file once (searched on a worker, as `edittool` will look), the `new_string` so far is
 //! drawn there as rows of their own (`Shown`, `OtherKind::Writing`): the lines it takes out washed, the ones it
-//! writes on the proposed wash, its head wet (S1's 번짐). Nothing is applied or decided and no key is taken — when
+//! writes on the proposed wash, its head bleeding (S1's 번짐). Nothing is applied or decided and no key is taken — when
 //! the call is whole the review opens on the same rows (the same diff of the same bytes); Claude's write landing
 //! unasked moves the buffer on and the rows go, follow's shown edit taking their place.
 //!

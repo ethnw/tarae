@@ -315,6 +315,9 @@ pub struct Document {
     pub git_version: u64,
     /// Where your own keys and pastes changed it since a code review last found its changes (`Own`).
     pub own: Own,
+    /// While an act that flashes what it touched runs (`.`, a paste): what each transaction wrote, the earlier
+    /// ones mapped forward — empty where it only took out (`motion.rs`, `Editor::recording`).
+    pub touched: Option<Vec<std::ops::Range<usize>>>,
     /// Display name of an unnamed buffer (tutorial etc.) · disposable (quit isn't blocked as "unsaved").
     pub title: Option<String>,
     pub throwaway: bool,
@@ -460,6 +463,7 @@ impl Document {
             conflicts_asked: None,
             git_version: u64::MAX,
             own: Own::default(),
+            touched: None,
             title: None,
             throwaway: false,
             paint: Vec::new(),
@@ -560,6 +564,13 @@ impl Document {
         }
         self.paint_follow(tx);
         self.own.edited(self.id, tx);
+        if let Some(t) = &mut self.touched {
+            for r in t.iter_mut() {
+                let start = tx.map_pos(r.start, Assoc::After);
+                *r = start..tx.map_pos(r.end, Assoc::Before).max(start);
+            }
+            t.extend(tx.changed());
+        }
         self.set_selection(sel);
         self.next_version += 1;
         self.version = self.next_version;

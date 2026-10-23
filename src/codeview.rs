@@ -51,7 +51,7 @@ pub enum OtherKind {
     /// change replaces (edited while the review waits), one it takes out or keeps, from the text it was asked on.
     Edit(Edit),
     /// A line of an edit Claude is still writing (`writing.rs`) — drawn as the review will draw it, nothing
-    /// applied; `head`: the line it's writing now, its last words wet.
+    /// applied; `head`: the line it's writing now, its last words bleeding.
     Writing { head: bool },
     /// A woven view's row that isn't a line (`weave.rs`).
     Woven(WovenRow),

@@ -462,6 +462,21 @@ fn y_copies_the_text_as_written() {
     assert_eq!(region(&ed), "view:chat");
 }
 
+/// `space y` in the view mode yanks to the clipboard as in the code — but the transcript draws no flash
+/// (`term::chat_paint`), so its words are a toast after the frame, never only a note (`motion.rs`).
+#[test]
+fn a_yank_in_the_view_mode_is_said_by_a_toast() {
+    let mut ed = editor();
+    ed.motion_drawn = true;
+    feed(&mut ed, "<esc>x y");
+    let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the copy's result");
+    ed.handle_event(ev);
+    frame(&mut ed);
+    let toasts: Vec<&str> = ed.toasts.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(toasts, ["copied 1 selection"], "not drawn: a toast");
+    assert_eq!(region(&ed), "view:chat");
+}
+
 /// For `term.rs`'s painter test: an editor in the chat's view mode after `keys`.
 pub(crate) fn viewing(keys: &str) -> Editor {
     let mut ed = editor();

@@ -1154,8 +1154,18 @@ const BRANCHES: &[(&str, &str, &str)] = &[
     ),
     (
         "src/editor.rs",
-        "in fn with_root: wet_ink",
-        "drawing only: the head of an answer being written drawn wet or dry — nothing a run does or reads",
+        "in fn with_root: bleed_ink",
+        "drawing only: the head of an answer being written drawn bleeding or not — nothing a run does or reads",
+    ),
+    (
+        "src/editor.rs",
+        "in fn with_root: motion_drawn",
+        "drawing only: a flash drawn or not — its record and wakes are made either way, nothing a run reads",
+    ),
+    (
+        "src/editor.rs",
+        "in fn with_root: motion_at",
+        "a shot's pinned motion age (TARAE_MOTION_AT) unread in tests — drawing only, nothing a run reads",
     ),
     ("src/sandbox.rs", "fn asked: a test build's twin", ASKED),
     ("src/sandbox.rs", "in fn now: asked", ASKED),

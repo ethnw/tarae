@@ -7,7 +7,10 @@
 //! Keys are sent in order, 0.35 s apart (`\r` = Enter, `\t` = Tab, `\x1b` = Esc, `\xHH` = any byte; everything
 //! else, Korean too, goes out as UTF-8); `@3` waits 3 s taking screen updates; `@?ready` waits until `ready` is
 //! on screen (a language server indexing …) — at most 120 s, or `@30?ready` 30; `@!ready` (`@30!ready`) until it's
-//! gone from it. A wait that times out fails the shot (the picture is still saved, of the screen as it was then):
+//! gone from it. `@~300` sends the key after it and keeps every frame drawn in the 300 ms after it: `out-01.png` (the
+//! screen before the key), `out-02.png` … and `out-sheet.png`, all side by side — a motion's contact sheet
+//! (`TARAE_MOTION_AT=<ms>` instead pins every motion at that age, for one picture of a step). A wait that times out
+//! fails the shot (the picture is still saved, of the screen as it was then):
 //! a shot of the wrong frame never passes as one that worked.
 //!
 //! Environment:
@@ -63,7 +66,12 @@ pub fn run(args: &[String]) -> Result<()> {
     let num = |k: &str, d: u16| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (cols, rows) = (num("TARAE_SHOT_COLS", 112), num("TARAE_SHOT_ROWS", 30));
     let scale = scale(std::env::var("TARAE_SHOT_SCALE").ok().as_deref())?;
-    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    let mut vt = Vt {
+        parser: vt100::Parser::new(rows, cols, 0),
+        held: Vec::new(),
+        capturing: None,
+        captured: Vec::new(),
+    };
 
     if let Some(replay) = std::env::var_os("TARAE_SHOT_REPLAY") {
         let bytes = std::fs::read(&replay).map_err(|e| format!("{}: {e}", Path::new(&replay).display()))?;
@@ -78,6 +86,7 @@ pub fn run(args: &[String]) -> Result<()> {
             let _ = std::fs::remove_dir_all(&state);
         }
         let missed = res?;
+        contact_sheet(&vt, scale, Path::new(out))?;
         return picture_of(&vt, scale, Path::new(out), &missed);
     }
     picture(&vt, scale, Path::new(out))
@@ -128,7 +137,12 @@ fn shot_env(zellij: Option<std::ffi::OsString>) -> Vec<(&'static str, Option<&'s
 /// in `state` (left there), the screen saved to `out`.
 pub fn take(setup: &Setup, keys: &[String], size: (u16, u16), state: &Path, out: &Path) -> Result<()> {
     let (cols, rows) = size;
-    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    let mut vt = Vt {
+        parser: vt100::Parser::new(rows, cols, 0),
+        held: Vec::new(),
+        capturing: None,
+        captured: Vec::new(),
+    };
     let missed = drive(&mut vt, setup, keys, state, &[], cols, rows)?;
     picture_of(&vt, 1, out, &missed)
 }
@@ -147,7 +161,12 @@ pub fn take_at(
     out: &Path,
 ) -> Result<Vec<Vec<String>>> {
     let (cols, rows) = size;
-    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    let mut vt = Vt {
+        parser: vt100::Parser::new(rows, cols, 0),
+        held: Vec::new(),
+        capturing: None,
+        captured: Vec::new(),
+    };
     let missed = drive(&mut vt, setup, keys, state, homes, cols, rows)?;
     picture_of(&vt, scale, out, &missed)?;
     let screen = vt.parser.screen();
@@ -208,7 +227,12 @@ fn live(args: &[String]) -> Result<()> {
     let (Some(cols), Some(rows)) = (size("cols"), size("rows")) else {
         return Err(format!("{}: no frame in its answer", sock.display()));
     };
-    let mut vt = Vt { parser: vt100::Parser::new(rows, cols, 0), held: Vec::new() };
+    let mut vt = Vt {
+        parser: vt100::Parser::new(rows, cols, 0),
+        held: Vec::new(),
+        capturing: None,
+        captured: Vec::new(),
+    };
     vt.feed(f["bytes"].as_str().unwrap_or_default().as_bytes());
     // (the frame as tarae drew it, before the terminal's update markers: ended here)
     vt.feed(FRAME_END);
@@ -284,6 +308,10 @@ fn ui_ask(sock: &Path, req: &serde_json::Value) -> Result<serde_json::Value> {
 struct Vt {
     parser: vt100::Parser,
     held: Vec<u8>,
+    /// `@~N`: since when every whole frame is kept (`captured`), for N ms after the key it went with.
+    capturing: Option<Instant>,
+    /// The frames `@~N` kept: the screen before its key, then each frame drawn, with when it came.
+    captured: Vec<(Duration, vt100::Screen)>,
 }
 
 impl Vt {
@@ -291,10 +319,66 @@ impl Vt {
         self.held.extend_from_slice(data);
         let Some(cut) = self.held.windows(FRAME_END.len()).rposition(|w| w == FRAME_END) else { return };
         let frames: Vec<u8> = self.held.drain(..cut + FRAME_END.len()).collect();
+        let Some(since) = self.capturing else { return self.process(&frames) };
+        // (one frame at a time, each kept as drawn)
+        let mut rest = &frames[..];
+        while let Some(end) = rest.windows(FRAME_END.len()).position(|w| w == FRAME_END) {
+            self.process(&rest[..end + FRAME_END.len()]);
+            self.captured.push((since.elapsed(), self.parser.screen().clone()));
+            rest = &rest[end + FRAME_END.len()..];
+        }
+    }
+
+    fn process(&mut self, frames: &[u8]) {
         let parser = &mut self.parser;
         // vt100 can panic on odd input — keep the screen so far rather than lose the shot
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.process(&frames)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.process(frames)));
     }
+}
+
+/// `@~300`: the next key is sent and every frame drawn in the 300 ms after it kept — a motion's frames as they come.
+fn capture_key(key: &str) -> Option<f64> {
+    key.strip_prefix("@~")?.parse::<f64>().ok().filter(|ms| *ms > 0.0).map(|ms| ms / 1000.0)
+}
+
+/// `@~`'s frames beside `out`: `out-01.png` (the screen before its key), `out-02.png` …, and all of them side by
+/// side, a gap between, in `out-sheet.png` — the contact sheet a motion is judged on.
+fn contact_sheet(vt: &Vt, scale: usize, out: &Path) -> Result<()> {
+    if vt.captured.is_empty() {
+        return Ok(());
+    }
+    let fonts = Fonts::load(scale)?;
+    let named = |tail: &str| {
+        let stem = out.file_stem().unwrap_or_default().to_string_lossy();
+        out.with_file_name(format!("{stem}-{tail}.png"))
+    };
+    let pictures: Vec<(usize, usize, Vec<u8>)> =
+        vt.captured.iter().map(|(_, screen)| render(screen, &fonts, scale)).collect();
+    for (i, ((t, _), (w, h, px))) in vt.captured.iter().zip(&pictures).enumerate() {
+        let path = named(&format!("{:02}", i + 1));
+        save_png(&path, *w, *h, px)?;
+        let when =
+            if i == 0 { "before its key".to_string() } else { format!("{} ms after it", t.as_millis()) };
+        println!("saved {} ({when})", path.display());
+    }
+    let gap = PAD * scale;
+    let (fw, fh) = (pictures[0].0, pictures.iter().map(|p| p.1).max().unwrap_or(0));
+    let n = pictures.len();
+    let (w, h) = (n * fw + (n - 1) * gap, fh);
+    // (the gaps a mid grey: apart from a dark and a light theme alike)
+    let mut sheet = vec![0x80u8; w * h * 3];
+    for (k, (pw, ph, px)) in pictures.iter().enumerate() {
+        let x0 = k * (fw + gap);
+        for y in 0..*ph {
+            let row = &px[y * pw * 3..(y + 1) * pw * 3];
+            let at = (y * w + x0) * 3;
+            sheet[at..at + row.len()].copy_from_slice(row);
+        }
+    }
+    let path = named("sheet");
+    save_png(&path, w, h, &sheet)?;
+    println!("saved {} ({n} frames)", path.display());
+    Ok(())
 }
 
 fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
@@ -394,7 +478,12 @@ fn drive(
     };
     pump(vt, 1.2);
     let mut missed = Vec::new();
+    let mut capture = None;
     for k in keys {
+        if let Some(secs) = capture_key(k) {
+            capture = Some(secs);
+            continue;
+        }
         if let Some((max, text)) = wait_key(k) {
             let t = Instant::now();
             if pump_until(vt, text, max, false) {
@@ -417,6 +506,15 @@ fn drive(
         }
         if let Some(secs) = k.strip_prefix('@').and_then(|s| s.parse::<f64>().ok()) {
             pump(vt, secs);
+            continue;
+        }
+        if let Some(secs) = capture.take() {
+            let since = Instant::now();
+            vt.captured.push((Duration::ZERO, vt.parser.screen().clone()));
+            vt.capturing = Some(since);
+            let _ = master.write_all(&unescape(k));
+            pump(vt, secs);
+            vt.capturing = None;
             continue;
         }
         let _ = master.write_all(&unescape(k));
@@ -853,6 +951,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_capture_key_is_its_ms_after_a_tilde() {
+        assert_eq!(capture_key("@~300"), Some(0.3));
+        assert_eq!(capture_key("@~0"), None);
+        assert_eq!(capture_key("@3"), None);
+        assert_eq!(capture_key("@?ready"), None);
+    }
+
+    #[test]
     fn unescapes_keys() {
         assert_eq!(unescape(r"/foo\r"), b"/foo\r");
         assert_eq!(unescape(r"\x1b:q\t"), b"\x1b:q\t");
@@ -869,7 +975,12 @@ mod tests {
         );
         assert_eq!((gone_key("@!lit"), gone_key("@5!a b")), (Some((WAIT_MAX, "lit")), Some((5.0, "a b"))));
         assert_eq!((gone_key("@?x"), gone_key("@!")), (None, None));
-        let mut vt = Vt { parser: vt100::Parser::new(2, 10, 0), held: Vec::new() };
+        let mut vt = Vt {
+            parser: vt100::Parser::new(2, 10, 0),
+            held: Vec::new(),
+            capturing: None,
+            captured: Vec::new(),
+        };
         vt.feed(b"\x1b[?2026hab\x1b[?2026l\x1b[?2026hcd");
         assert_eq!(vt.parser.screen().contents(), "ab");
         vt.feed(b"\x1b[?2026l");
@@ -1046,7 +1157,12 @@ mod tests {
         let v = ui_ask(&sock, &serde_json::json!({ "get": "frame" })).unwrap();
         server.join().unwrap();
         let f = &v["frame"];
-        let mut vt = Vt { parser: vt100::Parser::new(2, 10, 0), held: Vec::new() };
+        let mut vt = Vt {
+            parser: vt100::Parser::new(2, 10, 0),
+            held: Vec::new(),
+            capturing: None,
+            captured: Vec::new(),
+        };
         vt.feed(f["bytes"].as_str().unwrap().as_bytes());
         assert_eq!(vt.parser.screen().contents(), "", "held until a frame's end");
         vt.feed(FRAME_END);
