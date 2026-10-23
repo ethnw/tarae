@@ -601,7 +601,8 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   a real browser (carbonyl in the terminal pane) not now.
 - **Short videos, made ahead** (user, 2026-10-23): scripted scenes as docshots are — 16:9, English captions, no
   voice — for YouTube, the homepage and the README; a live stream once orchestra drives (Part I) and there's a
-  homepage and a release to point at. Plan and a measured spike first (collab).
+  homepage and a release to point at. Planned and measured (collab's spike: 1080p, MP4 ~600 KB a clip); made — `cargo xtask
+  video` and seven scenes — once P3 step 7's toasts, asks and follow card are in, kept out of git.
 
 - **The simulation harness's first piece** (§9.2) — done (detsim P1, `7a3f142b`): the simulated loop and one
   scenario. New code is tested in it from now on, so the harness grows with what's built instead of being fitted
