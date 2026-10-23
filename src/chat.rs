@@ -1928,7 +1928,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                 return;
             }
             let took = crate::clock::since(c.started);
-            let (secs, calls) = (took.as_secs_f32(), c.calls.len());
+            let calls = c.calls.len();
             // (the user stopped it: what its runs left going is offered to stop — `tools::left_running`)
             let stopped = c.stopping;
             c.state = State::Idle;
@@ -1965,7 +1965,7 @@ fn on_event(ed: &mut Editor, generation: u64, ev: StreamEv) {
                         c.msgs.push(Msg::new(Role::Assistant, text, ""));
                     }
                     crate::uistate::claude::cite(c);
-                    c.msgs.push(Msg::new(Role::Note, format!("{secs:.1}s"), ""));
+                    c.msgs.push(Msg::new(Role::Note, crate::term::run_duration(took), ""));
                 }
                 Err(_) if money.is_some() => {}
                 Err(e) => {

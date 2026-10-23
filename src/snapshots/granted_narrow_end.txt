@@ -4,17 +4,17 @@
 01  ╭─ granted ──────────────────────────────────────────────╮
 02  │   what you've let through                        20/20 │
 03  │ ────────────────────────────────────────────────────── │
-04  │  • .tarae.toml           you · 2 days ago · 2 versions │
+04  │  • .tarae.toml               you · 2d ago · 2 versions │
 05  │                                                        │
 06  │  Claude's settings · every checkout                    │
-07  │  • .claude/settings.json               you · yesterday │
+07  │  • .claude/settings.json                  you · 1d ago │
 08  │                                                        │
 09  │  git's own commands · every checkout                   │
-10  │  • .git/config                           you · 5 h ago │
+10  │  • .git/config                            you · 5h ago │
 11  │                                                        │
 12  │  git hooks · every checkout                            │
-13  │  • .githooks/pre-commit                  you · 1 h ago │
-14  │  • .githooks/pre-push                    you · 1 h ago │
+13  │  • .githooks/pre-commit                   you · 1h ago │
+14  │  • .githooks/pre-push                     you · 1h ago │
 15  │                                                        │
 16  │  plugins · everywhere                                  │
 17  │  • k8s: run kubectl, r…kube/config, reach 2 hosts  you │
@@ -54,17 +54,17 @@
 01  ff TTTTTTT fffffffffffffffffffffffffffffffffffffffffffffff
 02  f   ffff ffffff fff fffffff                        fffff f
 03  f ffffffffffffffffffffffffffffffffffffffffffffffffffffff f
-04  f  d                       ddd d d dddd ddd d d dddddddd f
+04  f  d                           ddd d dd ddd d d dddddddd f
 05  f                                                        f
 06  f  ffffffff ffffffff f fffff ffffffff                    f
-07  f  d                                     ddd d ddddddddd f
+07  f  d                                        ddd d dd ddd f
 08  f                                                        f
 09  f  fffff fff ffffffff f fffff ffffffff                   f
-10  f  d                                       ddd d d d ddd f
+10  f  d                                        ddd d dd ddd f
 11  f                                                        f
 12  f  fff fffff f fffff ffffffff                            f
-13  f  d                                       ddd d d d ddd f
-14  f  d                                       ddd d d d ddd f
+13  f  d                                        ddd d dd ddd f
+14  f  d                                        ddd d dd ddd f
 15  f                                                        f
 16  f  fffffff f ffffffffff                                  f
 17  f  d                                                 ddd f

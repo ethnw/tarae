@@ -1132,6 +1132,37 @@ fn chat_weave_line_tokens() {
     assert!(with.len() >= 2 && without.len() >= 2, "a request after the read in each");
 }
 
+/// What a run's time costs in its answer (one way a time is written, 2026-10-23): a run past a minute, its answer
+/// saying `in 1m 04s` where it said `in 64.2s`. The request after the run less the one before it is the call and its
+/// answer (Claude writes nothing before the call) — run against two builds (`TARAE_BIN`) and compare that.
+#[test]
+#[ignore = "live: run with `cargo live` (uses Claude)"]
+fn chat_run_answer_tokens() {
+    if !have("claude") {
+        return;
+    }
+    let (sb, out) = teed_chat("run-time-tokens");
+    sb.write("notes.txt", "alpha\n");
+    let mut t = sb.spawn(&["notes.txt"]);
+    chat_turn(
+        &mut t,
+        "Call the run tool with the command `sleep 64` at once, writing nothing before the call; then reply with the \
+         single word ok.",
+    );
+    let stream = std::fs::read_to_string(&out).unwrap_or_default();
+    let said = stream.lines().find_map(|l| {
+        let at = l.find("exit 0 in ")?;
+        Some(l[at..].chars().take_while(|c| *c != '\\').collect::<String>())
+    });
+    let p = prompts(&stream);
+    assert!(p.len() >= 2 && said.is_some(), "the run and a request after it: {p:?} {said:?}");
+    eprintln!(
+        "TOKENS a minute-long run's call and answer ({}): {} · prompts {p:?}",
+        said.unwrap(),
+        p[1] - p[0]
+    );
+}
+
 /// Keep-warm (`keepwarm.rs`): a ping of a fork of the conversation reads the cache the chat's turn wrote — its
 /// request's cache read is at least 95 % of the chat's last prompt, so the fork's prefix (tools, system prompt,
 /// history) is the chat's to the byte. Asked for now (`:keep-warm now`) rather than waited for 55 minutes; the

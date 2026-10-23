@@ -892,7 +892,7 @@ impl Editor {
         self.checks_on(b);
         self.share_move_joining(a, b, &[]);
         let name = self.client(b).map(|c| c.name.clone()).unwrap_or_default();
-        let secs = crate::term::duration(took.as_secs_f32());
+        let secs = crate::term::run_duration(took);
         crate::log::line(&name, "swap", &format!("switched to the new {name} after {secs}{note} — {why}"));
         self.swap_finish_a(a, Instant::now());
     }
@@ -1172,11 +1172,7 @@ impl Editor {
             None if !b.ready => "starting".into(),
             None => "checking it agrees".into(),
         };
-        Some(format!(
-            "{}: swap {} · {doing}",
-            b.name,
-            crate::term::duration(s.started.elapsed().as_secs_f32())
-        ))
+        Some(format!("{}: swap {} · {doing}", b.name, crate::term::run_duration(s.started.elapsed())))
     }
 
     /// What `:procs` says a shared server is doing — None for one folder's own.
@@ -1186,7 +1182,7 @@ impl Editor {
         let s = self.lsp.share.swaps.iter().find(|s| s.a == c.id || s.b == c.id);
         Some(match s {
             Some(s) if s.b == c.id && s.switched.is_none() => {
-                let secs = crate::term::duration(s.started.elapsed().as_secs_f32());
+                let secs = crate::term::run_duration(s.started.elapsed());
                 format!("swapping in for {of} — {secs} so far · {}", s.why)
             }
             Some(s) if s.a == c.id && s.switched.is_some() => {

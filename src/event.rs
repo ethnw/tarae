@@ -331,7 +331,10 @@ impl Editor {
         let said = crate::storewrite::pending_said(&stores).into_iter().chain(before);
         said.map(|said| match flushed {
             true => format!("tarae: not written: {said}"),
-            false => format!("tarae: not written before quitting ({}s waited): {said}", EXIT_WAIT.as_secs()),
+            false => format!(
+                "tarae: not written before quitting ({} waited): {said}",
+                crate::term::run_duration(EXIT_WAIT)
+            ),
         })
         .collect()
     }

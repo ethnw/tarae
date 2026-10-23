@@ -1189,7 +1189,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");
     // (the line's blame lands late — git on a worker; a loaded machine drew it inside the measured window)
-    t.wait_for("the line's blame", |s| s.contains("just now"));
+    t.wait_for("the line's blame", |s| s.contains(" ago · base"));
     let idle = |t: &mut Term, what: &str| {
         // Settled: what lands late (the git bar, the blame, the whole-screen redraw that follows frames sent
         // in parts — `RESTING_REDRAW`) is drawn — a second with no frame; a loaded machine takes longer, so

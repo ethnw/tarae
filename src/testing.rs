@@ -1477,8 +1477,10 @@ mod tests {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
             ed.handle_event(ev);
             let r = ed.session.test_run.as_ref().unwrap();
-            seen |=
-                r.wait.shown(Instant::now()).is_some_and(|w| w.starts_with("waiting for cargo's lock · 0:0"));
+            seen |= r
+                .wait
+                .shown(Instant::now(), crate::term::run_duration)
+                .is_some_and(|w| w.starts_with("waiting for cargo's lock · "));
         }
         assert!(seen, "the wait was the run's state");
         let r = ed.session.test_run.as_ref().unwrap();
@@ -1491,7 +1493,10 @@ mod tests {
             .unwrap();
         let second = answered.lines().nth(1).unwrap_or_default();
         assert!(
-            second.starts_with("Waited 0.") && second.contains("s for cargo's build directory lock. Ran "),
+            second
+                .strip_prefix("Waited ")
+                .and_then(|w| w.split_once(" for cargo's build directory lock. Ran "))
+                .is_some_and(|(w, _)| crate::term::reads_as_time(w)),
             "{answered}"
         );
         let line = crate::trace::LOGGED

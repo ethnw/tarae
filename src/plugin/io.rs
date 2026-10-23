@@ -654,9 +654,9 @@ impl Editor {
             && let Some(mut r) = p.procs.remove(&key)
         {
             r.pid = 0; // it ended: nothing to stop
-            let took = r.started.elapsed().as_millis();
+            let took = crate::term::run_duration(r.started.elapsed());
             let code = code.map_or("a signal".to_string(), |c| c.to_string());
-            crate::log::line(plugin, "exit", &format!("{} ended ({code}) after {took} ms", r.program));
+            crate::log::line(plugin, "exit", &format!("{} ended ({code}) after {took}", r.program));
         }
         self.plugin_queue(plugin, vec![ev], w);
     }

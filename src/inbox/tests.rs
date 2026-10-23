@@ -500,7 +500,7 @@ fn c_q_goes_to_a_finished_session_when_nothing_waits() {
     // Then third's turn end, said with how long ago
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, third);
-    assert!(ed.status.as_ref().is_some_and(|s| s.0 == "third · its turn ended 3 min ago"), "{:?}", ed.status);
+    assert!(ed.status.as_ref().is_some_and(|s| s.0 == "third · its turn ended 3m ago"), "{:?}", ed.status);
     // Nothing left
     feed(&mut ed, "<C-q>");
     assert_eq!(ed.session.id, third);
@@ -527,7 +527,8 @@ fn the_list_goes_to_the_one_picked_and_its_card_takes_the_keys() {
     assert_eq!(labels.len(), 2);
     assert!(labels[0].starts_with("third · Trust this project's settings?"), "{labels:?}");
     assert!(labels[1].starts_with("back · Claude asks 1"), "{labels:?}");
-    assert!(p.items()[0].hint.starts_with("project-trust · 6 min"), "{}", p.items()[0].hint);
+    // (its time a column, `RUN_TIME_W` wide)
+    assert!(p.items()[0].hint.starts_with("project-trust ·  6m 40s"), "{}", p.items()[0].hint);
     let rows = screen(&mut ed, 160, 30);
     assert!(rows.iter().any(|r| r.contains("enter go to it")), "its keys: {rows:#?}");
     // The second row, enter: back in front, its card up with the keys — `y` answers it there

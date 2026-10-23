@@ -63,10 +63,10 @@ pub fn installed_at(versions: &Path, version: &str) -> Option<SystemTime> {
 /// What the chat says of claude `version` installed `at`, by `now` — None while it's newer than `STALE`.
 pub fn said(version: &str, at: SystemTime, now: SystemTime) -> Option<String> {
     let age = now.duration_since(at).ok().filter(|a| *a >= STALE)?;
-    let days = age.as_secs() / (24 * 3600);
     Some(format!(
-        "claude {version} was installed {days} days ago, and tarae keeps it from updating itself — :claude-update \
-         looks for a newer one (`claude update`, run as you, outside the sandbox)"
+        "claude {version} was installed {}, and tarae keeps it from updating itself — :claude-update \
+         looks for a newer one (`claude update`, run as you, outside the sandbox)",
+        crate::term::ago(age, false)
     ))
 }
 
@@ -182,7 +182,7 @@ mod tests {
         assert!(said("2.1.296", at, at + Duration::from_secs(3600)).is_none(), "fresh");
         let old = said("2.1.296", at, at + STALE + Duration::from_secs(24 * 3600)).expect("stale");
         assert!(
-            old.contains("2.1.296") && old.contains("15 days") && old.contains(":claude-update"),
+            old.contains("2.1.296") && old.contains("installed 15d ago,") && old.contains(":claude-update"),
             "{old}"
         );
     }

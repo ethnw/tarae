@@ -29,14 +29,14 @@ impl Trace {
 
     pub fn step_at(&mut self, what: impl Into<String>, at: Instant) {
         let took = at.saturating_duration_since(self.last);
-        self.steps.push(format!("{} {}", what.into(), crate::term::duration(took.as_secs_f32())));
+        self.steps.push(format!("{} {}", what.into(), crate::term::run_duration(took)));
         self.last = self.last.max(at);
     }
 
     /// The log line.
     pub fn line(&self) -> String {
-        let total = self.last.saturating_duration_since(self.start).as_secs_f32();
-        format!("{} {} · {}", self.what, crate::term::duration(total), self.steps.join(" · "))
+        let total = self.last.saturating_duration_since(self.start);
+        format!("{} {} · {}", self.what, crate::term::run_duration(total), self.steps.join(" · "))
     }
 }
 

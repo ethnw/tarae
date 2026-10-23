@@ -1903,6 +1903,8 @@ fn chat_minimizes_while_following() {
 /// moves to the top right, out of the card's way, the card's buttons in sight.
 #[test]
 fn snapshot_follow_offer_run() {
+    // (the turn's time drawn from a clock held still)
+    crate::clock::hold();
     let mut s = Shot::new(100, 30);
     s.file("src/demo.rs", DEMO_RS);
     s.ed.config.llm.command = "sh".into();
@@ -2179,17 +2181,42 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
     let at =
         rows.iter().position(|r| r.contains("reviewer  reading…")).unwrap_or_else(|| panic!("{rows:#?}"));
     assert!(rows[at + 1].trim_start().starts_with("1m 20s · 14 reads"), "{rows:#?}");
+    // Its reads hold their column as its time counts (a running one, `timer`'s width) — the clock held for each
+    let held = crate::clock::hold();
+    let reads_at = |s: &mut Shot, ms: u64| {
+        s.ed.session.reviewer.as_mut().unwrap().started = held - Duration::from_millis(ms);
+        let mut parser = vt100::Parser::new(s.h, s.w, 0);
+        parser.process(&s.frame());
+        let row = parser.screen().rows(0, s.w).nth(at + 1).unwrap_or_default();
+        let i = row.find("· 14 reads").unwrap_or_else(|| panic!("{ms}ms: {row:?}"));
+        (row[..i].chars().count(), row)
+    };
+    let first = reads_at(&mut s, 412);
+    for ms in [1_200, 12_300, 59_900] {
+        let (col, row) = reads_at(&mut s, ms);
+        assert_eq!(col, first.0, "{ms}ms: {row:?} — 412ms: {:?}", first.1);
+    }
+    crate::clock::release();
     // Under a minute, no reads yet: seconds only
     let rv = s.ed.session.reviewer.as_mut().unwrap();
     (rv.started, rv.reads) = (Instant::now() - Duration::from_secs(7), 0);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
-    assert!(rows[at + 1].trim_start().starts_with("7s "), "{rows:#?}");
+    assert!(rows[at + 1].trim_start().starts_with("7.0s "), "{rows:#?}");
     assert!(!rows[at + 1].contains("read"), "{rows:#?}");
     // A frame as each second turns while the rail shows it — none with the rail out of sight, or once done
     let next = s.ed.tick_wanted().expect("a frame for its time");
-    assert!(next <= Duration::from_millis(1002), "{next:?}");
+    assert!(next <= Duration::from_millis(102), "a tenth under a minute: {next:?}");
+    // Calm (nothing on a clock): whole seconds, a frame as each turns
+    s.ed.config.motion = "calm".into();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    assert!(rows[at + 1].trim_start().starts_with("7s "), "{rows:#?}");
+    let next = s.ed.tick_wanted().expect("a frame for its time");
+    assert!(next > Duration::from_millis(102), "calm: a frame a second, not ten: {next:?}");
+    s.ed.config.motion = "full".into();
     s.ed.session.code_review.as_mut().unwrap().wide = true;
     s.frame();
     assert_eq!(s.ed.tick_wanted(), None, "the rail out of sight (space v z)");
@@ -2209,7 +2236,78 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
-    assert!(rows.iter().any(|r| r.contains("reviewer  reading… 1m 20s · 14 reads")), "{rows:#?}");
+    // (past the minute `timer`'s 7 cells: `1m 20s` right-aligned in them)
+    assert!(rows.iter().any(|r| r.contains("reviewer  reading…  1m 20s · 14 reads")), "{rows:#?}");
+}
+
+/// The inbox's rows, each with how long it has waited (one way a time is written, 2026-10-23) — for its screenshots
+/// (only with `TARAE_FRAMES_DIR` set: both themes there, 160×40; `cargo xtask shot` draws them).
+#[test]
+fn inbox_time_frames() {
+    use crate::offer::{Offer, What};
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    let now = crate::clock::hold();
+    let mut s = Shot::new(160, 40);
+    s.ed.offer_popups = true;
+    s.file("src/demo.rs", DEMO_RS);
+    for (n, ago) in [(1, 12_300), (2, 400_000), (3, 4_000_000)] {
+        let what = match n {
+            2 => What::ProjectTrust { hash: [7; 32] },
+            _ => What::Screen { call: crate::tools::Call::test(n) },
+        };
+        let title = if n == 2 { "Trust this project's settings?".into() } else { format!("Claude asks {n}") };
+        s.ed.push_offer(Offer::new(title, "to see the screen", "", String::new(), what));
+        let id = s.ed.offer_seq;
+        s.ed.offers.iter_mut().find(|o| o.id == id).unwrap().since = now - Duration::from_millis(ago);
+    }
+    s.ed.inbox_open();
+    s.frame();
+    s.frames_both("time-inbox");
+}
+
+/// One way an elapsed time is written (2026-10-23), for its screenshots (only with `TARAE_FRAMES_DIR` set: both
+/// themes there, 160×40; `cargo xtask shot` draws them with `TARAE_SHOT_REPLAY`): the chat's running row past an
+/// hour, the turn's end line, the rail's reviewer under a minute and past one. The clock held still.
+#[test]
+fn elapsed_time_frames() {
+    use crate::chat::{Msg, Role, State};
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    let now = crate::clock::hold();
+    let mut s = Shot::new(160, 40);
+    s.file("src/demo.rs", DEMO_RS);
+    let mut chat = crate::chat::Chat::new();
+    (chat.state, chat.unfolded) = (State::Thinking, true);
+    chat.started = now - Duration::from_millis(4_853_500);
+    chat.msgs.push(Msg::new(Role::User, "rebuild the index, then check every link in docs/", ""));
+    chat.msgs.push(Msg::new(
+        Role::Assistant,
+        "Rebuilding the index first — it takes a while on this tree.",
+        "",
+    ));
+    let generation = chat.generation();
+    s.ed.session.chat = Some(chat);
+    s.ed.session.at = crate::session::At::Chat;
+    s.frames_both("time-running");
+    crate::chat::stream_event(&mut s.ed, generation, crate::llm::StreamEv::Done(Ok(String::new())));
+    s.frames_both("time-ended");
+    let (base, text) = five_and_thirty_added();
+    for (secs, name) in [(7.4, "time-review-7s"), (80.0, "time-review-80s")] {
+        let mut s = review_of(160, 40, &base, &text);
+        let r = s.ed.session.code_review.as_ref().unwrap();
+        let mut rv = crate::reviewer::Reviewer::for_test(
+            r.root.clone(),
+            crate::reviewer::State::Reading,
+            Vec::new(),
+            "",
+        );
+        (rv.started, rv.reads) = (now - Duration::from_secs_f32(secs), 14);
+        s.ed.session.reviewer = Some(rv);
+        s.frames_both(name);
+    }
 }
 
 /// Three sessions on a `w`×16 screen, the chat open in front: `main` (in front, its reviewer reading),
@@ -2399,8 +2497,85 @@ fn snapshot_offer_left_running() {
 /// says behind what, whose, and how it stops; the task panel lists it waiting.
 #[test]
 fn snapshot_chat_run_queued_behind_a_stopped_turns() {
-    use crate::chat::{Msg, Role};
+    let mut s = queued_behind_a_stopped_turn(Duration::from_millis(432_500), 120);
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let all = parser.screen().contents();
+    assert!(all.contains("queued 1st, behind a stopped turn's run"), "{all}");
+    // (the name cut to fit, the time and the key whole)
+    assert!(all.contains("  grep -rn TODO ") && all.contains(" ·  7m 12s  space m c stop it"), "{all}");
+    s.check("chat_run_queued_behind_a_stopped_turns");
+    s.frames_both("chat_run_queued_behind_a_stopped_turns");
+}
+
+/// The empty chat's earlier conversations: their ages a column, right-aligned at the widest, each its largest unit.
+#[test]
+fn the_chats_earlier_conversations_line_up_their_ages() {
     let mut s = Shot::new(120, 30);
+    s.file("src/demo.rs", DEMO_RS);
+    let mut chat = crate::chat::Chat::new();
+    chat.unfolded = true;
+    let now = crate::chats::now();
+    chat.past = vec![
+        ("a".into(), "why does adds() fail?".into(), now - 2 * 3_600 - 1_234),
+        ("b".into(), "can average overflow?".into(), now - 16 * 86_400),
+    ];
+    s.ed.session.chat = Some(chat);
+    s.ed.session.at = crate::session::At::Chat;
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+    let end = |what: &str| {
+        let r = rows.iter().find(|r| r.contains(what)).unwrap_or_else(|| panic!("{what}: {rows:#?}"));
+        r[..r.find(" ago").unwrap()].chars().count()
+    };
+    assert!(rows.iter().any(|r| r.contains("why does adds() fail?") && r.contains("   2h ago")), "{rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("can average overflow?") && r.contains("  16d ago")), "{rows:#?}");
+    assert_eq!(end("why does adds"), end("can average"), "{rows:#?}");
+}
+
+/// The stopped turn's run counts before the key that stops it: the key holds its column as the time gains a digit
+/// (`412ms` → `1.2s` → `12.3s`; `1m 05s` → `10m 03s` → `1h 20m`) — moved once, at the minute, as a clock gaining
+/// one. Calm: whole seconds, in the same column.
+#[test]
+fn a_stopped_turns_run_keeps_its_key_still_as_it_counts() {
+    let column = |ms: u64, motion: &str| {
+        // (a chat wide enough for the run's whole name: nothing cut takes up what the time gives back)
+        let mut s = queued_behind_a_stopped_turn(Duration::from_millis(ms), 200);
+        s.ed.config.motion = motion.into();
+        let mut parser = vt100::Parser::new(s.h, s.w, 0);
+        parser.process(&s.frame());
+        let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
+        let row =
+            rows.iter().find(|r| r.contains("space m c stop it")).unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(row.contains("grep -rn TODO src ·"), "the name whole: {row}");
+        let at = row.find("space m c").unwrap();
+        (row[..at].chars().count(), row.trim().to_string())
+    };
+    let first = column(412, "full");
+    for (ms, motion) in [(1_200, "full"), (12_300, "full"), (59_900, "full"), (400, "calm"), (4_700, "calm")]
+    {
+        assert_eq!(
+            column(ms, motion).0,
+            first.0,
+            "{ms}ms {motion}: {:?} — {:?}",
+            column(ms, motion).1,
+            first.1
+        );
+    }
+    let past = column(65_000, "full");
+    assert_eq!(past.0, first.0 + 2, "the minute: two cells more, once — {past:?}");
+    for ms in [603_000, 4_853_500] {
+        assert_eq!(column(ms, "full").0, past.0, "{ms}ms: {:?} — {:?}", column(ms, "full").1, past.1);
+    }
+    assert!(column(4_700, "calm").1.contains(" ·    4s  space m c"), "calm: whole seconds");
+}
+
+/// The chat's run row queued behind a run a stopped turn left going, that run `ran` so far (the clock held), on a
+/// screen `w` wide.
+fn queued_behind_a_stopped_turn(ran: Duration, w: u16) -> Shot {
+    use crate::chat::{Msg, Role};
+    let mut s = Shot::new(w, 30);
     s.file("src/demo.rs", DEMO_RS);
     let cwd = std::env::temp_dir();
     let task = crate::task::Task {
@@ -2411,7 +2586,7 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     let mut r = crate::task::Run::for_test(task);
     (r.state, r.by_claude) = (crate::task::State::Running, true);
     // (its time so far in its header: the clock held still while the frame is drawn)
-    r.started = crate::clock::hold() - Duration::from_millis(432_500);
+    r.started = crate::clock::hold() - ran;
     r.last_output = Instant::now();
     s.ed.session.task_run = Some(r);
     let mut chat = crate::chat::Chat::new();
@@ -2433,14 +2608,7 @@ fn snapshot_chat_run_queued_behind_a_stopped_turns() {
     let job = crate::tools::Job::Command("cargo test -p tarae".into(), cwd);
     let who = crate::tools::For::Claude(call);
     crate::queued::push(&mut s.ed, crate::queued::What::Guarded { who, job, ride: Default::default() });
-    let mut parser = vt100::Parser::new(s.h, s.w, 0);
-    parser.process(&s.frame());
-    let all = parser.screen().contents();
-    assert!(all.contains("queued 1st, behind a stopped turn's run"), "{all}");
-    // (the name cut to fit, the time and the key whole)
-    assert!(all.contains("  grep -rn TODO ") && all.contains(" · 7:12  space m c stop it"), "{all}");
-    s.check("chat_run_queued_behind_a_stopped_turns");
-    s.frames_both("chat_run_queued_behind_a_stopped_turns");
+    s
 }
 
 /// The chat's session tabs have a row of air under them — the layout's, not the first message's: scrolled to the

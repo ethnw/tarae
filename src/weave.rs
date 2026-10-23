@@ -489,10 +489,10 @@ fn ask(ed: &mut Editor, id: DocId, key: Key) {
         let r = work(&top, (&rel, &home), branch, tip, ins);
         let line = match &r {
             Ok(w) => format!(
-                "{rel}: {} sides, {} conflicts — {} ms",
+                "{rel}: {} sides, {} conflicts — {}",
                 w.sides.len(),
                 w.merge.conflicts.len(),
-                crate::clock::since(started).as_millis()
+                crate::term::run_duration(crate::clock::since(started))
             ),
             Err(e) => format!("{rel}: {e}"),
         };

@@ -12,7 +12,7 @@
 09   8     for word in text.split_whitespace() {
 10   9     │   *counts.entry(word).or_insert(0) += 1;
 11  10     }                                ╭─ Quiet: Claude's command ──────────────────────────────╮
-12  11     counts                           │ No output for 14 min, 0% CPU — Claude's command cargo  │
+12  11     counts                           │ No output for 14m 00s, 0% CPU — Claude's command cargo │
 13  12 }                                    │ xtask linux test in the task panel. Claude's turn      │
 14  13                                      │ waits on it, and only you can stop it.                 │
 15  14 fn main() {                          │                                                        │

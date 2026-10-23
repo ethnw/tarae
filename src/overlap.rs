@@ -575,11 +575,11 @@ fn round(ws: Vec<Ws>, kept: &HashMap<(String, String), Arc<Vec<Conflict>>>, own:
         }
     }
     let line = format!(
-        "{} workspaces, {} taken, {merged} merged, {} overlaps — {} ms",
+        "{} workspaces, {} taken, {merged} merged, {} overlaps — {}",
         snaps.len(),
         ws.iter().filter(|w| w.take).count(),
         now.len(),
-        crate::clock::since(started).as_millis()
+        crate::term::run_duration(crate::clock::since(started))
     );
     crate::log::line("overlap", "info", &line);
     Round { snaps, failed, unknown, renewed, now, merges, merged, lock, held: true }

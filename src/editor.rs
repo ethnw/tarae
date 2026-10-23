@@ -1403,12 +1403,12 @@ impl Editor {
                 // Stamp before reading — a change during the read is caught by the next watch round
                 let disk = crate::disk::stamp(&p);
                 let result = crate::document::read_file(&p);
-                let ms = started.elapsed().as_millis();
+                let took = started.elapsed();
                 move |ed: &mut Editor| {
                     if let Some(d) = ed.docs.iter_mut().find(|d| d.id == id) {
                         d.disk = disk;
                     }
-                    ed.finish_loading(id, result, ms)
+                    ed.finish_loading(id, result, took)
                 }
             });
             Document::placeholder(id, &path)
@@ -1435,7 +1435,7 @@ impl Editor {
         Ok(())
     }
 
-    fn finish_loading(&mut self, id: DocId, result: Result<ropey::Rope>, ms: u128) {
+    fn finish_loading(&mut self, id: DocId, result: Result<ropey::Rope>, took: std::time::Duration) {
         let Some(i) = self.docs.iter().position(|d| d.id == id) else { return }; // closed while loading
         match result {
             Ok(text) => {
@@ -1454,8 +1454,9 @@ impl Editor {
                 self.undo_restore(id);
                 self.qlist_mark_open();
                 self.set_status(format!(
-                    "{} loaded — {mb:.1} MB in {ms} ms",
-                    self.docs[i].display_name(&self.session.root)
+                    "{} loaded — {mb:.1} MB in {}",
+                    self.docs[i].display_name(&self.session.root),
+                    crate::term::run_duration(took)
                 ));
                 self.plugin_event(crate::plugin::PluginEvent::Opened, id);
                 self.recovery_loaded(id);
@@ -2008,12 +2009,7 @@ impl Editor {
         if self.messages.is_empty() {
             return self.set_status("no messages yet");
         }
-        let ago = |at: std::time::Instant| match at.elapsed().as_secs() {
-            s if s < 10 => "just now".to_string(),
-            s if s < 60 => format!("{s} s ago"),
-            s if s < 3600 => format!("{} min ago", s / 60),
-            s => format!("{} h ago", s / 3600),
-        };
+        let ago = |at: std::time::Instant| crate::term::ago(at.elapsed(), true);
         let items = self
             .messages
             .iter()
@@ -3031,7 +3027,8 @@ impl Editor {
             || self.dap.as_ref().is_some_and(|d| d.state == crate::dap::State::Building)
             || (run && slot_drawn)
             || self.offer_busy();
-        // (the wave held still where nothing moves on a clock: a frame a second, for the time waited)
+        // (the wave held still where nothing moves on a clock: a frame a second, for the time waited — its timers
+        // say whole seconds there, `term::running`)
         let next = if waiting && !self.unfocused {
             let elapsed = anim_clock().elapsed();
             Some(match self.moving() {
@@ -3044,8 +3041,9 @@ impl Editor {
         } else {
             self.toast_wake()
         };
-        // The reviewer reading, its time on the review rail drawn last frame: a frame as each second turns (none
-        // while it waits in the line: no time runs)
+        // The reviewer reading, its time on the review rail drawn last frame: a frame as each tenth turns under a
+        // minute, each second after — as `term::running` writes it; where nothing moves on a clock it writes whole
+        // seconds, a frame each (none while it waits in the line: no time runs)
         let reviewer = self
             .session
             .reviewer
@@ -3056,8 +3054,10 @@ impl Editor {
             // (its time is drawn on the rail only — the status line's segment has none: an idle tarae draws nothing)
             .filter(|_| self.session.code_review.is_some())
             .map(|rv| {
-                let into = crate::clock::since(rv.started).subsec_nanos();
-                std::time::Duration::from_nanos(1_000_000_000 - u64::from(into))
+                let read = crate::clock::since(rv.started);
+                let step: u32 =
+                    if read.as_secs() < 60 && self.moving() { 100_000_000 } else { 1_000_000_000 };
+                std::time::Duration::from_nanos(u64::from(step - read.subsec_nanos() % step))
                     + std::time::Duration::from_millis(2)
             })
             .filter(|_| !self.unfocused);
@@ -15106,7 +15106,7 @@ mod tests {
             vec![file],
         ));
         crate::codereview::show(&mut ed, 0, false); // the base is asked for over the placeholder
-        ed.finish_loading(id, Ok(ropey::Rope::from_str("a\nB\nc\n")), 0);
+        ed.finish_loading(id, Ok(ropey::Rope::from_str("a\nB\nc\n")), std::time::Duration::ZERO);
         settle_until(&mut ed, |ed| {
             ed.doc().review_base.is_some() && ed.doc().git_version == ed.doc().version()
         });
@@ -17099,7 +17099,7 @@ q = \"delete_selection\"\n",
         ed.docs.push(Document::placeholder(gone, &dir.join("big.txt")));
         ed.current = 1;
         ed.handle_event(crate::event::Event::Resize);
-        ed.finish_loading(gone, Err(anyhow::anyhow!("boom")), 0);
+        ed.finish_loading(gone, Err(anyhow::anyhow!("boom")), std::time::Duration::ZERO);
         assert!(ed.docs.iter().all(|d| d.id != gone));
         assert!(ed.session.views.iter().all(|v| v.doc == id), "panes moved back to a.txt");
         assert_eq!(ed.doc().id, id);
@@ -17755,7 +17755,7 @@ q = \"delete_selection\"\n",
         let id = ed.alloc_id();
         ed.docs.push(Document::placeholder(id, &path));
         ed.current = 1;
-        ed.finish_loading(id, Ok(ropey::Rope::from_str("one\ntwo\nthree\n")), 0);
+        ed.finish_loading(id, Ok(ropey::Rope::from_str("one\ntwo\nthree\n")), std::time::Duration::ZERO);
         assert_eq!(ed.doc().selection().primary().head, 4);
         assert_eq!(ed.doc().top, 1);
     }

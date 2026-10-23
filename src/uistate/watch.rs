@@ -272,7 +272,7 @@ pub fn turn(ed: &mut Editor, what: &str, calls: usize, took: Option<std::time::D
     let (id, name) = (super::session_id(ed.session.id), ed.session.label().to_string());
     let said = match (what, took) {
         ("ended", Some(t)) => {
-            format!("{id} {name}: Claude's turn ended — {calls} calls, {:.1}s", t.as_secs_f32())
+            format!("{id} {name}: Claude's turn ended — {calls} calls, {}", crate::term::run_duration(t))
         }
         _ => format!("{id} {name}: Claude's turn {what}"),
     };

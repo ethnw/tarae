@@ -472,8 +472,8 @@ impl Editor {
     /// that it's over (a run) — or that there's no such element.
     pub fn ui_gone_said(&self, id: &str) -> String {
         if let Some(g) = self.ui_gone.iter().rev().find(|g| g.id == id) {
-            let ago = crate::term::duration(g.at.elapsed().as_secs_f32());
-            return format!("{id} went {ago} ago: {} — {}", g.how, g.title);
+            let ago = crate::term::ago(g.at.elapsed(), false);
+            return format!("{id} went {ago}: {} — {}", g.how, g.title);
         }
         match numbered(id) {
             Some(("toast", n)) if n >= 1 && n <= self.said => {

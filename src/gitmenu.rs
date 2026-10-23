@@ -205,26 +205,13 @@ pub fn parse_blame(out: &str) -> Vec<Option<Blame>> {
     lines
 }
 
-/// `3 days ago` — the largest unit that fits.
-pub fn ago(secs: i64) -> String {
-    let s = secs.max(0);
-    let (n, unit) = match s {
-        0..60 => return "just now".into(),
-        60..3600 => (s / 60, "minute"),
-        3600..86_400 => (s / 3600, "hour"),
-        86_400..2_592_000 => (s / 86_400, "day"),
-        2_592_000..31_536_000 => (s / 2_592_000, "month"),
-        _ => (s / 31_536_000, "year"),
-    };
-    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
-}
-
-/// What the cursor line's blame says at the line end.
+/// What the cursor line's blame says at the line end: who, how long ago (`term::ago` — `3d ago`, `2mo ago`), what.
 pub fn blame_text(b: &Blame, now: i64) -> String {
     if b.uncommitted {
         return "not committed yet".into();
     }
-    format!("{}, {} · {}", b.author, ago(now - b.time), b.summary)
+    let age = std::time::Duration::from_secs(u64::try_from(now - b.time).unwrap_or(0));
+    format!("{}, {} · {}", b.author, crate::term::ago(age, true), b.summary)
 }
 
 /// `git blame --porcelain` of `text` as file `path`'s — in its repository as `places` finds it
@@ -672,8 +659,7 @@ mod tests {
         let b = parse_blame(&out);
         assert_eq!(b.len(), 3);
         assert_eq!(b[1].as_ref().map(|b| b.author.as_str()), Some("Kim"), "metadata only on the first line");
-        assert_eq!(blame_text(b[0].as_ref().unwrap(), 1000 + 3 * 86_400), "Kim, 3 days ago · Add a");
+        assert_eq!(blame_text(b[0].as_ref().unwrap(), 1000 + 3 * 86_400), "Kim, 3d ago · Add a");
         assert_eq!(blame_text(b[2].as_ref().unwrap(), 0), "not committed yet");
-        assert_eq!(ago(90), "1 minute ago");
     }
 }

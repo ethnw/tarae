@@ -419,7 +419,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                     println!(
                         "  {} {name:<18} {}",
                         paint("32", "●"),
-                        paint("2", &format!("{:.1}s", took.as_secs_f32()))
+                        paint("2", &crate::term::run_duration(took))
                     )
                 }
                 Progress::Skipped { name } => {
@@ -433,7 +433,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
             let failed = failed.into_inner().unwrap();
             if failed.is_empty() {
-                println!("{} in {:.0}s", paint("1;32", "done"), started.elapsed().as_secs_f32());
+                println!("{} in {}", paint("1;32", "done"), crate::term::run_duration(started.elapsed()));
             } else {
                 println!("{} {} failed: {}", paint("1;33", "done"), failed.len(), failed.join(" "));
                 println!(

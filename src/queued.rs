@@ -269,7 +269,7 @@ fn push_at(ed: &mut Editor, mut what: What, front: bool, trace: Option<crate::tr
         What::Guarded { ride, .. } => ride.queued.take(),
         _ => None,
     };
-    let mut queued = earlier.unwrap_or_else(|| Queued { since: Instant::now(), behind: Vec::new() });
+    let mut queued = earlier.unwrap_or_else(|| Queued { since: crate::clock::now(), behind: Vec::new() });
     if let Some(h) = &holder
         && queued.behind.last() != Some(h)
     {
@@ -420,12 +420,13 @@ pub struct Row {
 }
 
 impl Row {
-    /// `queued · 2nd · behind cargo test · 0:12` — without `behind` (a hint beside it names it already):
-    /// `queued · 2nd · 0:12`. The time as wide as it stays for ten minutes.
-    pub fn said(&self, behind: bool) -> String {
+    /// `queued · 2nd · behind cargo test · 12.3s` — without `behind` (a hint beside it names it already):
+    /// `queued · 2nd · 12.3s`. The time a running one (`term::timer`, `calm` its whole seconds): it doesn't slide as it
+    /// counts.
+    pub fn said(&self, behind: bool, calm: bool) -> String {
         let holder =
             self.behind.as_ref().filter(|_| behind).map(|h| format!(" · behind {h}")).unwrap_or_default();
-        format!("queued · {}{holder} · {:>4}", ordinal(self.pos), crate::waits::clock(self.waited))
+        format!("queued · {}{holder} · {}", ordinal(self.pos), crate::term::timer(self.waited, calm))
     }
 }
 
@@ -474,8 +475,9 @@ pub struct ChatWait {
 
 /// Where session `l`'s Claude's first waiting call is in line and behind what, for the chat's live row
 /// (frictions26: a run a stopped turn left going held the next turn's, and the chat said nothing). One no turn
-/// waits on any more is said apart, with how it stops.
-pub fn chat_said(l: &Session, now: Instant) -> Option<ChatWait> {
+/// waits on any more is said apart, with how it stops. Its times running ones (`term::timer`, `calm` its whole
+/// seconds): the key after them doesn't slide as they count.
+pub fn chat_said(l: &Session, now: Instant, calm: bool) -> Option<ChatWait> {
     let chat = l.chat.as_ref().filter(|c| c.busy())?;
     let (slot, pos, n) = [Slot::Task, Slot::Tests].into_iter().find_map(|slot| {
         line(&l.runs_next, slot)
@@ -483,7 +485,7 @@ pub fn chat_said(l: &Session, now: Instant) -> Option<ChatWait> {
             .find(|(_, n)| n.what.calls().iter().any(|c| c.generation() == chat.generation()))
             .map(|(i, n)| (slot, i + 1, n))
     })?;
-    let waited = crate::waits::clock(now.saturating_duration_since(n.queued.since));
+    let waited = crate::term::timer(now.saturating_duration_since(n.queued.since), calm);
     let said = |s: String| ChatWait { said: s, left: None };
     let Some(holder) = holder(l, slot) else {
         return Some(said(format!("queued {} · {waited}", ordinal(pos))));
@@ -495,7 +497,7 @@ pub fn chat_said(l: &Session, now: Instant) -> Option<ChatWait> {
     };
     Some(match orphan {
         Some(started) => {
-            let ran = crate::waits::clock(now.saturating_duration_since(started));
+            let ran = crate::term::timer(now.saturating_duration_since(started), calm);
             let stop = if slot == Slot::Task { "space m c" } else { "space x c" };
             ChatWait {
                 said: format!("queued {}, behind a stopped turn's run", ordinal(pos)),
@@ -546,7 +548,8 @@ impl Editor {
             for slot in [Slot::Task, Slot::Tests] {
                 let ids = line(&l.runs_next, slot).map(|n| n.id);
                 for (id, r) in ids.zip(rows(l, slot, now)) {
-                    let said = r.said(true).trim_start_matches("queued · ").to_string();
+                    // (whole seconds: `:procs` looks again each second, a tenth would stand still between)
+                    let said = r.said(true, true).trim_start_matches("queued · ").to_string();
                     out.push((l.id, id, r.label, said));
                 }
             }
@@ -644,7 +647,7 @@ mod tests {
         assert_eq!(ed.session.runs_next.len(), 1, "in line");
         assert_eq!(ed.doing(&ed.session), crate::session::Doing::Queued { pos: 1 });
         let s = screen(&mut ed);
-        assert!(s.contains("claude · sh fast.sh   queued · 1st · behind sh slow.sh · 0:00"), "{s}");
+        assert!(s.contains("claude · sh fast.sh   queued · 1st · behind sh slow.sh · "), "{s}");
         let procs = ed.procs_queued();
         assert!(
             matches!(&procs[..], [(_, _, l, w)] if l == "claude · sh fast.sh" && w.starts_with("1st · behind sh slow.sh"))
@@ -658,11 +661,11 @@ mod tests {
         let second = text.lines().nth(1).unwrap_or_default();
         assert!(text.starts_with("exit 0"), "{text}");
         assert!(
-            second.starts_with("Waited ") && second.contains("s queued behind sh slow.sh. Ran "),
+            second.starts_with("Waited ") && second.contains(" queued behind sh slow.sh. Ran "),
             "{text}"
         );
-        let waited: f32 = second["Waited ".len()..].split('s').next().unwrap().parse().unwrap();
-        assert!(waited > 0.4, "{text}");
+        let waited = second["Waited ".len()..].split(" queued").next().and_then(crate::term::time_read);
+        assert!(waited.unwrap() > std::time::Duration::from_millis(400), "{text}");
         // The first's answer has no wait in it
         assert!(!answered(1).unwrap().unwrap().contains("Waited"));
         assert!(ed.session.runs_next.is_empty() && ed.doing(&ed.session) == crate::session::Doing::Working);
@@ -855,9 +858,16 @@ mod tests {
             matches!(ed.session.runs_next.front().map(|n| &n.what), Some(super::What::Task(_))),
             "first in line"
         );
+        // (its time read at a pinned clock: how long it has waited, as a running time says it)
+        let held = crate::clock::hold();
+        let waited = held.saturating_duration_since(ed.session.runs_next[0].queued.since);
         let s = screen(&mut ed);
+        crate::clock::release();
         let row = s.lines().find(|l| l.trim_start().starts_with("mine ")).unwrap_or_default();
-        assert!(row.contains("   queued · 1st · 0:00"), "{s}");
+        let said = format!("   queued · 1st · {}", crate::term::timer(waited, false));
+        assert!(row.contains(&said), "{said:?} in {s}");
+        let time = row.split("queued · 1st · ").nth(1).and_then(|t| t.trim_start().split("  ").next());
+        assert!(time.is_some_and(crate::term::reads_as_time), "{row}");
         assert!(s.contains("C-w j  enter run now — stops sh slow.sh"), "{s}");
         assert!(s.contains("claude · sh fast.sh   queued · 2nd"), "{s}");
         pump(&mut ed, "all ran", |ed| order(&dir).len() == 3 && !running(ed));
@@ -910,18 +920,18 @@ mod tests {
         crate::chat::turn_ended(&mut ed, generation, true);
         let o = ed.offers.first().expect("a card");
         assert_eq!(o.kind(), "left-running");
-        assert!(o.question.contains("sh slow.sh — the task panel, running 0:0"), "{}", o.question);
+        assert!(o.question.contains("sh slow.sh — the task panel, running "), "{}", o.question);
         assert!(!o.weighty(), "light: no settling");
         assert!(running(&ed), "not cut short");
         // The next turn's run waits behind it — the chat says so
         ed.session.chat.as_mut().unwrap().state = crate::chat::State::Thinking;
         run(&mut ed, generation, 2, "sh fast.sh");
-        let said = super::chat_said(&ed.session, Instant::now()).unwrap();
+        let said = super::chat_said(&ed.session, Instant::now(), false).unwrap();
         assert_eq!(said.said, "queued 1st, behind a stopped turn's run");
         assert!(
-            said.left
-                .as_ref()
-                .is_some_and(|(l, ran, k)| l == "sh slow.sh" && ran.starts_with("0:0") && *k == "space m c"),
+            said.left.as_ref().is_some_and(|(l, ran, k)| l == "sh slow.sh"
+                && crate::term::reads_as_time(ran.trim_start())
+                && *k == "space m c"),
             "{said:?}"
         );
         // `y`: stopped, and the one in line runs

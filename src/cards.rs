@@ -478,7 +478,7 @@ pub fn line(
         true => same,
         false => format!("{same} · warn={}", asked.warn.join(",")),
     };
-    let took = |at: Instant| crate::term::duration(now.saturating_duration_since(at).as_secs_f32());
+    let took = |at: Instant| crate::term::run_duration(now.saturating_duration_since(at));
     let drawn = o.drawn.get().map_or_else(|| "not drawn".to_string(), took);
     let run = asked.run.map(|r| format!(" · run#{r}")).unwrap_or_default();
     let answer = match by.filter(|b| b.starts_with("shuttle:")) {

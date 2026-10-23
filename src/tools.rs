@@ -605,8 +605,8 @@ impl Waited<'_> {
     fn line(self, wait: &crate::waits::Waiting, took: Option<Duration>) -> String {
         let joined = match self {
             Waited::Joined(d) => format!(
-                "Joined a run of the same command already under way ({:.1}s in) — this is its result.\n",
-                d.as_secs_f32()
+                "Joined a run of the same command already under way ({} in) — this is its result.\n",
+                crate::term::run_duration(d)
             ),
             _ => String::new(),
         };
@@ -770,7 +770,7 @@ pub fn left_running(ed: &mut Editor, left: Vec<Left>) {
                 crate::queued::Slot::Task => "the task panel",
                 crate::queued::Slot::Tests => "the test pane",
             };
-            let ran = crate::waits::clock(now.saturating_duration_since(r.started));
+            let ran = crate::term::run_duration(now.saturating_duration_since(r.started));
             format!("  {} — {at}, running {ran}", r.label)
         })
         .collect();
@@ -4687,7 +4687,7 @@ const FILTERED_SAID: std::time::Duration = std::time::Duration::from_secs(60);
 /// another's lock), the places it pointed at (from `root`, the project's), its output.
 fn run_report(root: &Path, r: &crate::task::Run, places: &[crate::quickfix::Item], waited: Waited) -> String {
     use crate::task::State;
-    let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
+    let took = r.took.map(|d| format!(" in {}", crate::term::run_duration(d))).unwrap_or_default();
     let verdict = match r.state {
         State::Passed => "exit 0".to_string(),
         State::Failed(Some(code)) => format!("exit {code}"),
@@ -4854,7 +4854,7 @@ const TAIL: usize = 80;
 /// output's tail when the run failed with no failed test to show for it (a build error). Paths from `root`;
 /// `waited`: its wait before it ran.
 fn report(root: &Path, r: &TestRun, waited: Waited) -> String {
-    let took = r.took.map(|d| format!(" in {:.1}s", d.as_secs_f32())).unwrap_or_default();
+    let took = r.took.map(|d| format!(" in {}", crate::term::run_duration(d))).unwrap_or_default();
     let verdict = match r.state {
         RunState::Passed => "passed".to_string(),
         RunState::Failed(Some(code)) => format!("failed (exit {code})"),
@@ -5953,7 +5953,7 @@ mod tests {
         let mut vt = vt100::Parser::new(36, 140, 0);
         vt.process(&bytes);
         let s = vt.screen().contents();
-        assert!(s.contains("waiting for cargo's lock · 0:0"), "{s}");
+        assert!(s.contains("waiting for cargo's lock · "), "{s}");
         assert!(ed.session.task_run.as_ref().unwrap().output.is_empty(), "cargo's line isn't output");
         // Its end: the answer says how much was the wait
         let running = |ed: &crate::editor::Editor| {
@@ -5967,12 +5967,13 @@ mod tests {
         let said = said();
         let text = said.expect("answered").1.unwrap();
         let second = text.lines().nth(1).unwrap_or_default();
-        let waited: f32 = second
+        let waited = second
             .strip_prefix("Waited ")
-            .and_then(|w| w.split_once("s for cargo's build directory lock. Ran "))
-            .and_then(|(w, _)| w.parse().ok())
+            .and_then(|w| w.split_once(" for cargo's build directory lock. Ran "))
+            .and_then(|(w, _)| crate::term::time_read(w))
             .unwrap_or_else(|| panic!("{text}"));
-        assert!(text.starts_with("exit 0") && (0.4..3.0).contains(&waited), "{text}");
+        let (low, high) = (std::time::Duration::from_millis(400), std::time::Duration::from_secs(3));
+        assert!(text.starts_with("exit 0") && (low..high).contains(&waited), "{text}");
         let output = text.split("\nOutput:\n").nth(1).unwrap_or_default();
         assert!(output.contains("Compiling stand-in") && !output.contains("Blocking"), "{text}");
         // The log's line: each step on its way, in order

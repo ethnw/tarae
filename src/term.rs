@@ -2548,7 +2548,8 @@ fn draw_task_panel(
     let steps = preflight_of(editor, r);
     let running = matches!(r.state, State::Running);
     // (waiting on what isn't its own — another session's cargo, likely — not stuck: #10, `waits.rs`)
-    let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
+    let calm = !editor.moving();
+    let wait = r.wait.shown(std::time::Instant::now(), |d| timer(d, calm)).filter(|_| running);
     // (printing nothing for minutes: said after its time — #157)
     let silent = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten();
     let follows = wait.is_some() || silent.is_some();
@@ -2558,7 +2559,9 @@ fn draw_task_panel(
             format!("   step {} of {}", at.max(1), p.steps.len())
         }
         // (under way is said by the wave by its name — the badge; here, the time it has run, which becomes its whole)
-        (State::Running, _, None) => format!("   {}", run_time(crate::clock::since(r.started), follows)),
+        (State::Running, _, None) => {
+            format!("   {}", run_time(crate::clock::since(r.started), follows, calm))
+        }
         (_, Some(d), _) => format!("   {}", run_duration(d)),
         _ => String::new(),
     };
@@ -2906,7 +2909,7 @@ fn draw_queued(
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
     let key = Style { bold: true, ..dim };
-    let rows = crate::queued::rows(&editor.session, slot, std::time::Instant::now());
+    let rows = crate::queued::rows(&editor.session, slot, crate::clock::now());
     let shown = if rows.len() > n { n - 1 } else { rows.len() };
     let room = w.saturating_sub(PAD + 2);
     // (the labels as one column: where each is in line starts under the one above)
@@ -2932,9 +2935,9 @@ fn draw_queued(
         let hint_w: usize = hint.iter().map(|s| s.text.width()).sum();
         // (the hint names what it waits behind: then the row doesn't — the hint keeps its room while the
         // label keeps 12, else it folds away and the row says it again)
-        let short = r.said(false).width();
+        let short = r.said(false, !editor.moving()).width();
         let keyed = hint_w > 0 && room > 12 + 3 + short + 3 + hint_w;
-        let said = r.said(!keyed);
+        let said = r.said(!keyed, !editor.moving());
         let label_room = room.saturating_sub(said.width() + 3 + if keyed { hint_w + 3 } else { 0 });
         let col = label_w.min(label_room.max(8));
         let label = fit_ellipsis(&r.label, col);
@@ -3536,11 +3539,12 @@ fn draw_test_panel(
     let running = matches!(r.state, RunState::Running);
     // (under way is said by the wave by its name — the badge; here, the time it has run, which becomes its whole —
     // then what it waits on that isn't its own: another session's cargo, likely, #10)
-    let wait = r.wait.shown(std::time::Instant::now()).filter(|_| running);
+    let calm = !editor.moving();
+    let wait = r.wait.shown(std::time::Instant::now(), |d| timer(d, calm)).filter(|_| running);
     let silent = running.then(|| r.wait.silent(r.last_output, std::time::Instant::now())).flatten();
     let follows = wait.is_some() || silent.is_some();
     let when = match (&r.state, r.took) {
-        (RunState::Running, _) => format!("   {}", run_time(crate::clock::since(r.started), follows)),
+        (RunState::Running, _) => format!("   {}", run_time(crate::clock::since(r.started), follows, calm)),
         (_, Some(d)) => format!("   {}", run_duration(d)),
         _ => String::new(),
     };
@@ -3721,7 +3725,9 @@ fn draw_test_panel(
             let (g, st) = mark(c.status);
             apply(out, Style { bg: row_bg.bg, ..st })?;
             queue!(out, Print(format!(" {g} ")))?;
-            let secs = c.secs.filter(|s| *s >= 0.001).map(duration).unwrap_or_default();
+            let secs =
+                c.secs.filter(|s| *s >= 0.001).and_then(|s| std::time::Duration::try_from_secs_f32(s).ok());
+            let secs = secs.map(run_duration).unwrap_or_default();
             let room = left_w.saturating_sub(5 + secs.width() + 2);
             let nm = fit_ellipsis(&short[idx], room);
             apply(
@@ -10799,12 +10805,6 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     Ok(())
 }
 
-/// How long something took (seconds), the one way it's written: `412ms` under a second, else `1.2s`. Takes
-/// the plain number — test reports can say anything (`Infinity`), and a `Duration` would panic on it.
-pub fn duration(s: f32) -> String {
-    if s < 1.0 { format!("{:.0}ms", s * 1000.0) } else { format!("{s:.1}s") }
-}
-
 /// Waiting animation: a three-cell equalizer wave (`▂▅▇` …) — only block chars in common monospace fonts.
 /// A step a `TICK` on the animation's clock (`editor::anim_step`): every wave on screen moves together, a
 /// step a frame — held still at its first where nothing moves on a clock (`editor.motion`, `Editor::moving`).
@@ -10833,28 +10833,123 @@ fn pulse(editor: &Editor) -> String {
 /// said after it (`follows`: a wait, a silence) filled out to `RUN_TIME_W` cells on its right (a header's details drop
 /// their leading blanks: `fold_details`) so that never slides as it counts — else the line runs on right after it,
 /// no gap in it.
-fn run_time(d: std::time::Duration, follows: bool) -> String {
+fn run_time(d: std::time::Duration, follows: bool, calm: bool) -> String {
     match follows {
-        true => pad_right(&run_duration(d), RUN_TIME_W),
-        false => run_duration(d),
+        true => pad_right(&running(d, calm), RUN_TIME_W),
+        false => running(d, calm),
     }
 }
 
-/// `59m 59s` — the widest `run_duration` is under ten hours: a run's time keeps this width (`run_time`).
+/// A running time at a row's right end — the chat's turn, a follow card's, an ask's, a queued row's, a wait's:
+/// `running`'s, right-aligned so what's before or after it doesn't slide as it counts — in 5 cells under a minute
+/// (`999ms`, `59.9s`), `RUN_TIME_W` past it: moved once, at the minute, as a clock gaining a digit (a narrow title
+/// keeps its words the first minute).
+pub fn timer(d: std::time::Duration, calm: bool) -> String {
+    let said = running(d, calm);
+    pad_left(&said, if d.as_secs_f32() < 59.95 { 5 } else { RUN_TIME_W })
+}
+
+/// A time still running, as it reads now: `run_duration`'s — but where nothing moves on a clock (`calm`: `editor.motion`
+/// calm or none, `!Editor::moving`) whole seconds under a minute (`4s`): its frames come a second apart there
+/// (`Editor::tick_wanted`), and a tenth would stand still between them (`3.7s`, `4.7s` …).
+pub fn running(d: std::time::Duration, calm: bool) -> String {
+    said_duration(d, calm)
+}
+
+/// `59m 59s` — the widest `run_duration` is under a hundred days: a run's time keeps this width (`run_time`).
 const RUN_TIME_W: usize = 7;
 
-/// How long a run took, or has run, the one way it's written — a task's, a preflight's and its steps', the tests':
-/// `duration`'s under a minute (`412ms`, `8.3s`), then minutes and seconds (`7m 12s`), then hours and minutes
-/// (`1h 32m`) — never wider than `RUN_TIME_W` under ten hours.
+/// How long something took, or has run, the one way a time is written for whoever reads it — a person or Claude: a
+/// run's, a turn's, a review's, a wait's. Milliseconds under a second (`412ms`), tenths under a minute (`8.3s`),
+/// then minutes and seconds (`7m 12s`), hours and minutes (`1h 32m`), days and hours (`2d 04h`) — never wider than
+/// `RUN_TIME_W` under a hundred days. A number that may not be a time (a test report's `Infinity`) goes through `Duration::try_from_secs_f32`
+/// first: what isn't one isn't drawn. `reads_as_time` knows what this writes.
 pub fn run_duration(d: std::time::Duration) -> String {
+    said_duration(d, false)
+}
+
+/// `run_duration`'s, or with `seconds` whole seconds under a minute (`0s`, `4s`, `59s` — `running`'s calm form).
+fn said_duration(d: std::time::Duration, seconds: bool) -> String {
     let s = d.as_secs_f32();
-    // (what `duration` would round up to `60.0s` reads as the minute it is)
+    // (what would round up to `1000ms` reads as `1.0s`, and `60.0s` as the minute it is)
     let whole = d.as_secs().max(60);
+    let (s, tenths) = if seconds { (s.trunc(), 0) } else { (s, 1) };
     match s {
-        _ if s < 59.95 => duration(s),
+        _ if s < 0.9995 && !seconds => format!("{:.0}ms", s * 1000.0),
+        _ if s < 59.95 => format!("{s:.tenths$}s"),
         _ if whole < 3600 => format!("{}m {:02}s", whole / 60, whole % 60),
-        _ => format!("{}h {:02}m", whole / 3600, whole / 60 % 60),
+        _ if whole < 86_400 => format!("{}h {:02}m", whole / 3600, whole / 60 % 60),
+        _ => format!("{}d {:02}h", whole / 86_400, whole / 3600 % 24),
     }
+}
+
+/// How old something is — `run_duration`'s units, the largest only, floored: `12s` `5m` `5h` `3d`, then months (of
+/// 30 days, eleven at most) `2mo` and years (of 365) `1y`. An age isn't a time to the tenth: `3d`, never `3d 00h`.
+pub fn age(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    let (n, unit) = match s {
+        0..60 => (s, "s"),
+        60..3600 => (s / 60, "m"),
+        3600..86_400 => (s / 3600, "h"),
+        86_400..2_592_000 => (s / 86_400, "d"),
+        2_592_000..31_536_000 => ((s / 2_592_000).min(11), "mo"),
+        _ => (s / 31_536_000, "y"),
+    };
+    format!("{n}{unit}")
+}
+
+/// An age as it's said, the one way — `12s ago` … `1y ago` (`age`); with `just_now` (where a place says it) `just now`
+/// under a second. In a column, right-aligned at the widest (picker hints are, at the row's end).
+pub fn ago(d: std::time::Duration, just_now: bool) -> String {
+    match just_now && d < std::time::Duration::from_secs(1) {
+        true => "just now".into(),
+        false => format!("{} ago", age(d)),
+    }
+}
+
+/// `run_duration`'s in a column of times, right-aligned in `RUN_TIME_W` cells so the rows line up whatever each says
+/// (the inbox's hints).
+pub fn time_column(d: std::time::Duration) -> String {
+    pad_left(&run_duration(d), RUN_TIME_W)
+}
+
+/// Whether `text` is a time `run_duration` wrote (`412ms`, `8.3s`, `7m 12s`, `1h 32m`) — the chat's turn end, a
+/// note whose text is its time alone.
+pub fn reads_as_time(text: &str) -> bool {
+    let num = |s: &str, frac: bool| match s.split_once('.') {
+        Some((a, b)) if frac => num_digits(a) && num_digits(b),
+        _ => num_digits(s),
+    };
+    match text.split_once(' ') {
+        Some((a, b)) => {
+            let (big, small) = (a.strip_suffix(['m', 'h', 'd']), b.strip_suffix(['s', 'm', 'h']));
+            big.zip(small).is_some_and(|(a, b)| num(a, false) && b.len() == 2 && num(b, false))
+        }
+        None => match text.strip_suffix("ms") {
+            Some(ms) => num(ms, false),
+            None => text.strip_suffix('s').is_some_and(|s| num(s, true)),
+        },
+    }
+}
+
+/// A time `run_duration` wrote under an hour, read back (`412ms`, `8.3s`, `7m 12s`) — for tests of what says one.
+#[cfg(test)]
+pub(crate) fn time_read(text: &str) -> Option<std::time::Duration> {
+    use std::time::Duration;
+    match text.split_once(' ') {
+        Some((m, s)) => Some(Duration::from_secs(
+            m.strip_suffix('m')?.parse::<u64>().ok()? * 60 + s.strip_suffix('s')?.parse::<u64>().ok()?,
+        )),
+        None => match text.strip_suffix("ms") {
+            Some(ms) => Some(Duration::from_millis(ms.parse().ok()?)),
+            None => Duration::try_from_secs_f32(text.strip_suffix('s')?.parse().ok()?).ok(),
+        },
+    }
+}
+
+/// One or more ASCII digits.
+fn num_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// While an ask answer streams: last few lines being written, in a card at the editing area's bottom right
@@ -10921,7 +11016,7 @@ fn draw_ask_stream(
     card_edge(out, card, x0, y0, width)?;
     // Title: wave · status · instruction ……… elapsed
     let y = y0 + pad;
-    let secs = format!("{:>4.1}s", rev.started.elapsed().as_secs_f32());
+    let secs = timer(rev.started.elapsed(), !editor.moving());
     let phase = if rev.thinking || rev.streamed.is_empty() { "thinking" } else { "writing" };
     queue!(out, MoveTo(x0 as u16, y as u16))?;
     apply(out, card)?;
@@ -11050,7 +11145,7 @@ fn draw_follow_card(
     let secs = match gaze.and_then(|g| g.step) {
         Some((k, n)) if replaying && back > 0 => format!("‹{back} {k}/{n}"),
         Some((k, n)) if replaying || !c.busy() => format!("{k}/{n}"),
-        _ => format!("{:>4.1}s", crate::clock::since(c.started).as_secs_f32()),
+        _ => timer(crate::clock::since(c.started), !editor.moving()),
     };
     let sp = |text: &str, style: Style| Span { text: text.into(), style };
     // The title, in both forms (글타래 P6: the stop that headed the card is the turn's knot `●` now): who and how it
@@ -12075,15 +12170,6 @@ pub(crate) fn rail_board_text(editor: &Editor, rv: &crate::reviewer::Reviewer, w
     rail_board(editor, rv, w).into_iter().map(|r| r.into_iter().map(|p| p.1).collect()).collect()
 }
 
-/// How long the reviewer has read, as the rail says it: `7s`, `1m 20s` — whole seconds, a frame each
-/// (`Editor::tick_wanted`).
-fn reading_for(d: std::time::Duration) -> String {
-    match d.as_secs() {
-        s if s < 60 => format!("{s}s"),
-        s => format!("{}m {:02}s", s / 60, s % 60),
-    }
-}
-
 /// The rail's rows about risk, under its counts (`risk.rs`, `reviewer.rs`): the high-risk changes left to
 /// look at (`▲ 2 high to look at` — `▲ all looked at`, faint), and the reviewer: reading (for how long, how
 /// many reads — beside it on a rail `w` wide enough for the longest that gets, else on the row under it: the
@@ -12134,7 +12220,9 @@ fn rail_risk(editor: &Editor, r: &crate::codereview::CodeReview, w: usize) -> Ve
         }
         State::Waiting | State::Reading => {
             row.push((Tone::Accent, "  reading…".into()));
-            let mut how = reading_for(crate::clock::since(rv.started));
+            // (a frame as each tenth turns under a minute, each second after — `Editor::tick_wanted`; a running
+            // time, its width kept: its reads after it hold their column as it counts)
+            let mut how = timer(crate::clock::since(rv.started), !editor.moving());
             if rv.reads > 0 {
                 how += &format!(" · {}", crate::nav::count(rv.reads, "read"));
             }
@@ -12228,8 +12316,9 @@ fn rail_board(editor: &Editor, rv: &crate::reviewer::Reviewer, w: usize) -> Vec<
             }
             None => {
                 head.push((Tone::Accent, "  reading…".into()));
-                // (the time first, the cost after it — shorter, then gone, where the rail is narrow)
-                let time = format!(" {}", reading_for(crate::clock::since(rv.started)));
+                // (the time first, the cost after it — shorter, then gone, where the rail is narrow; the time a
+                // running one, its width kept: the cost doesn't come and go as it counts)
+                let time = format!(" {}", timer(crate::clock::since(rv.started), !editor.moving()));
                 if fits(&head, &time) {
                     head.push((Tone::Faint, time));
                     if let Some(c) = rv.cost {
@@ -13013,7 +13102,7 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
             }
             // Elapsed time dimmed at the right end; stopped/error on the left
             Role::Note => {
-                let timing = m.text.ends_with('s') && m.text[..m.text.len() - 1].parse::<f32>().is_ok();
+                let timing = reads_as_time(&m.text);
                 // (its time at the row's end — the blanks before it aren't the text's)
                 let right = |text: &str| ChatRow {
                     spans: vec![sp(format!("{text:>w$}"), faint)],
@@ -13102,16 +13191,18 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
         let Some(look) = m.look.as_ref().filter(|_| m.role == Role::Tool && exploring && i + 1 == n) else {
             continue;
         };
-        let now = std::time::Instant::now();
+        let (now, calm) = (crate::clock::now(), !editor.moving());
         // (waiting in line: behind what, first — a run a stopped turn left there says so, frictions26)
         let queued = matches!(look.verb, "run" | "test")
-            .then(|| crate::queued::chat_said(&editor.session, now))
+            .then(|| crate::queued::chat_said(&editor.session, now, calm))
             .flatten();
         // (what it waits on, or how long it's said nothing — and, busy at nothing it shows, the key that stops
         // it: frictions 53)
         let said = |wait: &crate::waits::Waiting, last, slot| {
             let stop = wait.busy(last, now).map(|_| crate::inbox::stop_key(slot));
-            wait.shown(now).map(|s| (s, None)).or_else(|| wait.silent(last, now).map(|s| (s, stop)))
+            wait.shown(now, |d| timer(d, calm))
+                .map(|s| (s, None))
+                .or_else(|| wait.silent(last, now).map(|s| (s, stop)))
         };
         let wait = match look.verb {
             _ if queued.is_some() => queued.as_ref().map(|q| (q.said.clone(), None)),
@@ -13292,14 +13383,15 @@ fn draw_chat(
             let now = crate::chats::now();
             intro.push(vec![]);
             intro.push(first_key("C-p", "to continue an earlier one"));
+            // (their ages a column, right-aligned at the widest)
+            let old = |t: u64| ago(std::time::Duration::from_secs(now.saturating_sub(t)), true);
+            let when_w = past.iter().take(2).map(|p| old(p.2).width()).max().unwrap_or(0);
             for (_, title, updated) in past.iter().take(2) {
-                let when = format!("  {}", crate::chats::ago(*updated, now));
+                let when = format!("  {}", pad_left(&old(*updated), when_w));
                 let first = title.lines().next().unwrap_or_default();
-                intro.push(vec![
-                    sp("◦ ".into(), faint),
-                    sp(fit_ellipsis(first, w.saturating_sub(2 + when.width())), dim),
-                    sp(when, faint),
-                ]);
+                let room = w.saturating_sub(2 + when.width());
+                let first = fit_ellipsis(first, room);
+                intro.push(vec![sp("◦ ".into(), faint), sp(pad_right(&first, room), dim), sp(when, faint)]);
             }
         }
         // Taller than its room: its end folds (the suggestions, the keys), never its start — messages keep their
@@ -13427,10 +13519,10 @@ fn draw_chat(
     let left = w.saturating_sub(title_w + 2);
     let status: Vec<Span> = match c.state {
         // (its claude not up yet: the project's settings read first — frictions29 #67, a send then waits for it)
-        State::Idle if let Some(t) = c.settings.waiting_since() => vec![
-            sp(wave(editor), accent),
-            sp(format!(" starting {:>4.1}s", crate::clock::since(t).as_secs_f32()), dim),
-        ],
+        State::Idle if let Some(t) = c.settings.waiting_since() => {
+            let t = timer(crate::clock::since(t), !editor.moving());
+            vec![sp(wave(editor), accent), sp(format!(" starting {t}"), dim)]
+        }
         State::Idle => match crate::models::label(editor) {
             Some(m) if left >= 4 => vec![sp(fit_ellipsis(&m, left), faint)],
             None if left >= 5 => vec![sp("ready".into(), faint)],
@@ -13440,7 +13532,7 @@ fn draw_chat(
             sp(wave(editor), accent),
             sp(
                 format!(
-                    " {} {:>4.1}s",
+                    " {} {}",
                     if crate::compaction::under_way(&editor.session) {
                         "compacting"
                     } else if exploring {
@@ -13450,7 +13542,7 @@ fn draw_chat(
                     } else {
                         "writing"
                     },
-                    crate::clock::since(c.started).as_secs_f32()
+                    timer(crate::clock::since(c.started), !editor.moving())
                 ),
                 dim,
             ),
@@ -20123,7 +20215,7 @@ mod tests {
     #[test]
     fn a_run_waiting_on_cargos_lock_says_so() {
         use crate::task::{Run, State, Task};
-        const SAID: &str = "waiting for cargo's lock · 0:0";
+        const SAID: &str = "waiting for cargo's lock · ";
         let mut ed = Editor::new(Config::default());
         let cmd = "cargo test --lib";
         let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
@@ -20229,7 +20321,7 @@ mod tests {
     #[test]
     fn a_silent_run_says_so_where_the_user_looks() {
         use crate::task::{Run, State, Task};
-        const SAID: &str = "no output for 3:0";
+        const SAID: &str = "no output for 3m 0";
         let mut ed = Editor::new(Config::default());
         let cmd = "printf x | some-server";
         let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
@@ -20315,10 +20407,10 @@ mod tests {
         r.last_output = then;
         r.wait.looked(100.0, std::time::Instant::now());
         let s = shown(&mut ed);
-        let said =
-            s.lines().filter(|l| l.contains("no output for 10:0") && l.contains(" · 100% CPU")).count();
+        // (the chat's row cut where it's narrow — the CPU before the key, the key whole)
+        let said = s.lines().filter(|l| l.contains("no output for 10m 0") && l.contains(" · 100% C")).count();
         assert_eq!(said, 2, "the panel's header and the chat's row: {s}");
-        assert!(s.lines().any(|l| l.contains("100% CPU  space m c stop it")), "{s}");
+        assert!(s.lines().any(|l| l.contains("100% C…  space m c stop it")), "{s}");
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.
@@ -20354,9 +20446,144 @@ mod tests {
         );
         assert_eq!(fit_path_left("~/a/x.patch", 40), "~/a/x.patch", "fits: whole");
         assert_eq!(pad_left("타래", 6), "  타래");
-        assert_eq!(duration(0.412), "412ms");
-        assert_eq!(duration(f32::INFINITY), "infs", "a report's odd number is drawn, not a panic");
     }
+
+    /// One way a time is written (`run_duration`), and the chat's turn end tells one from its other notes by it —
+    /// an old conversation's `4853.5s` too. A test report's odd number isn't a time: not drawn, no panic.
+    #[test]
+    fn a_time_is_written_one_way_and_read_back() {
+        use std::time::Duration;
+        let t = |ms: u64| run_duration(Duration::from_millis(ms));
+        assert_eq!([0, 412, 999, 1_000, 8_340].map(t), ["0ms", "412ms", "999ms", "1.0s", "8.3s"]);
+        // A running one keeps its width: the first minute's, then past it
+        let timed = [8_340, 59_900, 64_200, 4_853_500].map(|ms| timer(Duration::from_millis(ms), false));
+        assert_eq!(timed, [" 8.3s", "59.9s", " 1m 04s", " 1h 20m"]);
+        // Calm (a frame a second): whole seconds, in the same width
+        let calm = [412, 4_700, 59_900, 64_200].map(|ms| timer(Duration::from_millis(ms), true));
+        assert_eq!(calm, ["   0s", "   4s", "  59s", " 1m 04s"]);
+        assert!(
+            Duration::try_from_secs_f32(f32::INFINITY).is_err(),
+            "a report's `Infinity` drawn as no time"
+        );
+        for said in ["412ms", "8.3s", "4853.5s", "7m 12s", "1h 32m"] {
+            assert!(reads_as_time(said), "{said}");
+        }
+        for said in ["stopped", "changed 2 · space u undo", "s", "ms", "1.s", "7m 1s", "m 12s", "tests"] {
+            assert!(!reads_as_time(said), "{said}");
+        }
+    }
+
+    /// An age is its largest unit only, floored — each unit's edge — and `just now` only where a place says it.
+    #[test]
+    fn an_age_is_its_largest_unit_only() {
+        use std::time::Duration;
+        const DAY: u64 = 86_400;
+        let a = |s: u64| ago(Duration::from_secs(s), false);
+        let edges = [
+            59,
+            60,
+            3_599,
+            3_600,
+            23 * 3_600 + 3_599,
+            DAY,
+            29 * DAY + 86_399,
+            30 * DAY,
+            364 * DAY,
+            365 * DAY,
+        ];
+        assert_eq!(
+            edges.map(a),
+            [
+                "59s ago", "1m ago", "59m ago", "1h ago", "23h ago", "1d ago", "29d ago", "1mo ago",
+                "11mo ago", "1y ago"
+            ]
+        );
+        assert_eq!([3 * DAY + 3_600 * 5, 400 * DAY, 800 * DAY].map(a), ["3d ago", "1y ago", "2y ago"]);
+        assert_eq!(ago(Duration::from_millis(999), true), "just now");
+        assert_eq!(ago(Duration::from_millis(999), false), "0s ago");
+        assert_eq!(ago(Duration::from_millis(1_000), true), "1s ago");
+    }
+
+    /// Every time someone reads — a person or Claude — is `run_duration`'s, every age `ago`'s: a time format written by
+    /// hand in what a non-test build compiles fails here, found by its unit whatever the placeholder is named
+    /// (`{:.1}s`, `{after} ms`, `{s} s`, `{} min`, `{}h`), an age by its `ago` (`{} days ago`, `{ago} ago`), but the
+    /// ones left (`HAND_TIMES`), a list that only shrinks.
+    #[test]
+    fn every_time_is_written_by_run_duration() {
+        let now = hand_times(&crate::sim::lint::sources());
+        crate::sim::lint::only_shrinks("seconds written by hand", &now, HAND_TIMES);
+    }
+
+    /// Broken once: each way of writing a time by hand counts, whatever its placeholder's name — a fresh one too;
+    /// `run_duration`, a terminal's control sequence (`\x1b[{}m`) and a placeholder in code don't.
+    #[test]
+    fn a_time_written_by_hand_counts() {
+        let f = [
+            r#"format!("{:.1}s", d.as_secs_f32())"#,
+            r#"format!(" {} {:>4.1}s", what, t)"#,
+            r#"format!("card held: came {after} ms after a key")"#,
+            r#"format!("{s} s")"#,
+            r#"format!("no output for {} min", q / 60)"#,
+            r#"format!("{}h {:02}m", h, m)"#,
+            r#"format!("up {zzfresh_name}s")"#,
+            r#"format!("installed {days} days ago")"#,
+            r#"format!("{id} went {ago} ago: {how}")"#,
+            r#"format!("{n} {unit}{} ago", plural)"#,
+            r#"format!("in {}", crate::term::run_duration(d))"#,
+            r#"format!("went {}", crate::term::ago(d, false))"#,
+            r#"format!("\x1b[{}m", sgr)"#,
+            r#"let ms = { 3 }ms;"#,
+        ]
+        .join("\n");
+        let n = hand_times(&[("a.rs".to_string(), f)]);
+        assert_eq!(n.get("a.rs"), Some(&10), "{n:?}");
+    }
+
+    /// Per file, the lines whose string literals write a time by hand: a placeholder right before a unit — `ms`,
+    /// `s`, `min`, `m`, `h`, `d`, a space between or none — whatever it's named (a plural, `{noun}s`, counts too:
+    /// the text can't tell it from `{secs}s`, so it's listed). Not after `[`, `;` or `?`: a terminal's control
+    /// sequence (`\x1b[{}m`). An age: a placeholder, a word or none, then `ago` (`{} days ago`, `{} ago`).
+    fn hand_times(files: &[(String, String)]) -> std::collections::BTreeMap<String, usize> {
+        let literal = regex::Regex::new(r#""(?:[^"\\]|\\.)*""#).unwrap();
+        let unit =
+            regex::Regex::new(r"(?:^|[^\[;?])\{[^{}]*\} ?(?:ms|s|min|m|h|d)\b|\{[^{}]*\}(?: ?[a-z]+)? ago\b")
+                .unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        for (path, text) in files {
+            let n = text
+                .lines()
+                .filter(|line| literal.find_iter(line).any(|l| unit.is_match(&l.as_str()[1..l.len() - 1])))
+                .count();
+            if n > 0 {
+                out.insert(path.clone(), n);
+            }
+        }
+        out
+    }
+
+    /// What still matches by hand, per file (paths under `src/`): a plural (`{noun}s` — no time); a limit or timeout
+    /// said as it's given, not a time that passed; a time still to come; a measurement under a millisecond; a mark
+    /// that counts whole seconds, then minutes, and wakes only as that changes; `run_duration` itself.
+    const HAND_TIMES: &[(&str, usize)] = &[
+        ("chat.rs", 1),                   // a tool call's own `wait` argument, as Claude gave it
+        ("commands.rs", 1),               // a plural
+        ("limits.rs", 1),                 // the plan's next try, a time to come
+        ("nav.rs", 4),                    // plurals
+        ("plugin/perm.rs", 1),            // a plural
+        ("procs.rs", 1),                  // the CPU share's window, a setting
+        ("replay.rs", 1),                 // a plural
+        ("sandbox.rs", 1),                // a run not started within its limit
+        ("sandbox/keeper.rs", 1),         // a run not started within its limit
+        ("sandbox/proxy.rs", 3),          // the proxy's limits, the card's hold
+        ("sandbox/proxy/relay.rs", 1),    // the proxy's limit
+        ("sandbox/proxy/upstream.rs", 1), // the proxy's limit
+        ("sandbox/supervisor.rs", 2),     // its exec limit; its own cost, tenths of a millisecond
+        ("sandbox/tier.rs", 1),           // the probe's limit
+        ("session.rs", 2),                // a stuck call's mark (`Doing::said`), seconds then minutes
+        ("term.rs", 8), // `run_duration` itself (5); `ago` itself; a `:procs` look's tenths of a ms; its settings
+        ("uisocket.rs", 2), // a driver's waits, as it asked them
+        ("usage.rs", 1), // the cache's time left, a time to come in whole minutes
+    ];
 
     #[test]
     fn test_names_drop_their_shared_prefix() {

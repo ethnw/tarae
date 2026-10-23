@@ -243,16 +243,9 @@ pub fn transcript(store: &Path, id: &str) -> Option<String> {
     Some(out)
 }
 
-/// How long ago, in a few characters (`just now` · `12 min ago` · `3 h ago` · `2 days ago`).
+/// How long ago `then` was, by `now` (seconds both): `just now` · `12m ago` · `3h ago` · `2d ago` — `term::ago`'s.
 pub fn ago(then: u64, now: u64) -> String {
-    let s = now.saturating_sub(then);
-    match s {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", s / 60),
-        3600..86400 => format!("{} h ago", s / 3600),
-        86400..172800 => "yesterday".into(),
-        _ => format!("{} days ago", s / 86400),
-    }
+    crate::term::ago(std::time::Duration::from_secs(now.saturating_sub(then)), true)
 }
 
 #[cfg(test)]
@@ -416,6 +409,6 @@ mod tests {
             "the picker's preview"
         );
         assert_eq!(ago(100, 100), "just now");
-        assert_eq!(ago(0, 7300), "2 h ago");
+        assert_eq!(ago(0, 7300), "2h ago");
     }
 }

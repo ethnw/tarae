@@ -282,10 +282,12 @@ fn the_report_lists_the_never_used_too() {
     assert_eq!(r.rows[3].answers, [("y".to_string(), 3), ("n".to_string(), 1)]);
     let text = r.markdown();
     // (the columns' names are the heading's, its text right over the rows')
-    assert!(text.contains("\n##  Commands         by key   palette   last         key\n"), "{text}");
-    assert!(text.contains("    move_line_up          3         ·   5 days ago   k\n"), "{text}");
+    // (a column of days right-aligned, as counts are: its ages end where the widest does)
+    assert!(text.contains("\n##  Commands         by key   palette     last   key\n"), "{text}");
+    assert!(text.contains("    move_line_down        5         ·    today   j\n"), "{text}");
+    assert!(text.contains("    move_line_up          3         ·   5d ago   k\n"), "{text}");
     assert!(
-        text.contains("\n##  Cards   asked   last    answered\n    run         4   today   y 3 · n 1\n"),
+        text.contains("\n##  Cards   asked    last   answered\n    run         4   today   y 3 · n 1\n"),
         "{text}"
     );
     assert!(text.contains("\n##  Never used\n"), "{text}");

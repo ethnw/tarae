@@ -133,8 +133,11 @@ fn a_run_under_its_own_time_limit_is_not_asked_before_it_is_up() {
     assert_eq!(w.stuck_for(t0, at(12), after), None, "its timeout 33 min away");
     assert_eq!(w.stuck_for(t0, at(44), after), None);
     assert_eq!(w.stuck_for(t0, at(46), after), Some(46 * MIN), "past it");
-    assert_eq!(w.silent(t0, at(10)).as_deref(), Some("no output for 10:00 · its timeout ends it in 35:00"));
-    assert_eq!(w.silent(t0, at(46)).as_deref(), Some("no output for 46:00"), "nothing to come");
+    assert_eq!(
+        w.silent(t0, at(10)).as_deref(),
+        Some("no output for 10m 00s · its timeout ends it in 35m 00s")
+    );
+    assert_eq!(w.silent(t0, at(46)).as_deref(), Some("no output for 46m 00s"), "nothing to come");
     let llm = crate::llm::LlmConfig::default();
     assert!(held(&w, t0, at(10), false, &llm), "`quiet` in the state");
     assert!(!held(&w, t0, at(46), false, &llm));
@@ -147,7 +150,7 @@ fn a_run_under_its_own_time_limit_is_not_asked_before_it_is_up() {
     assert_eq!(w.stuck_for(t0, at(121), after), Some(121 * MIN), "two hours at most");
     assert!(!held(&w, t0, at(121), false, &llm));
     let said = w.silent(t0, at(121)).unwrap();
-    assert!(said.starts_with("no output for 121:00 · its timeout ends it in 29d 21h"), "{said}");
+    assert!(said.starts_with("no output for 2h 01m · its timeout ends it in 29d 21h"), "{said}");
 }
 
 /// cardburden 5 (b), D4: one whose work may go on elsewhere — a daemon's socket granted, run outside the
@@ -206,9 +209,9 @@ fn alike_threads_are_counted_on_one_line() {
     assert_eq!(
         lines,
         [
-            "  cargo — sleeping in do_wait · 1.20 s CPU",
-            "  2 × worker — sleeping in futex_wait_queue · 0.03 s CPU",
-            "  thread — waiting · 0.00 s CPU",
+            "  cargo — sleeping in do_wait · 1.2s CPU",
+            "  2 × worker — sleeping in futex_wait_queue · 30ms CPU",
+            "  thread — waiting · 0ms CPU",
         ]
     );
 }
@@ -309,7 +312,7 @@ fn a_stuck_run_is_captured_then_asked_about() {
     let o = &ed.offers[0];
     assert_eq!(o.title, "Stuck? Claude's command");
     assert!(
-        o.question.starts_with("No output for 11 min, 0% CPU — Claude's command sleep 30"),
+        o.question.starts_with("No output for 11m 00s, 0% CPU — Claude's command sleep 30"),
         "{}",
         o.question
     );
@@ -318,7 +321,7 @@ fn a_stuck_run_is_captured_then_asked_about() {
     assert_eq!(answers, [('y', "Stop it"), ('w', "What it waits on"), ('n', "Keep waiting")]);
     let out: Vec<String> =
         ed.session.task_run.as_ref().unwrap().output.iter().map(|l| l.1.into_owned()).collect();
-    let head = "── tarae: no output for 11 min, 0% CPU — what each of its threads waits in ──";
+    let head = "── tarae: no output for 11m 00s, 0% CPU — what each of its threads waits in ──";
     let at = out.iter().position(|l| *l == head).unwrap_or_else(|| panic!("{out:?}"));
     assert!(out[at + 1].starts_with(&format!("pid {pid} · ")), "{out:?}");
     assert!(out[at + 2].starts_with("  ") && out[at + 2].contains(" — "), "a thread: {out:?}");
@@ -363,7 +366,7 @@ fn a_stuck_run_is_captured_then_asked_about() {
     let out = &ed.session.task_run.as_ref().unwrap().output;
     assert!(out.iter().any(|l| l.1 == head), "kept");
     assert!(
-        out.iter().any(|l| l.1 == "── stopped from tarae's card: no output for 11 min, 0% CPU ──"),
+        out.iter().any(|l| l.1 == "── stopped from tarae's card: no output for 11m 00s, 0% CPU ──"),
         "{out:?}"
     );
     ed.session.task_run = None;
@@ -764,7 +767,7 @@ fn a_run_busy_at_nothing_it_shows_is_said_not_asked() {
     ed.handle_event(crate::event::Event::Resize);
     assert!(ed.offers.iter().all(|o| o.stuck().is_none()), "busy isn't stuck: {:?}", ed.offers);
     let (said, listed) = silent(&ed);
-    assert!(said.starts_with("no output for 11:") && said.ends_with(" · 100% CPU"), "{said}");
+    assert!(said.starts_with("no output for 11m ") && said.ends_with(" · 100% CPU"), "{said}");
     let listed = listed.expect("in the inbox").asks;
     assert!(listed.contains("100% CPU — space m c stops it"), "{listed}");
     // Under BUSY, or at a share of a core below BUSY_PCT: neither
@@ -819,7 +822,7 @@ fn a_new_process_in_the_runs_tree_is_progress() {
     ed.procs_sampled(sample_with_child(pid, "tarae", 2, Duration::from_secs(3)));
     settle_until(&mut ed, |ed| ed.offers.iter().any(|o| o.stuck().is_some()));
     let q = &ed.offers.iter().find(|o| o.stuck().is_some()).unwrap().question;
-    assert!(q.starts_with("No output for 20 min, 0% CPU"), "since its last line: {q}");
+    assert!(q.starts_with("No output for 20m 00s, 0% CPU"), "since its last line: {q}");
     // New work while the card is up (the next scene's tarae): the card goes, as it does on a line
     ed.procs_sampled(sample_with_child(pid, "tarae", 3, Duration::from_secs(1)));
     ed.handle_event(crate::event::Event::Resize);
@@ -902,7 +905,7 @@ fn a_filtered_runs_card_says_why_nothing_shows() {
     let q = card("sleep 30 2>&1 | tail -15");
     assert!(
         q.starts_with(
-            "No output for 11 min, 0% CPU — Claude's command sleep 30 2>&1 | tail -15 in the task panel. Its \
+            "No output for 11m 00s, 0% CPU — Claude's command sleep 30 2>&1 | tail -15 in the task panel. Its \
              output goes through tail: what it lets through may show only when the run ends. Claude's turn \
              waits on it"
         ),

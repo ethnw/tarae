@@ -913,7 +913,9 @@ impl ProcsState {
             return;
         }
         let memory = crate::procs::mem(live.iter().map(|r| r.memory).sum());
-        let ago = self.looked_ms.map_or(String::new(), |m| format!(" · looked {}s ago", m / 1000));
+        let ago = self.looked_ms.map_or(String::new(), |m| {
+            format!(" · looked {}", crate::term::ago(std::time::Duration::from_millis(m), false))
+        });
         out.push(format!("procs: {} processes · {memory}{ago}", live.len()));
         for r in &self.rows {
             let pad = "  ".repeat(r.depth + 1);
@@ -1234,7 +1236,7 @@ impl ReviewerState {
 
     /// One line: `done in 1m 20s · 14 reads · 2 findings ▲1 · 1 not sent · 1 answered — <verdict>`.
     pub fn text(&self) -> String {
-        let took = crate::term::duration(self.ms as f32 / 1000.0);
+        let took = crate::term::run_duration(std::time::Duration::from_millis(self.ms));
         let how = match (self.state, &self.why) {
             ("waiting", _) => "waits its turn".to_string(),
             ("reading", _) => format!("reading {took}"),

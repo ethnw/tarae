@@ -334,7 +334,7 @@ impl Editor {
                     _ if preflight => ("user", "preflight"),
                     _ => ("user", "task"),
                 };
-                let waiting = r.wait.shown(now);
+                let waiting = r.wait.shown(now, crate::term::run_duration);
                 // (held from the stuck card: its own time limit to come, or its work maybe elsewhere — cardburden 5)
                 let away = crate::stuck::away(r.guard.as_ref());
                 let quiet =
@@ -363,7 +363,7 @@ impl Editor {
             }
             if let Some(r) = &l.test_run {
                 use crate::testing::RunState as S;
-                let waiting = r.wait.shown(now);
+                let waiting = r.wait.shown(now, crate::term::run_duration);
                 let away = crate::stuck::away(r.guard.as_ref());
                 let quiet =
                     r.by_claude && crate::stuck::held(&r.wait, r.last_output, now, away, &self.config.llm);

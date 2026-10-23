@@ -2850,7 +2850,7 @@ fn stream_said(
     (lines, denials, late): (usize, usize, usize),
     err: &str,
 ) -> String {
-    let ms = |d: Option<std::time::Duration>| d.map_or("—".to_string(), |d| format!("{}ms", d.as_millis()));
+    let ms = |d: Option<std::time::Duration>| d.map_or("—".to_string(), crate::term::run_duration);
     let err = err.lines().find(|l| !l.trim().is_empty()).map(|l| format!(" · stderr: {}", l.trim()));
     format!(
         "watch {tag} · first line {} · run started {} · gone {} · finished {} · stream ended {} · {lines} lines, \
@@ -3343,7 +3343,10 @@ pub fn panel_line(
     };
     let more = if b.distinct > 1 { format!("  +{}", b.distinct - 1) } else { String::new() };
     let quiet = (running && last_output.elapsed() >= QUIET).then(|| {
-        format!("quiet {}s — it may be waiting on what was blocked", last_output.elapsed().as_secs())
+        format!(
+            "quiet {} — it may be waiting on what was blocked",
+            crate::term::run_duration(last_output.elapsed())
+        )
     });
     Some((format!("sandbox blocked {}{more}", first.plain()), quiet))
 }
@@ -10645,8 +10648,8 @@ mod tests {
         );
         assert_eq!(
             line,
-            "watch tarae-7-1. · first line 1400ms · run started 150ms · gone 1180ms · finished 1330ms · stream \
-             ended 1410ms · 2 lines, 1 denials, 1 late"
+            "watch tarae-7-1. · first line 1.4s · run started 150ms · gone 1.2s · finished 1.3s · stream ended \
+             1.4s · 2 lines, 1 denials, 1 late"
         );
         let line = super::stream_said(
             "t.",

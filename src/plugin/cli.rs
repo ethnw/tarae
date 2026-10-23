@@ -197,9 +197,9 @@ fn dev(dir: &Path) -> anyhow::Result<()> {
                 std::fs::copy(&wasm, &tmp)?;
                 std::fs::rename(&tmp, &dest)?;
                 let kb = std::fs::metadata(&dest).map_or(0, |m| m.len().div_ceil(1024));
-                let secs = started.elapsed().as_secs_f32();
+                let took = crate::term::run_duration(started.elapsed());
                 println!(
-                    "{} built in {secs:.1}s · {kb} KB  {}",
+                    "{} built in {took} · {kb} KB  {}",
                     paint("1;32", "✓"),
                     paint("2", "— reloading in tarae")
                 );

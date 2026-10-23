@@ -668,10 +668,10 @@ impl Keeper {
                 let left = super::owners::OWNERS.let_go(serial, super::owners::live, std::thread::sleep);
                 if left > 0 {
                     let why = format!(
-                        "{left} sockets of what a dead keeper's runs left ({}) still held after {} min: kept as its \
+                        "{left} sockets of what a dead keeper's runs left ({}) still held after {}: kept as its \
                          session's, no longer asked after",
                         root.display(),
-                        super::owners::LET_GO_FOR.as_secs() / 60
+                        crate::term::run_duration(super::owners::LET_GO_FOR)
                     );
                     crate::log::line("sandbox", "info", &why);
                 }

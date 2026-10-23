@@ -13,11 +13,11 @@
 10  │  ◦ read outside home        not others' homes, volumes │
 11  │                                                        │
 12  │  always · this checkout                                │
-13  │▎ • reach registry.npmjs.org:443          you · 5 h ago │
-14  │  • write in /private/tm…ed/npm-cache  you · 3 days ago │
+13  │▎ • reach registry.npmjs.org:443           you · 5h ago │
+14  │  • write in /private/t…granted/npm-cache  you · 3d ago │
 15  │                                                        │
 16  │  this session                                          │
-17  │  • connect to port 5432                  you · 2 h ago │
+17  │  • connect to port 5432                   you · 2h ago │
 18  │  • reach db.example.com:5432      you · until you quit │
 19  │  • run without a sandbox          you · until you quit │
 20  │                                                        │
@@ -63,11 +63,11 @@
 10  f  f                          ddd ddddddd dddddd ddddddd f
 11  f                                                        f
 12  f  ffffff f ffff ffffffff                                f
-13  fa d TTTTT TTTTTTTTTTTTTTTTTTTTTT          ddd d d d ddd f
-14  f  d                                    ddd d d dddd ddd f
+13  fa d TTTTT TTTTTTTTTTTTTTTTTTTTTT           ddd d dd ddd f
+14  f  d                                        ddd d dd ddd f
 15  f                                                        f
 16  f  ffff fffffff                                          f
-17  f  d                                       ddd d d d ddd f
+17  f  d                                        ddd d dd ddd f
 18  f  d                                ddd d ddddd ddd dddd f
 19  f  d                                ddd d ddddd ddd dddd f
 20  f                                                        f

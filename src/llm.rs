@@ -1784,7 +1784,7 @@ pub fn preview(streamed: &str, rows: usize) -> Vec<&str> {
 fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, String>) {
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.generation == generation) else { return };
     ed.llm_pid = None;
-    let secs = rev.started.elapsed().as_secs_f32();
+    let took = rev.started.elapsed();
     let replies = match result {
         Ok(r) => r,
         Err(e) => {
@@ -1826,7 +1826,7 @@ fn on_result(ed: &mut Editor, generation: u64, result: Result<Vec<String>, Strin
     rev.current =
         rev.hunks.iter().position(|h| h.decision == Decision::Undecided && !h.conflict).unwrap_or(0);
     ed.current = doc_idx;
-    ed.set_status(format!("claude answered in {secs:.1}s"));
+    ed.set_status(format!("claude answered in {}", crate::term::run_duration(took)));
 }
 
 /// If edits happened while waiting, relocates the original (nearest match). False if not found.

@@ -457,7 +457,7 @@ impl std::fmt::Display for Verdict {
             Some(crate::task::State::Failed(Some(n))) => format!("exit {n}"),
             Some(s) => format!("{s:?}").to_lowercase(),
         };
-        let secs = |d: Duration| crate::term::duration(d.as_secs_f32());
+        let secs = crate::term::run_duration;
         let cold = self.cold.map(|c| format!(" warm, {} first", secs(c))).unwrap_or_default();
         let took = match (self.took, self.baseline) {
             (Some(t), Some(b)) => {
@@ -606,7 +606,7 @@ pub fn run(entry: &Entry, at: &Place) -> Verdict {
             let tail = run.map(|r| tail(&r.output.to_vec())).unwrap_or_default();
             v.fail(
                 Check::Timeout,
-                format!("not over in {}: {tail}", crate::term::duration(entry.timeout.as_secs_f32())),
+                format!("not over in {}: {tail}", crate::term::run_duration(entry.timeout)),
             );
             ed.task_close();
             return v;
@@ -718,7 +718,7 @@ fn answered_by_script(
             };
             let listed = entry.cards.iter().any(|c| c == kind || *c == said);
             let host = o.host().map(|a| {
-                let after = crate::term::duration(start.elapsed().as_secs_f32());
+                let after = crate::term::run_duration(start.elapsed());
                 let at = format!("{}:{}", a.host, a.port);
                 (at.clone(), format!("{said} {at} by {}, after {after}", a.process))
             });

@@ -23,11 +23,11 @@
 20
 21
 22
-23                                              ╭─ Stop what the stopped turn left running? ─────────╮
-24                                              │   grep -rn TODO src — the task panel, running 7:12 │
-25                                              │                                                    │
-26                                              │ Claude's next runs there wait behind it.           │
-27                                              ╰─ y Stop it · n Let it run ─────────────────────────╯
+23                                            ╭─ Stop what the stopped turn left running? ───────────╮
+24                                            │   grep -rn TODO src — the task panel, running 7m 12s │
+25                                            │                                                      │
+26                                            │ Claude's next runs there wait behind it.             │
+27                                            ╰─ y Stop it · n Let it run ───────────────────────────╯
 28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
@@ -85,11 +85,11 @@
 20
 21
 22
-23                                              ff TTTT TTTT TTT TTTTTTT TTTT TTTT TTTTTTTT ffffffffff
-24                                              f                                                    f
-25                                              f                                                    f
-26                                              f dddddddd dddd dddd ddddd dddd dddddd ddd           f
-27                                              ff A         f A ddd dd ddd ffffffffffffffffffffffffff
+23                                            ff TTTT TTTT TTT TTTTTTT TTTT TTTT TTTTTTTT ffffffffffff
+24                                            f                                                      f
+25                                            f                                                      f
+26                                            f dddddddd dddd dddd ddddd dddd dddddd ddd             f
+27                                            ff A         f A ddd dd ddd ffffffffffffffffffffffffffff
 28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend

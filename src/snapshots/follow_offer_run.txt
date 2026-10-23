@@ -3,7 +3,7 @@
 00  tarae  ›  src  ›  demo.rs
 01  ──────────────────────────────────────────────────────────────────────────────────────────────────
 02   1 use std::collections::HashMap;
-03   2                                                            claude › follow      waiting  0.0s
+03   2                                                            claude › follow      waiting   0ms
 04   3 ▎ Counts how often each word appears.                      ▎ commit it
 05     ▎
 06     ▎ Words are split on whitespace; case is kept.             C-c stop  C-f unfollow
@@ -65,7 +65,7 @@
 00  ddddd  f  ddd  f  TTTTTTT
 01  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 02   A
-03   f                                                            TTTTTT a aaaaaa      aaaaaaa  ffff
+03   f                                                            TTTTTT a aaaaaa      aaaaaaa   fff
 04   f f                                                          a TTTTTT TT
 05     f
 06     f                                                          DDD ffff  DDD ffffffff

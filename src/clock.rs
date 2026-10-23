@@ -36,6 +36,13 @@ pub fn hold() -> Instant {
     t
 }
 
+/// Tests outside a simulation: this thread's clock going again after a `hold` — a frame read at a pinned time in a test
+/// whose runs go on after it.
+#[cfg(test)]
+pub fn release() {
+    HELD.set(None);
+}
+
 /// Tests outside a simulation: this thread's clock moved on by `d` — what `now` and `since` read here from now on (a
 /// key-sequence test's wait past follow's PACE, say, without sleeping and without reaching into the state).
 #[cfg(test)]
@@ -121,7 +128,7 @@ mod tests {
         ("plugin/perm.rs", 1),
         ("preflight.rs", 5),
         ("procs.rs", 13),
-        ("queued.rs", 6),
+        ("queued.rs", 5),
         ("reads.rs", 7),
         ("reaper.rs", 3),
         ("rebase.rs", 3),
@@ -142,7 +149,7 @@ mod tests {
         ("stuck.rs", 1),
         ("syntax.rs", 4),
         ("task.rs", 6),
-        ("term.rs", 12),
+        ("term.rs", 10),
         ("testcode.rs", 1),
         ("testing.rs", 7),
         ("tools.rs", 5),

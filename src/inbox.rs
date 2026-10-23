@@ -94,15 +94,6 @@ pub enum Next {
     None,
 }
 
-/// How long it has waited, as a row's hint says it: `12 s`, `4 min`, `2 h`.
-fn waited(ms: u64) -> String {
-    match ms / 1000 {
-        s if s < 60 => format!("{s} s"),
-        s if s < 3600 => format!("{} min", s / 60),
-        s => format!("{} h", s / 3600),
-    }
-}
-
 /// The inbox's order — the one place it's decided: the card the user's own command just made while it's in
 /// front (`yours`, #205 — user decision 2026-10-13: `C-q` and `enter` go to it, Claude's stays stacked), then
 /// what asks for an answer before what doesn't, oldest first, then the order they came in (an entry, how long
@@ -341,7 +332,8 @@ impl Editor {
             Next::Done(id) => {
                 let Some(l) = self.sessions.iter().find(|l| l.id == id) else { return false };
                 let ago = l.turn_end.as_ref().map_or(0, |t| ms(t.0, Instant::now()));
-                let said = format!("{} · its turn ended {} ago", l.label(), waited(ago));
+                let ended = crate::term::ago(Duration::from_millis(ago), false);
+                let said = format!("{} · its turn ended {ended}", l.label());
                 self.session_switch(id);
                 self.set_status(said);
                 true
@@ -449,7 +441,12 @@ impl Editor {
                 };
                 crate::picker::Item {
                     label,
-                    hint: format!("{} · {}", e.kind, waited(e.waited_ms)),
+                    // (its time a column: the rows line up whatever each has waited)
+                    hint: format!(
+                        "{} · {}",
+                        e.kind,
+                        crate::term::time_column(Duration::from_millis(e.waited_ms))
+                    ),
                     action: crate::picker::Action::Inbox(e.id),
                     glyph: Some(glyph),
                 }

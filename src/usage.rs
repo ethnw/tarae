@@ -1079,7 +1079,7 @@ fn calls_section(u: &Usage) -> String {
         return String::new();
     }
     let clock = |ms: u64| crate::log::clock(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
-    let secs = |ms: u64| crate::term::duration(ms as f32 / 1000.0);
+    let secs = |ms: u64| crate::term::run_duration(std::time::Duration::from_millis(ms));
     let cells = |s: &Sums| {
         vec![
             s.requests.to_string(),

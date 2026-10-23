@@ -1585,8 +1585,9 @@ impl crate::editor::Editor {
         // (asked: counted once it's stacked — one asked again while it's up only refreshed the one there, above)
         self.count(crate::features::Area::Card, o.kind());
         if o.typing {
-            let after = self.last_input.map_or(0, |t| crate::clock::since(t).as_millis());
-            crate::log::line("tarae", "card", &format!("card held: came {after} ms after a key"));
+            let after = self.last_input.map_or(std::time::Duration::ZERO, crate::clock::since);
+            let after = crate::term::run_duration(after);
+            crate::log::line("tarae", "card", &format!("card held: came {after} after a key"));
             self.keys_quiet_later();
         }
         let at = self.offer_place(&o);
@@ -1625,8 +1626,9 @@ impl crate::editor::Editor {
             freed += 1;
         }
         if freed > 0 {
-            let quiet = self.last_input.map_or(0, |t| crate::clock::since(t).as_millis());
-            crate::log::line("tarae", "card", &format!("card free: the keys quiet {quiet} ms"));
+            let quiet = self.last_input.map_or(std::time::Duration::ZERO, crate::clock::since);
+            let quiet = crate::term::run_duration(quiet);
+            crate::log::line("tarae", "card", &format!("card free: the keys quiet {quiet}"));
         }
         freed > 0
     }

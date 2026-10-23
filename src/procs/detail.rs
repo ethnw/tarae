@@ -167,12 +167,9 @@ fn chain(r: &Row, rows: &[Row]) -> Vec<String> {
     out
 }
 
-/// CPU time: `0.4s`, `12s`, `3m` — as `age` past a minute.
+/// CPU time: `run_duration`'s (`400ms`, `12.0s`, `3m 05s`).
 fn busy(d: Duration) -> String {
-    match d.as_secs() {
-        0..10 => format!("{:.1}s", d.as_secs_f32()),
-        _ => age(d),
-    }
+    crate::term::run_duration(d)
 }
 
 /// `text` in lines of `room` cells at most, broken between words (a word wider than that, cut).

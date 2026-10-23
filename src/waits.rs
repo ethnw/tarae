@@ -30,14 +30,14 @@ pub const BUSY: Duration = Duration::from_secs(600);
 pub const BUSY_PCT: f32 = 50.0;
 
 /// Claude's report's line on a run that ended (or was stopped) at `end` after printing nothing since `last`
-/// for `SILENT` or more: `It printed nothing for its last 27:04.`
+/// for `SILENT` or more: `It printed nothing for its last 27m 04s.`
 pub fn silent_line(last: Instant, end: Instant) -> Option<String> {
     let d = end.saturating_duration_since(last);
     (d >= SILENT).then(|| {
         format!(
             "It printed nothing for its last {} — a program that waits for input or never exits (a server \
              after its input closed) hangs until the user stops it.",
-            clock(d)
+            crate::term::run_duration(d)
         )
     })
 }
@@ -161,10 +161,11 @@ impl Waiting {
         true
     }
 
-    /// The panel's: `waiting for cargo's lock · 0:37` — while it waits.
-    pub fn shown(&self, now: Instant) -> Option<String> {
+    /// The panel's: `waiting for cargo's lock · 37.0s` — while it waits, its time written by `time`
+    /// (`term::timer` where a key follows it on screen, `term::run_duration` for the state).
+    pub fn shown(&self, now: Instant, time: impl Fn(Duration) -> String) -> Option<String> {
         let (hit, since) = self.now.as_ref()?;
-        Some(format!("waiting for {} · {}", hit.said, clock(now.saturating_duration_since(*since))))
+        Some(format!("waiting for {} · {}", hit.said, time(now.saturating_duration_since(*since))))
     }
 
     /// How long a running run has printed nothing, since `last` — when that's `SILENT` or more and it waits
@@ -256,17 +257,19 @@ impl Waiting {
         (due && !asked && !limited).then_some(quiet)
     }
 
-    /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27:04` (`silent_for`) — and, under a time
-    /// limit of its own still to come, `· its timeout ends it in 35:00` (`1h 05m`, `29d 21h` — `span`).
+    /// The chat's row, `tarae state`'s runs, the inbox: `no output for 27m 04s` (`silent_for`) — and, under a time
+    /// limit of its own still to come, `· its timeout ends it in 35m 00s` (`1h 05m`, `29d 21h` — `run_duration`'s:
+    /// cardburden 4b's `timeout 30d` read `43079:00`).
     pub fn silent(&self, last: Instant, now: Instant) -> Option<String> {
         let limit = self
             .limit_at
             .and_then(|at| at.checked_duration_since(now))
-            .map(|d| format!(" · its timeout ends it in {}", span(d)))
+            .map(|d| format!(" · its timeout ends it in {}", crate::term::run_duration(d)))
             .unwrap_or_default();
         // (busy at it: its CPU said — frictions 53)
         let busy = self.busy(last, now).map(|c| format!(" · {c:.0}% CPU")).unwrap_or_default();
-        self.silent_for(last, now).map(|d| format!("no output for {}{busy}{limit}", clock(d)))
+        self.silent_for(last, now)
+            .map(|d| format!("no output for {}{busy}{limit}", crate::term::run_duration(d)))
     }
 
     /// Claude's report's line, once the run ended (`took` all told — from its start): `Waited 16.0s for
@@ -275,20 +278,21 @@ impl Waiting {
     /// build directory lock. Ran 11.0s.` None when it waited on nothing.
     pub fn said(&self, took: Duration, queued: Option<(Duration, &[String])>) -> Option<String> {
         let locks: Duration = self.waited.iter().map(|w| w.1).sum();
-        let ran = took.saturating_sub(locks).as_secs_f32();
+        let t = crate::term::run_duration;
+        let ran = t(took.saturating_sub(locks));
         let queued_said = queued.map(|(d, behind)| match behind {
-            [] => format!("{:.1}s queued", d.as_secs_f32()),
-            b => format!("{:.1}s queued behind {}", d.as_secs_f32(), listed(b)),
+            [] => format!("{} queued", t(d)),
+            b => format!("{} queued behind {}", t(d), listed(b)),
         });
         let each: Vec<String> = queued_said
             .into_iter()
-            .chain(self.waited.iter().map(|(r, d)| format!("{:.1}s for {r}", d.as_secs_f32())))
+            .chain(self.waited.iter().map(|(r, d)| format!("{} for {r}", t(*d))))
             .collect();
         let total = locks + queued.map_or(Duration::ZERO, |q| q.0);
         match &each[..] {
             [] => None,
-            [one] => Some(format!("Waited {one}. Ran {ran:.1}s.")),
-            all => Some(format!("Waited {:.1}s — {}. Ran {ran:.1}s.", total.as_secs_f32(), all.join(", "))),
+            [one] => Some(format!("Waited {one}. Ran {ran}.")),
+            all => Some(format!("Waited {} — {}. Ran {ran}.", t(total), all.join(", "))),
         }
     }
 }
@@ -302,25 +306,6 @@ fn listed(names: &[String]) -> String {
     }
 }
 
-/// `0:37` · `12:05` — a wait's time, minutes and seconds (the seconds always two digits, so it doesn't
-/// slide as it counts).
-pub(crate) fn clock(d: Duration) -> String {
-    let s = d.as_secs();
-    format!("{}:{:02}", s / 60, s % 60)
-}
-
-/// A time that may be long — when a run's own timeout ends it: within the hour as `clock` says it (`35:00`),
-/// then `1h 05m`, a day or more `30d` · `29d 22h` (cardburden 4b: `timeout 30d` read `43079:00`).
-pub(crate) fn span(d: Duration) -> String {
-    let s = d.as_secs();
-    match (s / 86_400, s % 86_400 / 3600) {
-        (0, 0) => clock(d),
-        (0, h) => format!("{h}h {:02}m", s % 3600 / 60),
-        (days, 0) => format!("{days}d"),
-        (days, h) => format!("{days}d {h:02}h"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,27 +316,27 @@ mod tests {
     }
 
     /// cardburden 4b: when a run's own timeout ends it, said past an hour in hours and past a day in days —
-    /// `timeout 30d` read `43079:00`; within the hour as every wait's clock, `35:00`.
+    /// `timeout 30d` read `43079:00` — as every time is (`term::run_duration`).
     #[test]
     fn a_timeouts_end_reads_in_hours_and_days() {
         let s = Duration::from_secs;
         for (secs, said) in [
-            (2100, "35:00"),
-            (3599, "59:59"),
+            (2100, "35m 00s"),
+            (3599, "59m 59s"),
             (3600, "1h 00m"),
             (3900, "1h 05m"),
             (86_399, "23h 59m"),
-            (86_400, "1d"),
-            (30 * 86_400, "30d"),
+            (86_400, "1d 00h"),
+            (30 * 86_400, "30d 00h"),
             (30 * 86_400 - 121 * 60, "29d 21h"),
         ] {
-            assert_eq!(span(s(secs)), said, "{secs}");
+            assert_eq!(crate::term::run_duration(s(secs)), said, "{secs}");
         }
         let mut w = Waiting::default();
         let t0 = Instant::now();
         w.limited(t0, Some(s(30 * 86_400)));
         let said = w.silent(t0, t0 + s(181)).unwrap();
-        assert_eq!(said, "no output for 3:01 · its timeout ends it in 29d 23h");
+        assert_eq!(said, "no output for 3m 01s · its timeout ends it in 29d 23h");
     }
 
     /// A wait's line is state, from it to the next line that isn't one; its time is told apart from the
@@ -370,10 +355,14 @@ mod tests {
         assert!(!w.line(None, at(1), &trace), "output");
         assert!(w.line(Some(hit.clone()), at(2), &trace), "a wait's line isn't output");
         assert!(w.line(Some(hit.clone()), at(3), &trace), "the same again: still waiting");
-        assert_eq!(w.shown(at(39)).as_deref(), Some("waiting for cargo's lock · 0:37"));
-        assert_eq!(w.shown(at(2 + 605)).as_deref(), Some("waiting for cargo's lock · 10:05"));
+        let shown = |w: &Waiting, t| w.shown(t, crate::term::run_duration);
+        assert_eq!(shown(&w, at(39)).as_deref(), Some("waiting for cargo's lock · 37.0s"));
+        assert_eq!(shown(&w, at(2 + 605)).as_deref(), Some("waiting for cargo's lock · 10m 05s"));
+        // (on screen a running time: it keeps its width)
+        let timer = |d| crate::term::timer(d, false);
+        assert_eq!(w.shown(at(3), timer).as_deref(), Some("waiting for cargo's lock ·  1.0s"));
         assert!(!w.line(None, at(39), &trace), "the next line ends it");
-        assert_eq!(w.shown(at(40)), None);
+        assert_eq!(shown(&w, at(40)), None);
         assert_eq!(
             w.said(Duration::from_secs(48), None).as_deref(),
             Some("Waited 37.0s for cargo's build directory lock. Ran 11.0s.")
@@ -398,11 +387,11 @@ mod tests {
         // Silent: from `SILENT` on, said — unless it says what it waits on
         let mut w = Waiting::default();
         assert_eq!(w.silent(at(0), at(179)), None);
-        assert_eq!(w.silent(at(0), at(1624)).as_deref(), Some("no output for 27:04"));
+        assert_eq!(w.silent(at(0), at(1624)).as_deref(), Some("no output for 27m 04s"));
         w.line(Some(hit.clone()), at(5), &trace);
         assert_eq!(w.silent(at(5), at(1624)), None, "its wait says it");
         assert_eq!(silent_line(at(0), at(179)), None);
-        assert!(silent_line(at(0), at(1624)).unwrap().starts_with("It printed nothing for its last 27:04"));
+        assert!(silent_line(at(0), at(1624)).unwrap().starts_with("It printed nothing for its last 27m 04s"));
         // Nothing waited on: nothing said; only in line, that alone
         assert_eq!(Waiting::default().said(Duration::from_secs(3), None), None);
         assert_eq!(

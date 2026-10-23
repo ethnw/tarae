@@ -1821,7 +1821,7 @@ fn report(ed: &Editor) -> Option<String> {
         || r.took.unwrap_or_else(|| crate::clock::since(r.started)),
         std::time::Duration::from_millis,
     );
-    let took = crate::term::duration(took.as_secs_f32());
+    let took = crate::term::run_duration(took);
     let cost = r.cost.map(|c| format!(" · ≈ API ${c:.2}")).unwrap_or_default();
     out += &match &r.state {
         State::Waiting | State::Reading if waits(ed, &ed.session) => waits_said(ed),
@@ -1897,7 +1897,7 @@ fn board_report(ed: &Editor, r: &Reviewer) -> String {
     use crate::board::Verdict;
     let b = r.board.as_deref().expect("a board");
     let mut out = format!("# The board — {}\n\n", r.label);
-    let took = crate::term::duration(r.took.unwrap_or_else(|| crate::clock::since(r.started)).as_secs_f32());
+    let took = crate::term::run_duration(r.took.unwrap_or_else(|| crate::clock::since(r.started)));
     let (skeptics, _) = r.tally_of(true);
     let cost = r.cost.map(|c| format!(" · ≈ API ${c:.2}")).unwrap_or_default();
     let what = format!(
@@ -4323,8 +4323,25 @@ mod tests {
         r.members[0].reads = 3;
         let r = ed.session.reviewer.as_ref().unwrap();
         let at = |w| crate::term::rail_board_text(&ed, r, w);
-        let rows = at(26);
+        let rows = at(29);
         assert!(rows[0].starts_with("board  reading… ") && rows[0].ends_with("s · $0.08"), "{rows:?}");
+        // (its time a running one, `term::timer`'s 5 cells under a minute: the cost holds as it counts — at 29
+        // cells there whatever the time says, at 26 never: no frame takes it away or brings it back)
+        let held = crate::clock::hold();
+        for ms in [412, 1_200, 12_300, 59_900] {
+            ed.session.reviewer.as_mut().unwrap().started = held - std::time::Duration::from_millis(ms);
+            let r = ed.session.reviewer.as_ref().unwrap();
+            let head = |w| crate::term::rail_board_text(&ed, r, w).remove(0);
+            assert!(
+                head(29).ends_with("s · $0.08") && head(29).chars().count() == 29,
+                "{ms}ms: {:?}",
+                head(29)
+            );
+            assert!(head(26).ends_with('s') && !head(26).contains('$'), "{ms}ms: {:?}", head(26));
+        }
+        crate::clock::release();
+        let r = ed.session.reviewer.as_ref().unwrap();
+        let at = |w| crate::term::rail_board_text(&ed, r, w);
         assert_eq!(
             rows[1..3],
             ["  correctness  3 reads…".to_string(), format!("  {:<11}  reading…", "tests")]
@@ -4931,7 +4948,7 @@ mod tests {
         fake(&mut ed, &dir, &[done]);
         reviewed(&mut ed, &repo);
         let text = report(&ed).unwrap();
-        assert!(text.contains("Done in 112.4s"), "{text}");
+        assert!(text.contains("Done in 1m 52s"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

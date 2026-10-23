@@ -13,30 +13,30 @@
 10  │  ◦ read outside home        not others' homes, volumes │ │
 11  │                                                        │ │
 12  │  always · this checkout                                │ │
-13  │  • reach registry.npmjs.org:443          you · 5 h ago │ │
-14  │  • write in /private/tm…ed/npm-cache  you · 3 days ago │ │
+13  │  • reach registry.npmjs.org:443           you · 5h ago │ │
+14  │  • write in /private/t…granted/npm-cache  you · 3d ago │ │
 15  │                                                        │ │
 16  │  this session                                          │ │
-17  │  • connect to port 5432                  you · 2 h ago │ │
+17  │  • connect to port 5432                   you · 2h ago │ │
 18  │  • reach db.example.com:5432      you · until you quit │ │  ▎ Ask Claude
 19  │  • run without a sandbox          you · until you quit │ │
 20  │                                                        │ │  It reads the whole project,
 21  │  this chat                                             │ │  starting from demo.rs.
-22  │  • open terminals, yours too            you · just now │ │
-23  │  • read /private/tmp/…notes           you · 12 min ago │ │  tab for a suggestion
+22  │  • open terminals, yours too             you · 20s ago │ │
+23  │  • read /private/tmp/…notes              you · 12m ago │ │  tab for a suggestion
 24  │                                                        │ │  › Explain what this file does
 25  │  tarae's project settings · every checkout             │ │  › Where is this used across the pro…
-26  │  • .tarae.toml           you · 2 days ago · 2 versions │ │  › Why is this diagnostic happening?
+26  │  • .tarae.toml               you · 2d ago · 2 versions │ │  › Why is this diagnostic happening?
 27  │                                                        │ │
 28  │  Claude's settings · every checkout                    │ │  C-t for another model
-29  │  • .claude/settings.json               you · yesterday │ │
+29  │  • .claude/settings.json                  you · 1d ago │ │
 30  │                                                        │ │
 31  │  git's own commands · every checkout                   │ │
-32  │  • .git/config                           you · 5 h ago │ │
+32  │  • .git/config                            you · 5h ago │ │
 33  │                                                        │ │
 34  │  git hooks · every checkout                            │ │
-35  │  • .githooks/pre-commit                  you · 1 h ago │ │
-36  │  • .githooks/pre-push                    you · 1 h ago │ │
+35  │  • .githooks/pre-commit                   you · 1h ago │ │
+36  │  • .githooks/pre-push                     you · 1h ago │ │
 37  │                                                        │ │
 38  │  plugins · everywhere                                  │ │
 39  │  • k8s: run kubectl, r…kube/config, reach 2 hosts  you │ │
@@ -115,30 +115,30 @@
 10  f  f                          ddd ddddddd dddddd ddddddd f f
 11  f                                                        f f
 12  f  ffffff f ffff ffffffff                                f f
-13  f  d                                       ddd d d d ddd f f
-14  f  d                                    ddd d d dddd ddd f f
+13  f  d                                        ddd d dd ddd f f
+14  f  d                                        ddd d dd ddd f f
 15  f                                                        f f
 16  f  ffff fffffff                                          f f
-17  f  d                                       ddd d d d ddd f f
+17  f  d                                        ddd d dd ddd f f
 18  f  d                                ddd d ddddd ddd dddd f f  a TTT TTTTTT
 19  f  d                                ddd d ddddd ddd dddd f f
 20  f                                                        f f  dd ddddd ddd ddddd dddddddd
 21  f  ffff ffff                                             f f  dddddddd dddd dddddddd
-22  f  d                                      ddd d dddd ddd f f
-23  f  d                                    ddd d dd ddd ddd f f  DDD fff f ffffffffff
+22  f  d                                       ddd d ddd ddd f f
+23  f  d                                       ddd d ddd ddd f f  DDD fff f ffffffffff
 24  f                                                        f f  f ddddddd dddd dddd dddd dddd
 25  f  fffffff fffffff ffffffff f fffff ffffffff             f f  f ddddd dd dddd dddd dddddd ddd dddd
-26  f  d                       ddd d d dddd ddd d d dddddddd f f  f ddd dd dddd dddddddddd dddddddddd
+26  f  d                           ddd d dd ddd d d dddddddd f f  f ddd dd dddd dddddddddd dddddddddd
 27  f                                                        f f
 28  f  ffffffff ffffffff f fffff ffffffff                    f f  DDD fff fffffff fffff
-29  f  d                                     ddd d ddddddddd f f
+29  f  d                                        ddd d dd ddd f f
 30  f                                                        f f
 31  f  fffff fff ffffffff f fffff ffffffff                   f f
-32  f  d                                       ddd d d d ddd f f
+32  f  d                                        ddd d dd ddd f f
 33  f                                                        f f
 34  f  fff fffff f fffff ffffffff                            f f
-35  f  d                                       ddd d d d ddd f f
-36  f  d                                       ddd d d d ddd f f
+35  f  d                                        ddd d dd ddd f f
+36  f  d                                        ddd d dd ddd f f
 37  f                                                        f f
 38  f  fffffff f ffffffffff                                  f f
 39  f  d                                                 ddd f f

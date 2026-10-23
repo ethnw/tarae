@@ -1780,6 +1780,7 @@ struct Diag {
 fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
     let root = project_root(ed);
     let ago = |t: &std::time::Instant| secs(t.elapsed());
+    let old = |t: &std::time::Instant| crate::term::ago(crate::clock::since(*t), false);
     let name = |c: &ClientId| ed.client(*c).map(|c| c.name.clone()).unwrap_or_default();
     let mut servers: Vec<ClientId> = Vec::new();
     let (mut listed, mut quiet) = (Vec::new(), Vec::new());
@@ -1832,7 +1833,7 @@ fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
         let last = theirs.iter().filter_map(|c| ed.lsp.published.get(&(*c, path.clone()))).max();
         quiet.push(match (theirs.is_empty(), last) {
             (true, _) => format!("{shown} — no language server reports on it"),
-            (false, Some(t)) => format!("{shown} — clean ({names} published for it {} ago)", ago(t)),
+            (false, Some(t)) => format!("{shown} — clean ({names} published for it {})", old(t)),
             (false, None) => format!("{shown} — not checked yet ({names} hasn't published for it)"),
         });
     }
@@ -1892,7 +1893,7 @@ fn diags_text(ed: &Editor, w: &DiagWait, settled: Option<bool>) -> String {
         };
         let last = ed.lsp.published.iter().filter(|((x, _), _)| x == c).map(|(_, t)| t).max();
         let last = match last {
-            Some(t) => format!("last published {} ago", ago(t)),
+            Some(t) => format!("last published {}", old(t)),
             None => "hasn't published anything yet".into(),
         };
         out.push_str(&format!("\n{}: {state}; {last}", s.name));
@@ -2645,7 +2646,7 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn secs(d: std::time::Duration) -> String {
-    crate::term::duration(d.as_secs_f32())
+    crate::term::run_duration(d)
 }
 
 /// A row's verdict once its answer is in (`12 references in 3 files`, `no matches for …`) — None for what

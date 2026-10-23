@@ -1210,7 +1210,7 @@ fn ended(ed: &mut Editor, mut w: Watch, now: Instant) {
         w.kind,
         changes,
         if changes == 1 { "" } else { "s" },
-        crate::term::duration(w.active.as_secs_f32()),
+        crate::term::run_duration(w.active),
         if list.is_empty() { String::new() } else { format!(": {}", list.join(" · ")) }
     );
     say(
@@ -1380,7 +1380,7 @@ impl Run {
 
     /// One line: `turn · 3 changes · 1 decided · 1 of 2 high looked at · active 1m 12s · in hand a.rs:10 (18s)`.
     pub fn text(&self) -> String {
-        let d = |s: u64| crate::term::duration(s as f32);
+        let d = |s: u64| crate::term::run_duration(std::time::Duration::from_secs(s));
         let mut out = format!(
             "{} · {} change{} · {} decided",
             self.kind,

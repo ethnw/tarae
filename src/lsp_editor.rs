@@ -883,13 +883,13 @@ impl Editor {
                 if id == 0 {
                     let Some(c) = self.client_mut(cid) else { return };
                     c.on_initialized(&msg["result"]);
-                    let (name, ms) = (c.name.clone(), c.started.elapsed().as_millis());
+                    let (name, took) = (c.name.clone(), crate::term::run_duration(c.started.elapsed()));
                     // Now the encoding is known — edits from here on carry UTF-16 columns if it needs them
                     let u16 = c.encoding == Encoding::Utf16;
                     for l in self.docs.iter_mut().flat_map(|d| &mut d.lsp.links).filter(|l| l.client == cid) {
                         l.u16 = u16;
                     }
-                    self.server_log(cid).line(&name, "ready", &format!("after {ms} ms"));
+                    self.server_log(cid).line(&name, "ready", &format!("after {took}"));
                     self.lsp.failed.remove(&name);
                     self.set_success(format!("{name} ready"));
                     self.lsp_flush();
@@ -1125,7 +1125,7 @@ impl Editor {
                         if let Some(p) = c.progress.remove(&token)
                             && let Some(began) = p.began
                         {
-                            let took = crate::term::duration(began.elapsed().as_secs_f32());
+                            let took = crate::term::run_duration(began.elapsed());
                             c.log().line(&c.name, "progress", &format!("{} took {took}", p.title));
                         }
                         self.lsp.work_ended.insert(cid, std::time::Instant::now());
@@ -2235,7 +2235,7 @@ impl Editor {
                 l.asleep.push(d);
             }
         }
-        let idle = crate::term::duration(wait.as_secs_f32());
+        let idle = crate::term::run_duration(wait);
         let msg = format!("{name} for {} stopped — its session idle behind for {idle}", root.display());
         log.line(&name, "stop", &msg);
         // (nothing of it is on screen)
@@ -2301,7 +2301,7 @@ impl Editor {
         let log = self.server_log(cid);
         let Some(name) = self.lsp_stopped(cid) else { return };
         self.lsp.waits_sight.extend(served);
-        let idle = crate::term::duration(wait.as_secs_f32());
+        let idle = crate::term::run_duration(wait);
         log.line(&name, "stop", &format!("{name} for {root} stopped — no file of it in sight for {idle}"));
         // (nothing of it is on screen)
         self.unchanged = true;
@@ -2344,7 +2344,7 @@ impl Editor {
         let Some(root) = self.client(cid).map(|c| c.root.display().to_string()) else { return };
         let log = self.server_log(cid);
         if let Some(name) = self.lsp_stopped(cid) {
-            let idle = crate::term::duration(wait.as_secs_f32());
+            let idle = crate::term::run_duration(wait);
             log.line(&name, "stop", &format!("{name} for {root} stopped — no file of it open for {idle}"));
         }
     }

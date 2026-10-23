@@ -880,16 +880,16 @@ impl Editor {
             return;
         };
         let o = l.parked.iter().find(|o| o.id == card && crate::clock::since(o.since) >= NUDGE_AFTER);
-        let Some((mins, title)) = o
+        let Some((waited, title)) = o
             .filter(|_| !l.nudged.contains(&card))
-            .map(|o| (crate::clock::since(o.since).as_secs() / 60, o.title.clone()))
+            .map(|o| (crate::term::run_duration(crate::clock::since(o.since)), o.title.clone()))
         else {
             self.unchanged = true;
             return;
         };
         l.nudged.push(card);
         let name = l.label().to_string();
-        let msg = format!("{name} · waiting {mins} min — {title} · {}", self.c_q_says(id, true));
+        let msg = format!("{name} · waiting {waited} — {title} · {}", self.c_q_says(id, true));
         self.said_for(id, crate::editor::ToastKind::Warning, msg);
     }
 
@@ -1763,7 +1763,7 @@ mod tests {
         ed.card_nudge(id, old);
         let said = warnings(&ed);
         assert!(
-            matches!(&said[..], [t] if t == "back · waiting 3 min — Claude asks 1 · C-q goes there"),
+            matches!(&said[..], [t] if t == "back · waiting 3m 10s — Claude asks 1 · C-q goes there"),
             "{said:?}"
         );
         ed.card_nudge(id, old);

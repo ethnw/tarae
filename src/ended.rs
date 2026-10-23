@@ -96,7 +96,7 @@ pub fn run(cmd: &[String], cwd: &Path, ended: &Path, limit: Duration) -> Ran {
             None => "stopped by a signal".into(),
         })),
         Some(Err(e)) => Err(format!("not waited for: {e}")),
-        None => Err(with(format!("stopped after {} s", limit.as_secs_f64()))),
+        None => Err(with(format!("stopped after {}", crate::term::run_duration(limit)))),
     };
     Ran { result, out, err }
 }
@@ -191,7 +191,7 @@ mod tests {
         let known = ed.procs_known();
         assert!(known.iter().any(|k| k.title == "session.ended" && k.what == shown), "in :procs");
         let t = Instant::now();
-        assert_eq!(ran.join().unwrap().result, Err("stopped after 1.5 s: waiting".into()));
+        assert_eq!(ran.join().unwrap().result, Err("stopped after 1.5s: waiting".into()));
         assert!(t.elapsed() < Duration::from_secs(5), "not waited for past its stop");
         assert!(!running().iter().any(|(_, c)| *c == shown), "gone from :procs");
         let pid: i32 = std::fs::read_to_string(&child).unwrap().trim().parse().unwrap();

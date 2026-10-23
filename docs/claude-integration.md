@@ -61,7 +61,7 @@ choice applies to the conversation at once, with no restart and no lost context:
 new model. It's also saved (`llm.model`, `llm.effort`), so `space i` and later chats use it too.
 
 Conversations outlive tarae. Each one is kept for its project, and Claude keeps its own memory of it
-(`claude --resume`). Open the chat after a restart and the latest conversation carries on (`continued from 2 h
+(`claude --resume`). Open the chat after a restart and the latest conversation carries on (`continued from 2h
 ago`) if you used it in the last 8 hours. Otherwise you get a fresh chat, and the empty panel lists your earlier
 conversations. `C-p` in the chat (or `:chat-resume`) picks any of them, with the conversation as the preview
 ([screenshot](screenshots/chat-conversations.png)). The last 20 conversations of a project are kept, in

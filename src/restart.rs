@@ -247,12 +247,13 @@ fn under_way_of(ed: &Editor, ending: bool) -> Vec<(Work, String)> {
         let running = crate::task::State::Running;
         if let Some(r) = l.task_run.as_ref().filter(|r| r.state == running && Some(r.generation()) != build) {
             let cmd = crate::task::traced(&r.task.cmd);
-            let said = format!("{cmd} in the task panel, {}", crate::waits::clock(r.started.elapsed()));
+            let said = format!("{cmd} in the task panel, {}", crate::term::run_duration(r.started.elapsed()));
             out.push((Work::Run(r.started), at(said)));
         }
         let testing = crate::testing::RunState::Running;
         if let Some(r) = l.test_run.as_ref().filter(|r| r.state == testing) {
-            let said = format!("tests {}, {}", r.target.label, crate::waits::clock(r.started.elapsed()));
+            let said =
+                format!("tests {}, {}", r.target.label, crate::term::run_duration(r.started.elapsed()));
             out.push((Work::Run(r.started), at(said)));
         }
     }
@@ -2944,10 +2945,7 @@ mod tests {
             toasts(&ed)
         );
         let q = restart_card(&ed).expect("asked again");
-        assert!(
-            q.contains("Under way — ended if it restarts now:\n  sleep 30 in the task panel, 0:0"),
-            "{q}"
-        );
+        assert!(q.contains("Under way — ended if it restarts now:\n  sleep 30 in the task panel, "), "{q}");
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert!(
@@ -3418,7 +3416,7 @@ mod tests {
         let up = |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Restart(_)));
         settle_until(&mut ed, up);
         frames_both(&mut ed, "restart_under_way");
-        wait_on_card(&mut ed, "back: sleep 30 in the task panel, 0:0");
+        wait_on_card(&mut ed, "back: sleep 30 in the task panel, ");
         let o = |ed: &Editor| {
             ed.offers.iter().find(|o| matches!(o.what, crate::offer::What::Restart(_))).cloned()
         };

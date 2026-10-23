@@ -1500,15 +1500,9 @@ pub fn mem(bytes: u64) -> String {
     }
 }
 
-/// `42s` · `12m` · `3h 05m` · `2d 04h`.
+/// How long a process has run, or a window: `run_duration`'s (`42.0s` · `12m 05s` · `3h 05m` · `2d 04h`).
 pub fn age(d: Duration) -> String {
-    let s = d.as_secs();
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        3600..86400 => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
-        _ => format!("{}d {:02}h", s / 86400, s % 86400 / 3600),
-    }
+    crate::term::run_duration(d)
 }
 
 impl Procs {
@@ -3627,7 +3621,7 @@ pub(crate) mod tests {
             [2],
             "the server, not the task: {found:?}"
         );
-        assert_eq!(found[0].short, "p2 busy 5m");
+        assert_eq!(found[0].short, "p2 busy 5m 00s");
         assert!(looks(&mut p, 3.0, at + QUIET_EVERY).is_empty(), "it rested");
         assert!(looks(&mut p, 95.0, at + 2 * QUIET_EVERY).is_empty(), "busy again: the time starts over");
         // Its work in progress, for minutes
@@ -3641,7 +3635,10 @@ pub(crate) mod tests {
         let now = t0 + Duration::from_secs(3600);
         assert!(p.check(&[], &[lsp(now - BUSY_FOR / 2)], now).0.is_empty());
         let found = p.check(&[], &[lsp(now - BUSY_FOR)], now).0;
-        assert_eq!(found.iter().map(|f| f.what.as_str()).collect::<Vec<_>>(), ["ra busy for 5m (Indexing)"]);
+        assert_eq!(
+            found.iter().map(|f| f.what.as_str()).collect::<Vec<_>>(),
+            ["ra busy for 5m 00s (Indexing)"]
+        );
     }
 
     /// Memory: a program's usual is the most it took in its first minutes (kept over its runs); far above it

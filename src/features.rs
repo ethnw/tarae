@@ -584,12 +584,12 @@ impl Report {
         self.rows.iter().filter(move |r| r.area == Some(area) && r.total() == 0)
     }
 
-    /// `today` · `yesterday` · `3 days ago` (under two weeks) · `2026-09-14`.
+    /// `today` · `yesterday` · `3d ago` (under two weeks, `term::ago`) · `2026-09-14`.
     pub fn when(&self, day: u32) -> String {
         match self.today.saturating_sub(day) {
             0 => "today".into(),
             1 => "yesterday".into(),
-            n if n < 14 => format!("{n} days ago"),
+            n if n < 14 => crate::term::ago(std::time::Duration::from_secs(u64::from(n) * 86_400), false),
             _ => date(day),
         }
     }
@@ -726,9 +726,14 @@ impl Report {
 fn columns(heading: &str, head: &[&str], rows: &[Vec<String>]) -> String {
     use unicode_width::UnicodeWidthStr as _;
     const NAME_MAX: usize = 32;
-    let numeric = |c: usize| {
-        c > 0 && rows.iter().all(|r| r[c] == "·" || r[c].chars().all(|ch| ch.is_ascii_digit() || ch == ','))
+    let count = |s: &str| s == "·" || s.chars().all(|ch| ch.is_ascii_digit() || ch == ',');
+    // (a column of days — `today`, an age, a date — right-aligned too: its ages end where the widest does)
+    let day = |s: &str| {
+        matches!(s, "today" | "yesterday")
+            || s.ends_with(" ago")
+            || s.chars().all(|ch| ch.is_ascii_digit() || ch == '-')
     };
+    let numeric = |c: usize| c > 0 && (rows.iter().all(|r| count(&r[c])) || rows.iter().all(|r| day(&r[c])));
     let widths: Vec<usize> = (0..head.len())
         .map(|c| rows.iter().map(|r| r[c].width()).chain([head[c].width()]).max().unwrap_or(0))
         .map(|w| w.max(1))

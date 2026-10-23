@@ -235,7 +235,7 @@ fn grouped(threads: &[Thread]) -> Vec<String> {
         .into_iter()
         .map(|(what, n, cpu)| {
             let times = if n > 1 { format!("{n} × ") } else { String::new() };
-            format!("  {times}{what} · {:.2} s CPU", cpu.as_secs_f64())
+            format!("  {times}{what} · {} CPU", crate::term::run_duration(cpu))
         })
         .collect()
 }
@@ -332,9 +332,9 @@ fn duration(w: &str) -> Option<Duration> {
     Duration::try_from_secs_f64(secs * times).ok()
 }
 
-/// `no output for 12 min, 0% CPU`.
+/// `no output for 12m 03s, 0% CPU`.
 fn said(s: &Stuck) -> String {
-    format!("no output for {} min, {:.0}% CPU", s.quiet.as_secs() / 60, s.cpu)
+    format!("no output for {}, {:.0}% CPU", crate::term::run_duration(s.quiet), s.cpu)
 }
 
 /// Its threads read: into its output (from `s.at`) — then the card (`card`), if it's still running and still
