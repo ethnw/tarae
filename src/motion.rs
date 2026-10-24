@@ -13,6 +13,11 @@
 //! from before a switch to `none`, one ends by its time: a frame as it goes. Made in tests too (drawn only where
 //! `motion_drawn` — off in tests unless one turns it on).
 //!
+//! A stamp your key makes in sight (§5: an edit review's change head, the turn review rail's file, the chat's knot
+//! row) is pressed (`press`, `What::Press` by its `Place`): it lands lit and dries to its dry ink over `PRESS` on the
+//! flash's drying (`pressed`, `term::stamp_spans`); on the row still in hand it stays lit. Only at `full`: at `calm`
+//! and `none` it's dry at once (nothing on a clock).
+//!
 //! What a flash says (`flash_saying`: a yank's "yanked …") is a note only where a frame drew that flash: kept in
 //! `:messages` at once, its toast after the frame that didn't draw it (the chat's transcript draws no flash, a
 //! buffer moved or out of sight, named colours) or as it goes undrawn (`words_drawn`, `words_unseen`).
@@ -95,19 +100,55 @@ impl Editor {
 
     /// A motion begins now, in the place of one of its kind on the same thing (whose words, unsaid, are a toast).
     pub fn motion_start(&mut self, what: What) {
-        let What::Flash { doc: id, .. } = what;
-        let (gone, kept): (Vec<Moving>, Vec<Moving>) = std::mem::take(&mut self.motions)
-            .into_iter()
-            .partition(|m| matches!(&m.what, What::Flash { doc, .. } if *doc == id));
+        let (gone, kept): (Vec<Moving>, Vec<Moving>) =
+            std::mem::take(&mut self.motions).into_iter().partition(|m| m.what.same(&what));
         self.motions = kept;
         self.words_unseen(gone);
+        let life = match what {
+            What::Flash { .. } => FLASH,
+            What::Press(_) => PRESS,
+        };
         self.motions.push(Moving {
             what,
             born: crate::clock::now(),
-            life: FLASH,
+            life,
             seen: Cell::new(false),
             words: None,
         });
+    }
+
+    /// Your key stamped a decision at `place`, in sight (§5): the stamp lands lit and dries over `PRESS`. Only at
+    /// `full` — at `calm` and `none` it's dry at once, as before.
+    pub fn press(&mut self, place: Place) {
+        if self.motion() == Motion::Full {
+            self.motion_start(What::Press(place));
+        }
+    }
+
+    /// The diff of `doc` at `version` landed (`git_schedule`): a hunk reset waiting on it (`press_on_diff`) presses
+    /// its turn file's `u` now, the frame it first shows — where that diff is empty; a later version's lets it go.
+    pub fn diff_landed(&mut self, doc: DocId, version: u64) {
+        let Some((id, at)) = self.press_on_diff.filter(|&(id, at)| id == doc && version >= at) else {
+            return;
+        };
+        self.press_on_diff = None;
+        let d = self.docs.iter().find(|d| d.id == id);
+        if version == at
+            && let Some(path) = d.filter(|d| d.git_hunks.is_empty()).and_then(|d| d.path.clone())
+        {
+            crate::codereview::press_turn_file(self, &path);
+        }
+    }
+
+    /// How lit the stamp at `place` is drawn now, 0 (dry) ‥ 1 (lit) — its press drying; 0 with none under way, or
+    /// where nothing moves on a clock.
+    pub fn pressed(&self, place: &Place) -> f32 {
+        if !self.moving() {
+            return 0.0;
+        }
+        (self.motions.iter())
+            .find(|m| matches!(&m.what, What::Press(p) if p == place))
+            .map_or(0.0, |m| self.motion_strength(m))
     }
 
     /// `flash` begins saying `msg` (a yank's "yanked …"): kept in `:messages` and a note now, a toast only if no
@@ -224,6 +265,8 @@ mod tests;
 /// (Neovim's yank highlight is a 150 ms hard cut; at 200 ms the curve left the step after the peak at a quarter,
 /// unseen on the sheets).
 pub const FLASH: Duration = Duration::from_millis(300);
+/// How long a stamp's press dries (§5): lit on its key's frame, dry at its end — the flash's drying, its time.
+pub const PRESS: Duration = Duration::from_millis(300);
 /// The most ranges a flash keeps (a `.` over thousands of cursors flashes none).
 pub const RANGES_MAX: usize = 256;
 /// The most lines an undo's span may cover and still flash (past it, its line diff would be the cost).
@@ -256,6 +299,39 @@ pub struct Moving {
 pub enum What {
     /// What an invisible act touched (§1): byte ranges of a document at its version — sorted, apart.
     Flash { doc: DocId, version: u64, ranges: Vec<Range<usize>>, act: Act },
+    /// A stamp your key pressed (§5), where it's drawn.
+    Press(Place),
+}
+
+impl What {
+    /// Whether `other` is a motion of the same thing — the one it takes the place of: a flash on the same document,
+    /// a press at the same place.
+    fn same(&self, other: &What) -> bool {
+        match (self, other) {
+            (What::Flash { doc: a, .. }, What::Flash { doc: b, .. }) => a == b,
+            (What::Press(a), What::Press(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// What the state names its act: a flash's act, a press `stamp`.
+    pub fn act(&self) -> &'static str {
+        match self {
+            What::Flash { act, .. } => act.name(),
+            What::Press(_) => "stamp",
+        }
+    }
+}
+
+/// Where a stamp is pressed — the place it's drawn, its key (§5: the press time is kept by it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// An edit review's change head: the review's document, the change's index.
+    Head { doc: DocId, change: usize },
+    /// The turn review rail's file.
+    File(std::path::PathBuf),
+    /// The chat's knot row of call `id` (and the follow card's, the same call).
+    Knot(String),
 }
 
 /// The act a flash shows.
@@ -281,10 +357,11 @@ impl Act {
 }
 
 impl Moving {
-    /// Its kind, as the state names it: `flash`.
+    /// Its kind, as the state names it: `flash`, `press`.
     pub fn kind(&self) -> &'static str {
         match self.what {
             What::Flash { .. } => "flash",
+            What::Press(_) => "press",
         }
     }
 }

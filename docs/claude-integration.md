@@ -329,7 +329,8 @@ its [edits](#edits) always come to you first). Each lookup shows as a quiet row 
 `◦ search  fn add  in src` — each named as the tool it is), its mark the stop's knot, as the card beside the code
 shows it. The stop in hand — where Claude is while it works, the one replay shows — is `●`
 in the accent; a change is `▲`, and once you've answered it, it carries the key that decided it (`▐y▌`, `▐n▌`,
-both when its changes went both ways). The other open files are listed in the context, and unsaved ones send their text,
+both when its changes went both ways) — pressed by your key, it lands lit and dries to its dim ink in 0.3 s, as an
+edit review's change head and a turn's file in the review rail do ([`editor.motion`](reference/settings.md)). The other open files are listed in the context, and unsaved ones send their text,
 since Claude would otherwise read the stale copy on disk. Answers cite code as `path:line`. Those references are
 underlined, and a click opens them. `C-]` (or `C-g` — zellij takes that one) walks every place the conversation points at, newest first, centering
 each one while the chat keeps the keys.

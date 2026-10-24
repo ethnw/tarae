@@ -338,6 +338,9 @@ impl Editor {
             // (on your key, not your edit — a review counts it taken back, not `edited`)
             doc.own.not_yours();
         });
+        // (its last change taken back: a turn review's file stamped `u` once this text's diff lands empty — pressed
+        // then, as it first shows: §5, `diff_landed`)
+        self.press_on_diff = Some((self.doc().id, self.doc().version()));
         self.note("hunk reset");
     }
 

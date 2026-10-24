@@ -1334,6 +1334,26 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (motion §5's sheet: Claude's edit of two changes, the first accepted — its head's stamp pressed, the frames of
+    // its drying kept — the second in hand)
+    Scene {
+        name: "press",
+        claude: "two",
+        files: MAIN,
+        keys: &[
+            "@1",
+            " ",
+            "l",
+            "@1",
+            "why does insert clone the name?",
+            "\r",
+            "@?Change 1 of 2",
+            "@1",
+            "@~400",
+            "y",
+            "@0.3",
+        ],
+    },
     // (Claude's edit of three changes: the first accepted, the second refused, the third in hand)
     Scene {
         name: "decided",
@@ -2743,6 +2763,8 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
         match script {
             "full" => turn.explain(true, false)?,
             "three" => turn.explain(true, true)?,
+            // (two changes: the press's sheet — the first answered, the second in hand)
+            "two" => turn.explain_items(2)?,
             // (its three-item edit being written: the third item's new text held mid-line)
             "writemid" => turn.explain_held(true, true, Some("nots.len());\\n\"}"))?,
             "mid" => turn.explain(false, false)?,
@@ -2837,8 +2859,17 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         self.explain_held(whole, three, None)
     }
 
+    /// `explain` whole, its edit of `n` changes (1 ‥ 3): the insert's, then the print's, then the doc comment's.
+    fn explain_items(&mut self, n: usize) -> io::Result<()> {
+        self.explain_with(true, n, None)
+    }
+
     /// `explain`, its edit's input held at `hold` while it's written (`writemid`).
     fn explain_held(&mut self, whole: bool, three: bool, hold: Option<&str>) -> io::Result<()> {
+        self.explain_with(whole, if three { 3 } else { 1 }, hold)
+    }
+
+    fn explain_with(&mut self, whole: bool, n: usize, hold: Option<&str>) -> io::Result<()> {
         self.words("Let me look at how the map is filled first.")?;
         self.text("\n\n")?;
         self.call(1, "read", json!({"files": ["src/main.rs:7-14"]}))?;
@@ -2867,16 +2898,15 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
             "    threads.insert(first.name.clone(), first);\n",
             "    threads.entry(first.name.clone()).or_insert(first);\n",
         );
-        let items = if three {
-            let doc =
-                item("/// 실타래 — 이어진 실 한 가닥.\n", "/// 실타래 — 같은 이름은 첫 가닥으로 남는다.\n");
-            let print = item(
-                "        println!(\"{name}: {} knots, {} long\", t.knots.len(), t.length());\n",
-                "        println!(\"{name}: {} knots\", t.knots.len());\n",
-            );
-            [doc, edit, print].join(", ")
-        } else {
-            edit
+        let doc = item("/// 실타래 — 이어진 실 한 가닥.\n", "/// 실타래 — 같은 이름은 첫 가닥으로 남는다.\n");
+        let print = item(
+            "        println!(\"{name}: {} knots, {} long\", t.knots.len(), t.length());\n",
+            "        println!(\"{name}: {} knots\", t.knots.len());\n",
+        );
+        let items = match n {
+            3 => [doc, edit, print].join(", "),
+            2 => [edit, print].join(", "),
+            _ => edit,
         };
         let input = format!(r#"{{"edits": [{items}]}}"#);
         self.input(2, "edit", &input, hold)?;

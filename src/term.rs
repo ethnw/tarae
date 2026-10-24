@@ -7242,7 +7242,8 @@ const THUMB: &str = "▎";
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: what each motion drew in the last frames — (kind, byte, the cell's text): `flash`.
+    /// Tests: what each motion drew in the last frames — (kind, where, what): `flash` (byte, the cell's text),
+    /// `press` (its strength in hundredths, its key and ink).
     pub(crate) static MOTION_SEEN: std::cell::RefCell<Vec<(&'static str, usize, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -7647,7 +7648,11 @@ fn draw_review_header(
     if let Some(stamp) = stamp {
         apply(out, base)?;
         queue!(out, Spaces(2))?;
-        for s in stamp_spans(ui, stamp, i == rev.current, base) {
+        let lit = match i == rev.current {
+            true => 1.0,
+            false => editor.pressed(&crate::motion::Place::Head { doc: rev.doc_id, change: i }),
+        };
+        for s in stamp_spans(ui, stamp, lit, base) {
             apply(out, s.style)?;
             queue!(out, Print(&s.text))?;
         }
@@ -7991,7 +7996,7 @@ fn draw_list_row(
         queue!(out, Spaces(lw.saturating_sub(used)))?;
         match r.stamp.flatten() {
             Some(stamp) => {
-                for s in stamp_spans(ui, stamp, r.selected, base) {
+                for s in stamp_spans(ui, stamp, if r.selected { 1.0 } else { 0.0 }, base) {
                     apply(out, s.style)?;
                     queue!(out, Print(&s.text))?;
                 }
@@ -13325,7 +13330,13 @@ fn draw_review_rail(
         if turn {
             row.push(sp(" ".into(), bg));
             match stamp {
-                Some(stamp) => row.extend(stamp_spans(ui, stamp, here, bg)),
+                Some(stamp) => {
+                    let lit = match here {
+                        true => 1.0,
+                        false => editor.pressed(&crate::motion::Place::File(f.path.clone())),
+                    };
+                    row.extend(stamp_spans(ui, stamp, lit, bg))
+                }
                 None => row.push(sp(" ".repeat(STAMP_W), bg)),
             }
         }
@@ -13671,7 +13682,8 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
             Role::User => 0,
             Role::Assistant => u64::from(last && c.state == State::Writing),
             Role::Thought => u64::from(last && c.busy()),
-            Role::Tool => u64::from(m.is_call(hand)),
+            // (and a press drying on its stamps: a step a layout — §5)
+            Role::Tool => u64::from(m.is_call(hand)) | (((knot_lit(editor, m, false) * 1000.0) as u64) << 1),
             // (the replay's stops, and its keys — which the chat's focus changes)
             Role::Note if turn_end(i) => {
                 1 | (u64::from(editor.session.is_at(At::Chat)) << 1) | ((stops as u64) << 2)
@@ -13780,7 +13792,7 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
             Role::Tool => {
                 let Some(look) = &m.look else { return lines };
                 let in_hand = m.is_call(hand);
-                let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
+                let stamps = knot_stamps(ui, &m.stamps, knot_lit(editor, m, in_hand), card);
                 let glyph = knot(look, in_hand, &styles);
                 let (spans, ran, tail) =
                     trail_row_at(look, m.ran.as_ref(), glyph, &stamps, w, false, &styles);
@@ -15121,19 +15133,24 @@ fn knot(look: &crate::chat::Look, in_hand: bool, st: &TrailStyles) -> crate::mar
     crate::markdown::Span { text: glyph.into(), style: if in_hand { st.accent } else { st.dim } }
 }
 
-/// A change's stamps (`Msg.stamps`) as its knot row ends with them — lit only on the row in hand, a cell apart.
-fn knot_stamps(
-    ui: &Ui,
-    stamps: &[crate::stamp::Stamp],
-    in_hand: bool,
-    on: Style,
-) -> Vec<crate::markdown::Span> {
+/// How lit a knot row's stamps are: whole on the row in hand, else their press drying (§5).
+fn knot_lit(editor: &Editor, m: &crate::chat::Msg, in_hand: bool) -> f32 {
+    match in_hand {
+        true => 1.0,
+        false if m.stamps.is_empty() => 0.0,
+        false => editor.pressed(&crate::motion::Place::Knot(m.call.clone())),
+    }
+}
+
+/// A change's stamps (`Msg.stamps`) as its knot row ends with them — lit on the row in hand (`lit` 1), drying
+/// from a press, a cell apart.
+fn knot_stamps(ui: &Ui, stamps: &[crate::stamp::Stamp], lit: f32, on: Style) -> Vec<crate::markdown::Span> {
     let mut out = Vec::new();
     for (k, s) in stamps.iter().enumerate() {
         if k > 0 {
             out.push(crate::markdown::Span { text: " ".into(), style: on });
         }
-        out.extend(stamp_spans(ui, *s, in_hand, on));
+        out.extend(stamp_spans(ui, *s, lit, on));
     }
     out
 }
@@ -15331,7 +15348,7 @@ fn follow_thread(
                 }
                 // (the stop in hand where it is now — its lines moved by later edits, a search's count)
                 let look = gaze.filter(|_| in_hand).map_or(look, |g| &g.look);
-                let stamps = knot_stamps(ui, &m.stamps, in_hand, card);
+                let stamps = knot_stamps(ui, &m.stamps, knot_lit(editor, m, in_hand), card);
                 let glyph = knot(look, in_hand, st);
                 let (row, ..) = trail_row_at(look, m.ran.as_ref(), glyph, &stamps, inner, false, st);
                 voice_under = false;
@@ -15995,11 +16012,17 @@ const STAMP_LIST_MIN: usize = 60;
 /// A stamp (`stamp.rs`) stamped on `on`, the one way it's drawn — `STAMP_W` cells, its letter the key that decided.
 /// Where `on` has a colour it's filled, `▐y▌`: the ground in its ink, the letter bold in `on`'s own colour, cut out
 /// of it (음각); where it has none (a transparent theme) there's nothing to cut the letter out of, so it's carved the
-/// other way, `▌y▐`: the letter bold and its frame in the ink, nothing painted (양각). Its ink is the accent when `lit` — the row in hand,
-/// where the accent's bar already is: one mark a region — else the dim.
-fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, lit: bool, on: Style) -> [crate::markdown::Span; 3] {
+/// other way, `▌y▐`: the letter bold and its frame in the ink, nothing painted (양각). Its ink is the accent when `lit` (1) — the row in
+/// hand, where the accent's bar already is: one mark a region — else the dim (0); between, a press drying (§5,
+/// `Editor::pressed`), the accent dried toward the dim by `drying` — the frame and the letter alike.
+fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, lit: f32, on: Style) -> [crate::markdown::Span; 3] {
     use crate::markdown::Span;
-    let ink = if lit { ui.accent.fg } else { ui.virt.fg };
+    let ink = stamp_ink(ui, lit);
+    #[cfg(test)]
+    if lit > 0.0 && lit < 1.0 {
+        let at = (lit * 100.0).round() as usize;
+        MOTION_SEEN.with_borrow_mut(|s| s.push(("press", at, format!("{} {ink:?}", stamp.0))));
+    }
     let edge = Style { fg: ink, bg: on.bg, ..Style::default() };
     let sp = |text: &str, style: Style| Span { text: text.into(), style };
     let key = stamp.0.to_string();
@@ -16010,6 +16033,21 @@ fn stamp_spans(ui: &Ui, stamp: crate::stamp::Stamp, lit: bool, on: Style) -> [cr
             sp("▌", edge),
         ],
         None => [sp("▌", edge), sp(&key, Style { bold: true, ..edge }), sp("▐", edge)],
+    }
+}
+
+/// A stamp's ink at `lit` (0 dry ‥ 1 lit): the accent dried toward the dim (`drying`); where either is a named colour
+/// there's no mix — lit while any of it is, then dry.
+fn stamp_ink(ui: &Ui, lit: f32) -> Option<Color> {
+    use crate::chrome::rgb;
+    match (ui.accent.fg.and_then(rgb), ui.virt.fg.and_then(rgb)) {
+        _ if lit >= 1.0 => ui.accent.fg,
+        _ if lit <= 0.0 => ui.virt.fg,
+        (Some(wet), Some(rest)) => {
+            let [r, g, b] = drying(wet, rest, lit);
+            Some(Color::Rgb { r, g, b })
+        }
+        _ => ui.accent.fg,
     }
 }
 
@@ -19707,6 +19745,27 @@ mod tests {
         c.state = crate::chat::State::Thinking;
         let rows = chat_rows(&mut ed, 120, "cargo test");
         assert_eq!(rows.last().unwrap(), "  ● run    cargo test", "{rows:#?}");
+    }
+
+    /// §5: a knot row's stamp your key made dries in the chat, step by step — its rows laid out again each step (the
+    /// press in `chat_laid`'s key), dry at its end.
+    #[test]
+    fn a_knot_rows_press_dries_in_the_chat() {
+        let mut ed = threaded_turn();
+        ed.motion_drawn = true;
+        crate::clock::hold();
+        ed.press(crate::motion::Place::Knot("e1".into()));
+        let mut steps = Vec::new();
+        for at in [0, 100, 200, 300] {
+            ed.motion_at = Some(std::time::Duration::from_millis(at));
+            MOTION_SEEN.with_borrow_mut(Vec::clear);
+            chat_rows(&mut ed, 120, "5.2s");
+            let seen = MOTION_SEEN
+                .with_borrow(|s| s.iter().filter(|(k, ..)| *k == "press").cloned().collect::<Vec<_>>());
+            steps.push(seen.iter().map(|(_, k, ink)| (*k, ink.chars().next().unwrap())).collect::<Vec<_>>());
+        }
+        crate::clock::release();
+        assert_eq!(steps, [vec![], vec![(44, 'y')], vec![(11, 'y')], vec![]], "lit, drying, dry");
     }
 
     /// The chat's rows from right after its gutter (its padding, then its text) on, from the question's row to the

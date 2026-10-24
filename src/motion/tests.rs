@@ -21,7 +21,7 @@ fn editor(text: &str) -> Editor {
 
 /// The flash on the document as it is now: its act and the text of each range.
 fn flashed(ed: &Editor) -> Option<(Act, Vec<String>)> {
-    let What::Flash { ranges, act, doc, version } = &ed.motions.last()?.what;
+    let What::Flash { ranges, act, doc, version } = &ed.motions.last()?.what else { return None };
     if (*doc, *version) != (ed.doc().id, ed.doc().version()) {
         return None;
     }
@@ -141,6 +141,87 @@ fn a_yank_is_a_note_where_its_flash_is_drawn_else_a_toast() {
     ed.toasts.clear();
     feed(&mut ed, "xy");
     assert_eq!((toasts(&ed), ed.motions.len()), (vec!["yanked 1 selection".to_string()], 0), "none: a toast");
+}
+
+/// §5: answering a two-change review's first change presses its head's stamp — lit on the key's frame, drying at its
+/// steps (1 · .44 · .11), dry at its end; the head back in hand is lit, never pressed; the press wakes on its own clock
+/// and ends; the second answer ends the review. At `calm` and `none` no press: dry at once.
+#[test]
+fn an_answered_change_presses_its_stamp_and_it_dries() {
+    let seen = |ed: &mut Editor| {
+        crate::term::MOTION_SEEN.with_borrow_mut(Vec::clear);
+        crate::term::render(ed, &mut Vec::new(), 100, 20).unwrap();
+        crate::term::MOTION_SEEN.with_borrow(|s| {
+            s.iter().filter(|(k, ..)| *k == "press").map(|(_, at, g)| (*at, g.clone())).collect::<Vec<_>>()
+        })
+    };
+    let review = |ed: &mut Editor| {
+        let id = ed.doc().id;
+        let changes = vec![(0, 3, "one".into(), "ONE".into()), (8, 13, "three".into(), "THREE".into())];
+        crate::llm::review_with(ed, id, "upper", changes, None);
+    };
+    let mut ed = editor("one\ntwo\nthree\n");
+    ed.motion_drawn = true;
+    let head = Place::Head { doc: ed.doc().id, change: 0 };
+    crate::clock::hold();
+    review(&mut ed);
+    feed(&mut ed, "y");
+    let presses: Vec<What> = ed.motions.iter().map(|m| m.what.clone()).collect();
+    assert_eq!(presses, [What::Press(head.clone())], "y: the first head pressed, the review on the second");
+    assert_eq!(ed.pressed(&head), 1.0, "lit on the key's frame");
+    let ms = |d: Option<Duration>| d.map(|d| d.as_millis());
+    assert_eq!(ms(ed.motion_wake()), Some(102), "its first step a TICK on");
+    let mut inks = Vec::new();
+    for (at, k) in [(100, 44), (200, 11)] {
+        ed.motion_at = Some(Duration::from_millis(at));
+        let s = seen(&mut ed);
+        assert!(
+            matches!(&s[..], [(n, ink)] if *n == k && ink.starts_with("y Some(Rgb")),
+            "at {at} ms: {s:?}"
+        );
+        inks.push(s[0].1.clone());
+    }
+    assert_ne!(inks[0], inks[1], "the ink dries, step by step");
+    ed.motion_at = Some(PRESS);
+    assert_eq!((seen(&mut ed), ed.pressed(&head)), (vec![], 0.0), "dry at its end");
+    ed.motion_at = Some(Duration::from_millis(100));
+    ed.session.review.as_mut().unwrap().current = 0;
+    assert_eq!(seen(&mut ed), [], "back in hand: lit, not pressed");
+    ed.session.review.as_mut().unwrap().current = 1;
+    ed.motion_at = None;
+    crate::clock::advance(PRESS);
+    assert_eq!(ms(ed.motion_wake()), Some(0), "over: the frame that draws it dry");
+    ed.schedule_tick();
+    assert_eq!((ed.motions.len(), ed.motion_wake()), (0, None), "and nothing more");
+    feed(&mut ed, "n");
+    assert!(ed.session.review.is_none(), "the second answer ends it");
+    crate::clock::release();
+    for level in ["calm", "none"] {
+        let mut ed = editor("one\ntwo\nthree\n");
+        crate::typed::execute(&mut ed, &format!("set editor.motion {level}")).unwrap();
+        review(&mut ed);
+        feed(&mut ed, "y");
+        assert!(ed.motions.is_empty(), "{level}: no press");
+    }
+}
+
+/// §5: a change's knot row stamped by your review's keys (`chat::stamp_call`) is pressed — no keys, none; a file
+/// outside a turn review presses nothing (`codereview::press_turn_file`: only a turn's files are stamped).
+#[test]
+fn a_knot_stamped_by_your_keys_is_pressed() {
+    let mut ed = editor("one\n");
+    ed.motion_drawn = true;
+    let mut c = crate::chat::Chat::new();
+    let mut m = crate::chat::Msg::new(crate::chat::Role::Tool, "edit", "");
+    m.call = "c1".into();
+    c.msgs.push(m);
+    ed.session.chat = Some(c);
+    crate::chat::stamp_call(&mut ed, "c1", &[]);
+    assert!(ed.motions.is_empty(), "no keys: nothing pressed");
+    crate::chat::stamp_call(&mut ed, "c1", &[crate::stamp::Stamp('y')]);
+    assert_eq!(ed.pressed(&Place::Knot("c1".into())), 1.0, "pressed, lit on its frame");
+    crate::codereview::press_turn_file(&mut ed, std::path::Path::new("/nowhere/a.rs"));
+    assert_eq!(ed.motions.len(), 1, "no turn review: no rail stamp to press");
 }
 
 /// What a flash draws: at its peak every cell of its ranges, at `calm` the same, at `none` nothing; past its time

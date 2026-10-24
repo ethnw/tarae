@@ -348,6 +348,7 @@ impl Editor {
                 {
                     d.git_hunks = hunks;
                     d.git_version = version;
+                    ed.diff_landed(id, version);
                 }
             }
         });

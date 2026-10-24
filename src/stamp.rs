@@ -1,6 +1,7 @@
 //! The stamp (도장, 글타래 P5 — `geultarae-plan.md` §2.4): a decision you made is stamped where it was made with
 //! the key that made it — `▐y▌ accepted`, `▐n▌ rejected` — so what's left is what has none: the edit review's
-//! change heads, the turn review's files, `:granted`'s answers. Stamped in the frame the key draws; it never moves.
+//! change heads, the turn review's files, `:granted`'s answers. Stamped in the frame the key draws, where it stays;
+//! one your key makes in sight lands lit and dries to its dry ink (motion §5 — `Editor::press`, `motion.rs`).
 //! (A stamp, not a seal: the seal is the brand's mark, never drawn in the editor — one word for one thing.)
 //!
 //! The key, not a word: it's the letter the hints of what's still undecided name (`y accept · n reject`), in the

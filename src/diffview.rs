@@ -77,6 +77,7 @@ impl Editor {
         if d.version() == version && !d.loading {
             d.git_hunks = hunks;
             d.git_version = version;
+            self.diff_landed(id, version);
         } else {
             d.git_version = u64::MAX;
         }

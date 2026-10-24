@@ -4173,6 +4173,7 @@ fn load_base(ed: &mut Editor, id: DocId, from: From, f: File) {
             {
                 d.git_hunks = hunks;
                 d.git_version = version;
+                ed.diff_landed(id, version);
             } else {
                 d.git_version = u64::MAX;
             }
@@ -4632,8 +4633,22 @@ fn toggle_viewed_at(ed: &mut Editor, i: usize) {
             return;
         }
         mark(ed, i);
+        if let Some(f) = ed.session.code_review.as_ref().and_then(|r| r.files.get(i)) {
+            let path = f.path.clone();
+            press_turn_file(ed, &path);
+        }
     }
     viewed_said(ed, i);
+}
+
+/// Your key decided a turn's file at `path` (`m`, its last change taken back): its rail stamp is pressed where it
+/// shows now (§5, `motion.rs`: lit on the frame it first shows) — nothing in another review, which stamps none.
+pub fn press_turn_file(ed: &mut Editor, path: &Path) {
+    let shows = (ed.session.code_review.as_ref())
+        .is_some_and(|r| r.files.iter().find(|f| f.path == path).is_some_and(|f| r.stamp(ed, f).is_some()));
+    if shows {
+        ed.press(crate::motion::Place::File(path.to_path_buf()));
+    }
 }
 
 /// `space v q` · `:review-close`: the review ends — asked first on a card while files are left not viewed

@@ -680,6 +680,10 @@ pub fn stamp_call(ed: &mut Editor, id: &str, keys: &[crate::stamp::Stamp]) {
     // (`y` first, whichever came first)
     crate::sorting::by_key(&mut m.stamps, |s| s.0 != 'y');
     m.changed();
+    // (your keys made them: pressed, §5)
+    if !keys.is_empty() {
+        ed.press(crate::motion::Place::Knot(id.to_string()));
+    }
 }
 
 /// The command `cmd` Claude asked to run ended: its row (the newest `run` row of that command whose call is

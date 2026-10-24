@@ -4481,6 +4481,62 @@ fn a_turns_file_is_stamped_once_kept_or_taken_back() {
     assert_eq!(look(&mut s).0, Some(("u".into(), dry)), "dry: not the row in hand");
 }
 
+/// §5: a turn's rail stamp your key made is pressed — `space v m`'s lit on its key's frame, drying on a row not in
+/// hand; `space v u` taking the file's last change back presses its `u` as that stamp first shows, once the diff
+/// landed, lit on that frame however slow the diff was.
+#[test]
+fn a_turns_rail_stamp_is_pressed_as_it_first_shows() {
+    use crate::codereview::{Base, File};
+    use crate::motion::{PRESS, Place};
+    let (base, now) = five_and_thirty_added();
+    let mut s = review_of(160, 30, &base, &now);
+    let (id, cwd) = (s.ed.doc().id, std::env::current_dir().unwrap());
+    let r = s.ed.session.code_review.as_mut().unwrap();
+    r.base = Base::Turn { at: 0, question: "fix it".into() };
+    r.rail_need.take();
+    r.docs.push(id);
+    let other = |p: &str| File {
+        rel: p.into(),
+        path: cwd.join(p),
+        added: 1,
+        removed: 0,
+        new: false,
+        gone: false,
+        binary: false,
+    };
+    r.files.push(other("src/other.rs"));
+    let place = Place::File(cwd.join("src/demo.rs"));
+    // The presses the rail drew at `at` ms, its keys' hand on other.rs: (strength in hundredths, its letter)
+    let drawn = |s: &mut Shot, at: u64| {
+        let was = std::mem::replace(&mut s.ed.session.at, crate::session::At::Rail);
+        s.ed.session.code_review.as_mut().unwrap().selected = 1;
+        s.ed.motion_at = Some(Duration::from_millis(at));
+        super::MOTION_SEEN.with_borrow_mut(Vec::clear);
+        s.frame();
+        (s.ed.motion_at, s.ed.session.at) = (None, was);
+        s.ed.session.code_review.as_mut().unwrap().selected = 0;
+        super::MOTION_SEEN.with_borrow(|seen| {
+            let presses = seen.iter().filter(|(k, ..)| *k == "press");
+            presses.map(|(_, k, ink)| (*k, ink.chars().next().unwrap())).collect::<Vec<_>>()
+        })
+    };
+    s.ed.motion_drawn = true;
+    crate::clock::hold();
+    s.keys(" vm");
+    assert_eq!(s.ed.pressed(&place), 1.0, "m: lit on its key's frame");
+    assert_eq!(drawn(&mut s, 100), [(44, 'm')], "drying on the rail");
+    assert_eq!(drawn(&mut s, 200), [(11, 'm')]);
+    crate::clock::advance(PRESS);
+    s.ed.goto_line(10);
+    s.keys(" vu");
+    // (a slow diff: the stamp shows only once it lands)
+    crate::clock::advance(Duration::from_millis(400));
+    s.until("the diff again", |ed| ed.doc().git_version == ed.doc().version());
+    assert_eq!(s.ed.pressed(&place), 1.0, "u: lit on the frame it first shows");
+    assert_eq!(drawn(&mut s, 100), [(44, 'u')], "drying on the rail");
+    crate::clock::release();
+}
+
 /// Frictions 13, #2: the rail's counts are every line, and what moved is said beside them, faint — on the
 /// file's row (the rail measured wide enough for it) and, each move once, on the counts' row.
 #[test]

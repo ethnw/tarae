@@ -1934,6 +1934,8 @@ fn review_answer(ed: &mut Editor, key: Key) -> bool {
     let doc = ed.session.review.as_ref().and_then(|r| ed.docs.iter().find(|d| d.id == r.doc_id));
     let wraps = doc.is_some_and(|d| ed.wraps(d));
     let Some(rev) = ed.session.review.as_mut().filter(|r| r.ready) else { return false };
+    // (the change answered: its head's stamp pressed once the review moves on — §5)
+    let answered = crate::motion::Place::Head { doc: rev.doc_id, change: rev.current };
     let decide = |rev: &mut Review, d: Decision| {
         rev.hunks[rev.current].decision = d;
         rev.follow = true;
@@ -1995,8 +1997,11 @@ fn review_answer(ed: &mut Editor, key: Key) -> bool {
             return true;
         }
     };
+    let stamped = matches!((key.code, key.ctrl || key.alt), (Code::Char('y' | 'n'), false));
     if done {
         finish(ed);
+    } else if stamped {
+        ed.press(answered);
     }
     true
 }

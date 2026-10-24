@@ -144,6 +144,8 @@ pub fn take(setup: &Setup, keys: &[String], size: (u16, u16), state: &Path, out:
         captured: Vec::new(),
     };
     let missed = drive(&mut vt, setup, keys, state, &[], cols, rows)?;
+    // (a scene's `@~N` frames too, as `cargo xtask shot` keeps them)
+    contact_sheet(&vt, 1, out)?;
     picture_of(&vt, 1, out, &missed)
 }
 

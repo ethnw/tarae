@@ -684,6 +684,9 @@ pub struct Editor {
     pub bleed_ink: bool,
     /// Motions on a clock under way (`motion.rs`): flashes, … — each let go once over (`motions_prune`).
     pub motions: Vec<crate::motion::Moving>,
+    /// A hunk reset waiting on its diff (§5): (the document, the version it left) — a turn's file's `u` shows once
+    /// that version's diff lands empty, and is pressed then (`Editor::diff_landed`).
+    pub press_on_diff: Option<(crate::document::DocId, u64)>,
     /// Whether motions are drawn — off in tests, as the animation is (a test that looks at one turns it on).
     pub motion_drawn: bool,
     /// `TARAE_MOTION_AT`: every motion drawn at this age, none ending (shots — read once at start).
@@ -1046,6 +1049,7 @@ impl Editor {
             offer_popups: !cfg!(test),
             bleed_ink: !cfg!(test),
             motions: Vec::new(),
+            press_on_diff: None,
             motion_drawn: !cfg!(test),
             motion_at: if cfg!(test) { None } else { crate::motion::pinned_age() },
             reduce_motion: false,

@@ -1660,9 +1660,7 @@ impl Editor {
                 .iter()
                 .map(|m| MotionState {
                     kind: m.kind(),
-                    act: match m.what {
-                        crate::motion::What::Flash { act, .. } => act.name(),
-                    },
+                    act: m.what.act(),
                     until_ms: crate::motion::shown_for(m.life).saturating_sub(self.motion_age(m)).as_millis()
                         as u64,
                 })
