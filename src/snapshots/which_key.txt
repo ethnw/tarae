@@ -5,30 +5,30 @@
 02   2
 03   3 ▎ Counts how often each word appears.
 04     ▎
-05     ▎ Words are split on whitespace; case is kept.
-06   6 pub fn word_counts(text:╭─ space ─────────────────────────────────────────────────────────────╮
-07   7     let mut counts = Has│ '  Reopen the last picker          l  Chat with Claude              │
-08   8     for word in text.spl│ /  Search in project               L  Close chat                    │
-09   9     │   *counts.entry(wo│ >  Quote or view chat              m  Tasks …                       │
-10  10     }                   │ ?  Find a command                  n  Ask Claude here, or reply     │
-11  11     counts              │ @  Point Claude at something       N  Claude's notes                │
-12  12 }                       │ a  Code actions                    o  Outline panel: show / hide    │
-13  13                         │ b  Switch to an open buffer        p  Paste clipboard after         │
-14  14 fn main() {             │ c  Comment or uncomment lines      P  Paste clipboard before        │
-15  15     let text = "the quic│ C  Block-comment the selections    q  List panel: show / hide       │
-16  16     let counts = word_co│ d  Diagnostics                     r  Rename symbol                 │
-17  17     println!("{} distinc│ D  Diagnostics in every file       s  Symbols in this file          │
-18  18 }                       │ e  Files panel: show / hide        S  Symbols in the workspace      │
-19                             │ f  Open a file                     t  Choose a theme (live preview) │
-20                             │ F  Follow next session at work     T  Terminal: show / hide         │
-21                             │ g  Git: stage, commit, push        u  Undo Claude's last turn       │
-22                             │ G  Debug …                         U  Bring Claude's turn back      │
-23                             │ h  Select this symbol's uses       v  Review …                      │
-24                             │ i  Ask Claude to edit selection    w  Window …                      │
-25                             │ I  What waits for your answer      W  Sessions: switch, end, new    │
-26                             │ j  Jump list                       x  Tests …                       │
-27                             │ k  Show docs under cursor          y  Copy to clipboard             │
-28                             ╰─────────────────────────────────────────────────────────────────────╯
+05     ▎ Words are split on whi╭─ space ─────────────────────────────────────────────────────────────╮
+06   6 pub fn word_counts(text:│ '  Reopen the last picker          l  Chat with Claude              │
+07   7     let mut counts = Has│ /  Search in project               L  Close chat                    │
+08   8     for word in text.spl│ >  Quote or view chat              m  Tasks …                       │
+09   9     │   *counts.entry(wo│ ?  Find a command                  n  Ask Claude here, or reply     │
+10  10     }                   │ @  Point Claude at something       N  Claude's notes                │
+11  11     counts              │ a  Code actions                    o  Outline panel: show / hide    │
+12  12 }                       │ b  Switch to an open buffer        p  Paste clipboard after         │
+13  13                         │ c  Comment or uncomment lines      P  Paste clipboard before        │
+14  14 fn main() {             │ C  Block-comment the selections    q  List panel: show / hide       │
+15  15     let text = "the quic│ d  Diagnostics                     r  Rename symbol                 │
+16  16     let counts = word_co│ D  Diagnostics in every file       s  Symbols in this file          │
+17  17     println!("{} distinc│ e  Files panel: show / hide        S  Symbols in the workspace      │
+18  18 }                       │ f  Open a file                     t  Choose a theme (live preview) │
+19                             │ F  Follow next session at work     T  Terminal: show / hide         │
+20                             │ g  Git: stage, commit, push        u  Undo Claude's last turn       │
+21                             │ G  Debug …                         U  Bring Claude's turn back      │
+22                             │ h  Select this symbol's uses       v  Review …                      │
+23                             │ i  Ask Claude to edit selection    w  Window …                      │
+24                             │ I  What waits for your answer      W  Sessions: switch, end, new    │
+25                             │ j  Jump list                       x  Tests …                       │
+26                             │ k  Show docs under cursor          y  Copy to clipboard             │
+27                             ╰─────────────────────────────────────────────────────────────────────╯
+28
 29  ● normal                                                                   rust   utf-8 LF   space
 ## bg · surface per cell, blank = ui.background
 00
@@ -67,11 +67,11 @@
 02   f
 03   f f
 04     f
-05     f
-06   f                         aa TTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+05     f                       aa TTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+06   f                         a A                                  A                                a
 07   f                         a A                                  A                                a
-08   f                         a A                                  A                                a
-09   f                         a A                                  A  ddddd d                       a
+08   f                         a A                                  A  ddddd d                       a
+09   f                         a A                                  A                                a
 10  ff                         a A                                  A                                a
 11  ff                         a A                                  A                                a
 12  ff                         a A                                  A                                a
@@ -83,14 +83,14 @@
 18  ff                         a A                                  A                                a
 19                             a A                                  A                                a
 20                             a A                                  A                                a
-21                             a A                                  A                                a
-22                             a A  ddddd d                         A                                a
+21                             a A  ddddd d                         A                                a
+22                             a A                                  A  dddddd d                      a
 23                             a A                                  A  dddddd d                      a
-24                             a A                                  A  dddddd d                      a
-25                             a A                                  A                                a
-26                             a A                                  A  ddddd d                       a
-27                             a A                                  A                                a
-28                             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+24                             a A                                  A                                a
+25                             a A                                  A  ddddd d                       a
+26                             a A                                  A                                a
+27                             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+28
 29  a TTTTTT                                                                   dddd   ddddd dd   AAAAA
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

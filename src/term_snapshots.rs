@@ -2692,20 +2692,47 @@ fn snapshot_sessions_with_the_reviewer_reading() {
     s.check("sessions_reviewing_list");
 }
 
-/// #195: where the names don't fit whole — each folded to its prefix on the chat's line, `docs`' reviewer news its
-/// `•`, the one behind reading its `¶`. The front's reviewer reading is the status line's segment, not a `¶` beside
-/// its name (bgreview).
+/// #195: where the names don't fit whole — never folded to letters (P3 step 7d): the front's whole, the others in `+2`,
+/// which keeps what they said — fix-login's reviewer `¶`, docs' news `•`. The front's reviewer reading is the status
+/// line's segment, not a `¶` beside its name (bgreview).
 #[test]
 fn snapshot_sessions_folded_with_the_reviewer_reading() {
     let mut s = sessions_reviewing(100);
-    s.ed.session.name = "main-with-a-long-feature-name".into();
+    s.ed.session.name = "main-with-a-long-feature".into();
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let row = parser.screen().rows(0, s.w).find(|r| r.contains(" · +")).unwrap_or_default();
-    assert!(row.contains("─ m · f ¶ reviewing · d • · +"), "{row}");
+    assert!(row.contains("─ main-with-a-long-feature · +2 ¶ • ─"), "{row}");
     let status = parser.screen().rows(0, s.w).last().unwrap_or_default();
     assert!(status.contains("¶ reviewing"), "{status}");
     s.check("sessions_reviewing_folded");
+    // A draft in fix-login's chat: `+2` says it too, each kind once, the overlap's `≈` last when there is one
+    let fix = s.ed.sessions.iter_mut().find(|l| l.name == "fix-login").unwrap();
+    fix.chat.as_mut().unwrap().input = "and the tests".into();
+    let mut parser = vt100::Parser::new(s.h, s.w, 0);
+    parser.process(&s.frame());
+    let row = parser.screen().rows(0, s.w).find(|r| r.contains(" · +")).unwrap_or_default();
+    assert!(row.contains(" · +2 ¶ • unsent ─"), "{row}");
+}
+
+/// The chat's top line with three sessions folded into `+3` — fix-login's reviewer reading, docs' news, parser's
+/// nothing — for its screenshots (only with `TARAE_FRAMES_DIR` set: both themes there, 100×16 and 80×16; `cargo xtask
+/// shot` draws them with `TARAE_SHOT_REPLAY`).
+#[test]
+fn plus_n_frames() {
+    if std::env::var_os("TARAE_FRAMES_DIR").is_none() {
+        return;
+    }
+    for w in [100, 80] {
+        let mut s = sessions_reviewing(w);
+        s.ed.session.name = "main-with-a-long-feature".into();
+        let dir = s.ed.session.root.with_file_name("parser");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = s.ed.session_add(dir);
+        s.ed.sessions.iter_mut().find(|l| l.id == id).unwrap().name = "parser".into();
+        s.frame();
+        s.frames_both(&format!("plus-n-{w}"));
+    }
 }
 
 /// The board's card at 60 columns (bgreview, the user's decision 2026-10-20): whole — no `↓ more lines`, so its
@@ -2961,7 +2988,8 @@ fn follow_is_one_card_in_one_place() {
     let corner = |r: (usize, usize, usize, usize)| (r.0 + r.2, r.1 + r.3);
     let first = gaze(&mut s, 1..5);
     let pane = s.ed.screen.panes[0].1;
-    assert_eq!(corner(first), (pane.x + pane.w - 1, pane.y + pane.h), "bottom right");
+    // (on its row of air above the status line, as every card at the foot — `card_floor`)
+    assert_eq!(corner(first), (pane.x + pane.w - 1, pane.y + pane.h - 1), "bottom right");
     assert_eq!(corner(gaze(&mut s, 8..12)), corner(first), "Claude reads elsewhere: the card stays put");
     // The lines read run under it: the top right, out of their way
     let moved = gaze(&mut s, 17..25);
@@ -7227,11 +7255,13 @@ fn a_cut_follow_log_loses_no_words() {
     c.msgs.push(Msg::new(Role::Assistant, said, ""));
     s.frame();
     let card = s.ed.screen.thought_card.get().expect("the card shows");
-    let rows: Vec<String> = rows_of(&mut s, card).iter().map(|r| r.trim().to_string()).collect();
+    // (inside its frame: its sides off)
+    let rows: Vec<String> =
+        rows_of(&mut s, card).iter().map(|r| r.trim().trim_matches('│').trim().to_string()).collect();
     let from = rows.iter().position(|r| r.starts_with('…')).unwrap_or_else(|| panic!("cut: {rows:#?}"));
     let shown: Vec<&str> = rows[from..]
         .iter()
-        .take_while(|r| !r.is_empty() && !r.starts_with('▀'))
+        .take_while(|r| !r.is_empty() && !r.starts_with('╰'))
         .flat_map(|r| r.trim_start_matches('…').split_whitespace())
         .collect();
     let words: Vec<&str> = said.split_whitespace().collect();
@@ -7276,14 +7306,15 @@ fn a_one_row_follow_log_still_says_its_cut() {
     c.msgs.push(Msg::new(Role::Assistant, said, ""));
     s.frame();
     let card = s.ed.screen.thought_card.get().expect("the card shows");
-    let rows: Vec<String> = rows_of(&mut s, card).iter().map(|r| r.trim().to_string()).collect();
+    let rows: Vec<String> =
+        rows_of(&mut s, card).iter().map(|r| r.trim().trim_matches('│').trim().to_string()).collect();
     let at =
         rows.iter().position(|r| r.starts_with('…')).unwrap_or_else(|| panic!("its cut said: {rows:#?}"));
     let shown: Vec<&str> = rows[at].trim_start_matches('…').split_whitespace().collect();
     let tail = said.split_whitespace().last().unwrap();
     assert!(shown.last() == Some(&tail), "the newest row's end, whole: {rows:#?}");
     let inner = card.2 - 4;
-    let text = rows.iter().filter(|r| !r.starts_with(['▄', '▀']));
+    let text = rows.iter().filter(|r| !r.starts_with(['╭', '╰']));
     assert!(text.clone().all(|r| r.width() <= inner), "nothing past the card: {rows:#?}");
 }
 

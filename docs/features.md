@@ -539,12 +539,18 @@ your `PATH`.
 - **Sessions** `space W` — several branches of work side by side, each a checkout of its own with its own Claude,
   chat, terminal and tests; the session list a floating pane that stays while you work (`esc` gives the keys back,
   `q` closes it) and closes once used — `enter`, a digit, `o`, `f` or `v` takes you to a session and the list goes, as
-  zellij's session manager and tmux's choose-tree do —, 3/5 of the screen wide and as tall as its rows up to half of it, its top at 1/4 of the screen's
+  zellij's session manager and tmux's choose-tree do —, or docked beside or above the code (`C-w H`/`L`/`K`, `C-w e`
+  floats it again), where it stays after `enter` — the overview kept in sight —, its side kept as its width is, and
+  after `:restart` it's back up there (a floating one isn't: done once used); floating, 3/5 of the screen wide and as tall as its rows up to half of it, its top at 1/4 of the screen's
   height as every floating pane's (growing downward as sessions come, its top never moving), searched with `/` as every pane is (`n`/`N`, its matches lit; its
   letters are keys: `o` new, `d` end, `b` bring, …) — the overview for whoever watches them: each row a session's name in its colour, its state
   (`working` · `▲ waits` · `◦ stuck?` · `done` · `queued 2nd`), what waits for you counted, `≈` whom it would
   conflict with, `↓N` behind its base, its context, its Claude's last sentence, then the rest (branch, changes, cost,
-  build folder, processes) as the frame's width allows; brought back into main, a rebase's conflicts resolved by that session's Claude
+  build folder, processes) as the frame's width allows; on the chat's top line every session by its whole name in its
+  colour, the front's and those that need you always, the rest `+N` where they don't fit (with their signs: `▲2 ¶ • ≈`); every session's cards in one
+  stack at the bottom right, over the chat's foot — or, the chat closed, a session list docked right, its selected row
+  kept in sight above them — (another session's a peek named in its colour, alone when none of yours waits — a press takes you
+  there, its card in hand); brought back into main, a rebase's conflicts resolved by that session's Claude
   ([rebasing a session](claude-integration.md#rebasing-a-session)); its git-ignored notes (`session.keep`:
   `target/sb`) moved to the main checkout's `target/sb/sessions/<name>/` when it ends; where each session's Claude
   is reading and writing shown wherever that file is, in any checkout (`▎` and a name tag, each session its own
@@ -567,7 +573,7 @@ your `PATH`.
 Install a new tarae (`cargo install …` again) while one is running, then type `:restart`. The running tarae
 saves your files and starts the new one in the same terminal, in the same zellij or tmux pane, and you're back
 where you were — in every session, each with its own: the open files with their cursors, selections, and scroll,
-the split windows, the side panel, the chat with the same conversation (and the words you were typing in it), and
+the split windows, the side panel, a docked session list, the chat with the same conversation (and the words you were typing in it), and
 a code review — of the uncommitted changes or since a branch — on the file it was on, its comments not yet sent
 and its viewed marks with it. The settings you changed with `:set` come along too, and the session that was in front is in front. A session behind
 comes back quiet: its language servers start when you bring it to the front, and its Claude when you send it a

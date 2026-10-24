@@ -30,10 +30,13 @@ pub enum Grip {
 }
 
 impl Editor {
-    /// Kind `kind`'s group floats in sight: floating, something to show, its own pane made (`float_groups_sync`).
+    /// Kind `kind`'s group floats in sight: floating, something to show, its own pane made (`float_groups_sync`). A
+    /// list up floats wherever it isn't docked in sight — docked where its column gets no room (a narrow screen, a wide
+    /// chat, no slot's leaf to dock beside), it floats for that frame, its dock kept (as a group's layout choice that
+    /// doesn't fit), so the keys never go to a list nobody sees.
     pub fn floating_in_sight(&self, kind: GroupKind) -> bool {
         if crate::floatlist::is_list(kind) {
-            return self.float_list(kind).is_some();
+            return self.float_list(kind).is_some() && !self.docked_in_sight(kind);
         }
         let Some(g) = self.session.group(kind) else { return false };
         matches!(g.place, Place::Floating(_)) && self.kind_there(kind) && self.float_host(&g)
@@ -89,6 +92,13 @@ impl Editor {
     /// it says so (the side panel's keys are its own, `space e`, `space g`…).
     pub fn float_key(&mut self) {
         if let Some(k) = self.float_list_in_hand() {
+            // (the session list docked: floating again, where its frame was — P3 step 7d)
+            if self.list_docked(k) {
+                self.sizes.sessions_dock = None;
+                self.sizes_keep();
+                self.dock_sync();
+                return self.set_status("sessions floats — C-w H K L dock it, C-w m moves it");
+            }
             return self
                 .set_status(format!("the {} list floats — C-w m moves it, q closes it", list_name(k)));
         }

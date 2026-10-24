@@ -188,6 +188,14 @@ fn one_card_names_every_workspace_behind_and_what_would_conflict_where() {
     assert!(q.contains("c rebases the conflicting one too"), "{q}");
     let answers: Vec<char> = card(&s.ed).unwrap().answers(false).iter().map(|a| a.0).collect();
     assert_eq!(answers, ['y', 'c', 'n']);
+    // Each workspace named in its own colour, as the strip and the list name it (`Offer.paint`)
+    let colour = |name: &str| {
+        let c = s.ed.sessions.iter().find(|l| l.id == s.id(name)).unwrap().colour;
+        crate::session::PARTICIPANTS[c as usize % crate::session::COLOURS]
+    };
+    let want: Vec<(String, &str)> = ["fix", "up", "db"].iter().map(|n| (n.to_string(), colour(n))).collect();
+    assert_eq!(card(&s.ed).unwrap().paint, want);
+    assert_eq!(want.iter().map(|w| w.1).collect::<std::collections::HashSet<_>>().len(), 3, "three colours");
     // (one card: a frame more, nothing more asked)
     quiet(&mut s.ed);
     assert_eq!(s.ed.offers.iter().filter(|o| matches!(o.what, What::BaseMoved(_))).count(), 1);

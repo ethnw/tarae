@@ -455,7 +455,7 @@ fn over_fold(editor: &mut Editor, w: u16, h: u16) {
     if editor.zoomed().is_some() {
         return;
     }
-    editor.screen.over_folded = [false; 4];
+    editor.screen.over_folded = [false; crate::pane::DOCKABLE];
     let over: Vec<GroupKind> = (GroupKind::ALL.into_iter())
         .filter(|&k| {
             k.dockable() && editor.session.group(k).is_some_and(|g| g.place == Place::Docked(Side::Top))
@@ -4856,6 +4856,22 @@ fn draw_docked(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) -> 
         {
             let _fade = Fade::unless(has, &own);
             match g.kind.slot() {
+                // (the session list docked — P3 step 7d: its rows under its top line, the leaf's whole)
+                None if g.kind == crate::pane::GroupKind::Sessions => {
+                    let card = panel_style(ui, editor);
+                    let line = edge_style(&own, card, Region::Slot);
+                    let rr = crate::split::Rect {
+                        x: docked.slot_x,
+                        y: docked.slot_y(),
+                        w: docked.slot_w,
+                        h: docked.debug_h,
+                    };
+                    apply(out, card)?;
+                    for y in rr.y..rr.y + rr.h {
+                        queue!(out, MoveTo(rr.x as u16, y as u16), Spaces(rr.w))?;
+                    }
+                    draw_sessions_pane(editor, &own, card, line, rr, false, out)?
+                }
                 Some(Slot::Test) if let Some(t) = &editor.session.test_run => {
                     draw_test_panel(t, editor, &own, &docked, out)?
                 }
@@ -4896,7 +4912,7 @@ fn draw_floating(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut Vec<u8>) -> i
         let line = edge_style(&own, card, Region::Slot);
         if kind == GroupKind::Sessions {
             let _fade = Fade::unless(has, &own);
-            draw_sessions_pane(editor, &own, card, line, r, out)?;
+            draw_sessions_pane(editor, &own, card, line, r, true, out)?;
         } else if kind == GroupKind::Messages {
             let _fade = Fade::unless(has, &own);
             draw_messages_pane(editor, &own, card, line, r, out)?;
@@ -4952,12 +4968,14 @@ fn float_sides(
 /// The session list in its frame `r` (§3.6, `sessionpane.rs`): `╭─ sessions ── 1 working · 1 waits ── …keys ─╮`, then
 /// a row a session — the bar `▎` and `ui.menu.selected` on the one selected, its name in its colour (the front's bold),
 /// its columns as `sessionpane::lay` folds them to the frame's width, each as wide as its widest; the report cut.
+/// Docked (`framed` false — P3 step 7d), the same in its leaf: its top line a pane's, its rows the leaf's width.
 fn draw_sessions_pane(
     editor: &Editor,
     ui: &Ui,
     card: Style,
     line: Style,
     r: crate::split::Rect,
+    framed: bool,
     out: &mut impl Write,
 ) -> io::Result<()> {
     use crate::sessionpane::{Col, Ink};
@@ -4991,19 +5009,31 @@ fn draw_sessions_pane(
         faint,
         ..TopLine::default()
     };
-    top_line(out, line, card, (r.x, r.y, r.w), ("╭", "╮", "┬"), &[], true, &head)?;
-    // The rows: `▎ ` (the bar's cell and a blank), the name, its columns, a cell before the side
-    let (x0, y0, inner) = (r.x + 1, r.y + 1, r.h.saturating_sub(2));
-    let room = r.w.saturating_sub(2 + 2 + 1);
+    let ends = if framed { ("╭", "╮", "┬") } else { ("", "", "┬") };
+    top_line(out, line, card, (r.x, r.y, r.w), ends, &[], true, &head)?;
+    // The rows: `▎ ` (the bar's cell and a blank), the name, its columns, a cell before the side — docked, no sides
+    let side = usize::from(framed);
+    let (x0, y0, inner) = (r.x + side, r.y + 1, r.h.saturating_sub(1 + side));
+    let room = r.w.saturating_sub(2 * side + 2 + 1);
     let (name_w, cols) = crate::sessionpane::lay(&rows, room);
     let here = editor.sessions_here();
     let selected = rows.iter().position(|row| Some(row.id) == here).unwrap_or(0);
     let p = editor.float_list(crate::pane::GroupKind::Sessions);
     let top = p.map_or(0, |p| p.top.get());
-    let top = crate::key::in_sight(0, top, selected, rows.len(), inner, 0).0;
+    // (docked right, the asks over its foot — `asks_foot`: the selected row kept in sight above the stack, a row of air
+    // between)
+    let asks =
+        editor.screen.offer_card.filter(|c| !framed && c.0 >= x0 && c.1 + c.3 > y0 && c.1 < y0 + inner);
+    let shown = asks.map_or(inner, |c| c.1.saturating_sub(y0 + 1).clamp(1, inner));
+    let mut top = crate::key::in_sight(0, top, selected, rows.len(), shown, 0).0;
+    if asks.is_some() {
+        top = top.clamp((selected + 1).saturating_sub(shown), selected);
+    }
     if let Some(p) = p {
         p.top.set(top);
     }
+    // (its rows in sight: those above the stack — the moves page by them, the row under the card air)
+    let inner = shown;
     editor.screen.lists.borrow_mut().push((crate::pane::GroupKind::Sessions, (y0, inner, top)));
     let sel = selected_row(ui, editor, card);
     let ink = |i: Ink, base: Style| match i {
@@ -5062,7 +5092,7 @@ fn draw_sessions_pane(
             used += w;
         }
         apply(out, base)?;
-        queue!(out, Spaces((r.w - 2).saturating_sub(used)))?;
+        queue!(out, Spaces((r.w - 2 * side).saturating_sub(used)))?;
     }
     Ok(())
 }
@@ -9347,9 +9377,11 @@ fn draw_statusline(
             keep: INBOX,
         });
         // (what it needs folds first — that one waits is what's left when the room runs out)
+        // (none of this session's up, another's waiting — its peek, or out of sight: `C-q` goes there)
+        let elsewhere = editor.offers.is_empty() && matches!(editor.next_up(), crate::inbox::Next::Go(_));
         if let Some(short) = card_short(editor, lay) {
             left.push(Seg { text: format!(" · {short}"), style: ui.status.patch(warn), keep: INBOX - 1 });
-        } else if held {
+        } else if held || elsewhere {
             let key = editor.key_said("C-q");
             left.push(Seg { text: format!(" · {key}"), style: ui.status.patch(warn), keep: INBOX - 1 });
         }
@@ -10293,7 +10325,7 @@ fn draw_toasts(
     }
     let h = rows.len() + 2 * pad;
     let x0 = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
-    let rows_at = (lay.text_top as usize, lay.text_top as usize + lay.text_rows);
+    let rows_at = (lay.text_top as usize, card_floor(lay));
     // Code too narrow to keep off (the card over half its width — beside the chat at 80 columns): a routine
     // message is said on the status line instead (`SAID`, what joins it counted there); an error or a warning
     // keeps its card (`Toast::waiting`). Decided once for the card, as it first shows — while it's up it doesn't
@@ -10448,8 +10480,13 @@ struct OfferCard {
     badge: String,
     /// Downloading — the wave at the start of the second line in accent.
     busy: bool,
-    /// Cards stacked behind (nearest first): (depth 1.., title, start time if downloading, failed?, id).
-    peeks: Vec<(usize, String, Option<std::time::Instant>, bool, u64)>,
+    /// Cards stacked behind (nearest first): (depth 1.., title, start time if downloading, failed?, id, whom it's
+    /// about) — this session's, then other sessions' (P3 step 7d: every session's asks in one stack).
+    peeks: Vec<Peek>,
+    /// The session it's about, as its frame names it (`card_about`): its name, in its colour, before `asks · title`.
+    about: Option<(String, u8)>,
+    /// Words of its text in a scope (`Offer.paint`): BaseMoved's workspaces in their colours.
+    paint: Vec<(String, &'static str)>,
     /// Lines left out for want of room (0: shown whole).
     cut: usize,
     /// Its answers set into the frame's bottom line (they make one row), not rows of their own.
@@ -10458,6 +10495,10 @@ struct OfferCard {
     /// a frame (D3) — its title (`lines[0]`) the frame's name, one cell of padding inside.
     bar: bool,
 }
+
+/// A card stacked behind the front one (`OfferCard.peeks`): its depth (1..), title, start time if downloading, whether it
+/// failed, its id, and whom it's about (its session's name and colour).
+type Peek = (usize, String, Option<std::time::Instant>, bool, u64, Option<(String, u8)>);
 
 /// How many cells a back card is inset on each side relative to the one in front.
 const PEEK_INSET: usize = 2;
@@ -10490,10 +10531,9 @@ fn card_rows(text: &str, w: usize) -> Vec<String> {
 }
 
 /// What the screen lacks for the card up when this frame couldn't draw it (#201: in a 50-column pane
-/// `:restart`'s card was nowhere, and nothing said one waited): `C-q shows its card` when the chat in hand
-/// takes the whole width (`C-q` gives the card the keys, the chat folds), else the window's size it needs —
-/// `card needs 62 cols`, `card needs 20 rows`. None when it's drawn, or held back on purpose (a picker, keys
-/// under way, its text read in its buffer).
+/// `:restart`'s card was nowhere, and nothing said one waited): the window's size it needs — `card needs 62 cols`,
+/// `card needs 20 rows` —, over the chat's foot too (P3 step 7d: whichever is short, the chat's width or its rows).
+/// None when it's drawn, or held back on purpose (a picker, keys under way, its text read in its buffer).
 fn card_short(editor: &Editor, lay: &Layout) -> Option<String> {
     let o = editor.offers.first()?;
     if editor.screen.offer_card.is_some()
@@ -10504,24 +10544,37 @@ fn card_short(editor: &Editor, lay: &Layout) -> Option<String> {
         return None;
     }
     let height = lay.status_y as usize + 1;
+    let answer = o.answers(editor.preflight_quick().is_some()).iter().map(|(_, l)| 2 + l.width()).max();
+    let side = editor.session.sidebar.is_some();
+    let chat = |w: usize| crate::sizes::widths(w, editor.chat_panel(w), side, editor.sizes).chat;
+    // (over the chat's foot or a docked list's: as wide as that column — its text 6 cells less, at least
+    // `CARD_MIN_INNER`; the rows from its top line down to the input's line)
+    if let Some((_, aw, _, arows)) = asks_foot(editor, lay) {
+        let need = CARD_MIN_INNER + 6;
+        if aw < need {
+            // (the window width that gives the chat that much, as it's laid out — `sizes::widths` —, its edge and
+            // margins as now)
+            let edge = chat(lay.width).min(lay.width).saturating_sub(aw);
+            let cols = (lay.width..lay.width + 400).find(|&w| chat(w).min(w) >= need + edge);
+            return Some(cols.map_or("card needs a wider chat".into(), |c| format!("card needs {c} cols")));
+        }
+        return Some(match arows < 8 {
+            true => format!("card needs {} rows", height + 8 - arows),
+            false => "card needs more rows".into(),
+        });
+    }
     if lay.text_rows < 8 {
         return Some(format!("card needs {} rows", height + 8 - lay.text_rows));
     }
     // (as `OfferCard::new` lays it out: its text at least `CARD_MIN_INNER` wide — 8 cells less than the code —
     // and each answer whole on a row of the widest it can be — 6 cells less, and the scrollbar's)
-    let answer = o.answers(editor.preflight_quick().is_some()).iter().map(|(_, l)| 2 + l.width()).max();
     let edit_w = (CARD_MIN_INNER + 8).max(answer.unwrap_or(0) + 6 + usize::from(lay.scrollbar));
     if edit_w <= lay.edit_w {
         // (too few rows for its text and answers — how many depends on the card)
         return Some("card needs more rows".into());
     }
-    // The chat in hand taking the whole width: `C-q` folds it and the code, the card with it, is back
-    if lay.edit_w == 0 && editor.session.chat_has_keys() && lay.width >= edit_w {
-        return Some(format!("{} shows its card", editor.key_said("C-q")));
-    }
     // The window width that leaves the code that much beside the chat as it's laid out (`sizes::widths`)
-    let side = editor.session.sidebar.is_some();
-    let code = |w: usize| w - crate::sizes::widths(w, editor.chat_panel(w), side, editor.sizes).chat;
+    let code = |w: usize| w - chat(w);
     let cols = (lay.width..lay.width + 400).find(|&w| code(w) >= edit_w)?;
     Some(format!("card needs {cols} cols"))
 }
@@ -10554,6 +10607,24 @@ fn buttons_width(labels: &[(char, &str)]) -> usize {
     labels.iter().map(|(_, l)| 2 + l.width()).sum::<usize>() + 3 * labels.len().saturating_sub(1)
 }
 
+/// Who card `o` is about as the stack names it (P3 step 7d): with two sessions or more — one draws no names — the
+/// session's name and colour (`Offer.about`).
+fn card_about(editor: &Editor, o: &crate::offer::Offer) -> Option<(String, u8)> {
+    // (one up here that goes with its session and came by no push — restored, a test's — is this session's)
+    let about = o.about.or_else(|| o.goes_with_session().then_some(editor.session.id));
+    let id = about.filter(|_| !editor.sessions.is_empty())?;
+    let l = std::iter::once(&editor.session).chain(&editor.sessions).find(|l| l.id == id)?;
+    Some((l.label().to_string(), l.colour))
+}
+
+/// A card's title as its frame or peek says it: `main asks · Run cargo test` when it's about a session, else the title.
+fn asks_title(about: Option<&(String, u8)>, title: &str) -> String {
+    match about {
+        Some((name, _)) => format!("{name} asks · {title}"),
+        None => title.to_string(),
+    }
+}
+
 /// The card's count from what waits (`Editor::cards_waiting`: here, the card itself among them · in sessions
 /// behind): `1/3` · `1/2 here · 1 elsewhere` · `+1 elsewhere` — nothing when it's alone. With the title it
 /// shares a row with (`title_w`, in `room`): shorter (`1/2 · +1 elsewhere`, `1/2 · +1`) before the title is cut.
@@ -10572,19 +10643,114 @@ fn card_badge((here, elsewhere): (usize, usize), title_w: usize, room: usize) ->
     forms.iter().find(|b| fits(b)).or(forms.last()).cloned().unwrap_or_default()
 }
 
+/// Where the asks float (P3 step 7d, the user 2026-10-22: bottom-right is what needs you): over the right column's foot
+/// at its width — the chat's while it's open, the transcript's newest line above it, else a session list docked right
+/// (the user 2026-10-24) — else the screen's right, above a bottom slot or the status line. The column's foot, if it's
+/// one (`asks_foot`), and the area: columns from `ax`, `aw` wide; rows from `atop`, `arows` of them (the last one air).
+type AsksArea = (Option<(usize, usize, usize, usize)>, (usize, usize, usize, usize));
+
+fn asks_area(editor: &Editor, lay: &Layout) -> AsksArea {
+    let foot = asks_foot(editor, lay);
+    let area = foot.unwrap_or((
+        0,
+        lay.edit_w.saturating_sub(usize::from(lay.scrollbar)),
+        lay.text_top as usize,
+        lay.text_rows,
+    ));
+    (foot, area)
+}
+
 impl OfferCard {
+    /// Other sessions' asks waiting with none of this session's (P3 step 7d: every session's asks in one stack): their
+    /// one-row peeks alone, where this session's card would stand — its width, bottom-right, the nearest lowest, a row
+    /// of air under it; each named in its colour, a press on one goes there with its card focused (`offer_peek`).
+    fn peeks_alone(editor: &Editor, lay: &Layout) -> Option<Self> {
+        let (foot, (ax, aw, atop, arows)) = asks_area(editor, lay);
+        if lay.offer_bar.is_some() || editor.picker.is_some() || !editor.pending.is_empty() || aw == 0 {
+            return None;
+        }
+        let asks = editor.asks_elsewhere();
+        // (as wide as a card would be there: the column's, else its reading width)
+        let inner = match foot {
+            Some(_) => aw.saturating_sub(6),
+            None => (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8)),
+        };
+        let room_w = if foot.is_some() { aw.saturating_sub(2) } else { lay.edit_w.saturating_sub(1) };
+        let width = inner + 4;
+        if asks.is_empty() || inner < CARD_MIN_INNER || width > room_w {
+            return None;
+        }
+        // (the row of air at the area's foot under the nearest)
+        let bottom = atop + arows - 1;
+        let peeks: Vec<Peek> = (asks.into_iter())
+            .take(3.min(arows.saturating_sub(1)))
+            .enumerate()
+            .filter(|(k, _)| width > 2 * PEEK_INSET * (k + 1) + 8)
+            .map(|(k, (l, p))| {
+                let about = Some((l.label().to_string(), l.colour));
+                let title = asks_title(about.as_ref(), &p.title);
+                (k + 1, title, None, matches!(p.state, crate::offer::OfferState::Failed(_)), p.id, about)
+            })
+            .collect();
+        if peeks.is_empty() {
+            return None;
+        }
+        let x = (ax + aw).saturating_sub(width + 1);
+        let buttons = (peeks.iter())
+            .map(|(k, ..)| {
+                let px = x + PEEK_INSET * k;
+                (bottom - k, px, px + width - 2 * PEEK_INSET * k, char::from(b'0' + *k as u8))
+            })
+            .collect();
+        Some(Self {
+            id: 0,
+            x,
+            y: bottom,
+            inner,
+            lines: Vec::new(),
+            warn: Vec::new(),
+            diff: Vec::new(),
+            buttons_row: None,
+            button_rows: Vec::new(),
+            buttons,
+            labels: Vec::new(),
+            waits: None,
+            pad: 0,
+            failed: false,
+            badge: String::new(),
+            busy: false,
+            peeks,
+            about: None,
+            paint: Vec::new(),
+            cut: 0,
+            keys_in_line: false,
+            bar: false,
+        })
+    }
+
+    /// Only other sessions' peeks, no card of this session's in front (`peeks_alone`).
+    fn alone(&self) -> bool {
+        self.lines.is_empty() && !self.bar
+    }
+
     fn new(editor: &Editor, lay: &Layout) -> Option<Self> {
         use crate::offer::OfferState;
-        let o = editor.offers.first()?;
+        // (none of this session's: another's waiting are the stack still — its peeks alone)
+        let Some(o) = editor.offers.first() else { return Self::peeks_alone(editor, lay) };
+        let (foot, (ax, aw, atop, arows)) = asks_area(editor, lay);
         if lay.offer_bar.is_none()
-            && (editor.picker.is_some() || !editor.pending.is_empty() || lay.text_rows < 8 || lay.edit_w == 0)
+            && (editor.picker.is_some() || !editor.pending.is_empty() || arows < 8 || aw == 0)
         {
             return None;
         }
         let pad = CARD_PAD;
-        let reading = (lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8));
+        // (over the chat: as wide as the chat, a cell in from each side — its text that minus the frame's)
+        let fixed = foot.map(|_| aw.saturating_sub(6));
+        let reading = fixed.unwrap_or((lay.edit_w / 2).clamp(30, 56).min(lay.edit_w.saturating_sub(8)));
         // The widest it can be — its answers and its cut row may take it past `reading`, never past the code
-        let widest = lay.edit_w.saturating_sub(6 + usize::from(lay.scrollbar));
+        let widest = aw.saturating_sub(6);
+        // (and the most cells it takes, its frame's sides and padding with it — a cell of air beside it)
+        let room_w = if foot.is_some() { aw.saturating_sub(2) } else { lay.edit_w.saturating_sub(1) };
         // Its text as wide as its answers' row already makes it (narrow, a host card's five answers were 64
         // cells over text wrapped at 37 — its title cut, its rows doubled)
         let answers_w = buttons_width(&o.answers(editor.preflight_quick().is_some())).min(widest);
@@ -10610,11 +10776,10 @@ impl OfferCard {
         if lay.offer_bar.is_none() && reading < CARD_MIN_INNER {
             return None;
         }
-        // (with sessions, Claude's card names whose it is — #90: `C-q` landed somewhere unsaid)
-        let title = match !editor.sessions.is_empty() && o.claudes() {
-            true => format!("{} · {}", editor.session.label(), o.title),
-            false => o.title.clone(),
-        };
+        // (with sessions, a card about one names it — #90: `C-q` landed somewhere unsaid; P3 step 7d: `main asks · …`,
+        // the title cut first, the name never)
+        let about = card_about(editor, o);
+        let title = asks_title(about.as_ref(), &o.title);
         // Its title whole, and the count that shares its row, where the code has the room — at 80 columns the
         // run-outside card's was cut at its key word (`outside the sandb…`), alone or with a card behind it
         // (its count's shortest form: the card widens only as far as the title needs — a longer form where it fits)
@@ -10657,8 +10822,7 @@ impl OfferCard {
                     None => 0,
                 };
                 // (and a row of air under it — `bottom` below)
-                let room =
-                    lay.text_rows.saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows + 1);
+                let room = arows.saturating_sub(1 + button_rows(&b, widest).len() + 2 * pad + said_rows + 1);
                 // (the card's rows with the question's lines `skip` left out — their warning and diff rows marked)
                 let build = |skip: &[usize], warn: &mut Vec<usize>, diff: &mut Vec<(usize, char)>| {
                     let mut v = vec![(title.clone(), false)];
@@ -10821,6 +10985,8 @@ impl OfferCard {
                 badge,
                 busy: o.installing(),
                 peeks: Vec::new(),
+                about,
+                paint: Vec::new(),
                 cut: 0,
                 keys_in_line: false,
                 bar: true,
@@ -10843,7 +11009,7 @@ impl OfferCard {
         };
         // Taller than the room: the body cut to fit, its last row saying how much is left (`v` views it all);
         // the buttons stay (#14: an 88-line card wasn't drawn at all, so it couldn't be answered)
-        let room = lay.text_rows.saturating_sub(buttons_h + 2 * pad + said.len() + 1);
+        let room = arows.saturating_sub(buttons_h + 2 * pad + said.len() + 1);
         let mut cut = 0;
         // (the cut row's forms all fit: the card keeps its width as it says another)
         let mut cut_floor = 0;
@@ -10937,36 +11103,42 @@ impl OfferCard {
         // (and its answers, when they make one row, whole in its bottom line: `╰─ ` and ` ─╯` round them — as
         // wide as their widest form, so a card read whole doesn't change size; too wide for the code beside, rows)
         let in_line = inner.max(btn_w + 2).max(btn_floor + 2);
-        let keys_in_line = has_buttons && button_rows.len() == 1 && in_line + 5 <= lay.edit_w;
+        let keys_in_line = has_buttons && button_rows.len() == 1 && in_line + 4 <= room_w;
         let inner = if keys_in_line { in_line } else { inner };
+        // (over the chat: its width whatever it says)
+        let inner = fixed.unwrap_or(inner);
         let width = inner + 4;
         let (body_rows, inside) =
             (lines.len() - 1, if has_buttons && !keys_in_line { 1 + button_rows.len() } else { 0 });
         // Too narrow for it: not drawn (and an install's `y` isn't taken — `offer_key`)
-        if width + 1 > lay.edit_w {
+        if width > room_w {
             return None;
         }
         let h = body_rows + inside + 2 * pad;
-        let top = lay.text_top as usize;
-        // (a row of air over what's below — the slot, the status line — whether its bottom row is the frame's line
-        // or, without the keys, its answers: it never sits on what's below)
-        let bottom = top + lay.text_rows - 1;
-        let y = bottom.checked_sub(h)?.max(top);
-        let x = lay.edit_w.saturating_sub(width + 1 + usize::from(lay.scrollbar));
+        // (a row of air over what's below — the chat's input, the slot, the status line — whether its bottom row is the
+        // frame's line or, without the keys, its answers: it never sits on what's below)
+        let bottom = atop + arows - 1;
+        let y = bottom.checked_sub(h)?.max(atop);
+        let x = (ax + aw).saturating_sub(width + 1);
         // Back cards: one row each above the front card (as room allows, max three — beyond that "1/N" tells) —
-        // a row of air between them and its frame (two cards never touch)
-        let room = y.saturating_sub(top + pad + 1);
-        let peeks = editor.offers[1..]
-            .iter()
+        // a row of air between them and its frame (two cards never touch): this session's, then every other session's
+        // waiting, oldest first, named in its colour (P3 step 7d, the user: every session's asks in one stack)
+        let room = y.saturating_sub(atop + pad + 1);
+        let here = editor.offers[1..].iter().map(|p| (p, card_about(editor, p)));
+        let elsewhere =
+            editor.asks_elsewhere().into_iter().map(|(l, p)| (p, Some((l.label().to_string(), l.colour))));
+        let peeks = here
+            .chain(elsewhere)
             .take(3.min(room))
             .enumerate()
             .filter(|(k, _)| width > 2 * PEEK_INSET * (k + 1) + 8)
-            .map(|(k, p)| {
+            .map(|(k, (p, about))| {
                 let started = match p.state {
                     OfferState::Installing(t) => Some(t),
                     _ => None,
                 };
-                (k + 1, p.title.clone(), started, matches!(p.state, OfferState::Failed(_)), p.id)
+                let title = asks_title(about.as_ref(), &p.title);
+                (k + 1, title, started, matches!(p.state, OfferState::Failed(_)), p.id, about)
             })
             .collect::<Vec<_>>();
         let buttons_row =
@@ -11013,6 +11185,8 @@ impl OfferCard {
             badge,
             busy,
             peeks,
+            about,
+            paint: o.paint.clone(),
             cut,
             keys_in_line,
             bar: false,
@@ -11026,6 +11200,9 @@ impl OfferCard {
 
     /// Its rows: the edges, the lines inside (framed, the title is the frame's), the answers' rows.
     fn rows(&self) -> usize {
+        if self.alone() {
+            return 0;
+        }
         let inside = match self.buttons_row {
             Some(_) if !self.keys_in_line => 1 + self.button_rows.len(),
             _ => 0,
@@ -11044,7 +11221,7 @@ impl OfferCard {
 
     /// The row of air between the back cards and the front card's frame (none without back cards).
     fn air(&self) -> usize {
-        usize::from(!self.bar && !self.peeks.is_empty())
+        usize::from(!self.bar && !self.alone() && !self.peeks.is_empty())
     }
 
     /// Its answers as a frame's bottom line has them (`draw_frame`): each key in the accent, what it does after it —
@@ -11114,7 +11291,7 @@ impl OfferCard {
             apply(out, air_style)?;
             queue!(out, MoveTo(self.x as u16, (self.y - 1) as u16), Spaces(width))?;
         }
-        for (k, title, started, failed, peek) in self.peeks.iter().rev() {
+        for (k, title, started, failed, peek, about) in self.peeks.iter().rev() {
             let (px, pw, py) = (self.x + PEEK_INSET * k, width - 2 * PEEK_INSET * k, self.y - k - air);
             let peek_id = format!("card#{peek}");
             spot(*peek, px, py, pw);
@@ -11138,18 +11315,27 @@ impl OfferCard {
             apply(out, bar_st)?;
             queue!(out, Print("▎"))?;
             apply(out, text)?;
-            queue!(
-                out,
-                Print(" "),
-                Print(&t),
-                Spaces(pw.saturating_sub(3 + t.width() + tail.width() + mark_w))
-            )?;
+            queue!(out, Print(" "))?;
+            // (whose it is: its name in its colour, as the chrome names it — the rest as the peek's text)
+            let rest = match about.as_ref().and_then(|(n, c)| Some((n, c, t.strip_prefix(n.as_str())?))) {
+                Some((n, c, rest)) => {
+                    apply(out, Style { fg: ui.participant(*c, true), ..text })?;
+                    queue!(out, Print(n))?;
+                    apply(out, text)?;
+                    rest
+                }
+                None => t.as_str(),
+            };
+            queue!(out, Print(rest), Spaces(pw.saturating_sub(3 + t.width() + tail.width() + mark_w)))?;
             if let Some((m, st)) = mark {
                 apply(out, st)?;
                 queue!(out, Print(m), Print(" "))?;
             }
             apply(out, bar_st)?;
             queue!(out, Print(&tail))?;
+        }
+        if self.alone() {
+            return Ok(());
         }
         // Front card's top edge: a row of its colour (the frame's line, drawn over it)
         if self.pad > 0 {
@@ -11162,6 +11348,9 @@ impl OfferCard {
         let mut row = self.y + self.pad;
         // (its label on its title's row: the frame's top line)
         spot(self.id, self.x, self.y, width);
+        // (its painted words, each the first found after the one before, across its rows — as a toast's)
+        let rows: Vec<String> = self.lines.iter().map(|l| l.0.clone()).collect();
+        let painted = toast_paint(&rows, &self.paint);
         for (i, (text, faint)) in self.lines.iter().enumerate() {
             // (its title is the frame's name)
             if i == 0 {
@@ -11176,26 +11365,24 @@ impl OfferCard {
             queue!(out, Print("  "))?;
             let badge = if i == 0 { self.badge.as_str() } else { "" };
             let diff = self.diff.iter().find(|d| d.0 == i).map(|d| d.1);
-            apply(
-                out,
-                lit(if self.warn.contains(&i) {
-                    warning
-                } else if let Some(c) = diff {
-                    // (the lines around a change dim: what came and went, and where, stand out)
-                    match c {
-                        '+' => plus,
-                        '-' => minus,
-                        'f' => body,
-                        _ => dim,
-                    }
-                } else if *faint {
-                    dim
-                } else if i == 0 {
-                    strong
-                } else {
-                    body
-                }),
-            )?;
+            let row_style = lit(if self.warn.contains(&i) {
+                warning
+            } else if let Some(c) = diff {
+                // (the lines around a change dim: what came and went, and where, stand out)
+                match c {
+                    '+' => plus,
+                    '-' => minus,
+                    'f' => body,
+                    _ => dim,
+                }
+            } else if *faint {
+                dim
+            } else if i == 0 {
+                strong
+            } else {
+                body
+            });
+            apply(out, row_style)?;
             match text.split_once(' ').filter(|_| self.busy && i == 1) {
                 // Downloading: wave in accent, text dimmed
                 Some((w, rest)) => {
@@ -11203,6 +11390,20 @@ impl OfferCard {
                     queue!(out, Print(w))?;
                     apply(out, dim)?;
                     queue!(out, Print(" "), Print(rest))?;
+                }
+                // (a workspace's name in its colour, at full strength in a faint row too)
+                None if !self.paint.is_empty() => {
+                    for (part, scope) in &painted[i] {
+                        match scope {
+                            Some(s) => {
+                                let fg = editor.theme.try_get(s).and_then(|st| st.fg).or(body.fg);
+                                apply(out, Style { fg, bold: true, ..body })?;
+                                queue!(out, Print(part))?;
+                                apply(out, row_style)?;
+                            }
+                            None => queue!(out, Print(part))?,
+                        }
+                    }
                 }
                 None => queue!(out, Print(text))?,
             }
@@ -11267,7 +11468,16 @@ impl OfferCard {
         let title = self.lines.first().map_or(String::new(), |l| l.0.clone());
         let focus = pane_names(ui, editor, card, &[""], 0)[0].1;
         let name = Style { fg: if self.failed { ui.error.fg } else { focus.fg }, ..focus };
-        let mut named = vec![(title, flashed(ui, editor, &id, name))];
+        let name = flashed(ui, editor, &id, name);
+        // (named by its session: its name in its colour, bold — no dot — then `asks · title` as the title is)
+        let mut named =
+            match self.about.as_ref().and_then(|(n, c)| Some((n, c, title.strip_prefix(n.as_str())?))) {
+                Some((n, c, rest)) if !self.failed => vec![
+                    (n.clone(), Style { fg: ui.participant(*c, true), bold: true, ..name }),
+                    (rest.to_string(), name),
+                ],
+                _ => vec![(title.clone(), name)],
+            };
         // (given to Claude or cited by it this turn: its faint mark after the name)
         if let Some((m, st)) = ui_mark(ui, editor, &id, body) {
             named.push((format!(" {m}"), st));
@@ -11366,6 +11576,13 @@ fn which_key_columns(
     (cut >= WHICH_KEY_CUT_MIN).then_some((needed, cut))
 }
 
+/// The row every card at the code's foot stands on — the asks, the follow card, a toast at its bottom spot, which-key,
+/// the ask stream: a row of air above what's under the code (the status line, a bottom slot), each card's last row
+/// right above it (the user, 2026-10-24: their bottoms on one line).
+fn card_floor(lay: &Layout) -> usize {
+    (lay.text_top as usize + lay.text_rows).saturating_sub(1)
+}
+
 /// The narrowest a which-key description is cut to (`which_key_columns`).
 const WHICH_KEY_CUT_MIN: usize = 6;
 
@@ -11428,11 +11645,11 @@ fn draw_which_key(editor: &Editor, ui: &Ui, lay: &Layout, out: &mut impl Write) 
     let inner = cols * cell + (cols - 1) * 3;
     let width = inner + 4;
     let h = rows + 2 * pad;
-    if h > lay.text_rows || width >= lay.edit_w {
+    if h + 1 > lay.text_rows || width >= lay.edit_w {
         return Ok(());
     }
     let x0 = lay.edit_w - width - 1;
-    let y0 = lay.text_top as usize + lay.text_rows - h;
+    let y0 = card_floor(lay) - h;
     let card = on_ground(ui, card_style(ui, editor, "ui.popup"));
     let (key_style, dim) = (Style { bg: card.bg, ..key_style }, Style { bg: card.bg, ..dim });
     card_edge(out, card, x0, y0, width)?;
@@ -11679,10 +11896,10 @@ fn draw_ask_stream(
     let body = if rev.streamed.is_empty() { 0 } else { code.len().min(ROWS) };
     let hint = usize::from(!stop.is_empty());
     let h = 1 + body + hint + 2 * pad;
-    if lay.text_rows < h + 1 || inner < 24 {
+    if lay.text_rows < h + 2 || inner < 24 {
         return Ok(None);
     }
-    let (x0, y0) = (lay.edit_w.saturating_sub(inner + 5), lay.text_top as usize + lay.text_rows - h);
+    let (x0, y0) = (lay.edit_w.saturating_sub(inner + 5), card_floor(lay) - h);
     let width = inner + 4;
     card_edge(out, card, x0, y0, width)?;
     // Title: wave · status · instruction ……… elapsed
@@ -11746,15 +11963,16 @@ fn draw_ask_stream(
 /// goes there). `None`: no room.
 ///
 /// ```text
-///      ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-///        claude › follow            ▂▅▇ exploring 3.2s
-///        ▎ does ask get tools too?                       ← minimized only
-///        ◦ read    src/chat.rs  L88–120
-///        The chat swaps the empty tool list here;
-///        ● read    src/llm.rs  L230–249
-///        ask never calls it, so it stays tool-less.
-///        C-c stop  C-f unfollow                          ← minimized only
-///      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+///      ╭─ main working ── paused ────── ▂▅▇ exploring 3.2s ─╮  ← P3 step 7d: framed, named
+///      │ ▎ does ask get tools too?                     │  ← minimized only
+///      │ ◦ read    src/chat.rs  L88–120                │
+///      │ The chat swaps the empty tool list here;     │
+///      │ ● read    src/llm.rs  L230–249                │
+///      │ ask never calls it, so it stays tool-less.   │
+///      │ C-c stop  C-f unfollow                       │  ← minimized only
+///      ╰─────────────────────────────────────────────╯
+///
+/// Its frame's top line names whom it follows as the chrome does (one session: `follow`); it takes no keys.
 /// ```
 fn draw_follow_card(
     c: &crate::chat::Chat,
@@ -11781,7 +11999,8 @@ fn draw_follow_card(
     if inner < 28 || ph < 8 {
         return Ok(None);
     }
-    let card = card_style(ui, editor, "ui.popup");
+    // (framed on the ground, as every floating pane — D3)
+    let card = on_ground(ui, card_style(ui, editor, "ui.popup"));
     let pad = CARD_PAD;
     let dim = Style { fg: ui.virt.fg, ..card };
     let faint = Style { fg: ui.linenr.fg, ..card };
@@ -11823,7 +12042,6 @@ fn draw_follow_card(
     // goes — minimized, Claude's commands without a sandbox too (in warning) — then, as the chat's title says it,
     // what it's at and how long. Narrow, what it's at gives way first, then `› no sandbox` goes shorter
     let paused = c.follow.paused && c.busy();
-    let badge = if paused { " › paused" } else { " › follow" };
     let exploring = c.msgs.last().is_some_and(|m| m.role == Role::Tool);
     let doing: &[&str] = match () {
         _ if compacting => &[" compacting", ""],
@@ -11843,29 +12061,60 @@ fn draw_follow_card(
         true => &[" › no sandbox", " › bare", ""],
         false => &[""],
     };
-    let left_w = "claude".width() + badge.width();
-    let right_w = |d: &str| mark.width() + d.width() + 1 + secs.width();
-    let (bare, doing) = bares
-        .iter()
-        .flat_map(|b| doing.iter().map(move |d| (*b, *d)))
-        .find(|(b, d)| left_w + b.width() + right_w(d) <= inner)
-        .unwrap_or(("", ""));
     let warn = editor
         .theme
         .try_get("warning")
         .and_then(|s| s.fg)
         .map_or(accent, |fg| Style { fg: Some(fg), ..card });
-    let gap = inner.saturating_sub(left_w + bare.width() + right_w(doing));
-    let title = vec![
-        sp("claude", if editor.session.is_at(At::Chat) { strong } else { dim }),
-        sp(badge, if paused { faint } else { accent }),
-        sp(bare, warn),
-        sp(&" ".repeat(gap), card),
-        sp(&mark, accent),
-        sp(doing, if waiting { accent } else { dim }),
-        sp(" ", card),
-        sp(&secs, faint),
-    ];
+    // Its frame's top line (P3 step 7d: a floating pane, named): who it follows as the chrome names it — with two
+    // sessions or more its name in its colour, else `follow` — its state after it (`▲ waits` in warning, `done` the
+    // accent; at work, what it's at says it at the right: `thinking`, not `working` twice); `paused` and, minimized,
+    // `no sandbox` as its details; the turn's time at the right
+    let l = &editor.session;
+    let (who, who_st) = match editor.sessions.is_empty() {
+        true => ("follow".to_string(), if editor.session.is_at(At::Chat) { strong } else { dim }),
+        false => (l.label().to_string(), Style { fg: ui.participant(l.colour, true), bold: true, ..card }),
+    };
+    let state: Option<(String, Style)> = {
+        use crate::session::Doing;
+        match editor.doing(l) {
+            Doing::Waiting => Some((" ▲ waits".into(), warn)),
+            Doing::Done => Some((" done".into(), accent)),
+            d @ Doing::Stuck { .. } => Some((format!(" ◦ {}", d.said()), warn)),
+            d @ Doing::Queued { .. } => Some((format!(" {}", d.said()), faint)),
+            Doing::Working | Doing::Idle => None,
+        }
+    };
+    let mut names = vec![(who, who_st)];
+    names.extend(state);
+    let left_w = names.iter().map(|n| n.0.width()).sum::<usize>() + if paused { 9 } else { 0 };
+    let right_w = |d: &str| mark.width() + d.width() + 1 + secs.width();
+    // (the line's own cells: `─ ` before the names, ` ─` and the ends round what stands at its right)
+    let room = inner.saturating_sub(TOP_LINE_OWN + 2);
+    let (bare, doing) = bares
+        .iter()
+        .flat_map(|b| doing.iter().map(move |d| (*b, *d)))
+        .find(|(b, d)| left_w + b.width() + right_w(d) <= room)
+        .unwrap_or(("", ""));
+    let mut details: Vec<(String, Style)> = Vec::new();
+    if paused {
+        details.push(("paused".into(), faint));
+    }
+    if let Some(b) = bare.strip_prefix(" › ").filter(|b| !b.is_empty()) {
+        if !details.is_empty() {
+            details.push((NAMES_SEP.into(), faint));
+        }
+        details.push((b.to_string(), warn));
+    }
+    // (what it's at and how long, a blank between — waiting on you, its state says so: not twice)
+    let doing = if waiting { "" } else { doing.trim_start() };
+    let mut right: Vec<(String, Style)> = Vec::new();
+    for (part, style) in [(mark.as_str(), accent), (doing, dim), (secs.as_str(), faint)] {
+        if !part.is_empty() {
+            let gap = if right.is_empty() { "" } else { " " };
+            right.push((format!("{gap}{part}"), style));
+        }
+    }
     // The turn of the stop in hand, its knots and words — the newest at the bottom
     let st = TrailStyles { faint, dim, string, accent, warn };
     let (turn_rows, hand_row, knots) = follow_thread(c, editor, ui, inner, card, &st, compact);
@@ -11894,8 +12143,8 @@ fn draw_follow_card(
     } else {
         (stops && c.busy()).then(|| vec![sp("[r", key), sp(" replay what it did", faint)])
     };
-    // The title; minimized, the panel's part above the turn too: the question, the plan's step
-    let mut top: Vec<Vec<Span>> = vec![title];
+    // Minimized, the panel's part above the turn: the question, the plan's step (the title is the frame's line)
+    let mut top: Vec<Vec<Span>> = Vec::new();
     if compact {
         let turn = c.msgs.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
         let question = c.msgs[..turn]
@@ -11937,7 +12186,8 @@ fn draw_follow_card(
     // review's changes); none free of the lines read and the review's changes: free of the change in hand,
     // then of the lines read, then anywhere (a card over cards never). As many of the newest words as
     // there's room for, a row at least, up to `BODY` and half the pane.
-    let end = py + ph;
+    // (at the pane's foot it stands on its row of air, as every card at the foot does — `card_floor`)
+    let end = (py + ph).saturating_sub(1);
     let min_h = fixed + 1;
     // (first row, end, anchored at its end)
     let place = |keep: &[usize]| -> Option<(usize, usize, bool)> {
@@ -11999,10 +12249,8 @@ fn draw_follow_card(
     if compact {
         editor.screen.chat_mini.set(Some(rect));
     }
-    card_edge(out, card, x0, y0, width)?;
     let mut links = editor.screen.chat_links.borrow_mut();
-    let mut y = y0 + pad;
-    for (row, link) in &rows {
+    for (y, (row, link)) in (y0 + pad..).zip(&rows) {
         queue!(out, MoveTo(x0 as u16, y as u16))?;
         apply(out, card)?;
         queue!(out, Print("  "))?;
@@ -12012,9 +12260,20 @@ fn draw_follow_card(
         if let Some(l) = link {
             links.push((y, x0 + 2, x0 + 2 + inner, l.clone()));
         }
-        y += 1;
     }
-    card_edge(out, card, x0, y, width)?;
+    // Its frame (P3 step 7d): takes no keys — its lines the faint wash always; its name, details and time its top line
+    draw_frame(out, ui, card, rect, &[], &[], &[], false)?;
+    let head = TopLine {
+        names: &names,
+        details: &details,
+        key: card,
+        faint,
+        plain: true,
+        right: &right,
+        keep_right: true,
+        ..TopLine::default()
+    };
+    top_line(out, frame_line(ui, card), card, (x0, y0, width), ("╭", "╮", "┬"), &[], true, &head)?;
     Ok(Some(rect))
 }
 
@@ -13447,19 +13706,7 @@ fn draw_review_rail(
 ///   enter send  esc normal  C-r apply
 /// ```
 /// Returns the input cursor position (when focused).
-/// The sessions under the chat's header (with more than one): `main │ fix-login working │ new-parser ▲ waits │
-/// docs done │ +` — each name in its participant colour, full, the one in front bold (collab C1, the user
-/// 2026-10-22: who it is is its name in its colour; its state follows it), `working` its Claude at work, faint (and
-/// the file it's in, dim — `presence.rs`, the first to go when they don't fit), `queued 2nd` at work but its run in
-/// line, faint, `▲ waits` a card (or an edit) waiting for
-/// you, `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool
-/// call unanswered that long), `¶ reviewing` its reviewer reading (#195), `•` news while it was behind —
-/// files came again from disk there (#6), its reviewer ended (#195) — `+` a new one. Where that doesn't
-/// fit, one dropdown: `◂ fix-login working ¶ ▾ 2/3 ◦1 1 done •1 ▸` (the name opens the list, `◦1` possibly stuck,
-/// `•1` news in one behind, the arrows step — how many things wait for you is the status
-/// line's `▲3 waiting`, every session's). Styles: dim, faint, accent, warning, the reviewer's · where each click goes
-/// (from the row's start).
-/// The other sessions as the dropdown and the status line's chip count them: ` ◦1` (possibly stuck) ·
+/// The other sessions as the status line's chip counts them: ` ◦1` (possibly stuck) ·
 /// ` 1 done` (a turn ended, not looked at) — each empty when none (#86: what waits is counted apart).
 fn sessions_counted(editor: &Editor) -> [String; 2] {
     let stuck = match editor.sessions_stuck() {
@@ -13473,6 +13720,18 @@ fn sessions_counted(editor: &Editor) -> [String; 2] {
     [stuck, done]
 }
 
+/// The sessions on the chat's top line (with more than one): `main · fix-login working · new-parser ▲ waits · docs done
+/// · +` — each name in its participant colour, whole, the one in front bold (collab C1, the user 2026-10-22: who it is
+/// is its name in its colour; its state follows it), `working` its Claude at work, faint (and the file it's in, dim —
+/// `presence.rs`), `queued 2nd` at work but its run in line, faint, `▲ waits` a card (or an edit) waiting for you,
+/// `done` a turn that ended behind and hasn't been looked at, `◦ symbols 42s` possibly stuck (a tool call unanswered that
+/// long), `≈ main` whom its changes would conflict with, `¶ reviewing` its reviewer reading (#195), `•` news while it
+/// was behind — `+` a new one. **Names whole, never letters** (the user, 2026-10-23: nine sessions read `m · k · d · pu`):
+/// where they don't fit, folded least important first — the files; the overlaps' names to `≈`; the states to what needs
+/// you (`▲`, `◦`, `done`, `¶`); then sessions into `+N` (a click opens the list), from the end of the order, the front
+/// and those that need you always in (the order kept: one that starts waiting appears in its place); last, those too —
+/// `+N ▲k` — the front's name alone. While `+N` shows, the `+` goes (the list's `o` makes one). Styles: dim, faint,
+/// accent, warning, the reviewer's · where each click goes (from the row's start).
 fn session_tabs(
     editor: &Editor,
     w: usize,
@@ -13512,123 +13771,151 @@ fn session_tabs(
             .as_ref()
             .map(|r| Span { text: format!(" {}", r.said()), style: if r.stopped() { warn } else { dim } })
     };
-    // (as short as they're told apart — `presence::prefixes`, the side panel's file rows' rule)
-    let short =
-        crate::presence::prefixes(&sessions.iter().map(|l| l.label().to_string()).collect::<Vec<_>>());
-    // Folds, least important first: where each is in its turn (its file, `presence.rs`), then the states to what needs
-    // you (`▲`, `◦`), then the names to their prefixes
-    for (files, states, prefix) in
-        [(true, true, false), (false, true, false), (false, false, false), (false, false, true)]
-    {
+    let unsent = |l: &crate::session::Session| {
+        l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.blank())
+    };
+    // A session's words at a fold: `files` where it is in its turn, `whom` its overlaps' names (else `≈` alone, in
+    // warning — whose, the list and the side panel say), `states` its state in words (else what needs you: `▲`, `◦`,
+    // `done`, `¶`)
+    let words = |l: &crate::session::Session, files: bool, whom: bool, states: bool| -> Vec<Span> {
+        // (who it is: its name in its colour, the front's bold — its state after it)
+        let own = colour(l.colour);
+        let own = Style { bold: l.id == editor.session.id || own.bold, ..own };
+        let mut v = vec![Span { text: l.label().to_string(), style: own }];
+        let folded = |m: Span| match m.text.trim_start().chars().next() {
+            _ if states => Some(m),
+            Some(g @ ('▲' | '◦')) => Some(Span { text: format!(" {g}"), ..m }),
+            _ if m.text == " done" => Some(m),
+            _ => None,
+        };
+        v.extend(mark(l).and_then(folded));
+        // (whom its changes would conflict with — `≈ main`, each in its colour: `overlap.rs`)
+        let others = crate::overlap::others(editor, l.id);
+        if !whom && !others.is_empty() {
+            v.push(Span { text: " ≈".into(), style: warn });
+        }
+        for (k, (name, c)) in others.into_iter().enumerate().filter(|_| whom) {
+            v.push(Span {
+                text: if k == 0 { " ≈ " } else { ", " }.into(),
+                style: if k == 0 { warn } else { faint },
+            });
+            v.push(Span { text: name, style: c.map_or(faint, colour) });
+        }
+        if let Some(file) = crate::presence::file_of(editor, l.id).filter(|_| files) {
+            v.push(Span { text: format!(" {file}"), style: dim });
+        }
+        // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195; the front session's left to
+        // the status line's segment while that shows — bgreview)
+        let front = l.id == editor.session.id && crate::reviewer::status_shows(editor, rail_w);
+        if let Some(said) = crate::reviewer::session_said(editor, l).filter(|_| !front) {
+            let said = match (states, said == "reviewing") {
+                (false, _) => " ¶",
+                (true, true) => " ¶ reviewing",
+                (true, false) => " ¶ waits",
+            };
+            v.push(Span { text: said.into(), style: reviewer });
+        }
+        if states {
+            v.extend(rebasing(l));
+        }
+        // (news while it was behind: files came again from disk — #6, its reviewer ended — #195; a sign already, kept
+        // at every fold, as `+N` carries it)
+        if l.news() {
+            v.push(Span { text: " •".into(), style: dim });
+        }
+        // (a message typed in its chat, not sent — its input isn't on screen; folding never drops it)
+        if unsent(l) {
+            v.push(Span { text: " unsent".into(), style: dim });
+        }
+        v
+    };
+    // What needs you: always in (with the front)
+    let needs = |l: &crate::session::Session| matches!(editor.doing(l), Doing::Waiting | Doing::Stuck { .. });
+    // The sessions `shown` laid out in their order, `·` between (as a top line's names — `pane_names`), then the rest as
+    // `+N` (a click: the list) — or, all shown, `+`. Folding a name never drops what it says: `+N` carries its sessions'
+    // signs, each kind once — `▲k` waiting on you, `◦k` maybe stuck, `¶` a reviewer, `•` news, `unsent`, `≈` an overlap
+    let lay = |items: &[Vec<Span>], shown: &[bool]| -> (Vec<Span>, Vec<(usize, usize, Spot)>) {
         let (mut spans, mut spots, mut x) = (Vec::new(), Vec::new(), 0);
         let mut put = |spans: &mut Vec<Span>, text: String, style: Style| {
             x += text.width();
             spans.push(Span { text, style });
             x
         };
-        for (i, l) in sessions.iter().enumerate() {
-            // (`·` between them, as between a top line's names — `pane_names`)
-            let start = if i > 0 { put(&mut spans, NAMES_SEP.into(), faint) } else { 0 };
-            // (who it is: its name in its colour, the front's bold — its state after it)
-            let own = colour(l.colour);
-            let own = Style { bold: l.id == editor.session.id || own.bold, ..own };
-            let name = if prefix { short[i].clone() } else { l.label().to_string() };
-            let mut end = put(&mut spans, name, own);
-            let folded = |m: Span| match m.text.trim_start().chars().next() {
-                _ if states => Some(m),
-                Some(g @ ('▲' | '◦')) => Some(Span { text: format!(" {g}"), ..m }),
-                _ => None,
-            };
-            if let Some(m) = mark(l).and_then(folded) {
-                end = put(&mut spans, m.text, m.style);
+        for (i, item) in items.iter().enumerate().filter(|(i, _)| shown[*i]) {
+            let start = if spans.is_empty() { 0 } else { put(&mut spans, NAMES_SEP.into(), faint) };
+            let mut end = start;
+            for s in item {
+                end = put(&mut spans, s.text.clone(), s.style);
             }
-            // (whom its changes would conflict with — `≈ main`, each in its colour: `overlap.rs`)
-            for (k, (name, c)) in crate::overlap::others(editor, l.id).into_iter().enumerate() {
-                put(&mut spans, if k == 0 { " ≈ " } else { ", " }.into(), if k == 0 { warn } else { faint });
-                end = put(&mut spans, name, c.map_or(faint, colour));
-            }
-            if let Some(file) = crate::presence::file_of(editor, l.id).filter(|_| files) {
-                end = put(&mut spans, format!(" {file}"), dim);
-            }
-            // (its reviewer reading — beside its chat's mark, in the reviewer's colour: #195; the front session's
-            // left to the status line's segment while that shows — bgreview)
-            let front = l.id == editor.session.id && crate::reviewer::status_shows(editor, rail_w);
-            if let Some(said) = crate::reviewer::session_said(editor, l).filter(|_| !front) {
-                let said = if said == "reviewing" { " ¶ reviewing" } else { " ¶ waits" };
-                end = put(&mut spans, said.into(), reviewer);
-            }
-            if let Some(r) = rebasing(l) {
-                end = put(&mut spans, r.text, r.style);
-            }
-            // (news while it was behind: files came again from disk — #6, its reviewer ended — #195)
-            if l.news() {
-                end = put(&mut spans, " •".into(), dim);
-            }
-            // (a message typed in its chat, not sent — its input isn't on screen)
-            if l.id != editor.session.id && l.chat.as_ref().is_some_and(|c| !c.input.blank()) {
-                end = put(&mut spans, " unsent".into(), dim);
-            }
-            spots.push((start, end, Spot::Session(l.id)));
+            spots.push((start, end, Spot::Session(sessions[i].id)));
         }
+        let hidden: Vec<usize> = (0..items.len()).filter(|&i| !shown[i]).collect();
         let start = put(&mut spans, NAMES_SEP.into(), faint);
-        let end = put(&mut spans, "+".into(), dim);
-        spots.push((start, end, Spot::New));
-        if x <= w {
-            return (spans, spots);
+        let mut end = match hidden.len() {
+            0 => put(&mut spans, "+".into(), dim),
+            n => put(&mut spans, format!("+{n}"), dim),
+        };
+        // (each with its own sign: `▲` waiting on you, `◦` maybe stuck)
+        let count = |stuck: bool| {
+            let of = |i: &&usize| matches!(editor.doing(sessions[**i]), Doing::Stuck { .. }) == stuck;
+            hidden.iter().filter(|i| needs(sessions[**i])).filter(of).count()
+        };
+        for (glyph, n) in [("▲", count(false)), ("◦", count(true))] {
+            if n > 0 {
+                end = put(&mut spans, format!(" {glyph}{n}"), warn);
+            }
+        }
+        let any = |f: &dyn Fn(&crate::session::Session) -> bool| hidden.iter().any(|&i| f(sessions[i]));
+        let signs: [(&str, Style, bool); 4] = [
+            (" ¶", reviewer, any(&|l| crate::reviewer::session_said(editor, l).is_some())),
+            (" •", dim, any(&|l| l.news())),
+            (" unsent", dim, any(&unsent)),
+            (" ≈", warn, any(&|l| !crate::overlap::others(editor, l.id).is_empty())),
+        ];
+        for (text, style, _) in signs.into_iter().filter(|s| s.2) {
+            end = put(&mut spans, text.into(), style);
+        }
+        spots.push((start, end, if hidden.is_empty() { Spot::New } else { Spot::List }));
+        (spans, spots)
+    };
+    let width =
+        |l: &(Vec<Span>, Vec<(usize, usize, Spot)>)| l.0.iter().map(|s| s.text.width()).sum::<usize>();
+    let all = vec![true; sessions.len()];
+    // Folds, least important first, each on the whole line: where each is in its turn (its file), the overlaps' names,
+    // the states to what needs you
+    let mut items = Vec::new();
+    for (files, whom, states) in
+        [(true, true, true), (false, true, true), (false, false, true), (false, false, false)]
+    {
+        items = sessions.iter().map(|l| words(l, files, whom, states)).collect::<Vec<_>>();
+        let laid = lay(&items, &all);
+        if width(&laid) <= w {
+            return laid;
         }
     }
-    // The dropdown
-    let at = sessions.iter().position(|l| l.id == editor.session.id).unwrap_or(0) + 1;
-    let count = format!(" {at:>n$}/{}", sessions.len(), n = sessions.len().to_string().len());
-    // (its own mark as a glyph, its rebase as main has it, the counts with words while the name keeps its
-    // room — else without)
-    let mark = mark(&editor.session).map(|m| match m.text.strip_suffix(" waits") {
-        Some(glyph) if glyph.starts_with(" ▲") => Span { text: glyph.to_string(), ..m },
-        _ => m,
-    });
-    let reviewing = (editor.session.reviewing() && !crate::reviewer::status_shows(editor, rail_w))
-        .then(|| Span { text: " ¶".into(), style: reviewer });
-    let rebasing = rebasing(&editor.session);
-    // (its changes would conflict with another's: the glyph alone — the list names whose)
-    let overlap = (!crate::overlap::others(editor, editor.session.id).is_empty())
-        .then(|| Span { text: " ≈".into(), style: warn });
-    let marks_w = [&mark, &overlap, &reviewing, &rebasing]
-        .iter()
-        .filter_map(|m| m.as_ref())
-        .map(|m| m.text.width())
-        .sum::<usize>();
-    let reloaded = match editor.sessions_with_news() {
-        0 => String::new(),
-        n => format!(" •{n}"),
-    };
-    let fixed = |[waiting, done]: &[String; 2]| {
-        2 + marks_w + 2 + count.width() + waiting.width() + done.width() + reloaded.width() + 2
-    };
-    let label = editor.session.label();
-    let [waiting, done] = sessions_counted(editor);
-    let name = fit_ellipsis(label, w.saturating_sub(fixed(&[waiting.clone(), done.clone()])).max(1));
-    // (the arrows dim, not faint — they're what a click steps with)
-    let own = Style { bold: true, ..colour(editor.session.colour) };
-    let mut spans = vec![Span { text: "◂ ".into(), style: dim }, Span { text: name, style: own }];
-    spans.extend(mark);
-    spans.extend(overlap);
-    spans.extend(reviewing);
-    spans.extend(rebasing);
-    spans.push(Span { text: " ▾".into(), style: dim });
-    spans.push(Span { text: count, style: faint });
-    if !waiting.is_empty() {
-        spans.push(Span { text: waiting, style: warn });
+    // Then sessions into `+N`, from the end of the order back — never the front nor one that needs you; the order kept,
+    // the room used (one that fits after one that didn't is shown)
+    let front = |l: &crate::session::Session| l.id == editor.session.id;
+    let mut shown: Vec<bool> = sessions.iter().map(|l| front(l) || needs(l)).collect();
+    if width(&lay(&items, &shown)) <= w {
+        for i in 0..sessions.len() {
+            if !shown[i] {
+                shown[i] = true;
+                shown[i] = width(&lay(&items, &shown)) <= w;
+            }
+        }
+        return lay(&items, &shown);
     }
-    if !done.is_empty() {
-        spans.push(Span { text: done, style: accent });
+    // Last, those that need you too: the front alone, `+N ▲k` — its name cut only where it alone can't fit
+    let shown: Vec<bool> = sessions.iter().map(|l| front(l)).collect();
+    let over = width(&lay(&items, &shown)).saturating_sub(w);
+    if over > 0
+        && let Some(i) = sessions.iter().position(|l| front(l))
+    {
+        let name = &mut items[i][0].text;
+        *name = fit_ellipsis(name, name.width().saturating_sub(over).max(1));
     }
-    if !reloaded.is_empty() {
-        spans.push(Span { text: reloaded, style: dim });
-    }
-    let list_end: usize = spans.iter().map(|s| s.text.width()).sum();
-    spans.push(Span { text: " ▸".into(), style: dim });
-    let spots = vec![(0, 1, Spot::Prev), (2, list_end, Spot::List), (list_end + 1, list_end + 2, Spot::Next)];
-    (spans, spots)
+    lay(&items, &shown)
 }
 
 /// The conversation as the chat lays it out `chat_w` wide: each message's rows — laid out only when its key changed
@@ -13966,6 +14253,76 @@ fn chat_widths(chat_w: usize) -> (usize, usize) {
     (w, w.min(MEASURE))
 }
 
+/// The chat's input shows this many of its rows at most.
+const CHAT_INPUT_MAX: usize = 5;
+
+/// The chat's input `text` wrapped to its text's width `w` (a cell for the caret): its rows, and the row and column of
+/// `cursor` (a byte offset).
+fn chat_input_rows(text: &str, cursor: usize, w: usize) -> (Vec<String>, usize, usize) {
+    let mut rows: Vec<String> = vec![String::new()];
+    let (mut cur_row, mut cur_col) = (0, 0);
+    let mut col = 0;
+    for (b, ch) in text.char_indices() {
+        if b == cursor {
+            (cur_row, cur_col) = (rows.len() - 1, col);
+        }
+        let cw = ch.width().unwrap_or(0);
+        if ch == '\n' || col + cw > w - 2 {
+            rows.push(String::new());
+            col = 0;
+            if ch == '\n' {
+                continue;
+            }
+        }
+        rows.last_mut().unwrap().push(ch);
+        col += cw;
+    }
+    if cursor >= text.len() {
+        (cur_row, cur_col) = (rows.len() - 1, col);
+    }
+    (rows, cur_row, cur_col)
+}
+
+/// Where the asks float while the chat is open (P3 step 7d, the user 2026-10-22: bottom-right, over the chat's foot at
+/// its width): its columns from `x`, `w` wide (the card a cell in from each side), and the row its input's line is on —
+/// as `draw_chat` lays them out. None: the chat isn't open beside the code (closed, minimized).
+fn chat_foot(editor: &Editor, lay: &Layout) -> Option<(usize, usize, usize)> {
+    let c = editor.session.chat.as_ref().filter(|_| lay.chat_w > 0)?;
+    let (w, _) = chat_widths(lay.chat_w);
+    let input_h = chat_input_rows(&c.input.text(), c.input.cursor(), w).0.len().min(CHAT_INPUT_MAX);
+    let now_ms = crate::usage::now_ms();
+    let warm = crate::keepwarm::said(&editor.session, &editor.config.llm, &editor.limits, now_ms);
+    let s = Style::default();
+    let u = &editor.session.usage;
+    let usage = usage_spans(u, &warm, &editor.limits, editor.session.billing, now_ms, w, [s; 4]).is_some();
+    // (its top line, the transcript, the input's line, its rows, the hint row, the usage row — `draw_chat`)
+    let rule = lay.body_h.checked_sub(input_h + 2 + usize::from(usage))?;
+    let (x, w) = match lay.edit_w {
+        0 => (0, lay.chat_w),
+        e => (e + crate::chrome::GAP, lay.chat_w.saturating_sub(crate::chrome::GAP)),
+    };
+    Some((x, w, rule))
+}
+
+/// The asks' area over the right column's foot (P3 step 7d): columns from `x`, `w` wide; rows from `top`, `rows` of them,
+/// the last one air — the chat's while it's open (`chat_foot`: under its top line, down to its input's line), else a
+/// session list docked right and in sight (the user 2026-10-24: "as the chat's" — under its top line, down to its leaf's
+/// last row), where it's wide enough for a card. None: the screen's right.
+fn asks_foot(editor: &Editor, lay: &Layout) -> Option<(usize, usize, usize, usize)> {
+    use crate::pane::{GroupKind, Place, Side};
+    if let Some((x, w, rule)) = chat_foot(editor, lay) {
+        return Some((x, w, 1, rule.saturating_sub(1)));
+    }
+    let g = editor.session.group(GroupKind::Sessions).filter(|g| g.place == Place::Docked(Side::Right))?;
+    if !editor.docked_in_sight(g.kind) || lay.chat_w > 0 {
+        return None;
+    }
+    let r = lay.leaves.iter().find(|l| l.0 == g.host)?.1;
+    // (its edge line the leaf's first cell, as `Layout::docked` lays it; a card's text at least `CARD_MIN_INNER`)
+    let (x, w) = (r.x + 1, r.w.saturating_sub(1));
+    (w >= CARD_MIN_INNER + 6).then_some((x, w, r.y + 1, r.h.saturating_sub(1)))
+}
+
 fn draw_chat(
     c: &crate::chat::Chat,
     editor: &Editor,
@@ -13990,30 +14347,9 @@ fn draw_chat(
     let rows = lay.body_h;
     // ── Input (wrapped, up to 5 rows) + cursor position
     let placeholder = format!("Ask about {}…", editor.doc().display_name_short());
-    let mut input_rows: Vec<String> = vec![String::new()];
-    let (mut cur_row, mut cur_col) = (0, 0);
-    let mut col = 0;
-    let (typed, cursor) = (c.input.text(), c.input.cursor());
-    for (b, ch) in typed.char_indices() {
-        if b == cursor {
-            (cur_row, cur_col) = (input_rows.len() - 1, col);
-        }
-        let cw = ch.width().unwrap_or(0);
-        if ch == '\n' || col + cw > w - 2 {
-            input_rows.push(String::new());
-            col = 0;
-            if ch == '\n' {
-                continue;
-            }
-        }
-        input_rows.last_mut().unwrap().push(ch);
-        col += cw;
-    }
-    if cursor >= typed.len() {
-        (cur_row, cur_col) = (input_rows.len() - 1, col);
-    }
-    let first_input = input_rows.len().saturating_sub(5).min(cur_row);
-    let input_h = input_rows.len().min(5);
+    let (input_rows, cur_row, cur_col) = chat_input_rows(&c.input.text(), c.input.cursor(), w);
+    let first_input = input_rows.len().saturating_sub(CHAT_INPUT_MAX).min(cur_row);
+    let input_h = input_rows.len().min(CHAT_INPUT_MAX);
     // ── Claude's plan, pinned under the title (one row when the panel is short) + a divider under it
     let room = rows.saturating_sub(input_h + 4);
     let plan_rows = match &c.plan {
@@ -14113,14 +14449,22 @@ fn draw_chat(
     // In its view mode the chat holds still: from its transcript's top row (the frame's own rows trail its rows) —
     // else the newest, `scroll` up from the bottom
     let view = crate::chatdoc::transcript(editor).filter(|t| t.keyed && t.pane.doc_in().is_some());
+    // (the asks over its foot — P3 step 7d: the transcript's newest line stays in sight above the stack, a row of air
+    // between, as the input's growth takes its room)
+    let start = top + 1 + plan_h;
+    let asks = editor.screen.offer_card.filter(|r| r.0 >= x0 && r.1 + r.3 > start && r.1 < start + area);
+    let area_shown = match (asks, view) {
+        (Some(r), None) => r.1.saturating_sub(start + 1).min(area),
+        _ => area,
+    };
     let (from, to) = match view {
         Some(t) => {
             let from = t.top_row().min(total.saturating_sub(1));
             (from, (from + area).min(total))
         }
         None => {
-            let scroll = c.scroll.min(total.saturating_sub(area));
-            (total.saturating_sub(area + scroll), total - scroll)
+            let scroll = c.scroll.min(total.saturating_sub(area_shown));
+            (total.saturating_sub(area_shown + scroll), total - scroll)
         }
     };
     // (only the rows on screen are looked at again — the rest stays where it's kept)
@@ -14294,7 +14638,7 @@ fn draw_chat(
     }
     // (what this frame laid out, and where its rows are: the view mode is made of them, the wheel finds its row)
     *editor.screen.chat_laid.borrow_mut() = pieces.clone();
-    editor.screen.chat_view.set(Some((y, w, area, from)));
+    editor.screen.chat_view.set(Some((y, w, area_shown, from)));
     // (its view mode's selections, matches and cursors, painted over the rows they're on — its cursors only while
     // it has the keys: a card given them, a picker over it, its selections alone)
     let view_cursor = editor.cursor_in() == Some(crate::chrome::CursorIn::View);
@@ -17180,11 +17524,9 @@ mod tests {
                 "{cols} columns, in sight:\n{s}"
             );
         }
-        // The chat taking all 50 columns: not drawn, and said where the user looks — and `C-q` brings it up
+        // The chat taking all 50 columns: over its foot, as at any width (P3 step 7d) — `C-q` gives it the keys
         let (buttons, s) = shown(50, true);
-        assert!(buttons.is_empty(), "{s}");
-        let status = s.lines().last().unwrap_or_default();
-        assert!(status.contains("▲1 waiting · C-q shows its card"), "{status}\n{s}");
+        assert!(buttons.iter().any(|b| b.3 == 'y') && !s.contains("shows its card"), "over the chat\n{s}");
         let (buttons, s) = shown_after(50, 30, true, &["C-q"]);
         assert!(buttons.iter().any(|b| b.3 == 'y'), "C-q: drawn, with the keys\n{s}");
         // Too short for any card: the height it needs
@@ -17195,6 +17537,151 @@ mod tests {
         // Too narrow for any card, and for the reason too: that one waits is what's left
         let (_, s) = shown(30, false);
         assert!(s.lines().last().unwrap_or_default().contains("▲1 waiting"), "{s}");
+        // Over the chat's foot, what's short is said: its rows — how many the window needs — or its width
+        let (buttons, s) = shown_after(80, 9, true, &[]);
+        let status = s.lines().last().unwrap_or_default();
+        assert!(
+            buttons.is_empty() && status.contains("card needs ") && status.contains(" rows"),
+            "{status}\n{s}"
+        );
+        assert!(!status.contains("more rows"), "how many: {status}");
+        let mut ed = Editor::new(crate::config::Config::default());
+        let what = What::ChangeSet { whose: crate::refactor::Whose::Claude(7), ops: false };
+        ed.push_offer(Offer::new("Claude changes 3 files".into(), "One review.", "", String::new(), what));
+        ed.session.chat = Some(crate::chat::Chat::new());
+        render(&mut ed, &mut Vec::new(), 28, 30).unwrap();
+        let short = card_short(&ed, &Layout::new(&ed, 28, 30)).expect("something short");
+        let cols: u16 = (short.strip_prefix("card needs ").and_then(|s| s.strip_suffix(" cols")))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("the chat's width short, not its rows: {short}"));
+        // (that many: drawn there, not a column less)
+        for (w, drawn) in [(cols - 1, false), (cols, true)] {
+            render(&mut ed, &mut Vec::new(), w, 30).unwrap();
+            assert_eq!(ed.screen.offer_card.is_some(), drawn, "{short}: at {w}");
+        }
+    }
+
+    /// The chat's top line with nine sessions (P3 step 7d, the user 2026-10-23): names whole, never letters — in their
+    /// order, the front and those that need you (two waiting; stuck counts as they do —
+    /// `a_call_silent_too_long_marks_its_session`) always in, the rest into `+N` where they don't fit (the `+` gone with
+    /// it), last the front alone with `+8 ▲2`; a session that starts waiting appears in its place, nothing else shown
+    /// moving in.
+    #[test]
+    fn the_chats_line_keeps_names_whole_and_folds_the_rest_into_plus_n() {
+        use crate::offer::{Offer, What};
+        use crate::session::Spot;
+        let dir = crate::scratch::Scratch::new("nine");
+        let names = ["main", "fix", "docs", "parser", "sbspeed", "keys", "pull", "web", "motion"];
+        let mut ed = Editor::new(crate::config::Config::default());
+        ed.session.name = names[0].into();
+        let mut ids = vec![ed.session.id];
+        for n in &names[1..] {
+            let p = dir.path().join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            ids.push(ed.session_open(&p).unwrap());
+            ed.session.name = (*n).into();
+        }
+        assert!(ed.session_switch(ids[0]));
+        let card = |n: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what)
+        };
+        fn behind<'a>(ed: &'a mut Editor, name: &str) -> &'a mut crate::session::Session {
+            ed.sessions.iter_mut().find(|l| l.name == name).unwrap()
+        }
+        behind(&mut ed, "docs").parked.push(card(1));
+        behind(&mut ed, "parser").parked.push(card(2));
+        behind(&mut ed, "web").turn_end = Some((std::time::Instant::now(), Ok(())));
+        let s = Style::default();
+        let tabs = |ed: &Editor, w: usize| {
+            let (spans, spots) = session_tabs(ed, w, 0, [s; 5], &|_| s);
+            let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+            let shown: Vec<String> = (spots.iter())
+                .filter_map(|&(a, b, spot)| match spot {
+                    Spot::Session(_) => Some(text.chars().skip(a).take(b - a).collect::<String>()),
+                    _ => None,
+                })
+                .collect();
+            (text, shown, spots)
+        };
+        let mut was: Option<Vec<String>> = None;
+        for w in [200, 90, 60, 40, 28, 12] {
+            let (text, shown, spots) = tabs(&ed, w);
+            assert!(text.width() <= w || shown.len() == 1, "{w}: within its room: {text}");
+            // (whole names, in their order)
+            let at: Vec<usize> = (shown.iter())
+                .map(|r| names.iter().position(|n| r.split(' ').next() == Some(n)).expect("a whole name"))
+                .collect();
+            assert!(at.windows(2).all(|p| p[0] < p[1]), "{w}: the order kept: {text}");
+            let hidden = names.len() - shown.len();
+            match hidden {
+                0 => assert!(text.ends_with(" · +") && spots.last().unwrap().2 == Spot::New, "{w}: {text}"),
+                n => {
+                    assert!(!text.ends_with(" · +") && text.contains(&format!("+{n}")), "{w}: {text}");
+                    assert_eq!(spots.last().unwrap().2, Spot::List, "{w}: +N opens the list");
+                }
+            }
+            // (the front and what needs you: in while they fit, else the front alone with their signs)
+            match shown.len() {
+                1 => assert!(shown[0].starts_with("main") && text.contains("+8 ▲2"), "{w}: {text}"),
+                _ => {
+                    for n in ["main", "docs", "parser"] {
+                        assert!(shown.iter().any(|r| r.split(' ').next() == Some(n)), "{w}: {n} in: {text}");
+                    }
+                }
+            }
+            if w == 40 {
+                was = Some(shown);
+            }
+        }
+        // pull starts waiting: it appears in its place; nothing shown before moves in
+        let before = was.expect("at 40");
+        behind(&mut ed, "pull").parked.push(card(3));
+        let (text, shown, _) = tabs(&ed, 40);
+        assert!(shown.iter().any(|r| r.starts_with("pull")), "{text}");
+        for r in shown.iter().filter(|r| !r.starts_with("pull")) {
+            let name = r.split(' ').next().unwrap();
+            assert!(before.iter().any(|b| b.split(' ').next() == Some(name)), "{name} moved in: {text}");
+        }
+    }
+
+    /// Where the asks float (P3 step 7d): the chat open, over its foot at its width — a cell in from its line and the
+    /// screen's edge, a row of air over its input's line; the chat closed, the screen's right above the status line. One
+    /// session: its title alone.
+    #[test]
+    fn the_asks_float_over_the_chats_foot_or_at_the_screens_right() {
+        use crate::offer::{Offer, What};
+        for (w, h) in [(80u16, 24u16), (160, 45)] {
+            for chat in [true, false] {
+                let mut ed = Editor::new(crate::config::Config::default());
+                let what = What::Screen { call: crate::tools::Call::test(1) };
+                ed.push_offer(Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what));
+                ed.session.chat = chat.then(crate::chat::Chat::new);
+                let mut bytes = Vec::new();
+                render(&mut ed, &mut bytes, w, h).unwrap();
+                let mut p = vt100::Parser::new(h, w, 0);
+                p.process(&bytes);
+                let rows: Vec<String> = p.screen().rows(0, w).collect();
+                let (x, y, cw, ch) = ed.screen.offer_card.expect("drawn");
+                let s = rows.join("\n");
+                assert!(rows[y].contains("╭─ Claude asks ─"), "{w} {chat}: its title alone\n{s}");
+                let (w, h) = (w as usize, h as usize);
+                match chat {
+                    true => {
+                        let cx = ed.screen.chat_x.expect("the chat") + crate::chrome::GAP;
+                        assert_eq!((x, x + cw), (cx + 1, w - 1), "{w}: the chat's width, a cell in\n{s}");
+                        // (a row of air, then the input's line)
+                        let line: String = rows[y + ch + 1].chars().skip(cx).collect();
+                        assert!(line.trim_start().starts_with('─'), "{w}: over the input's line\n{s}");
+                        assert!(rows[y + ch].chars().skip(cx).all(|c| c == ' '), "{w}: air\n{s}");
+                    }
+                    false => {
+                        assert_eq!(x + cw, w - 1, "{w}: the screen's right\n{s}");
+                        assert_eq!(y + ch, h - 2, "{w}: a row of air over the status line\n{s}");
+                    }
+                }
+            }
+        }
     }
 
     /// Which-key's columns: what fits at full width keeps it, short descriptions too (a floor on cutting once
@@ -18047,6 +18534,8 @@ mod tests {
                 came: 0,
                 yours: false,
                 output: None,
+                about: None,
+                paint: Vec::new(),
             });
             let result =
                 serde_json::json!([{"label": "line_one", "detail": "fn line_one()"}, {"label": "lx"}]);
@@ -19782,6 +20271,87 @@ mod tests {
         assert_eq!(steps, [vec![], vec![(44, 'y')], vec![(11, 'y')], vec![]], "lit, drying, dry");
     }
 
+    /// Every card at the code's foot stands on one line (the user, 2026-10-24: "why are the two cards' bottoms at
+    /// different heights?"): the follow card, an ask at the screen's right, a toast at its bottom spot, which-key —
+    /// each its last row a row of air above the status line (`card_floor`). With the chat open the ask is over the
+    /// chat's foot instead: a row of air above its input's line.
+    #[test]
+    fn every_card_at_the_foot_stands_on_one_line() {
+        use crate::offer::{Offer, What};
+        let bottom = |r: Rect4| r.1 + r.3 - 1;
+        let draw = |ed: &mut Editor, w: u16, h: u16| {
+            let mut bytes = Vec::new();
+            render(ed, &mut bytes, w, h).unwrap();
+            let mut p = vt100::Parser::new(h, w, 0);
+            p.process(&bytes);
+            p.screen().rows(0, w).collect::<Vec<String>>()
+        };
+        for (w, h) in [(80u16, 24u16), (160, 45)] {
+            let floor = h as usize - 3;
+            for chat in [false, true] {
+                let at = format!("{w}×{h}, the chat {}", if chat { "open" } else { "closed" });
+                // The follow card
+                let mut ed = threaded_turn();
+                let c = ed.session.chat.as_mut().unwrap();
+                (c.unfolded, c.follow.on, c.state) = (chat, true, crate::chat::State::Writing);
+                c.msgs.pop();
+                let run = c.msgs[5].look.clone().unwrap();
+                c.follow.gaze = Some(crate::follow::Gaze {
+                    call: "x1".into(),
+                    ..crate::follow::Gaze::new(run, None, None)
+                });
+                ed.session.at = crate::session::At::Code;
+                let s = draw(&mut ed, w, h).join("\n");
+                let card = ed.screen.thought_card.get().expect("the follow card");
+                assert_eq!(bottom(card), floor, "{at}: the follow card\n{s}");
+                // (the state lists it as a floating pane that takes no keys, where the frame drew it)
+                let state = ed.ui_state();
+                let pane = state.sessions.iter().flat_map(|l| &l.panes).find(|p| p.id == "follow");
+                let pane = pane.unwrap_or_else(|| panic!("{at}: the follow card's pane"));
+                assert_eq!(
+                    (pane.shows.as_str(), pane.rect, pane.float, pane.at, pane.place),
+                    ("follow", Some(card), true, false, None),
+                    "{at}"
+                );
+                // An ask
+                let mut ed = Editor::new(Config::default());
+                let what = What::Screen { call: crate::tools::Call::test(1) };
+                ed.push_offer(Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what));
+                ed.session.chat = chat.then(crate::chat::Chat::new);
+                let rows = draw(&mut ed, w, h);
+                let (s, card) = (rows.join("\n"), ed.screen.offer_card.expect("the ask"));
+                match chat {
+                    false => assert_eq!(bottom(card), floor, "{at}: the ask\n{s}"),
+                    true => {
+                        let cx = ed.screen.chat_x.expect("the chat") + crate::chrome::GAP;
+                        let line: String = rows[bottom(card) + 2].chars().skip(cx).collect();
+                        assert!(
+                            line.trim_start().starts_with('─'),
+                            "{at}: the ask over the input's line\n{s}"
+                        );
+                    }
+                }
+                // A toast at its bottom spot (the cursor's row holds the top one)
+                let mut ed = Editor::new(Config::default());
+                ed.docs[0].text = Rope::from_str(&"fn main() {}\n".repeat(60));
+                ed.session.chat = chat.then(crate::chat::Chat::new);
+                ed.set_warning("a warning keeps its card");
+                let s = draw(&mut ed, w, h).join("\n");
+                let card = ed.screen.toast_card.get().expect("the toast");
+                assert_eq!(bottom(card), floor, "{at}: the toast\n{s}");
+                // Which-key, where it fits
+                let mut ed = Editor::new(Config::default());
+                ed.session.chat = chat.then(crate::chat::Chat::new);
+                ed.handle_key("g".parse().unwrap());
+                let rows = draw(&mut ed, w, h);
+                match rows.iter().rposition(|r| r.contains('╰')) {
+                    Some(k) => assert_eq!(k, floor, "{at}: which-key\n{}", rows.join("\n")),
+                    None => assert!(w == 80 && chat, "{at}: which-key drawn\n{}", rows.join("\n")),
+                }
+            }
+        }
+    }
+
     /// The chat's rows from right after its gutter (its padding, then its text) on, from the question's row to the
     /// row with `end`.
     fn chat_rows(ed: &mut Editor, w: u16, end: &str) -> Vec<String> {
@@ -19793,22 +20363,23 @@ mod tests {
         rows[first..=last].to_vec()
     }
 
-    /// The follow card's rows: its title, then the rest down to its foot (its edge, its keys and the blank row
-    /// over them — not kept).
+    /// The follow card's rows: its frame's top line (its ends and the line's run of `─` off — its title), then the
+    /// rows inside down to its foot (its frame's bottom line, its keys and the blank row over them — not kept).
     fn follow_card(ed: &mut Editor, w: u16) -> Vec<String> {
         const KEYS: [&str; 3] = ["C-c stop", "stop by stop", "space l open the chat"];
         let vt = screen_at(ed, w);
         let (x, y, width, h) = ed.screen.thought_card.get().expect("the card is up");
-        let mut card: Vec<String> = vt
-            .screen()
-            .rows(x as u16 + 2, width as u16 - 4)
-            .skip(y)
-            .take(h)
-            .skip_while(|r| !r.contains("claude › follow"))
-            .map(|r| r.trim_end().into())
-            .collect();
+        let top = vt.screen().rows(x as u16, width as u16).nth(y).unwrap_or_default();
+        let mut card = vec![top.trim_matches(['╭', '╮', '─', ' ']).to_string()];
+        card.extend(
+            vt.screen()
+                .rows(x as u16 + 2, width as u16 - 4)
+                .skip(y + 1)
+                .take(h - 1)
+                .map(|r| r.trim_end().into()),
+        );
         let foot =
-            |r: &String| r.is_empty() || r.chars().all(|ch| ch == '▀') || KEYS.iter().any(|k| r.contains(k));
+            |r: &String| r.is_empty() || r.chars().all(|ch| ch == '─') || KEYS.iter().any(|k| r.contains(k));
         while card.last().is_some_and(foot) {
             card.pop();
         }

@@ -82,8 +82,8 @@ impl Editor {
     /// `CODE_MIN` beside it. Automatic, as much as leaves the code `CODE_ROOM`, up to 2/5 of the screen; yours
     /// (`Sizes.docked`) as much as leaves it `CODE_MIN`. In the kinds' order, each after the ones before it; two on one
     /// side are stacked in one column (`place`), as wide as the wider, its width taken off the room once.
-    pub fn dock_widths(&self, total: usize) -> [usize; 4] {
-        let mut out = [0; 4];
+    pub fn dock_widths(&self, total: usize) -> [usize; crate::pane::DOCKABLE] {
+        let mut out = [0; crate::pane::DOCKABLE];
         let side_open = self.session.sidebar.is_some() && !self.review_rail_up();
         let w = crate::sizes::widths(total, self.chat_panel(total), side_open, self.sizes);
         let rail = if self.review_rail_up() { self.screen.rail_w } else { 0 };
@@ -138,6 +138,7 @@ impl Editor {
     /// code takes the room; its next run lands on its side again) — out of it, the group's host is the slot's leaf,
     /// its place kept.
     pub fn dock_sync(&mut self) {
+        self.list_dock_sync();
         for i in 0..self.session.groups.len() {
             let g = self.session.groups[i];
             let Place::Docked(side) = g.place else { continue };
@@ -148,6 +149,33 @@ impl Editor {
                 (false, true) => self.dock_out(g.kind),
                 _ => {}
             }
+        }
+    }
+
+    /// The session list docked is the viewer's (P3 step 7d): while it's up and `sessions_dock` names a side, the session in
+    /// front has its group there, the list's own pane its list (`At::List`, its search and selection one list's whichever
+    /// session is in front) — its leaf then `dock_sync`'s as any group's; else none.
+    fn list_dock_sync(&mut self) {
+        let kind = GroupKind::Sessions;
+        let want = self.sizes.sessions_dock.zip(self.sessions_pane.as_ref().map(|p| p.list));
+        let have = self.session.group(kind);
+        if let (Some((side, list)), Some(g)) = (want, have)
+            && g.list == list
+            && g.place == Place::Docked(side)
+        {
+            return;
+        }
+        if let Some(g) = have {
+            if self.dock_leaf(&g) {
+                self.session.split.remove(g.host);
+            }
+            self.session.panes.retain(|p| p.shows != Shows::Group(kind));
+            self.session.groups.retain(|g| g.kind != kind);
+        }
+        if let (Some((side, list)), Some(host)) = (want, self.session.leaf(Shows::Slot)) {
+            let mut g = Group::new(kind, host, list);
+            g.place = Place::Docked(side);
+            self.session.groups.push(g);
         }
     }
 
@@ -267,8 +295,26 @@ impl Editor {
     /// (`C-w J`). False: the keys aren't in a group (the code's panes trade places, `swap_view`).
     pub fn dock_key(&mut self, dx: i32, dy: i32) -> bool {
         if let Some(k) = self.float_list_in_hand() {
-            let what = if k == GroupKind::Messages { "the messages list" } else { "the session list" };
-            self.set_status(format!("{what} floats — C-w m moves it, C-w < > - + size it"));
+            if k == GroupKind::Messages {
+                self.set_status("the messages list floats — C-w m moves it, C-w < > - + size it");
+                return true;
+            }
+            // The session list docks (P3 step 7d): beside the code or above it, the keys staying with it; below is the
+            // slot's, which it has no tab in
+            let side = match (dx, dy) {
+                (-1, _) => Side::Left,
+                (1, _) => Side::Right,
+                (_, -1) => Side::Top,
+                _ => {
+                    self.set_status("the session list docks beside or above the code — C-w e floats it");
+                    return true;
+                }
+            };
+            self.sizes.sessions_dock = Some(side);
+            self.sizes_keep();
+            self.list_dock_sync();
+            self.dock_sync();
+            self.set_status(format!("sessions docked {} — C-w e floats it", side.name()));
             return true;
         }
         let Some(kind) = self.group_in_hand() else {

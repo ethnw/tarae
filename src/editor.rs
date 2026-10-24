@@ -379,7 +379,7 @@ pub struct Screen {
     pub height: Option<usize>,
     /// The groups docked over the code folded into the slot this frame, by `dock_index` — the code and the slot under
     /// them leave them too few rows (`term::over_fold`).
-    pub over_folded: [bool; 4],
+    pub over_folded: [bool; crate::pane::DOCKABLE],
     /// The bottom slot's width (from `slot_x`) — a group docked right of the code is past it.
     pub slot_w: usize,
     /// First row and row count of the picker list.
@@ -2586,7 +2586,7 @@ impl Editor {
         if m.kind == K::Down && (button.is_some() || on_card) {
             let has = self.card_has_keys();
             match button {
-                Some(d) if d.is_ascii_digit() => self.offer_to_front(d.to_digit(10).unwrap_or(0) as usize),
+                Some(d) if d.is_ascii_digit() => self.offer_peek(d.to_digit(10).unwrap_or(0) as usize),
                 Some(k) if has => {
                     let weighty = self.offers.first().is_some_and(|o| o.weighty_answer(k));
                     match k {
@@ -2652,9 +2652,14 @@ impl Editor {
             self.float_focus(kind);
             return;
         }
-        // A floating list (the session list, `:messages`): a press on a row selects it (again: opens it), the wheel
-        // moves through it
-        if let Some(kind) = floated.filter(|&k| crate::floatlist::is_list(k)) {
+        // A floating list (the session list, `:messages`) — or the session list docked: a press on a row selects it
+        // (again: opens it), the wheel moves through it
+        let docked_list = crate::floatlist::KINDS.into_iter().find(|&k| {
+            self.dock_rect(k)
+                .is_some_and(|(_, r)| (r.x..r.x + r.w).contains(&x) && (r.y..r.y + r.h).contains(&y))
+        });
+        let list = floated.filter(|&k| crate::floatlist::is_list(k));
+        if let Some(kind) = list.or(docked_list.filter(|_| floated.is_none() && self.picker.is_none())) {
             match m.kind {
                 K::Down => match s.list(kind) {
                     Some((y0, rows, top)) if (y0..y0 + rows).contains(&y) => {
@@ -12733,10 +12738,10 @@ mod tests {
         let tabs = r.iter().position(|r| r.contains("─ main · fix-login-everywhere · parser ▲ waits · + ─"));
         let tabs = tabs.unwrap_or_else(|| panic!("the tabs: {r:#?}"));
         assert!(tabs == 0 && !r[0].contains("claude"), "the chat's top line: {r:#?}");
-        // Narrow: the states fold to what needs you, then the names to their prefixes — how many wait is the status
-        // line's, every session's
+        // Narrow: the states fold to what needs you, then the sessions into `+N` — names whole, the front and the one
+        // waiting always in, the order kept; `+` gone while `+N` shows. How many wait is the status line's
         let r = rows(&mut ed, 100);
-        assert!(r[0].contains("─ m · f · p ▲ · + ─"), "{}", r[0]);
+        assert!(r[0].contains("─ main · parser ▲ · +1 ─"), "{}", r[0]);
         assert!(r[23].contains("● normal   ▲1 waiting"), "{}", r[23]);
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
@@ -12763,12 +12768,13 @@ mod tests {
         });
         assert!(ed.sessions_list_keys(), "the list");
         ed.float_list_close(crate::pane::GroupKind::Sessions);
-        // A name folded to its prefix is clicked as the name is
+        // `+1`: the list, where the one folded is
         ed.session_switch(0);
         let r = rows(&mut ed, 100);
-        let x = r[0].find("· f ·").map(|b| r[0][..b].chars().count() + 2).unwrap();
+        let x = r[0].find("+1").map(|b| r[0][..b].chars().count()).unwrap();
         ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: 0, alt: false, ctrl: false });
-        assert_eq!(ed.session.id, one, "f: fix-login-everywhere");
+        assert!(ed.sessions_list_keys(), "+1: the list");
+        ed.float_list_close(crate::pane::GroupKind::Sessions);
         ed.sessions.clear();
         for w in [&wt, &other] {
             git_in(&repo, &["worktree", "remove", "--force", w.to_str().unwrap()]);

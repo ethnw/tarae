@@ -1055,7 +1055,14 @@ impl Editor {
         }
         // (a docked or floating group's members name their host)
         let mut docked: Vec<(crate::split::PaneId, String)> = Vec::new();
-        for g in l.groups.iter().filter(|g| is_front && self.screen.leaves.iter().any(|r| r.0 == g.list)) {
+        // (the session list docked is the viewer's list, listed once below with the floating lists — not a member here)
+        let members = |g: &&crate::pane::Group| !crate::floatlist::is_list(g.kind);
+        for g in l
+            .groups
+            .iter()
+            .filter(members)
+            .filter(|g| is_front && self.screen.leaves.iter().any(|r| r.0 == g.list))
+        {
             let host = self.group_host(g).unwrap_or(g.host);
             let Some(i) = ids.iter().position(|&id| id == host) else { continue };
             ids.splice(i + 1..i + 1, std::iter::once(g.list).chain(g.detail_pane()));
@@ -1112,14 +1119,19 @@ impl Editor {
         // The floating lists (the session list, `:messages`) — the viewer's: listed with the front session's panes
         let lists = crate::floatlist::KINDS.iter().filter(|_| is_front);
         for (kind, p) in lists.filter_map(|&k| self.float_list(k).map(|p| (k, p))) {
-            let rect = self.screen.floating.borrow().iter().find(|f| f.0 == kind).map(|f| f.1);
+            // (the session list docked — P3 step 7d: its leaf's rect, as last drawn)
+            let docked = self.docked_in_sight(kind);
+            let rect = match docked {
+                true => self.dock_rect(kind).map(|d| d.1),
+                false => self.screen.floating.borrow().iter().find(|f| f.0 == kind).map(|f| f.1),
+            };
             out.push(PaneState {
                 id: format!("pane#{}", p.list),
                 shows: Shows::List(kind).name(),
                 rect: rect.map(|r| (r.x, r.y, r.w, r.h)),
                 at: l.at == At::List(p.list),
                 float: false,
-                place: Some("floating"),
+                place: Some(if docked { "docked" } else { "floating" }),
                 group: None,
             });
         }
@@ -1137,6 +1149,19 @@ impl Editor {
                     shows: f.kind().into(),
                     rect,
                     at: has,
+                    float: true,
+                    place: None,
+                    group: None,
+                });
+            }
+            // The follow card, a floating pane that takes no keys (P3 step 7d)
+            let following = l.chat.as_ref().is_some_and(|c| c.follow.on);
+            if let Some(rect) = self.screen.thought_card.get().filter(|_| following) {
+                out.push(PaneState {
+                    id: "follow".into(),
+                    shows: "follow".into(),
+                    rect: Some(rect),
+                    at: false,
                     float: true,
                     place: None,
                     group: None,

@@ -10,7 +10,7 @@
 //! - **Done once used** (user, 2026-10-23): a floating list closes as what it was opened for is done — the session
 //!   list's `enter` switching (zellij's session manager, tmux's choose-tree), the messages' `enter` opening one —
 //!   floating panes sit in the middle of the screen, so a list that stayed would cover the code (`used`). A docked
-//!   one would stay; neither docks yet.
+//!   one stays: the session list docks (`C-w H/K/L`, `Sizes.sessions_dock` — P3 step 7d), `:messages` only floats.
 
 use crate::editor::Editor;
 use crate::key::{Code, Key, ListMove};
@@ -144,10 +144,19 @@ impl Editor {
         }
     }
 
-    /// Done once used (user, 2026-10-23): what a list was opened for is done — floating, it closes; docked it would
-    /// stay, its keys back to the code (neither list docks yet).
+    /// Done once used (user, 2026-10-23): what a list was opened for is done — floating, it closes; docked it stays,
+    /// its keys back to the code (the manager's overview kept in sight — P3 step 7d).
     pub(crate) fn float_list_used(&mut self, kind: GroupKind) {
-        self.float_list_close(kind);
+        match self.docked_in_sight(kind) {
+            true => self.float_list_leave(kind),
+            false => self.float_list_close(kind),
+        }
+    }
+
+    /// Kind `kind`'s list is docked (the session list, `Sizes.sessions_dock`) — up or not, its place; in sight there
+    /// is `docked_in_sight` (else it floats for the frame — `floating_in_sight`).
+    pub fn list_docked(&self, kind: GroupKind) -> bool {
+        kind == GroupKind::Sessions && self.sizes.sessions_dock.is_some()
     }
 
     /// The row the list's selection is on (by its id, else its first row).
@@ -199,6 +208,10 @@ impl Editor {
 
     /// The list's cells on a screen `w` wide with `h` rows above the status line (`Frame::rect_rows`).
     pub fn float_list_rect(&self, kind: GroupKind, w: usize, h: usize) -> Option<crate::split::Rect> {
+        // (docked in sight: a leaf of the tree, not a frame)
+        if self.docked_in_sight(kind) {
+            return None;
+        }
         Some(self.float_list_frame(kind)?.rect_rows(w, h, self.float_list_ids(kind).len()))
     }
 

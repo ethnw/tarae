@@ -1,6 +1,6 @@
 # sessions_reviewing_folded · 100x16 · theme meok · cursor 1:4
 ## text
-00 ─ tarae › [scratch] ────────────────────────────────────────┬─ m · f ¶ reviewing · d • · + ─ ready ─
+00 ─ tarae › [scratch] ────────────────────────────────────────┬─ main-with-a-long-feature · +2 ¶ • ───
 01   1                                                         │  ▎ Ask Claude
 02                                                             │
 03                                                             │  It reads the whole project,
@@ -34,7 +34,7 @@
 14
 15
 ## fg · visible glyphs only, blank = unlisted color, UPPERCASE = bold
-00 a ddddd f TTTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf B f               f   d f d f fffff f
+00 a ddddd f TTTTTTTTT aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf BBBBBBBBBBBBBBBBBBBBBBBB f dd   d fff
 01   A                                                         a  a TTT TTTTTT
 02                                                             a
 03                                                             a  dd ddddd ddd ddddd dddddddd

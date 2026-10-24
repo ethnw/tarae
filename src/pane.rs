@@ -81,6 +81,9 @@ pub enum GroupKind {
     Messages,
 }
 
+/// How many kinds dock (`GroupKind::dock_index`).
+pub const DOCKABLE: usize = 5;
+
 impl GroupKind {
     pub const ALL: [GroupKind; 8] = [
         GroupKind::Tests,
@@ -119,21 +122,19 @@ impl GroupKind {
 
     /// It can leave the slot and dock beside the code (§3.1): the slot's groups. The git tab and the review's rail
     /// are the left column's (§3.7: how you move, not what you look at) — their detail is the code itself.
+    /// The session list docks too (P3 step 7d: the manager's overview kept in sight); `:messages` only floats.
     pub fn dockable(self) -> bool {
-        !self.detail_is_code() && !crate::floatlist::is_list(self)
+        !self.detail_is_code() && self != GroupKind::Messages
     }
 
-    /// Its index among the dockable kinds (`Sizes.docked`).
+    /// Its index among the dockable kinds (`Sizes.docked`, `DOCKABLE` of them).
     pub fn dock_index(self) -> usize {
         match self {
             GroupKind::Tests => 0,
             GroupKind::Task => 1,
             GroupKind::Preflight => 2,
-            GroupKind::Procs
-            | GroupKind::Git
-            | GroupKind::Review
-            | GroupKind::Sessions
-            | GroupKind::Messages => 3,
+            GroupKind::Procs | GroupKind::Git | GroupKind::Review | GroupKind::Messages => 3,
+            GroupKind::Sessions => 4,
         }
     }
 }

@@ -633,11 +633,6 @@ impl Session {
             })
     }
 
-    /// Its reviewer (`reviewer.rs`) reads — said beside what its chat's Claude does (both can be at work).
-    pub fn reviewing(&self) -> bool {
-        self.reviewer.as_ref().is_some_and(crate::reviewer::Reviewer::reading)
-    }
-
     /// Something came while it was behind that it hasn't been in front for since: files again from disk
     /// (#6), its reviewer's end (#195) — its tab's `•`.
     pub fn news(&self) -> bool {
@@ -681,11 +676,8 @@ pub enum Spot {
     Granted,
     /// The status line's `◦ shuttle`: the program typing into tarae is ended (`:shuttle-end`).
     Shuttle,
-    /// The dropdown's name, the status line's chip: the list (`space W`).
+    /// The chat's line's `+N`, the status line's chip: the list (`space W`).
     List,
-    /// The dropdown's `◂` · `▸`: the session before · after the one in front.
-    Prev,
-    Next,
     /// The status line's `▲3 waiting`: the inbox.
     Inbox,
     /// The status line's `¶ reviewing` (bgreview): the reviewer's report (`space v r`).
@@ -1450,21 +1442,12 @@ impl Editor {
 
     /// A click on the sessions' tabs, dropdown or chip.
     pub fn session_spot(&mut self, s: Spot) {
-        let order: Vec<SessionId> = self.sessions_in_order().iter().map(|l| l.id).collect();
-        let at = order.iter().position(|&id| id == self.session.id).unwrap_or(0) as isize;
-        let step = |by: isize| order[(at + by).rem_euclid(order.len() as isize) as usize];
         match s {
             Spot::Session(id) => {
                 self.session_switch(id);
             }
             Spot::New => self.session_prompt(),
             Spot::List => self.session_list(),
-            Spot::Prev => {
-                self.session_switch(step(-1));
-            }
-            Spot::Next => {
-                self.session_switch(step(1));
-            }
             Spot::Inbox => self.inbox_open(),
             Spot::Granted => self.granted(),
             Spot::Shuttle => crate::shuttle::end(self),
@@ -1675,7 +1658,7 @@ mod tests {
         assert_eq!(ed.cards_waiting(), (2, 1), "its two here, back's elsewhere");
         let rows = screen(&mut ed, 140, 30);
         let head = rows.iter().find(|r| r.contains("Claude asks 2")).expect("its card");
-        assert!(head.contains("third · Claude asks 2"), "named: {head}");
+        assert!(head.contains("third asks · Claude asks 2"), "named: {head}");
         assert!(head.contains("1/2 here · 1 elsewhere"), "{head}");
         // Answered there: the next C-q goes to back
         ed.offers.clear();
@@ -1683,9 +1666,183 @@ mod tests {
         assert_eq!(ed.session.id, back_id);
         let rows = screen(&mut ed, 140, 30);
         assert!(
-            rows.iter().any(|r| r.contains("back · Claude asks 1") && !r.contains("elsewhere")),
+            rows.iter().any(|r| r.contains("back asks · Claude asks 1") && !r.contains("elsewhere")),
             "{rows:#?}"
         );
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// Every session's asks in one stack (P3 step 7d): the front's card in front, named by its session; another session's
+    /// waiting card a peek named by its own — a press on it takes you to that session, the card focused there.
+    #[test]
+    fn another_sessions_ask_is_a_peek_in_the_stack_and_a_press_goes_there() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("peeks");
+        let card = |n: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what)
+        };
+        let back_id = ed.session_open(&back).unwrap();
+        assert!(ed.session_switch(0));
+        ed.push_offer(card(1));
+        session_by_mut(&mut ed, back_id).parked.push(card(2));
+        for (w, h) in [(80, 24), (160, 45)] {
+            let rows = screen(&mut ed, w, h);
+            let front_name = format!("{} asks · Claude asks 1", ed.session.label());
+            assert!(rows.iter().any(|r| r.contains(&front_name)), "{w}: named by its session\n{rows:#?}");
+            let peek = rows.iter().position(|r| r.contains("asks · Claude asks 2")).expect("back's peek");
+            assert!(rows[peek].contains("back"), "{w}: the peek named by its own session: {}", rows[peek]);
+        }
+        // A press on it: the digit its button carries
+        let digit =
+            ed.screen.offer_buttons.iter().find(|b| b.3.is_ascii_digit()).map(|b| b.3).expect("its button");
+        ed.offer_peek(digit.to_digit(10).unwrap() as usize);
+        assert_eq!(ed.session.id, back_id, "there");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
+        assert!(ed.card_has_keys(), "its card focused");
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// With none of the front session's, another session's ask is still in the one stack: its peek drawn alone
+    /// bottom-right, named in its colour, the status line's count and `C-q` still said — a press on it goes there,
+    /// the card focused.
+    #[test]
+    fn another_sessions_ask_with_none_here_is_its_peek_alone() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("peekalone");
+        let back_id = ed.session_open(&back).unwrap();
+        assert!(ed.session_switch(0));
+        let what = What::Screen { call: crate::tools::Call::test(2) };
+        session_by_mut(&mut ed, back_id).parked.push(Offer::new(
+            "Claude asks 2".into(),
+            "to see the screen",
+            "",
+            String::new(),
+            what,
+        ));
+        assert!(ed.offers.is_empty(), "none here");
+        for (w, h) in [(80u16, 24u16), (160, 45)] {
+            let rows = screen(&mut ed, w, h);
+            let (w, h) = (usize::from(w), usize::from(h));
+            let peek = rows.iter().position(|r| r.contains("back asks · Claude asks 2"));
+            let peek = peek.unwrap_or_else(|| panic!("{w}: the peek drawn alone\n{rows:#?}"));
+            let (x, y, cw, ch) = ed.screen.offer_card.expect("its rect");
+            assert_eq!((y, ch), (peek, 1), "{w}: one row");
+            assert!(x + cw + 1 >= w - 1 && peek > h / 2, "{w}: bottom-right: {x}+{cw} at {peek}\n{rows:#?}");
+            assert!(
+                rows[h - 1].contains("▲1 waiting · C-q"),
+                "{w}: still counted, its way said: {}",
+                rows[h - 1]
+            );
+        }
+        // A press on it
+        let (x, y, ..) = ed.screen.offer_card.unwrap();
+        ed.handle_mouse(crate::event::Mouse {
+            kind: crate::event::MouseKind::Down,
+            x: (x + 6) as u16,
+            y: y as u16,
+            alt: false,
+            ctrl: false,
+        });
+        assert_eq!(ed.session.id, back_id, "there");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
+        assert!(ed.card_has_keys(), "its card focused");
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// Two other sessions' asks, none here: the peeks are stacked in the order `C-q` and a press take them — the oldest
+    /// nearest (lowest, `1`), whichever session it's in; `C-q` goes to the one drawn nearest.
+    #[test]
+    fn the_peeks_alone_stand_in_the_order_c_q_takes_them() {
+        use crate::offer::{Offer, What};
+        let (mut ed, front, back) = two_projects("peekorder");
+        let third = front.with_file_name("third");
+        std::fs::create_dir_all(&third).unwrap();
+        let back_id = ed.session_open(&back).unwrap();
+        let third_id = ed.session_open(&third).unwrap();
+        assert!(ed.session_switch(0));
+        let card = |n: u64, ago: u64| {
+            let what = What::Screen { call: crate::tools::Call::test(n) };
+            let mut o = Offer::new(format!("Claude asks {n}"), "to see the screen", "", String::new(), what);
+            o.id = 100 + n;
+            o.since = crate::clock::now().checked_sub(std::time::Duration::from_secs(ago)).unwrap();
+            o
+        };
+        // (back's the newer, third's — opened after it — the older: the order isn't the sessions')
+        session_by_mut(&mut ed, back_id).parked.push(card(1, 5));
+        session_by_mut(&mut ed, third_id).parked.push(card(2, 60));
+        let rows = screen(&mut ed, 160, 45);
+        let at =
+            |t: &str| rows.iter().position(|r| r.contains(t)).unwrap_or_else(|| panic!("{t}\n{rows:#?}"));
+        let (older, newer) = (at("third asks · Claude asks 2"), at("back asks · Claude asks 1"));
+        assert_eq!(newer + 1, older, "the oldest nearest, the next above it\n{rows:#?}");
+        let digit = |row: usize| ed.screen.offer_buttons.iter().find(|b| b.0 == row).map(|b| b.3);
+        assert_eq!((digit(older), digit(newer)), (Some('1'), Some('2')), "a press: 1 the nearest");
+        // `C-q`: to the one drawn nearest
+        ed.handle_key("C-q".parse().unwrap());
+        assert_eq!(ed.session.id, third_id, "C-q went to the oldest — the peek drawn nearest");
+        assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Claude asks 2"));
+        std::fs::remove_dir_all(front.parent().unwrap()).ok();
+    }
+
+    /// A card about another session's checkout is that session's ask (`Offer.about`, set as it's pushed): a bring's (its
+    /// rebase first, then the bring), a resolved rebase's, an end's — matched by root, through a link to the checkout
+    /// too; one naming no session's checkout is nobody's.
+    #[test]
+    fn the_bring_rebase_and_end_cards_are_about_the_session_whose_checkout_they_name() {
+        let (mut ed, front, back) = two_projects("about");
+        let back_id = ed.session_open(&back).unwrap();
+        assert!(ed.session_switch(0));
+        let link = front.with_file_name("back-link");
+        std::os::unix::fs::symlink(&back, &link).unwrap();
+        let moved = |root: &std::path::Path| crate::rebase::Moved {
+            root: root.to_path_buf(),
+            name: "back".into(),
+            branch: "back".into(),
+            base: "main".into(),
+            moved: 2,
+            ahead: 1,
+        };
+        let ending = |root: &std::path::Path| crate::worktree::Ending {
+            root: root.to_path_buf(),
+            common: root.to_path_buf(),
+            name: "back".into(),
+            branch: Some("back".into()),
+            tip: "0".repeat(40),
+            base: "main".into(),
+            changed: Vec::new(),
+            ahead: Vec::new(),
+            lost: Vec::new(),
+            entries: Vec::new(),
+            keep: crate::sessionkeep::Plan {
+                folders: Vec::new(),
+                differ: Vec::new(),
+                instructions_to: None,
+                not: None,
+                main: None,
+            },
+        };
+        let resolved = |root: &std::path::Path| {
+            let what = crate::offer::What::RebaseResolved { root: root.to_path_buf(), message: false };
+            crate::offer::Offer::new("Resolved".into(), "go on?", "", String::new(), what)
+        };
+        for root in [&back, &link] {
+            for card in
+                [moved(root).card(), moved(root).bring_card(None, true), resolved(root), ending(root).card()]
+            {
+                let kind = card.kind();
+                ed.offers.clear();
+                ed.push_offer(card);
+                let about = ed.offers.first().and_then(|o| o.about);
+                assert_eq!(about, Some(back_id), "{kind} through {}", root.display());
+            }
+        }
+        // (a checkout no session has: nobody's)
+        let nowhere = front.with_file_name("nowhere");
+        std::fs::create_dir_all(&nowhere).unwrap();
+        ed.offers.clear();
+        ed.push_offer(ending(&nowhere).card());
+        assert_eq!(ed.offers.first().map(|o| o.about), Some(None));
         std::fs::remove_dir_all(front.parent().unwrap()).ok();
     }
 
@@ -2440,8 +2597,8 @@ mod tests {
         assert_eq!(ed.doing(session_by(&ed, id)).said(), "symbols  3m");
         session_by_mut(&mut ed, id).name = "back-and-forth-and-back-again".into();
         let narrow =
-            screen(&mut ed, 100, 24).into_iter().find(|r| r.contains(" · + ")).expect("the sessions' line");
-        assert!(narrow.contains("f · b ◦ · +"), "{narrow}");
+            screen(&mut ed, 100, 24).into_iter().find(|r| r.contains(" · +")).expect("the sessions' line");
+        assert!(narrow.contains(" · +1 ◦1 ─"), "the stuck one in `+1`, its sign with it: {narrow}");
         // Answered: the mark goes
         serve(&mut ed, &file);
         let end = Instant::now() + Duration::from_secs(10);

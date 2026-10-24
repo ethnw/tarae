@@ -533,7 +533,16 @@ fn looked(ed: &mut Editor, mut moves: Moves) {
         return next(ed);
     }
     ed.unchanged = false;
-    ed.push_offer(moves.card());
+    // (its workspaces named in their colours, as the strip and the list name them)
+    let mut card = moves.card();
+    card.paint = (moves.ws.iter())
+        .filter_map(|w| {
+            let l = std::iter::once(&ed.session).chain(&ed.sessions).find(|l| l.id == w.id)?;
+            let scope = crate::session::PARTICIPANTS[l.colour as usize % crate::session::COLOURS];
+            Some((w.name.clone(), scope))
+        })
+        .collect();
+    ed.push_offer(card);
 }
 
 /// The card up for `base`, gone — said why (the gone ring).

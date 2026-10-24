@@ -209,8 +209,8 @@ fn an_aside_card_is_the_inboxs() {
     assert!(ed.card_has_keys(), "{}", said(&ed));
 }
 
-/// The chat taking the whole screen (50 columns): the status line's `C-q shows its card` says the chat's way back
-/// — and that key brings the card up, drawn.
+/// The chat taking the whole screen (50 columns): the card waits over its foot (P3 step 7d), the status line's count
+/// and the twin of `C-q` its way — and `esc` from the chat leaves it drawn, with its answers.
 #[test]
 fn the_chat_taking_the_screen_says_its_way_back_to_the_card() {
     let mut ed = editor(true);

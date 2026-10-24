@@ -1040,6 +1040,8 @@ pub fn snapshot(ed: &mut Editor) -> Value {
             // (the review's viewed marks, each session's)
             ("viewed".into(), crate::codereview::viewed_snapshot(ed)),
             ("symbols".into(), symbols(ed)),
+            // (the session list docked and up: its side — a floating one isn't kept, done once used)
+            ("session_list".into(), json!(ed.sizes.sessions_dock.filter(|_| ed.sessions_pane.is_some()).map(|s| s.name()))),
         ]);
     }
     state
@@ -1286,6 +1288,15 @@ fn restore_quietly(ed: &mut Editor, v: &Value) -> Back {
                 }
             }
         }
+    }
+    // The session list docked comes back up on its side (P3 step 7d, the user 2026-10-24: part of the layout — the
+    // overview kept in sight is why one docks it), the keys where they were
+    if let Some(side) = v["session_list"].as_str().and_then(crate::pane::Side::of_name) {
+        let at = ed.session.at;
+        ed.sizes.sessions_dock = Some(side);
+        ed.session_list();
+        ed.session.at = at;
+        ed.dock_sync();
     }
     back.gone_checkouts = gone;
     back.sessions = 1 + ed.sessions.len();
@@ -1925,6 +1936,37 @@ mod tests {
             Some(vec!["fmt".to_string()]),
             "after: still the project's quick set"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A docked session list comes back up after `:restart`, on its side — part of the layout, the overview kept in
+    /// sight (the user, 2026-10-24) — the keys where they were; a floating one doesn't (done once used).
+    #[test]
+    fn a_docked_session_list_comes_back_up_a_floating_one_doesnt() {
+        use crate::pane::{GroupKind, Side};
+        let (front, _back, dir, mut ed) = two_sessions("listback");
+        ed.sizes.sessions_dock = Some(Side::Right);
+        ed.session_list();
+        ed.float_list_leave(GroupKind::Sessions);
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        assert_eq!(ed.sizes.sessions_dock, Some(Side::Right), "its side");
+        assert!(ed.sessions_pane.is_some(), "up");
+        assert!(!ed.sessions_list_keys(), "the keys where they were — the code's");
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 160, 40).unwrap();
+        assert_eq!(ed.dock_rect(GroupKind::Sessions).map(|d| d.0), Some(Side::Right), "docked, drawn");
+        // Floating: done once used — not kept
+        ed.sizes.sessions_dock = None;
+        ed.dock_sync();
+        assert!(ed.sessions_pane.is_some(), "up, floating");
+        let state = snapshot(&mut ed);
+        drop(ed);
+        let mut ed = started_in(&dir, &front);
+        restore(&mut ed, &state);
+        assert!(ed.sessions_pane.is_none(), "a floating list doesn't come back");
         std::fs::remove_dir_all(&dir).ok();
     }
 

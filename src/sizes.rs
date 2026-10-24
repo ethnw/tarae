@@ -59,19 +59,24 @@ pub struct Sizes {
     pub side: Option<u16>,
     pub bottom: Option<u16>,
     /// A docked group's, per kind (`GroupKind::dock_index`): its width beside the code, its rows above it.
-    pub docked: [Option<u16>; 4],
+    pub docked: [Option<u16>; crate::pane::DOCKABLE],
     /// The session list's frame (`sessionpane.rs`) — where you put it, the viewer's (None: centred).
     pub sessions: Option<crate::pane::Frame>,
     /// `:messages`' frame, as the session list's.
     pub messages: Option<crate::pane::Frame>,
+    /// The side the session list is docked on (P3 step 7d, `C-w H/K/L`; `C-w e` floats it again) — the viewer's place
+    /// for it, kept while it closes and opens and across `:restart`: the session in front holds its leaf
+    /// (`list_dock_sync`). None: it floats.
+    pub sessions_dock: Option<crate::pane::Side>,
 }
 
 /// The dockable kinds by `GroupKind::dock_index`, as `sizes.json` names them.
-const DOCKED: [crate::pane::GroupKind; 4] = [
+const DOCKED: [crate::pane::GroupKind; crate::pane::DOCKABLE] = [
     crate::pane::GroupKind::Tests,
     crate::pane::GroupKind::Task,
     crate::pane::GroupKind::Preflight,
     crate::pane::GroupKind::Procs,
+    crate::pane::GroupKind::Sessions,
 ];
 
 impl Sizes {
@@ -98,6 +103,7 @@ impl Sizes {
             docked,
             sessions,
             messages,
+            sessions_dock: v["sessions_dock"].as_str().and_then(crate::pane::Side::of_name),
         }
     }
 
@@ -108,8 +114,9 @@ impl Sizes {
             .collect();
         let (sessions, messages) =
             (self.sessions.map(crate::pane::Frame::json), self.messages.map(crate::pane::Frame::json));
+        let dock = self.sessions_dock.map(crate::pane::Side::name);
         json!({ "chat": self.chat, "side": self.side, "bottom": self.bottom, "docked": docked, "sessions": sessions,
-                "messages": messages })
+                "messages": messages, "sessions_dock": dock })
         .to_string()
     }
 }
@@ -640,8 +647,14 @@ impl crate::editor::Editor {
         if self.float_auto() {
             return;
         }
-        self.sizes =
-            Sizes { sessions: self.sizes.sessions, messages: self.sizes.messages, ..Sizes::default() };
+        // (where the lists are is no size: their frames and the session list's side stay)
+        let s = self.sizes;
+        self.sizes = Sizes {
+            sessions: s.sessions,
+            messages: s.messages,
+            sessions_dock: s.sessions_dock,
+            ..Sizes::default()
+        };
         self.session.split.even();
         for g in &mut self.session.groups {
             g.laid = crate::pane::Laid::Auto;
@@ -853,8 +866,15 @@ impl crate::editor::Editor {
 mod tests {
     use super::*;
 
-    const AUTO: Sizes =
-        Sizes { chat: None, side: None, bottom: None, docked: [None; 4], sessions: None, messages: None };
+    const AUTO: Sizes = Sizes {
+        chat: None,
+        side: None,
+        bottom: None,
+        docked: [None; crate::pane::DOCKABLE],
+        sessions: None,
+        messages: None,
+        sessions_dock: None,
+    };
 
     /// Panes P2a: where the keys are is one value (`Session.at`) — once what it names is gone (the chat closed,
     /// the side panel closed, the terminal hidden, the slot showing nothing that takes them) the next event
@@ -964,9 +984,10 @@ mod tests {
             chat: Some(70),
             side: None,
             bottom: None,
-            docked: [None; 4],
+            docked: [None; crate::pane::DOCKABLE],
             sessions: None,
             messages: None,
+            sessions_dock: None,
         };
         assert_eq!(chat_beside(160, 36, kept), 70, "yours stays");
         assert_eq!(chat_beside(70, 36, AUTO), 70, "narrow: the chat takes it all, as without the rail");
@@ -980,9 +1001,10 @@ mod tests {
             chat: Some(90),
             side: Some(40),
             bottom: None,
-            docked: [None; 4],
+            docked: [None; crate::pane::DOCKABLE],
             sessions: None,
             messages: None,
+            sessions_dock: None,
         };
         assert_eq!(widths(200, true, true, kept), Widths { chat: 90, side: 40 });
         // 150: the chat keeps its 90; the panel's 40 would leave the code 20 — it gives way
@@ -1000,9 +1022,10 @@ mod tests {
             chat: Some(5),
             side: Some(500),
             bottom: None,
-            docked: [None; 4],
+            docked: [None; crate::pane::DOCKABLE],
             sessions: None,
             messages: None,
+            sessions_dock: None,
         };
         assert_eq!(widths(240, true, true, odd), Widths { chat: CHAT_MIN, side: SIDE_MAX });
     }
@@ -1026,9 +1049,10 @@ mod tests {
             chat: Some(70),
             side: None,
             bottom: Some(12),
-            docked: [None; 4],
+            docked: [None; crate::pane::DOCKABLE],
             sessions: None,
             messages: None,
+            sessions_dock: Some(crate::pane::Side::Right),
         };
         save(&path, s, 1);
         assert_eq!(Sizes::read(Some(&path)), s);

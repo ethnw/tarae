@@ -196,8 +196,12 @@ fn the_session_list_floats_and_stays_while_you_work() {
     assert!(ed.sessions_list_keys(), "space W again");
     feed(&mut ed, "<C-w>e");
     assert!(ed.messages.last().unwrap().2.contains("the session list floats"));
+    // (it docks — P3 step 7d — and `C-w e` floats it again)
     feed(&mut ed, "<C-w>H");
-    assert!(ed.messages.last().unwrap().2.contains("the session list floats"));
+    assert!(ed.messages.last().unwrap().2.contains("sessions docked left"));
+    feed(&mut ed, "<C-w>e");
+    assert!(ed.sizes.sessions_dock.is_none() && ed.messages.last().unwrap().2.contains("sessions floats"));
+    frame(&mut ed, 160, 40);
     feed(&mut ed, "<C-w>mj<ret><C-w>>");
     let moved = ed.screen.floating.borrow().iter().find(|f| f.0 == GroupKind::Sessions).unwrap().1;
     assert_eq!((moved.y, moved.w), (f.y + 2, f.w + crate::sizes::STEP_COLS));
@@ -207,6 +211,174 @@ fn the_session_list_floats_and_stays_while_you_work() {
     feed(&mut ed, " W");
     let again = ed.screen.floating.borrow().iter().find(|f| f.0 == GroupKind::Sessions).unwrap().1;
     assert_eq!(again, moved, "where you put it");
+}
+
+/// Docked (`C-w L`, P3 step 7d) the list is a leaf beside the code, its keys its own: `enter` on another row switches and
+/// it stays — in the session now in front too; its rows take presses there; `C-w e` floats it again.
+#[test]
+fn the_session_list_docks_and_stays_after_enter() {
+    let dir = crate::scratch::Scratch::new("sessiondock");
+    let mut ed = Editor::new(crate::config::Config::default());
+    (ed.session.root, ed.session.name) = (dir.to_path_buf(), "main".into());
+    let other = dir.join("fix");
+    std::fs::create_dir_all(&other).unwrap();
+    let fix = ed.session_open(&other).unwrap();
+    ed.session.name = "fix".into();
+    assert!(ed.session_switch(0));
+    feed(&mut ed, " W<C-w>L");
+    assert_eq!(ed.sizes.sessions_dock, Some(crate::pane::Side::Right));
+    let s = frame(&mut ed, 160, 40);
+    assert!(ed.screen.floating.borrow().iter().all(|f| f.0 != GroupKind::Sessions), "not floating");
+    let (_, r) = ed.dock_rect(GroupKind::Sessions).expect("docked, drawn");
+    assert!(s.lines().nth(r.y).unwrap().contains("sessions"), "its top line\n{s}");
+    assert!(ed.sessions_list_keys(), "the keys stay with it");
+    feed(&mut ed, "j<ret>");
+    assert_eq!(ed.session.id, fix, "switched");
+    assert!(
+        ed.sessions_pane.is_some() && !ed.sessions_list_keys(),
+        "docked, it stays — the keys to the code"
+    );
+    let s = frame(&mut ed, 160, 40);
+    let (_, r) = ed.dock_rect(GroupKind::Sessions).expect("in fix's layout too");
+    assert!(s.lines().nth(r.y + 2).unwrap().contains("fix"), "its rows\n{s}");
+    // A press on main's row: the keys its, that row selected
+    ed.handle_mouse(crate::event::Mouse {
+        kind: crate::event::MouseKind::Down,
+        x: (r.x + 4) as u16,
+        y: (r.y + 1) as u16,
+        alt: false,
+        ctrl: false,
+    });
+    assert!(ed.sessions_list_keys() && ed.sessions_here() == Some(0), "a press on its row");
+    feed(&mut ed, "<C-w>e");
+    assert!(ed.sizes.sessions_dock.is_none(), "floating again");
+    frame(&mut ed, 160, 40);
+    assert!(ed.screen.floating.borrow().iter().any(|f| f.0 == GroupKind::Sessions));
+}
+
+/// Docked where its column gets no room — a narrow screen — or with the code zoomed, `space W` gives the keys to a
+/// list that's drawn: it floats for that frame, its dock kept (back docked once there's room), and floating it's done
+/// once used.
+#[test]
+fn a_docked_list_with_no_room_floats_so_the_keys_go_to_a_list_in_sight() {
+    let dir = crate::scratch::Scratch::new("sessiondocknarrow");
+    let mut ed = Editor::new(crate::config::Config::default());
+    (ed.session.root, ed.session.name) = (dir.to_path_buf(), "main".into());
+    let other = dir.join("fix");
+    std::fs::create_dir_all(&other).unwrap();
+    ed.session_open(&other).unwrap();
+    ed.session.name = "fix".into();
+    assert!(ed.session_switch(0));
+    feed(&mut ed, " W<C-w>L");
+    frame(&mut ed, 160, 40);
+    assert!(ed.dock_rect(GroupKind::Sessions).is_some(), "docked at 160");
+    let floating =
+        |ed: &Editor| ed.screen.floating.borrow().iter().find(|f| f.0 == GroupKind::Sessions).map(|f| f.1);
+    // (the state's pane for the list: where it is and the rect the frame drew it at)
+    let listed = |ed: &Editor| {
+        let state = ed.ui_state();
+        let panes: Vec<_> =
+            state.sessions.iter().flat_map(|l| &l.panes).filter(|p| p.shows == "list:sessions").collect();
+        assert_eq!(panes.len(), 1, "listed once: {panes:#?}");
+        (panes[0].place, panes[0].rect)
+    };
+    let (_, d) = ed.dock_rect(GroupKind::Sessions).unwrap();
+    assert_eq!(listed(&ed), (Some("docked"), Some((d.x, d.y, d.w, d.h))), "docked: its leaf");
+    // Narrow: no room beside the code — it floats, drawn, with the keys
+    let s = frame(&mut ed, 60, 30);
+    let r = floating(&ed).expect("floats where its column has no room");
+    assert_eq!(listed(&ed), (Some("floating"), Some((r.x, r.y, r.w, r.h))), "floating: its frame");
+    assert!(ed.sessions_list_keys(), "the keys with it");
+    assert!(s.lines().nth(r.y).unwrap().contains("sessions"), "its frame drawn\n{s}");
+    assert!(s.lines().skip(r.y + 1).take(r.h).any(|l| l.contains("fix")), "its rows\n{s}");
+    assert_eq!(ed.sizes.sessions_dock, Some(crate::pane::Side::Right), "its dock kept");
+    // Room again: docked
+    frame(&mut ed, 160, 40);
+    assert!(floating(&ed).is_none() && ed.dock_rect(GroupKind::Sessions).is_some(), "docked again");
+    // Narrow, `enter` on the front's row: floating, done once used
+    frame(&mut ed, 60, 30);
+    assert!(ed.sessions_list_keys(), "the keys still the list's");
+    feed(&mut ed, "<ret>");
+    assert!(ed.sessions_pane.is_none(), "floating, it closes once used: {:?}", ed.status);
+    assert_eq!(ed.sizes.sessions_dock, Some(crate::pane::Side::Right), "its dock still kept");
+    // The list docked and up, the code (split) zoomed: `space W` — the list drawn, the keys its
+    feed(&mut ed, " W<esc><C-w>v<C-w>z");
+    frame(&mut ed, 160, 40);
+    assert!(ed.zoomed().is_some(), "the code zoomed");
+    feed(&mut ed, " W");
+    let s = frame(&mut ed, 160, 40);
+    assert!(ed.sessions_list_keys(), "the keys with the list");
+    let shown = ed.dock_rect(GroupKind::Sessions).map(|d| d.1).or_else(|| floating(&ed));
+    let shown = shown.unwrap_or_else(|| panic!("drawn\n{s}"));
+    assert!(s.lines().skip(shown.y + 1).take(shown.h).any(|l| l.contains("fix")), "its rows in sight\n{s}");
+}
+
+/// The chat closed and the list docked right, the asks sit over the list's foot as over the chat's (the user,
+/// 2026-10-24): its width, a cell in from its line and the screen's edge, a row of air over its leaf's end; the list
+/// keeps its selected row in sight above the stack.
+#[test]
+fn the_asks_float_over_a_docked_lists_foot_its_selected_row_above_them() {
+    use crate::offer::{Offer, What};
+    let dir = crate::scratch::Scratch::new("sessiondockasks");
+    let mut ed = Editor::new(crate::config::Config::default());
+    (ed.session.root, ed.session.name) = (dir.to_path_buf(), "main".into());
+    // (more than the leaf has rows: the last one would be under the stack)
+    for k in 0..30 {
+        let other = dir.join(format!("s{k:02}"));
+        std::fs::create_dir_all(&other).unwrap();
+        ed.session_open(&other).unwrap();
+        ed.session.name = format!("s{k:02}");
+    }
+    assert!(ed.session_switch(0));
+    feed(&mut ed, " W<C-w>LG");
+    let what = What::Screen { call: crate::tools::Call::test(1) };
+    ed.push_offer(Offer::new("Claude asks".into(), "to see the screen", "", String::new(), what));
+    let s = frame(&mut ed, 160, 30);
+    let (_, r) = ed.dock_rect(GroupKind::Sessions).expect("docked, drawn");
+    let (x, y, cw, ch) = ed.screen.offer_card.expect("drawn");
+    assert_eq!((x, x + cw), (r.x + 2, r.x + r.w - 1), "the list's width, a cell in\n{s}");
+    assert_eq!(y + ch, r.y + r.h - 1, "a row of air over its leaf's end\n{s}");
+    let rows: Vec<&str> = s.lines().collect();
+    assert!(rows[y + ch].chars().skip(r.x + 1).all(|c| c == ' '), "air, no row of the list\n{s}");
+    let bar = (r.y + 1..r.y + r.h).find(|&k| rows[k].chars().skip(r.x).any(|c| c == '▎'));
+    assert!(
+        bar.is_some_and(|k| k + 1 < y),
+        "the selected row above the stack, a row of air: {bar:?} < {y}\n{s}"
+    );
+    assert!(rows[bar.unwrap()].contains("s29"), "the last one selected\n{s}");
+}
+
+/// The list's side is kept as its width is (`sizes.json`, plan §3.4 "its place kept"): docked left, the next tarae —
+/// `:restart`'s, reading the file — opens it docked there; `C-w =` makes sizes automatic, never its side.
+#[test]
+fn a_docked_session_lists_side_is_kept_across_restart() {
+    let dir = crate::scratch::Scratch::new("sessiondockkept");
+    let path = dir.join("sizes.json");
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.sizes_path = Some(path.clone());
+    (ed.session.root, ed.session.name) = (dir.to_path_buf(), "main".into());
+    feed(&mut ed, " W<C-w>H");
+    frame(&mut ed, 160, 40);
+    feed(&mut ed, "<C-w>=");
+    assert_eq!(ed.sizes.sessions_dock, Some(crate::pane::Side::Left), "C-w = keeps where it is");
+    // (written on a worker)
+    let kept = || crate::sizes::Sizes::read(Some(&path)).sessions_dock;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while kept().is_none() && std::time::Instant::now() < end {
+        if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
+            ed.handle_event(ev);
+        }
+    }
+    assert_eq!(kept(), Some(crate::pane::Side::Left), "in the file");
+    // The next tarae: its sizes read from the file, the list opened — docked left, not floating
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.sizes = crate::sizes::Sizes::read(Some(&path));
+    (ed.session.root, ed.session.name) = (dir.to_path_buf(), "main".into());
+    feed(&mut ed, " W");
+    frame(&mut ed, 160, 40);
+    assert!(ed.screen.floating.borrow().iter().all(|f| f.0 != GroupKind::Sessions), "not floating");
+    let (side, r) = ed.dock_rect(GroupKind::Sessions).expect("docked, drawn");
+    assert!(side == crate::pane::Side::Left && r.x < 80, "on the side it was: {side:?} at {}", r.x);
 }
 
 /// A card that comes while the list has the keys waits to be focused (P3 §3.8, the rule 7a's stand-in folded into):

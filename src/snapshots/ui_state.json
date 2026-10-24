@@ -14,10 +14,10 @@
       "aside": false,
       "asks": "End the review?",
       "at": [
-        74,
-        28,
-        45,
-        7
+        62,
+        26,
+        57,
+        9
       ],
       "cut": 0,
       "focused": false,
@@ -264,10 +264,10 @@
           "float": true,
           "id": "card#2",
           "rect": [
-            74,
-            28,
-            45,
-            7
+            62,
+            26,
+            57,
+            9
           ],
           "shows": "card"
         }

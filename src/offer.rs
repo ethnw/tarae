@@ -81,6 +81,12 @@ pub struct Offer {
     /// What its `v` opens in a buffer of its own, the card staying up: (title, lines) — a failed preflight's
     /// output on the bring card it stopped (frictions34 42).
     pub output: Option<(String, Vec<String>)>,
+    /// The session it asks about (`push_offer`, `Editor::offer_about`): its frame is named by it with two sessions or
+    /// more (`main asks · Run cargo test`), its peek in another session's stack too. None: about no one session.
+    pub about: Option<crate::event::SessionId>,
+    /// Words of its text painted in a theme scope, in order — each the first found after the one before (`Toast.paint`'s
+    /// rule): BaseMoved's workspaces in their participant colours.
+    pub paint: Vec<(String, &'static str)>,
 }
 
 /// Where a card stands among the ones up (`Editor::offer_place`): the lower first, arrival order within.
@@ -582,6 +588,8 @@ impl Offer {
             came: 0,
             yours: false,
             output: None,
+            about: None,
+            paint: Vec::new(),
         }
     }
 
@@ -1509,6 +1517,7 @@ impl crate::editor::Editor {
         // or from work nobody's input started, waits its turn: #205)
         o.came = self.person_seq;
         o.yours = o.yours_kind() && self.events.asked() == Some(self.input_seq);
+        o.about = o.about.or_else(|| self.offer_about(&o));
         // One bring card a session: a new one takes the place of the one waiting for that checkout, wherever it
         // waits — its going said (the gone ring: one card replaced); one whose bring is under way stays
         if let Some(root) = o.bring_root().map(std::path::Path::to_path_buf) {
@@ -1608,6 +1617,25 @@ impl crate::editor::Editor {
         let rank = o.rank();
         let behind = self.offers.iter().enumerate().skip(usize::from(held)).find(|(_, x)| x.rank() > rank);
         behind.map_or(self.offers.len(), |(i, _)| i)
+    }
+
+    /// The session card `o` asks about (P3 step 7d): one that goes with its session — the one it's pushed in (a session
+    /// behind pushes as itself in front, `background`) —; a bring's, a rebase's, its resolve's, an end's — the session
+    /// whose checkout it names. Else none (a grammar, a server, a trust, a base that moved, a restart).
+    fn offer_about(&self, o: &Offer) -> Option<crate::event::SessionId> {
+        if o.goes_with_session() {
+            return Some(self.session.id);
+        }
+        let root = match &o.what {
+            What::RebaseResolved { root, .. } => root.as_path(),
+            What::SessionEnd(e) => e.root.as_path(),
+            _ => o.bring_root()?,
+        };
+        let real = crate::paths::real(root).unwrap_or_else(|| root.to_path_buf());
+        std::iter::once(&self.session)
+            .chain(&self.sessions)
+            .find(|l| l.root == real || l.root == root)
+            .map(|l| l.id)
     }
 
     /// A card's keys while it has them (`Editor::card_has_keys`, from `card_key`) — true if handled (`y` yes · `n`
@@ -2514,6 +2542,30 @@ impl crate::editor::Editor {
             What::FeaturesReset => self.features_reset_answer(o.id, false),
             What::Board(a) => crate::board::answer(self, *a, false),
             What::Shuttle => crate::shuttle::answer(self, o.id, false),
+        }
+    }
+
+    /// Other sessions' cards waiting, oldest first (P3 step 7d: every session's asks in one stack — each a peek behind
+    /// this session's, named in its colour).
+    pub fn asks_elsewhere(&self) -> Vec<(&crate::session::Session, &Offer)> {
+        let mut v: Vec<_> = (self.sessions.iter())
+            .flat_map(|l| l.parked.iter().filter(|o| !o.installing()).map(move |o| (l, o)))
+            .collect();
+        crate::sorting::by_key(&mut v, |(_, o)| (o.since, o.id));
+        v
+    }
+
+    /// A press on the stack's peek `k` (1 the nearest): this session's card brought to the front, focused — another
+    /// session's, that session in front with its card focused, as the inbox goes to it (`inbox_go`).
+    pub fn offer_peek(&mut self, k: usize) {
+        // (this session's stacked behind its front card, then the others' — with no card here, the others' alone)
+        let here = self.offers.len().saturating_sub(1);
+        if k <= here {
+            return self.offer_to_front(k);
+        }
+        let other = self.asks_elsewhere().get(k - 1 - here).map(|(_, o)| o.id);
+        if let Some(id) = other {
+            self.inbox_go(&format!("card#{id}"));
         }
     }
 

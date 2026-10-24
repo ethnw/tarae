@@ -24,11 +24,11 @@
 21
 22
 23
-24
-25                                                       ╭─ messages ────────────────────────────────╮
-26                                                       │▎ demo.rs changed on disk                  │
-27                                                       │▎ Couldn't save demo.rs: permission denied │
-28                                                       ╰───────────────────────────────────────────╯
+24                                                       ╭─ messages ────────────────────────────────╮
+25                                                       │▎ demo.rs changed on disk                  │
+26                                                       │▎ Couldn't save demo.rs: permission denied │
+27                                                       ╰───────────────────────────────────────────╯
+28
 29  ● normal                                                                    rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -86,11 +86,11 @@
 21
 22
 23
-24
-25                                                       ff BBBBBBBB fffffffffffffffffffffffffffffffff
-26                                                       fw                                          f
-27                                                       fe                                          f
-28                                                       fffffffffffffffffffffffffffffffffffffffffffff
+24                                                       ff BBBBBBBB fffffffffffffffffffffffffffffffff
+25                                                       fw                                          f
+26                                                       fe                                          f
+27                                                       fffffffffffffffffffffffffffffffffffffffffffff
+28
 29  a TTTTTT                                                                    dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary  A=ui.cursor.primary

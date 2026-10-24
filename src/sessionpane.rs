@@ -306,6 +306,9 @@ impl Editor {
         self.float_list_used(GroupKind::Sessions);
         if id != self.session.id {
             self.session_switch(id);
+        } else if self.docked_in_sight(GroupKind::Sessions) {
+            // (docked it stays: nothing to switch to, said — no silent key)
+            self.set_status(format!("{} is in front — q closes the list", self.session.label()));
         }
     }
 }

@@ -326,6 +326,138 @@ const WEAVE: &[&str] = overlap_keys!(
     "@10?conflict 1 of 1",
     "@1"
 );
+/// Claude's card, the keys back in the code, then the chat closed (`asks-closed`).
+const ASKS_CLOSED: &[&str] = &[
+    "@1",
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "\x17",
+    "h",
+    "@?Its reason",
+    "@1",
+    ":",
+    "chat-close",
+    "\r",
+    "@2",
+];
+/// Claude's card, the keys back in the code, then the chat open again (`asks-open`).
+const ASKS_OPEN: &[&str] =
+    &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", " ", "l", "@2"];
+// (main's card behind, fix's Claude asking too, then two cards of yours: four in the stack, over two sessions)
+const ASKS_STACK: &[&str] = waits_keys!(
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "@?Its reason",
+    "@1",
+    "\x17",
+    "h",
+    "@1",
+    ":",
+    "features-reset",
+    "\r",
+    "@1",
+    "\x1b",
+    ":",
+    "restart",
+    "\r",
+    "@2"
+);
+/// One session following its Claude's edit being written, the keys back in the code (`follow-one`).
+const FOLLOW_ONE: &[&str] = &[
+    "@1",
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@20?knots\", t.k",
+    "\x1b",
+    "\x1b",
+    "@2",
+];
+/// The session list docked right (`C-w L`), `j` and `enter`: in fix, the list staying (`sessions-docked`).
+const SESSIONS_DOCKED: &[&str] = waits_keys!(" ", "W", "@1", "\x17", "L", "@1", "k", "\r", "@2");
+/// Nine sessions (`strip-nine`): main and fix overlapping, seven more checkouts — docs and parser waiting on their
+/// Claude's card, keys's Claude on its run's card (a shot's sandbox is none: no run goes unasked, so none is stuck —
+/// `session_tabs`' tests have that), web's turn ended behind (done) — then main's chat open, its top line naming them.
+const STRIP_NINE: &[&str] = overlap_keys!(
+    ":",
+    "sh for n in docs parser sbspeed keys pull web motion; do git worktree add -q ../$n; done",
+    "\r",
+    "@4",
+    ":",
+    "session-open ../docs",
+    "\r",
+    "@3",
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "@?Its reason",
+    "\x1b",
+    ":",
+    "session-open ../parser",
+    "\r",
+    "@3",
+    " ",
+    "l",
+    "@1",
+    "run the tests",
+    "\r",
+    "@?Its reason",
+    "\x1b",
+    ":",
+    "session-open ../sbspeed",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../keys",
+    "\r",
+    "@3",
+    " ",
+    "l",
+    "@1",
+    "wait for the build",
+    "\r",
+    "@2",
+    "\x1b",
+    ":",
+    "session-open ../pull",
+    "\r",
+    "@3",
+    ":",
+    "session-open ../web",
+    "\r",
+    "@3",
+    " ",
+    "l",
+    "@1",
+    "why does insert clone the name?",
+    "\r",
+    "@20?Change 1 of",
+    "@1",
+    "y",
+    "@20?Nothing else",
+    "\x1b",
+    ":",
+    "session-open ../motion",
+    "\r",
+    "@3",
+    ":",
+    "session-switch 0",
+    "\r",
+    "@2",
+    " ",
+    "l",
+    "@2"
+);
 /// collab C3: two more checkouts — fix's own commit on the `threads.insert` line, docs untouched — then main's own way
 /// of that line committed in the checkout tarae started in: main moved, and its one card names both workspaces behind
 /// it, fix's would-be conflict in words (`basemoved`).
@@ -2084,6 +2216,19 @@ const SCENES: &[Scene] = &[
     Scene { name: "weavegone", claude: "writemid", files: MAIN, keys: WEAVE_GONE },
     // (collab C3: main moved — one card for every workspace behind it, what would conflict where)
     Scene { name: "basemoved", claude: "writemid", files: MAIN, keys: BASE_MOVED },
+    // (panes P3 step 7d: Claude's card with the chat closed — the screen's right, above the status line)
+    Scene { name: "asks-closed", claude: "card", files: MAIN, keys: ASKS_CLOSED },
+    // (…and with the chat open — `space l` brings it back from following: over its foot, the transcript above it)
+    Scene { name: "asks-open", claude: "card", files: MAIN, keys: ASKS_OPEN },
+    // (…four asks over two sessions in one stack: two cards your keys asked for in front, fix's Claude's behind them,
+    // main's a peek named in its colour)
+    Scene { name: "asks-stack", claude: "card", files: MAIN, keys: ASKS_STACK },
+    // (…the follow card framed, one session: named `follow`, the turn's time at its line's right)
+    Scene { name: "follow-one", claude: "writemid", files: MAIN, keys: FOLLOW_ONE },
+    // (…the chat's top line with nine sessions: three waiting, two overlapping, one done — whole names, `+N`)
+    Scene { name: "strip-nine", claude: "nine", files: MAIN, keys: STRIP_NINE },
+    // (…the session list docked right, `enter` on the next row: switched, the list still there)
+    Scene { name: "sessions-docked", claude: "card", files: MAIN, keys: SESSIONS_DOCKED },
     // (the docs' `claude-reviews.png`: the reviewer read in the background — three findings on thread.rs's lines,
     // one's card open under it, its report beside it in a split (`space v r` — read, the status line's
     // `¶ 3 findings` goes, as decided))
@@ -2775,6 +2920,10 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "manager" if line.contains("run the tests") => turn.ask_outside()?,
             "manager" => turn.explain_held(true, true, Some("nots.len());\\n\"}"))?,
             "samebinary" => turn.same_binary()?,
+            // (nine sessions: a run asked for outside the sandbox, a run that outlasts the stuck mark, else a whole turn)
+            "nine" if line.contains("run the tests") => turn.ask_outside()?,
+            "nine" if line.contains("wait for the build") => turn.run_long()?,
+            "nine" => turn.explain(true, false)?,
             "searchcard" => turn.search_outside()?,
             "grants" => turn.grants()?,
             "warm" => turn.warm(false)?,
@@ -3132,6 +3281,14 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         let run = json!({"command": "cargo test --quiet", "outside_sandbox": true,
             "reason": "cargo needs to fetch the registry index"});
         self.call(1, "run", run)?;
+        self.line(json!({"type": "result", "result": "done"}))
+    }
+
+    /// A run in the sandbox that outlasts the stuck mark (`STUCK_AFTER`): its call unanswered past it.
+    fn run_long(&mut self) -> io::Result<()> {
+        self.words("The build takes a while; I will wait for it.")?;
+        self.text("\n")?;
+        self.call(1, "run", json!({"command": "sleep 120"}))?;
         self.line(json!({"type": "result", "result": "done"}))
     }
 
