@@ -533,7 +533,7 @@ fn seeded(seed: u64, n: usize) -> Vec<u8> {
 
 /// How long a test waits on one of its own threads, a read or a write (`bounded`, `limited`) — a hang fails the
 /// test, it never hangs the run.
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// A thread of the test's whose result is waited for at most `LIMIT`.
 struct Bounded<T>(Receiver<T>);
@@ -577,9 +577,9 @@ fn limited(s: TcpStream) -> TcpStream {
     s
 }
 
-/// A stream read to its end (within 60 s a read): how many bytes, and their FNV-1a hash.
+/// A stream read to its end (by `PATIENCE` a read): how many bytes, and their FNV-1a hash.
 fn drained(mut s: &TcpStream) -> (usize, u64) {
-    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    s.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
     let (mut n, mut h, mut b) = (0usize, 0xcbf2_9ce4_8422_2325u64, vec![0u8; 64 << 10]);
     loop {
         match s.read(&mut b) {
@@ -801,7 +801,7 @@ fn a_spliced_tunnel_half_closes_as_its_sides_do() {
     c.shutdown(std::net::Shutdown::Write).unwrap();
     // (the answer read as it comes: the outside says what it read only once its answer is sent)
     let reader = bounded(move || drained(&c));
-    let got = out.got.recv_timeout(Duration::from_secs(30)).expect("the outside read to its end");
+    let got = out.got.recv_timeout(crate::test_results::PATIENCE).expect("the outside read to its end");
     assert!(got == sent, "the outside read {} bytes, sent {}", got.len(), sent.len());
     let back = reader.join("the client's reader");
     assert_eq!(back, (HALF_M, fnv(&seeded(9, HALF_M))), "the client read the answer, then its end");
@@ -1149,12 +1149,7 @@ fn a_reused_port_never_gives_another_relays_count() {
     std::thread::sleep(Duration::from_millis(50));
     relay::ended(at, 222);
     assert_eq!(early.join("the reader"), Some(222), "the later relay's own, read before it ended");
-    let gone = bounded(move || relay::spliced_by(at));
-    assert_eq!(
-        gone.join("the second reader"),
-        None,
-        "the earlier relay's count went when the later one started"
-    );
+    assert_eq!(relay::spliced_now(at), None, "the earlier relay's count went when the later one started");
 }
 
 /// Without pipes (descriptors run short) a tunnel isn't refused: the relay pumps it, the same bytes through.

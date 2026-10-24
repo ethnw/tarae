@@ -314,7 +314,7 @@ fn a_hosts_always_in_a_repository_is_every_checkouts_and_says_so() {
     ed.config.llm.sandbox_network = true;
     (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
     let until = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
-        let end = Instant::now() + std::time::Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "timed out: {what}");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -385,7 +385,7 @@ fn each_answer_reaches_as_far_as_its_key() {
     assert!(tell.contains(&format!("refused your commands to reach {HOST}:443 for this session")), "{tell}");
     // `A`'s keeping, on a worker: the project's hosts, read back as the next run's policy reads them
     let path = ed.allow_path.clone().unwrap();
-    let end = Instant::now() + std::time::Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     let kept = loop {
         let k = crate::allow::Store::read(Some(&path)).get(&ed.session.root).hosts;
         if !k.is_empty() || Instant::now() > end {
@@ -421,7 +421,7 @@ fn a_hosts_answer_records_the_key_that_gave_it() {
     assert_eq!(session("session.example.invalid"), Some('s'));
     // The project's, read back from `sandbox.json`
     let path = ed.allow_path.clone().unwrap();
-    let end = Instant::now() + std::time::Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     let project = crate::allow::Grant::Host("project.example.invalid".into(), 443);
     let kept = loop {
         let k = crate::allow::Store::read(Some(&path)).get(&ed.session.root).given.get(&project).copied();
@@ -530,7 +530,7 @@ fn a_project_opened_through_a_link_is_one_session_to_both() {
     let (id, a) = (o.id, o.host().unwrap().clone());
     answer(&mut ed, id, a, Scope::Project);
     let path = ed.allow_path.clone().unwrap();
-    let end = Instant::now() + std::time::Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while crate::allow::Store::read(Some(&path)).get(&real).hosts.is_empty() {
         assert!(Instant::now() < end, "kept under the real path");
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {

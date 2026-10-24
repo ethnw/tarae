@@ -1909,7 +1909,7 @@ pub(crate) mod tests {
             })
         });
         assert!(taken, "the proxy told");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !Store::read(Some(&path)).get(&root).hosts.is_empty() {
             assert!(std::time::Instant::now() < end, "what's kept, taken back");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -2026,7 +2026,7 @@ pub(crate) mod tests {
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         (ed.session.root, ed.allow_path) = (main.clone(), Some(store.clone()));
         let settle = |ed: &mut crate::editor::Editor| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.allow_writing > 0 {
                 assert!(std::time::Instant::now() < end, "the write never came back");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

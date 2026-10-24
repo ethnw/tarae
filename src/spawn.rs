@@ -407,14 +407,22 @@ pub fn wait_and_drain(
     status
 }
 
-/// `start` again while it fails with ETXTBSY, 10 ms apart, for up to a second — for a test that runs a script it
+/// `start` again while it fails with ETXTBSY, 10 ms apart, until `PATIENCE` — for a test that runs a script it
 /// just wrote: Linux won't run a file any process holds open for writing, and every child another test forks holds
 /// a copy of this process's descriptors until its own exec closes them (O_CLOEXEC acts only then), so a fork landing
 /// between the script's `open` and `close` keeps it busy a moment after the write is done (`cargo xtask linux
 /// test`, once). Tests only: tarae's own spawns don't wait on the main thread.
 #[cfg(test)]
-pub(crate) fn when_not_busy<T>(mut start: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(1);
+pub(crate) fn when_not_busy<T>(start: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    when_not_busy_until(std::time::Instant::now() + crate::test_results::PATIENCE, start)
+}
+
+/// `when_not_busy` giving up at `end`.
+#[cfg(test)]
+fn when_not_busy_until<T>(
+    end: std::time::Instant,
+    mut start: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
     loop {
         match start() {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < end => {
@@ -485,7 +493,7 @@ mod tests {
         crate::dap::term_group(pid);
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(wait(pid).unwrap().signal(), Some(libc::SIGTERM));
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while alive(grandchild) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -521,7 +529,7 @@ mod tests {
         assert_eq!((out.as_str(), status.success()), ("one\ntwo\nend\n", true));
     }
 
-    /// `when_not_busy` starts again only while it's ETXTBSY, and gives up with it after its second.
+    /// `when_not_busy` starts again only while it's ETXTBSY, and gives up with it at its end.
     #[test]
     fn a_busy_program_is_started_again_and_nothing_else_is() {
         let busy = || io::Error::from_raw_os_error(libc::ETXTBSY);
@@ -537,10 +545,10 @@ mod tests {
             Err(io::Error::from_raw_os_error(libc::ENOENT))
         });
         assert_eq!((e.unwrap_err().kind(), n), (io::ErrorKind::NotFound, 1), "another error at once");
-        let t = Instant::now();
-        let e = when_not_busy(|| -> io::Result<()> { Err(busy()) });
+        let end = crate::test_results::quiet_for(Duration::from_millis(100));
+        let e = when_not_busy_until(end, || -> io::Result<()> { Err(busy()) });
         assert_eq!(e.unwrap_err().raw_os_error(), Some(libc::ETXTBSY));
-        assert!(t.elapsed() >= Duration::from_secs(1), "gave up only after its second");
+        assert!(Instant::now() >= end, "gave up only at its end");
     }
 
     /// Linux refuses to run a script open for writing (ETXTBSY) — the window `when_not_busy` waits out: held
@@ -642,7 +650,7 @@ mod tests {
         let mut ed = crate::editor::Editor::new(config);
         // A terminal panel running, its master held here; a pty and a pipe held besides
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "echo up; sleep 30".into()], Vec::new());
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let shows = |ed: &crate::editor::Editor, s: &str| {
             ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains(s))
         };
@@ -695,7 +703,7 @@ mod tests {
             ("terminal", &|| {
                 let mut t = crate::editor::Editor::new(crate::config::parse("").0);
                 t.terminal_run(vec!["/bin/sh".into(), "-c".into(), LIST_FDS.into()], Vec::new());
-                let end = Instant::now() + Duration::from_secs(5);
+                let end = Instant::now() + crate::test_results::PATIENCE;
                 while t.session.terminal.as_ref().is_none_or(|t| t.exited.is_none()) && Instant::now() < end {
                     if let Some(ev) = t.events.recv_timeout(Duration::from_millis(50)) {
                         t.handle_event(ev);

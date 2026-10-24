@@ -109,21 +109,27 @@ pub(super) fn ended(peer: std::net::SocketAddr, n: usize) {
 }
 
 /// Tests: the bytes the relay whose client is the test's `end` (its local address) moved through pipes — that
-/// relay's alone — once it ended (within 10 s; None: it didn't), taken out. Elsewhere than Linux, 0.
+/// relay's alone — once it ended (by `PATIENCE`; None: it didn't), taken out. Elsewhere than Linux, 0.
 #[cfg(test)]
 pub fn spliced_by(end: std::net::SocketAddr) -> Option<usize> {
-    let by = Instant::now() + Duration::from_secs(10);
+    let by = Instant::now() + crate::test_results::PATIENCE;
     loop {
-        let mut list = SPLICED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = list.iter().position(|(a, n)| *a == end && n.is_some()) {
-            return list.remove(i).1;
+        if let Some(n) = spliced_now(end) {
+            return Some(n);
         }
-        drop(list);
         if Instant::now() > by {
             return None;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// `spliced_by`'s count if its relay has ended now, taken out — None: no count there (yet), never waited for.
+#[cfg(test)]
+pub fn spliced_now(end: std::net::SocketAddr) -> Option<usize> {
+    let mut list = SPLICED.lock().unwrap_or_else(|e| e.into_inner());
+    let i = list.iter().position(|(a, n)| *a == end && n.is_some())?;
+    list.remove(i).1
 }
 
 /// `relay`, the pipes to splice through made by `pipes` (an Err: it stays on the pump).

@@ -434,7 +434,10 @@ fn fetches(tool: &str) {
     });
     let url = p.proxy_url().is_some();
     let ended = crate::sandbox::after_run(Some(&p));
-    let (status, out, err) = finish(crate::sandbox::spawn(Some(&p), &cmd).expect("the tool starts"), 300);
+    let (status, out, err) = finish(
+        crate::sandbox::spawn(Some(&p), &cmd).expect("the tool starts"),
+        std::time::Duration::from_secs(300),
+    );
     ended();
     let lines: Vec<(bool, String)> = out
         .lines()

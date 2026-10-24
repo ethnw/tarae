@@ -2587,7 +2587,7 @@ mod tests {
         cmd.env("PORT", port.to_string()).env("OUT", &out).current_dir(&p.root);
         let spawned = super::super::spawn(Some(&p), &cmd).unwrap();
         let exit = crate::spawn::wait(spawned.pid).unwrap().code().unwrap_or(-1);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with('\n'))
             && std::time::Instant::now() < end
         {
@@ -2612,7 +2612,7 @@ mod tests {
         };
         // (the orphan, a zombie child of the keeper's once it's done: reaped)
         let gone = || child.is_none_or(|c| !std::path::Path::new(&format!("/proc/{c}")).exists());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while mine && !gone() && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -2730,7 +2730,7 @@ mod tests {
 
     /// Waits (5 s at most) for `done`.
     fn until(done: impl Fn() -> bool) -> bool {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done() && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -3412,7 +3412,7 @@ mod tests {
         let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        udp.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        udp.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
         let udp_closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let [open_at, closed_at, udp_at, udp_closed_at] = [
             open.local_addr().unwrap(),
@@ -3702,7 +3702,7 @@ mod tests {
         }
         let s = Scratch::new("mmsg-top");
         let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        udp.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        udp.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
         let at = udp.local_addr().unwrap();
         let p = s.policy(vec![at.port()], false, Vec::new());
         let got = probe_in(&p, &["sendmmsg-top".to_string(), format!("sendto {at}")]);

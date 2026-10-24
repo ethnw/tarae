@@ -465,7 +465,7 @@ impl Recovery {
             0 => self.run.clone(),
             n => PathBuf::from(format!("{}.{n}", self.run.display())),
         });
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         for lock in folders.map(|d| d.join(LOCK)).filter(|l| l.exists()) {
             let free = || File::open(&lock).is_ok_and(|f| f.try_lock().is_ok());
             while !free() {

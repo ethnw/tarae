@@ -1689,7 +1689,7 @@ mod tests {
         ed.session.chat = Some(crate::chat::Chat::new());
         ed.session.at = crate::session::At::Chat;
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 ed.handle_event(ed.events.recv_timeout(left).expect("done before the timeout"));

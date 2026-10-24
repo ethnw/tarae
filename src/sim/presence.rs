@@ -18,7 +18,7 @@ const SEEDS: &[u64] = &[0, 1, 2];
 
 const INPUTS: usize = 60;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 const TEXT: &str = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n}\n";
 

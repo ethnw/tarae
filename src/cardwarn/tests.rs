@@ -464,7 +464,7 @@ fn chat_in(name: &str, project: &str) -> (crate::editor::Editor, u64, PathBuf) {
 }
 
 fn pump_until(ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(std::time::Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

@@ -220,7 +220,7 @@ fn a_runs_changes_wait_for_a_save_still_being_written() {
             .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(1)).map(|(_, r)| r.clone()))
     };
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -713,7 +713,7 @@ fn a_runs_changes_join_the_turn_and_undo_takes_them_back() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -798,7 +798,7 @@ fn what_came_with_heads_move_isnt_the_turns() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -979,7 +979,7 @@ fn an_edit_and_its_commit_in_one_run_stay_the_turns() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1038,7 +1038,7 @@ fn checks_and_tests_are_covered_and_ignored_deletions_said() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1117,7 +1117,7 @@ fn a_protected_name_a_run_made_is_asked_about_before_the_next_run() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1189,7 +1189,7 @@ fn turn_in(dir: &Path) -> (crate::editor::Editor, u64) {
 }
 
 fn pump_until(ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str) {
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1379,7 +1379,7 @@ fn a_stopped_run_and_one_past_its_turn_are_kept_too() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

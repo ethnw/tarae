@@ -1380,10 +1380,11 @@ mod tests {
     }
 
     /// The checks are one set in three places: `.tarae.toml`'s `[preflight]` (what `:preflight` runs here),
-    /// CONTRIBUTING's list, and CI's jobs — CI read as it runs them (`--locked` aside, `RUSTFLAGS: -D
+    /// CONTRIBUTING's list, and CI's jobs — CI read as it runs them (`--locked` and `--no-fail-fast` aside, `RUSTFLAGS: -D
     /// warnings` making clippy's warnings errors, its feature matrix spelled out). Where CI differs on
     /// purpose: `cargo perf` (it runs only the time budgets, and only to report — time is judged on a fixed
-    /// machine) and the network job (`--ignored`).
+    /// machine), the network job (`--ignored`) and macOS's tests, only built there (`--no-run`: they run on the
+    /// maintainer's Mac). A step with an `if:` names its command on the line after (`run: …`).
     #[test]
     fn the_checks_are_the_same_here_in_contributing_and_in_ci() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1411,14 +1412,17 @@ mod tests {
             })
             .collect();
         let mut ran = Vec::new();
-        for cmd in
-            ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).filter(|c| c.starts_with("cargo "))
+        for cmd in ci
+            .lines()
+            .filter_map(|l| l.trim().trim_start_matches("- ").strip_prefix("run: "))
+            .filter(|c| c.starts_with("cargo "))
         {
-            // (on purpose: perf as budgets only, and the network job)
-            if cmd.contains("--profile perf") || cmd.contains("-- --ignored") {
+            // (on purpose: perf as budgets only, the network job, macOS's tests only built)
+            if cmd.contains("--profile perf") || cmd.contains("-- --ignored") || cmd.contains(" --no-run") {
                 continue;
             }
-            let cmd = cmd.replace(" --locked", "");
+            // (CI's own: the lock file as committed, every failing binary said at once)
+            let cmd = cmd.replace(" --locked", "").replace(" --no-fail-fast", "");
             let each: Vec<String> = match cmd.contains("\"${{ matrix.features }}\"") {
                 true => features
                     .iter()
@@ -1563,7 +1567,7 @@ mod tests {
         let carded =
             |ed: &Editor| ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Preflight { .. }));
         let pump = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
-            let end = Instant::now() + Duration::from_secs(5);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(Instant::now() < end, "{what}");
                 if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1673,7 +1677,7 @@ mod tests {
         let waits =
             "printf '    Blocking waiting for file lock on build directory\\n' >&2; sleep 0.2; echo built";
         ed.preflight_run(vec![step("first", waits), step("second", "exit 3")], Set::Quick).unwrap();
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
             assert!(Instant::now() < end, "it ended");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -1714,7 +1718,7 @@ mod tests {
             ed.session.root = s.to_path_buf();
             ed.claude_env = Some(env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
             ed.preflight_run(vec![step("test", cmd)], Set::Quick).unwrap();
-            let end = Instant::now() + Duration::from_secs(10);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
                 assert!(Instant::now() < end, "it ended");
                 if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -1753,7 +1757,7 @@ mod tests {
             step("test bundled", "echo bundled ok"),
         ];
         ed.preflight_run(steps, Set::Quick).unwrap();
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.task_run.as_ref().is_some_and(|r| r.state == crate::task::State::Running) {
             assert!(Instant::now() < end, "it ended");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {

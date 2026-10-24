@@ -321,7 +321,7 @@ fn chat_for(dir: &Path, log: &Path) -> Editor {
 
 /// Events until `done` (the change is worked out and written on workers).
 fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(std::time::Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -426,7 +426,7 @@ fn the_edit_tools_review_quotes_what_you_asked() {
     pump(&mut ed, "the review", |ed| ed.session.review.is_some());
     assert_eq!(title(&ed).as_deref(), Some("tidy the greeting"));
     // (the answer still names the change, not what was asked: `n`, and Claude hears `edit a.rs`)
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while answered(43).is_none() {
         assert!(std::time::Instant::now() < end, "the answer");
         crate::llm::review_key(&mut ed, crate::key::Key::plain(crate::key::Code::Char('n')));
@@ -455,7 +455,7 @@ fn asked(ed: &mut Editor, n: u64, tool: &str, args: &Value) -> Call {
 /// key before it's settled (as `the_edit_tools_review_quotes_what_you_asked` answers it). After a key, what the
 /// main loop does after every event: the next file's review up (`refactor::next`) — no other event may come.
 fn answer_reviews(ed: &mut Editor, key: char, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(std::time::Instant::now() < end, "the reviews answered `{key}`");
         if ed.session.review.as_ref().is_some_and(|r| r.ready) {

@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(std::fs::symlink_metadata(pagemap).unwrap().len(), 0, "procfs says 0");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(found_in(pagemap)).ok());
-        let found = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("read past the size it says");
+        let found = rx.recv_timeout(crate::test_results::PATIENCE).expect("read past the size it says");
         assert_eq!(found, Found::default());
     }
 
@@ -1330,7 +1330,7 @@ mod tests {
         for place in ["/proc", "/sys"] {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || tx.send(found_in(Path::new(place))).ok());
-            let found = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(place);
+            let found = rx.recv_timeout(crate::test_results::PATIENCE).expect(place);
             assert_eq!(found, Found::default(), "{place} looked in");
         }
     }

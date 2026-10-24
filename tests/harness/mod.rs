@@ -18,8 +18,10 @@ use std::time::{Duration, Instant};
 mod pty;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_tarae");
-/// Generous — a loaded CI runner can be slow; a passing test never waits this long.
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a wait waits before it calls it a hang — the unit tests' `test_results::PATIENCE`, the same value (a
+/// guard only stops a test that would never end; why it's this long is said there). A passing test never waits
+/// this long.
+pub const TIMEOUT: Duration = Duration::from_secs(120);
 /// Live runs wait on real tools: rust-analyzer indexing, cargo building, Claude thinking.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(240);
 pub const POLL: Duration = Duration::from_millis(20);
@@ -1192,7 +1194,7 @@ mod tests {
             (t.asked, t.read) = (t.asked + 1, read);
             answer
         };
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + TIMEOUT;
         let got = settle_on(&mut t, ask, |a| *a, |t| t.read, deadline);
         (got, t.asked)
     }

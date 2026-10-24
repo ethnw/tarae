@@ -1350,9 +1350,9 @@ mod tests {
         }
     }
 
-    /// Events handled until `done` (a worker's result), at most 5 s.
+    /// Events handled until `done` (a worker's result).
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -1360,9 +1360,9 @@ mod tests {
         }
     }
 
-    /// Events handled for `ms` — what a worker would bring back by then.
+    /// Events handled for `ms` — a look that nothing comes meanwhile (`quiet_for`).
     fn settle_for(ed: &mut Editor, ms: u64) {
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let end = crate::test_results::quiet_for(std::time::Duration::from_millis(ms));
         while let Some(ev) = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
         {
             ed.handle_event(ev);

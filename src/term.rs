@@ -19990,7 +19990,7 @@ mod tests {
             if pty {
                 let mut ed = editor();
                 ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
-                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let end = std::time::Instant::now() + crate::test_results::PATIENCE;
                 while ed.session.terminal.is_none() && std::time::Instant::now() < end {
                     if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
                         ed.handle_event(ev);
@@ -21087,7 +21087,7 @@ mod tests {
         ed.docs[0].text = Rope::from_str(&text);
         ed.plugins_sync(crate::plugin::Watch::new(Some(dir.clone())).changed().unwrap());
         while ed.plugin_command("spin").is_none() {
-            let ev = ed.events.recv_timeout(Duration::from_secs(20)).expect("the plugin loads");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the plugin loads");
             ed.handle_event(ev);
         }
         let mut buf = Vec::with_capacity(1 << 16);
@@ -22392,7 +22392,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut landing = Duration::ZERO;
         while ed.picker.as_ref().is_some_and(|p| p.filtering) {
-            let Some(ev) = ed.events.recv_timeout(Duration::from_secs(5)) else { panic!("no result") };
+            let Some(ev) = ed.events.recv_timeout(crate::test_results::PATIENCE) else { panic!("no result") };
             let t = Instant::now();
             ed.handle_event(ev);
             buf.clear();
@@ -22447,7 +22447,7 @@ mod tests {
         let budget = frame_budget();
         let mut ed = Editor::new(Config::default());
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.terminal.is_none() && Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(100)) {
                 ed.handle_event(ev);

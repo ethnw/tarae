@@ -27,9 +27,9 @@ fn env_of(c: &Command) -> HashMap<String, String> {
     set.collect()
 }
 
-/// A request head read from `s`, to its blank line (within 10 s).
+/// A request head read from `s`, to its blank line (by `PATIENCE`).
 pub(super) fn head(mut s: &TcpStream) -> Vec<u8> {
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -44,19 +44,19 @@ pub(super) fn head(mut s: &TcpStream) -> Vec<u8> {
 pub(super) use super::packs_tests::finish;
 
 /// The tests' own time limit holds: a run past it is ended (`Deadline` — its process group, the run's own), so
-/// the test fails instead of hanging. The stand-in run is a `sleep` this test started.
+/// the test fails instead of hanging. The stand-in run is a `sleep` this test started, killed — never its own end.
 #[test]
 fn a_run_past_its_time_is_ended() {
-    let t = Instant::now();
-    let (status, ..) = finish(crate::spawn::setsid(Command::new("/bin/sleep").arg("30")).unwrap(), 1);
-    assert!(t.elapsed() < Duration::from_secs(10), "ended at its time: {:?}", t.elapsed());
-    assert!(status.is_some_and(|s| !s.success()), "{status:?}");
+    use std::os::unix::process::ExitStatusExt as _;
+    let sleep = crate::spawn::setsid(Command::new("/bin/sleep").arg("600")).unwrap();
+    let (status, ..) = finish(sleep, Duration::from_secs(1));
+    assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL), "ended by its limit: {status:?}");
 }
 
-/// The first connection `l` takes within `secs` — None: none came (a test fails, never hangs).
-pub(super) fn accept_within(l: &TcpListener, secs: u64) -> Option<TcpStream> {
+/// The first connection `l` takes by `PATIENCE` — None: none came (a test fails, never hangs).
+pub(super) fn accept_within(l: &TcpListener) -> Option<TcpStream> {
     l.set_nonblocking(true).unwrap();
-    let by = Instant::now() + Duration::from_secs(secs);
+    let by = Instant::now() + crate::test_results::PATIENCE;
     while Instant::now() < by {
         if let Ok((s, _)) = l.accept() {
             s.set_nonblocking(false).unwrap();
@@ -69,25 +69,37 @@ pub(super) fn accept_within(l: &TcpListener, secs: u64) -> Option<TcpStream> {
 
 /// The outside, standing in: a loopback listener of the test's own under `name` (`TEST_NAMES`), taken for
 /// beyond in the runs of `root`'s project (`TEST_BEYOND`). Its port, and its first request's head (answered
-/// `200`, `ok`) with the listener after — None when none came within `secs`.
-fn outside(
-    name: &str,
-    root: &Path,
-    secs: u64,
-) -> (u16, std::thread::JoinHandle<(Option<String>, TcpListener)>) {
-    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let at = l.local_addr().unwrap();
-    super::TEST_NAMES.lock().unwrap().push((name.into(), at));
-    super::TEST_BEYOND.lock().unwrap().push((root.to_path_buf(), at.ip()));
+/// `200`, `ok`) with the listener after — None when none came by `PATIENCE`.
+fn outside(name: &str, root: &Path) -> (u16, std::thread::JoinHandle<(Option<String>, TcpListener)>) {
+    let (port, l) = outside_unserved(name, root);
     let seen = crate::event::thread("tarae-5d-test", move || {
-        let h = accept_within(&l, secs).map(|s| {
+        let h = accept_within(&l).map(|s| {
             let h = head(&s);
             let _ = (&s).write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
             String::from_utf8_lossy(&h).into_owned()
         });
         (h, l)
     });
-    (at.port(), seen)
+    (port, seen)
+}
+
+/// The outside as `outside` stands it in, never served: its port and listener — for a run that must not reach
+/// it, looked at once the run had its answer (a connection would have come before it: `reached`).
+fn outside_unserved(name: &str, root: &Path) -> (u16, TcpListener) {
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let at = l.local_addr().unwrap();
+    super::TEST_NAMES.lock().unwrap().push((name.into(), at));
+    super::TEST_BEYOND.lock().unwrap().push((root.to_path_buf(), at.ip()));
+    (at.port(), l)
+}
+
+/// A connection `l` holds now, waiting — the head of its request, if any.
+fn reached(l: &TcpListener) -> Option<String> {
+    l.set_nonblocking(true).unwrap();
+    l.accept().ok().map(|(s, _)| {
+        s.set_nonblocking(false).unwrap();
+        String::from_utf8_lossy(&head(&s)).into_owned()
+    })
 }
 
 /// `script` run by `sh` through the real path — `command`, `spawn`, its wait, `after_run` — in `p`: what it
@@ -96,7 +108,7 @@ fn run(p: &Policy, script: &str) -> String {
     let mut c = command(Some(p), "/bin/sh", &["-c".into(), script.into()]);
     c.current_dir(&p.root);
     let ended = after_run(Some(p));
-    let (_, out, errs) = finish(spawn(Some(p), &c).unwrap(), 60);
+    let (_, out, errs) = finish(spawn(Some(p), &c).unwrap(), crate::test_results::PATIENCE);
     ended();
     if !errs.is_empty() {
         eprintln!("stderr: {errs}");
@@ -179,7 +191,7 @@ fn git_sends_its_password_up_front() {
     let url = "https://a-5d.example.invalid/x.git";
     crate::gitrepo::not_in_this_repository(&home, &["ls-remote", url]);
     let answered = crate::event::thread("tarae-5d-test", move || {
-        let Some(s) = accept_within(&stand_in, 15) else { return Vec::new() };
+        let Some(s) = accept_within(&stand_in) else { return Vec::new() };
         let h = head(&s);
         let _ = (&s).write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         h
@@ -198,7 +210,7 @@ fn git_sends_its_password_up_front() {
         .env("GIT_CEILING_DIRECTORIES", home.parent().unwrap())
         .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(&home);
-    let (_, _, said) = finish(crate::spawn::setsid(&git).unwrap(), 30);
+    let (_, _, said) = finish(crate::spawn::setsid(&git).unwrap(), crate::test_results::PATIENCE);
     let first = answered.join().unwrap();
     std::fs::remove_dir_all(&home).ok();
     let h = match parse::head(&first) {
@@ -233,7 +245,7 @@ fn a_runs_port_closes_with_it() {
     crate::spawn::wait(s.pid).unwrap();
     ended();
     // (`RunEnded` reaches the proxy's dispatcher on its own thread: waited for, at most 5 s)
-    let by = Instant::now() + Duration::from_secs(5);
+    let by = Instant::now() + crate::test_results::PATIENCE;
     let mut last = None;
     while Instant::now() < by {
         match TcpStream::connect((Ipv4Addr::LOCALHOST, port)) {
@@ -273,7 +285,7 @@ fn a_run_reaches_only_its_own_proxy_port() {
         let script = format!("{how} {}", port(l));
         let mut c = command(Some(p), "/bin/sh", &["-c".into(), script]);
         c.current_dir(&root);
-        finish(crate::spawn::setsid(&c).unwrap(), 30);
+        finish(crate::spawn::setsid(&c).unwrap(), crate::test_results::PATIENCE);
         l.accept().is_ok()
     };
     let nc = "/usr/bin/nc -z -w 2 127.0.0.1";
@@ -322,7 +334,7 @@ fn a_run_reaches_only_its_own_proxy_port() {
 fn a_runs_port_takes_it_to_the_outside() {
     let root = Path::new("/Users/u/p-5d-rules");
     let name = "rules-5d.example.invalid";
-    let (port, seen) = outside(name, root, 15);
+    let (port, seen) = outside(name, root);
     let p = open(root);
     let mut curl = Command::new("/usr/bin/curl");
     curl.args(["-s", "--max-time", "10", &format!("http://{name}:{port}/through")]);
@@ -332,7 +344,7 @@ fn a_runs_port_takes_it_to_the_outside() {
             .filter(|(k, _)| k.to_lowercase().ends_with("_proxy")),
     );
     let ended = after_run(Some(&p));
-    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), 30);
+    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), crate::test_results::PATIENCE);
     ended();
     let (h, _) = seen.join().unwrap();
     assert_eq!(out, "ok", "through the proxy");
@@ -356,7 +368,7 @@ fn with_the_network_closed_a_host_waits_and_yes_lets_it_through() {
     }
     let root = Path::new("/Users/u/p-c1-ask");
     let name = "ask-c1.example.invalid";
-    let (port, seen) = outside(name, root, 30);
+    let (port, seen) = outside(name, root);
     let (asks, asked) = std::sync::mpsc::channel();
     let session = super::session_of(root);
     super::TEST_ASKS.lock().unwrap().push((session, asks));
@@ -382,10 +394,10 @@ fn with_the_network_closed_a_host_waits_and_yes_lets_it_through() {
     let p = closed();
     let ended = after_run(Some(&p));
     let s = spawn(Some(&p), &curl(&p, "first")).unwrap();
-    let FromProxy::Ask { run, host, .. } = asked.recv_timeout(Duration::from_secs(10)).expect("asked");
+    let FromProxy::Ask { run, host, .. } = asked.recv_timeout(crate::test_results::PATIENCE).expect("asked");
     assert_eq!((run, host.as_str()), (p.run_id, name));
     super::get().send(answer(run, Scope::Run));
-    let (_, out, _) = finish(s, 30);
+    let (_, out, _) = finish(s, crate::test_results::PATIENCE);
     ended();
     assert_eq!(out, "ok", "`y`: the held request went on");
     assert!(seen.join().unwrap().0.is_some_and(|h| h.starts_with("GET /first ")));
@@ -393,10 +405,10 @@ fn with_the_network_closed_a_host_waits_and_yes_lets_it_through() {
     let p = closed();
     let ended = after_run(Some(&p));
     let s = spawn(Some(&p), &curl(&p, "second")).unwrap();
-    let FromProxy::Ask { run, .. } = asked.recv_timeout(Duration::from_secs(10)).expect("asked again");
+    let FromProxy::Ask { run, .. } = asked.recv_timeout(crate::test_results::PATIENCE).expect("asked again");
     assert_eq!(run, p.run_id);
     super::get().send(answer(run, Scope::Refused));
-    let (_, out, _) = finish(s, 30);
+    let (_, out, _) = finish(s, crate::test_results::PATIENCE);
     ended();
     assert_ne!(out, "ok", "refused");
 }
@@ -412,7 +424,7 @@ fn an_unknown_host_waits_for_the_answer() {
     use super::{FromProxy, Scope, ToProxy};
     let root = Path::new("/Users/u/p-5e-ask");
     let name = "ask-5e.example.invalid";
-    let (port, seen) = outside(name, root, 30);
+    let (port, seen) = outside(name, root);
     let (asks, asked) = std::sync::mpsc::channel();
     let session = super::session_of(root);
     super::TEST_ASKS.lock().unwrap().push((session, asks));
@@ -431,18 +443,18 @@ fn an_unknown_host_waits_for_the_answer() {
     let p = listed();
     let ended = after_run(Some(&p));
     let s = spawn(Some(&p), &curl(&p, "first")).unwrap();
-    let ask = asked.recv_timeout(Duration::from_secs(10)).expect("the main loop asked");
+    let ask = asked.recv_timeout(crate::test_results::PATIENCE).expect("the main loop asked");
     let FromProxy::Ask { run, host, port: at, process, .. } = ask;
     assert_eq!((run, host.as_str(), at, process.as_str()), (p.run_id, name, port, "curl"));
     super::get().send(ToProxy::Answer { session, run, host: name.into(), port, scope: Scope::Session });
-    let (_, out, _) = finish(s, 30);
+    let (_, out, _) = finish(s, crate::test_results::PATIENCE);
     ended();
     let (h, l) = seen.join().unwrap();
     assert_eq!(out, "ok", "the held request went on");
     assert!(h.is_some_and(|h| h.starts_with("GET /first ")));
     // The session's next run: its rules don't name it, the session's answer does
     let again = crate::event::thread("tarae-5e-test", move || {
-        accept_within(&l, 15).map(|s| {
+        accept_within(&l).map(|s| {
             let h = head(&s);
             let _ = (&s).write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
             String::from_utf8_lossy(&h).into_owned()
@@ -450,7 +462,7 @@ fn an_unknown_host_waits_for_the_answer() {
     });
     let p = listed();
     let ended = after_run(Some(&p));
-    let (_, out, _) = finish(spawn(Some(&p), &curl(&p, "second")).unwrap(), 30);
+    let (_, out, _) = finish(spawn(Some(&p), &curl(&p, "second")).unwrap(), crate::test_results::PATIENCE);
     ended();
     assert_eq!(out, "ok", "the session's next run");
     assert!(again.join().unwrap().is_some_and(|h| h.starts_with("GET /second ")));
@@ -466,7 +478,7 @@ fn a_run_whose_own_addresses_are_unread_reaches_nothing() {
     let root = Path::new("/Users/u/p-5d-unread");
     let name = "unread-5d.example.invalid";
     // (asked once curl has its answer: a connection to the outside would have come before it)
-    let (port, seen) = outside(name, root, 1);
+    let (port, outside) = outside_unserved(name, root);
     let base = open(root);
     let mut r = RunPort::new(base.run_id).unwrap();
     std::sync::Arc::get_mut(&mut r).expect("a new run's port, ours alone").own_addresses = None;
@@ -489,13 +501,13 @@ fn a_run_whose_own_addresses_are_unread_reaches_nothing() {
             .filter(|(k, _)| k.to_lowercase().ends_with("_proxy")),
     );
     let ended = after_run(Some(&p));
-    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), 30);
+    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), crate::test_results::PATIENCE);
     ended();
     assert!(
         out.contains("this machine's own addresses couldn't be read, so no address is reached"),
         "refused, saying why: {out:?}"
     );
-    let (h, _) = seen.join().unwrap();
+    let h = reached(&outside);
     assert!(h.is_none(), "the outside was reached: {h:?}");
 }
 
@@ -507,7 +519,7 @@ fn a_run_whose_own_addresses_are_unread_reaches_nothing() {
 fn a_name_leading_to_an_own_address_is_refused() {
     let root = Path::new("/Users/u/p-g7-own");
     let name = "own-g7.example.invalid";
-    let (port, seen) = outside(name, root, 1);
+    let (port, outside) = outside_unserved(name, root);
     let base = open(root);
     let mut r = RunPort::new(base.run_id).unwrap();
     let own = Some(vec![std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)]);
@@ -521,10 +533,10 @@ fn a_name_leading_to_an_own_address_is_refused() {
             .filter(|(k, _)| k.to_lowercase().ends_with("_proxy")),
     );
     let ended = after_run(Some(&p));
-    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), 30);
+    let (_, out, _) = finish(spawn(Some(&p), &curl).unwrap(), crate::test_results::PATIENCE);
     ended();
     assert!(out.contains("one of this machine's own addresses"), "refused, saying why: {out:?}");
-    let (h, _) = seen.join().unwrap();
+    let h = reached(&outside);
     assert!(h.is_none(), "the outside was reached: {h:?}");
 }
 
@@ -539,7 +551,7 @@ fn a_run_goes_out_only_through_its_proxy() {
     }
     let root = scratch("sb-5d-out");
     let name = "a-5d.example.invalid";
-    let (port, seen) = outside(name, &root, 15);
+    let (port, seen) = outside(name, &root);
     let p = open(&root);
     let script = format!(
         "/usr/bin/curl -s --max-time 10 http://{name}:{port}/through; echo; \
@@ -576,7 +588,7 @@ fn a_wrong_token_is_said_in_the_runs_report() {
     let said = "reaching wrong-5d.example.invalid:80: a wrong proxy password — not its run's (HTTPS_PROXY) \
                 (network-proxy, sh)";
     let g = Guard::In(Box::new(p));
-    let by = Instant::now() + Duration::from_secs(5);
+    let by = Instant::now() + crate::test_results::PATIENCE;
     while !g.report(&[]).contains(said) && Instant::now() < by {
         std::thread::sleep(Duration::from_millis(20));
     }

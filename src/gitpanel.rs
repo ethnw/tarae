@@ -2167,7 +2167,7 @@ mod tests {
             ed.handle_key(k.parse().unwrap());
         }
         ed.git_stage("", true);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !ed.toasts.iter().any(|t| t.text == "Staged everything") {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("staged before the timeout");

@@ -459,7 +459,7 @@ pub(crate) fn stand_in(arg: &str, env: &str) -> std::process::Child {
         .unwrap();
     let has = |bytes: &[u8], m: &str| bytes.windows(m.len()).any(|w| w == m.as_bytes());
     let read = |f: &str| std::fs::read(format!("/proc/{}/{f}", target.id())).unwrap_or_default();
-    let by = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let by = std::time::Instant::now() + crate::test_results::PATIENCE;
     let (seen, cmdline, environ) = loop {
         let (cmdline, environ) = (read("cmdline"), read("environ"));
         let seen = has(&cmdline, arg) && has(&environ, env);
@@ -729,7 +729,7 @@ mod tests {
             return;
         }
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        receiver.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        receiver.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
         let to = receiver.local_addr().unwrap();
         let connected = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         connected.connect(to).unwrap();

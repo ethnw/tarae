@@ -1244,8 +1244,16 @@ mod tests {
         (t, ed)
     }
 
-    fn settle(ed: &mut Editor, ms: u64, done: impl Fn(&Editor) -> bool) -> bool {
-        let end = Instant::now() + Duration::from_millis(ms);
+    fn settle(ed: &mut Editor, done: impl Fn(&Editor) -> bool) -> bool {
+        settle_by(ed, Instant::now() + crate::test_results::PATIENCE, done)
+    }
+
+    /// Events for `ms`, or until `done` — a look that it doesn't happen meanwhile (`quiet_for`).
+    fn quiet(ed: &mut Editor, ms: u64, done: impl Fn(&Editor) -> bool) -> bool {
+        settle_by(ed, crate::test_results::quiet_for(Duration::from_millis(ms)), done)
+    }
+
+    fn settle_by(ed: &mut Editor, end: Instant, done: impl Fn(&Editor) -> bool) -> bool {
         while !done(ed) && Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
                 ed.handle_event(ev);
@@ -1259,7 +1267,7 @@ mod tests {
         ed.open(file).unwrap();
         let id = ed.doc().id;
         let has = |ed: &Editor| ed.docs.iter().find(|d| d.id == id).is_some_and(|d| d.lsp.client.is_some());
-        settle(ed, 3000, has);
+        settle(ed, has);
         (id, main_of(ed, id))
     }
 
@@ -1283,7 +1291,7 @@ mod tests {
     fn sent(t: &Path, ed: &Editor, cid: ClientId, want: &[&str]) -> String {
         let pid = ed.client(cid).and_then(Client::pid).expect("its process");
         let log = t.join(format!("srv-{pid}.log"));
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         loop {
             let out = std::fs::read_to_string(&log).unwrap_or_default();
             if want.iter().all(|w| out.contains(w)) || Instant::now() >= end {
@@ -1313,7 +1321,7 @@ mod tests {
 
     /// The swap's comparison round: A and B answer `a` and `b` to each definition asked.
     fn round(ed: &mut Editor, a: ClientId, b: ClientId, ra: &Value, rb: &Value) {
-        settle(ed, 2000, |ed| !asked(ed, a, is_check).is_empty() && !asked(ed, b, is_check).is_empty());
+        settle(ed, |ed| !asked(ed, a, is_check).is_empty() && !asked(ed, b, is_check).is_empty());
         for id in asked(ed, a, is_check) {
             answer(ed, a, id, ra.clone());
         }
@@ -1328,7 +1336,7 @@ mod tests {
 
     /// A's shutdown answered: it's gone, quietly.
     fn shut(ed: &mut Editor, a: ClientId) {
-        settle(ed, 3000, |ed| !asked(ed, a, |k| matches!(k, Kind::Shutdown)).is_empty());
+        settle(ed, |ed| !asked(ed, a, |k| matches!(k, Kind::Shutdown)).is_empty());
         let id = asked(ed, a, |k| matches!(k, Kind::Shutdown)).pop().expect("told to shut down");
         answer(ed, a, id, Value::Null);
         assert!(ed.client(a).is_none(), "gone at its answer");
@@ -1359,12 +1367,12 @@ mod tests {
         // The worktree's file: its folder joins by a swap
         ed.open(&wt_file).unwrap();
         let wt = ed.doc().id;
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap began");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap began");
         let (sa, b) = the_swap(&ed).unwrap();
         assert_eq!(sa, a);
         assert_eq!(ed.client(b).unwrap().roots, [t.join("main"), t.join("wt1")], "B for both folders");
         assert!(
-            settle(&mut ed, 2000, |ed| main_of(ed, wt) == Some(b)),
+            settle(&mut ed, |ed| main_of(ed, wt) == Some(b)),
             "the new folder's file is B's from the start"
         );
         assert_eq!(main_of(&ed, main), Some(a), "main's file still A's");
@@ -1440,7 +1448,7 @@ mod tests {
         up(&mut ed, a);
         quiescent(&mut ed, a);
         let id = ed.session_add(t.join("wt1"));
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap began with no file of it open");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap began with no file of it open");
         let (_, b) = the_swap(&ed).unwrap();
         assert_eq!(ed.client(b).unwrap().roots, [t.join("main"), t.join("wt1")]);
         ed.session_switch(id);
@@ -1462,7 +1470,7 @@ mod tests {
         up(&mut ed, a);
         quiescent(&mut ed, a);
         let wt = ed.session_add(t.join("wt1"));
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap began");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap began");
         let (_, b) = the_swap(&ed).unwrap();
         up(&mut ed, b);
         quiescent(&mut ed, b);
@@ -1480,14 +1488,14 @@ mod tests {
         assert_eq!(ed.client(c).unwrap().roots, [t.join("main")], "its own folder's");
         up(&mut ed, c);
         quiescent(&mut ed, c);
-        settle(&mut ed, (GATHER + ms(100)).as_millis() as u64, |ed| the_swap(ed).is_some());
+        quiet(&mut ed, (GATHER + ms(100)).as_millis() as u64, |ed| the_swap(ed).is_some());
         assert!(the_swap(&ed).is_none(), "the held checkout isn't taken back in");
 
         ed.sessions.iter_mut().find(|l| l.id == wt).unwrap().made_protected.clear();
         ed.sessions_sync();
         ed.session_switch(wt);
         ed.open(&t.join("wt1/src/main.rs")).unwrap();
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "answered, its files join again");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "answered, its files join again");
         let (_, d) = the_swap(&ed).unwrap();
         assert_eq!(ed.client(d).unwrap().roots, [t.join("main"), t.join("wt1")]);
         ed.sessions.clear();
@@ -1532,7 +1540,7 @@ mod tests {
         ed.open(&t.join("wt1/src/main.rs")).unwrap();
         ed.open(&t.join("wt2/src/main.rs")).unwrap();
         let wt2 = ed.doc().id;
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()));
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()));
         let (_, b) = the_swap(&ed).unwrap();
         assert_eq!(
             ed.client(b).unwrap().roots.len(),
@@ -1549,7 +1557,7 @@ mod tests {
         shut(&mut ed, a);
         // wt2's file closed — nothing keeps its checkout: a swap with the shorter list
         ed.close_doc(wt2);
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap to leave it");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap to leave it");
         let (sa, c) = the_swap(&ed).unwrap();
         assert_eq!(sa, b);
         assert_eq!(ed.client(c).unwrap().roots, [t.join("main"), t.join("wt1")]);
@@ -1573,7 +1581,7 @@ mod tests {
         takes(&mut ed, a);
         ed.open(&t.join("wt1/src/main.rs")).unwrap();
         let wt = ed.doc().id;
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "joining is still a swap");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "joining is still a swap");
         let (_, b) = the_swap(&ed).unwrap();
         takes(&mut ed, b);
         let place = json!([{ "uri": "file:///x.rs", "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } } }]);
@@ -1582,7 +1590,7 @@ mod tests {
         // wt1's file closed, no session for it: told, and the same server serves main
         ed.close_doc(wt);
         let left = |ed: &Editor| ed.client(b).is_some_and(|c| c.roots == [t.join("main")]);
-        assert!(settle(&mut ed, 3000, left), "{:?}", ed.client(b).map(|c| c.roots.clone()));
+        assert!(settle(&mut ed, left), "{:?}", ed.client(b).map(|c| c.roots.clone()));
         assert!(the_swap(&ed).is_none() && ed.lsp.clients.len() == 1, "no swap, no second server");
         let out = sent(&t, &ed, b, &["didChangeWorkspaceFolders"]);
         let told = out.lines().find(|l| l.contains("didChangeWorkspaceFolders")).unwrap_or_default();
@@ -1604,7 +1612,7 @@ mod tests {
         up(&mut ed, a);
         quiescent(&mut ed, a);
         let (wt, _) = (ed.open(&t.join("wt1/src/main.rs")).map(|_| ed.doc().id).unwrap(), ());
-        assert!(settle(&mut ed, 3000, |ed| ed.client(a).is_none()), "A stopped at once");
+        assert!(settle(&mut ed, |ed| ed.client(a).is_none()), "A stopped at once");
         let b = main_of(&ed, main).expect("main's file has the new one");
         assert_eq!(main_of(&ed, wt), Some(b), "and the worktree's");
         assert_eq!(ed.client(b).unwrap().roots, [t.join("main"), t.join("wt1")]);
@@ -1618,7 +1626,7 @@ mod tests {
         // Room again: the next checkout is a swap
         ed.lsp.share.room = Some(plenty);
         let (wt2, _) = (ed.open(&t.join("wt2/src/main.rs")).map(|_| ed.doc().id).unwrap(), ());
-        assert!(settle(&mut ed, 3000, |ed| main_of(ed, wt2).is_some()));
+        assert!(settle(&mut ed, |ed| main_of(ed, wt2).is_some()));
         let c = main_of(&ed, wt2).unwrap();
         assert_eq!(the_swap(&ed), Some((b, c)), "with room: a swap");
         let _ = std::fs::remove_dir_all(&t);
@@ -1632,7 +1640,7 @@ mod tests {
         up(&mut ed, a);
         // (never quiescent)
         ed.open(&t.join("wt1/src/main.rs")).unwrap();
-        assert!(settle(&mut ed, 3000, |ed| ed.client(a).is_none()), "restarted, not swapped");
+        assert!(settle(&mut ed, |ed| ed.client(a).is_none()), "restarted, not swapped");
         let b = main_of(&ed, main).unwrap();
         assert_eq!(ed.client(b).unwrap().roots.len(), 2);
         assert!(ed.lsp.share.swaps.is_empty());
@@ -1658,11 +1666,11 @@ mod tests {
         up(&mut ed, a);
         quiescent(&mut ed, a);
         ed.open(&t.join("wt1/src/main.rs")).unwrap();
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()));
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()));
         let (_, b) = the_swap(&ed).unwrap();
         up(&mut ed, b);
         PRESSURE.store(1, Ordering::SeqCst);
-        assert!(settle(&mut ed, 3000, |ed| ed.client(a).is_none()), "A stopped");
+        assert!(settle(&mut ed, |ed| ed.client(a).is_none()), "A stopped");
         assert_eq!(main_of(&ed, main), Some(b), "B took main's file");
         assert!(ed.lsp.share.swaps.is_empty());
         assert!(ed.client(b).unwrap().checks_off, "its checks wait until it's loaded");
@@ -1681,14 +1689,14 @@ mod tests {
         up(&mut ed, a);
         // (still loading: restarted for both)
         let (wt, _) = (ed.open(&t.join("wt1/src/main.rs")).map(|_| ed.doc().id).unwrap(), ());
-        assert!(settle(&mut ed, 3000, |ed| main_of(ed, wt).is_some() && ed.client(a).is_none()));
+        assert!(settle(&mut ed, |ed| main_of(ed, wt).is_some() && ed.client(a).is_none()));
         let s = main_of(&ed, wt).unwrap();
         up(&mut ed, s);
         quiescent(&mut ed, s);
         std::fs::write(t.join("wt1/rust-toolchain.toml"), "[toolchain]\nchannel = \"1.98.0\"\n").unwrap();
         let fetching = json!({ "jsonrpc": "2.0", "method": "$/progress", "params": { "token": "rustAnalyzer/Fetching", "value": { "kind": "begin", "title": "Fetching" } } });
         ed.on_lsp_message(s, fetching);
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap to let it go");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap to let it go");
         let (_, b) = the_swap(&ed).unwrap();
         assert_eq!(ed.client(b).unwrap().roots, [t.join("main")]);
         up(&mut ed, b);
@@ -1716,7 +1724,7 @@ mod tests {
         std::fs::remove_file(t.join("wt2/Cargo.toml")).unwrap();
         ed.share_session(&t.join("wt2"));
         ed.share_session(&t.join("wt1"));
-        assert!(settle(&mut ed, 3000, |ed| the_swap(ed).is_some()), "a swap began");
+        assert!(settle(&mut ed, |ed| the_swap(ed).is_some()), "a swap began");
         let (_, b) = the_swap(&ed).unwrap();
         assert_eq!(ed.client(b).unwrap().roots, [t.join("main"), t.join("wt1")], "wt1 joined, wt2 didn't");
         let _ = std::fs::remove_dir_all(&t);

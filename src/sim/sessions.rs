@@ -24,7 +24,7 @@ const SEEDS: &[u64] = &[0, 1];
 const INPUTS: usize = 40;
 
 /// A run's real time at most.
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// Commits made by the scenario carry this date, so two runs of a seed make the same commits.
 const DATE: &str = "2026-10-18T00:00:00Z";

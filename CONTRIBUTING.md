@@ -131,8 +131,10 @@ measured" is never a pass. A slow change thus fails a budget, and a slower one s
 `cargo perf` is the gate on time; `cargo test` builds at opt-level 0 for a quick edit-and-test loop, where these skip
 themselves, saying so. On a slow shared machine, `TARAE_PERF_SLACK=3` multiplies the budget.
 
-[CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
-clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — except `cargo perf`:
+Where each OS is tested: macOS's tests run here, on the maintainer's Mac (`:preflight`, `:preflight-full`); CI
+only builds them. [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run
+workflow) — fmt, clippy (warnings are errors), and the tests on Linux, with and without bundled grammars, every
+failing test binary said at once (`--no-fail-fast`) — except `cargo perf`:
 time is judged on a fixed machine, so CI runs only the time budgets, in the `perf` profile, and they only report (the
 `perf-budgets-…` artifact, what went over in the step's summary; never a failed job) — its gate is the deterministic
 tests and budgets of work, the same on any machine. A test that fails there and passes here waits on the wrong

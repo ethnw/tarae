@@ -581,7 +581,7 @@ mod tests {
     /// hang-up comes when tarae's master's last copy closes: a process another thread is spawning holds a copy of
     /// every descriptor until it execs, so dropping the master may hang the pty up only a moment later.
     fn hung_up(end: BorrowedFd) -> Result<(), String> {
-        const HUNG_WAIT: Duration = Duration::from_secs(10);
+        const HUNG_WAIT: Duration = crate::test_results::PATIENCE;
         let mut fl = libc::pollfd { fd: end.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         // SAFETY: a struct of ours, a descriptor we hold.
         let ready = unsafe { libc::poll(&mut fl, 1, HUNG_WAIT.as_millis() as libc::c_int) };

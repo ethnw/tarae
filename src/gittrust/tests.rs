@@ -172,7 +172,7 @@ fn a_command_added_mid_session_brings_its_card() {
     // Gone unanswered (its session ended, say): the git tab's read puts it up again
     ed.offers.clear();
     ed.git_refresh();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while ed.session.git_status.is_none() {
         let ev =
             ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).expect("read");
@@ -278,7 +278,7 @@ fn opening_a_file_there_asks() {
     ed.session.root = repo.clone();
     ed.git_auto = true;
     ed.open(&repo.join("a.txt")).unwrap();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while ed.git_bases_read == 0 {
         let ev =
             ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).expect("read");

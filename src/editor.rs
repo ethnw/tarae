@@ -5511,7 +5511,7 @@ mod tests {
 
     /// Waits until one background job finishes and is applied.
     fn settle(ed: &mut Editor) {
-        let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("job result");
+        let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("job result");
         ed.handle_event(ev);
     }
 
@@ -5869,7 +5869,7 @@ mod tests {
 
     /// Processes events until the condition holds (a streamed answer is several events).
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -6630,7 +6630,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), format!("cat > '{}'", log.display())];
         feed(&mut ed, "<space>lwhat is this?<ret>");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let sent = loop {
             let sent = std::fs::read_to_string(&log).unwrap_or_default();
             if sent.contains("what is this?") || std::time::Instant::now() > end {
@@ -6975,7 +6975,7 @@ mod tests {
         let (a, b) = (ed.session.id, ed.session_add(other.clone()));
         assert!(ed.session_switch(b));
         // The wake-up lands while it's behind: follow doesn't take over in a session you aren't in
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let end = crate::test_results::quiet_for(std::time::Duration::from_millis(300));
         while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
             if let Some(ev) = ed.events.recv_timeout(left) {
                 ed.handle_event(ev);
@@ -7075,7 +7075,7 @@ mod tests {
             (d.path.clone(), led_line(ed), shown, card)
         };
         let mut seen: Vec<Seen> = Vec::new();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let mut started = false;
         while !started || ed.session.chat.as_ref().unwrap().busy() {
             started |= ed.session.chat.as_ref().unwrap().busy();
@@ -7213,7 +7213,7 @@ mod tests {
         assert_eq!(crate::notes::here(&ed).map(|n| n.id), Some(1));
         // The fake logs our control_response when it reads it — wait for that
         let logged = |needle: &str| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             loop {
                 let sent = std::fs::read_to_string(&log).unwrap_or_default();
                 if sent.contains(needle) || std::time::Instant::now() > end {
@@ -7321,7 +7321,7 @@ mod tests {
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), script];
         feed(&mut ed, "<space>lcheck the adder<ret>");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.session.chat.as_ref().unwrap().busy() {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("the run ends before the timeout");
@@ -7411,7 +7411,7 @@ mod tests {
 
     /// Handles events until `done` (or panics after a minute).
     fn settle_for(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("done before the timeout");
@@ -7441,7 +7441,7 @@ mod tests {
                 && !ed.session.checkpoints.gathering
                 && std::fs::read_to_string(dir.join("stdin.log")).is_ok_and(|s| s.contains("\"c7\""))
         };
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
                 ed.handle_event(ev);
@@ -8201,7 +8201,7 @@ mod tests {
         };
         // Events handled with a frame drawn after each — the screen goes with a frame
         let settle_drawing = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "done before the timeout");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -9004,7 +9004,7 @@ mod tests {
         r.containers.as_mut().unwrap().find_on(dir.join("bin").as_os_str());
         ed.task_close();
         let stopped = format!("stop {prefix}-checks on tcp://tarae-test.invalid:2375");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !std::fs::read_to_string(&asked).unwrap_or_default().contains(&stopped) {
             let asked = std::fs::read_to_string(&asked).unwrap_or_default();
             assert!(std::time::Instant::now() < end, "stopped by name, on its engine: {asked}");
@@ -10028,7 +10028,7 @@ mod tests {
 
     /// The answer tarae gave claude's permission request `id`.
     fn permission_answer_to(log: &Path, id: &str) -> serde_json::Value {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         loop {
             let sent = std::fs::read_to_string(log).unwrap_or_default();
             if let Some(l) = sent.lines().find(|l| l.contains(&format!("\"request_id\":\"{id}\""))) {
@@ -10725,7 +10725,7 @@ mod tests {
         settle_until(&mut ed, |ed| !ed.session.chat.as_ref().unwrap().busy());
         assert_eq!(ed.session.chat.as_ref().unwrap().conversation.as_deref(), Some("s-1"));
         let kept = |dir: &Path| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             loop {
                 let all = crate::chats::load(&dir.join("chats"), &test_root());
                 // (kept twice — the question when claude names the conversation, then the answer: wait for the answer)
@@ -10758,7 +10758,7 @@ mod tests {
         );
         assert_eq!(c.msgs.iter().filter(|m| m.text.starts_with("continued from")).count(), 1);
         let started = || std::fs::read_to_string(&argv).unwrap_or_default();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !started().lines().last().unwrap_or_default().contains("--resume s-1") {
             assert!(std::time::Instant::now() < end, "resumed: {}", started());
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -10779,7 +10779,7 @@ mod tests {
             let c = ed.session.chat.as_ref().unwrap();
             c.msgs.iter().filter(|m| m.text == "Hello back.").count() == 2 && !c.busy()
         };
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !answered(&ed) {
             let c = ed.session.chat.as_ref().unwrap();
             let rows: Vec<_> = c.msgs.iter().map(|m| &m.text).collect();
@@ -10875,7 +10875,7 @@ mod tests {
         );
         assert!(rows[at("▎ Add a flag")].contains("1/3"));
         // (the fake logs our answer when it reads it)
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !std::fs::read_to_string(&log).unwrap_or_default().contains("plan shown (1/3 done)") {
             assert!(std::time::Instant::now() < end, "answered");
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -10921,7 +10921,7 @@ mod tests {
         };
         assert!(title(&mut ed).contains("Opus 5.5"), "default names the model it stands for");
         let logged = |needle: &str| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !std::fs::read_to_string(&log).unwrap_or_default().contains(needle) {
                 assert!(std::time::Instant::now() < end, "sent {needle}");
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -11596,7 +11596,7 @@ mod tests {
         let spec: &'static syntax::LangSpec = Box::leak(Box::new(lang));
         ed.load_language(ed.doc().id, spec);
         // (until its load is back: the grammar missing, its offer held)
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.doc().grammar_held.is_none() {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
             ed.handle_event(ev.expect("its load back, the offer held"));
@@ -11893,7 +11893,7 @@ mod tests {
         ok: impl Fn(&crate::checkpoint::Stored) -> bool,
     ) -> crate::checkpoint::Stored {
         let root = test_root();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         loop {
             let kept = crate::checkpoint::load_whole(store, &root);
             if ok(&kept) {
@@ -12093,7 +12093,7 @@ mod tests {
         feed(&mut ed, "edit it<ret>");
         settle_until(&mut ed, |ed| !ed.session.checkpoints.turn.is_empty());
         // (a moment for an answer to reach claude)
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let end = crate::test_results::quiet_for(std::time::Duration::from_millis(300));
         while std::time::Instant::now() < end {
             if let Ok(Some(ev)) = ed.events.recv_within(std::time::Duration::from_millis(10)) {
                 ed.handle_event(ev);
@@ -12297,7 +12297,7 @@ mod tests {
         // (what's said from here on — `:session-open`'s own toast names it too)
         let before = ed.messages.len();
         let (mut events, mut drawn) = (0, 0);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while session_by(&ed, behind).chat.as_ref().unwrap().busy() {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("the session behind's answer");
@@ -12363,7 +12363,7 @@ mod tests {
         ed.events.jobs().spawn(|| |_: &mut Editor| {});
         let mut unchanged = true;
         for _ in 0..4 {
-            let ev = ed.events.recv_timeout(std::time::Duration::from_secs(10)).expect("each job's result");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("each job's result");
             unchanged &= crate::term::handle_noting(&mut ed, ev);
         }
         assert!(crate::term::batch_done(&mut ed, unchanged));
@@ -12435,7 +12435,7 @@ mod tests {
         crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
         // A UI-state ask, its input come — answered by the frame that's drawn for it
         let (tx, rx) = std::sync::mpsc::channel();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = std::time::Instant::now() + crate::test_results::PATIENCE;
         let ask = crate::uistate::Ask {
             after_input: ed.input_seq,
             json: true,
@@ -12467,7 +12467,7 @@ mod tests {
         ed.picker = Some(Picker::new("files", Vec::new(), true));
         ed.set_error("an error under the picker");
         let (tx, _rx) = std::sync::mpsc::channel();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let until = std::time::Instant::now() + crate::test_results::PATIENCE;
         let ask = crate::uistate::Ask {
             after_input: ed.input_seq + 1,
             json: true,
@@ -13594,7 +13594,7 @@ mod tests {
         assert_eq!(said, ["chat 52 columns · C-w = automatic"]);
         // Kept in the file
         let kept = || crate::sizes::Sizes::read(Some(&dir.join("sizes.json")));
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while kept().chat != Some(52) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
                 ed.handle_event(ev);
@@ -13679,7 +13679,7 @@ mod tests {
         assert!(ed.dragging.is_none());
         assert!(ed.toasts.iter().any(|t| t.text == "chat 66 columns · C-w = automatic"), "said when let go");
         let kept = || crate::sizes::Sizes::read(Some(&dir.join("sizes.json")));
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while kept().chat != Some(66) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
                 ed.handle_event(ev);
@@ -15213,7 +15213,7 @@ mod tests {
 
     /// Events until `done`, or 5 s — without failing (the caller says what didn't come).
     fn wait_for(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
                 ed.handle_event(ev);
@@ -15529,7 +15529,7 @@ mod tests {
         ed.doc_mut().git_base = Some(std::sync::Arc::new("a\nB\nc\n".into()));
         ed.doc_mut().git_version = u64::MAX;
         ed.git_schedule();
-        let stale = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the index diff");
+        let stale = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the index diff");
         crate::codereview::start_in(&mut ed, dir.clone(), None);
         settle_until(&mut ed, |ed| {
             ed.doc().review_base.is_some() && ed.doc().git_version == ed.doc().version()
@@ -15554,7 +15554,7 @@ mod tests {
             crate::codereview::CodeReview::for_test(crate::codereview::Base::Head, dir.clone(), Vec::new());
         r.docs.push(id);
         ed.session.code_review = Some(r);
-        let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the index base");
+        let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the index base");
         ed.handle_event(ev);
         assert!(ed.doc().git_base.is_none(), "the review's base is on its way");
         std::fs::remove_dir_all(&dir).ok();
@@ -15920,7 +15920,7 @@ mod tests {
         let mut ed = editor("a\nB\nc\nd\nnew\n");
         ed.docs[0].git_base = Some(std::sync::Arc::new("a\nb\nc\nd\n".to_string()));
         ed.git_schedule();
-        let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).unwrap();
         ed.handle_event(ev);
         let kinds: Vec<_> = ed.doc().git_hunks.iter().map(|h| (h.kind, h.lines.clone())).collect();
         assert_eq!(kinds, [(crate::git::HunkKind::Modified, 1..2), (crate::git::HunkKind::Added, 4..5)]);
@@ -16451,7 +16451,7 @@ mod tests {
         assert!(underlined(col("screen")) && underlined(col("100×30")), "the screen is a link: {}", rows[r]);
         assert!(!underlined(col(" · screen") + 1), "the rest of the chip isn't: {}", rows[r]);
         // (the fake claude's log isn't an editor event: poll, handling events as they come)
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !(std::fs::read_to_string(&log).unwrap_or_default().contains("what is wrong here")
             && std::fs::read_to_string(&copy).is_ok_and(|t| t.contains("fn main() {}")))
         {
@@ -17486,7 +17486,7 @@ q = \"delete_selection\"\n",
         let mut grammar = true;
         for n in &names[..8] {
             ed.open(&dir.join(format!("{n}.rs"))).unwrap();
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !has_tree(&ed, n) && std::time::Instant::now() < end {
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
                     ed.handle_event(ev);
@@ -17501,8 +17501,9 @@ q = \"delete_selection\"\n",
         // One opened and left before it was ever shown
         ed.open(&dir.join("never.rs")).unwrap();
         ed.open(&dir.join("h.rs")).unwrap();
-        // Ten minutes on: the five seen last keep theirs, the others' go
-        ed.trees_follow_sight(std::time::Instant::now() + std::time::Duration::from_secs(600));
+        // Long past `trees_unseen` (the clock this rule is read on, moved on): the five seen last keep theirs, the
+        // others' go
+        ed.trees_follow_sight(std::time::Instant::now() + trees_unseen() * 3);
         let kept: Vec<&str> = names.iter().copied().filter(|n| has_tree(&ed, n)).collect();
         assert_eq!(kept, ["d", "e", "f", "g", "h"]);
         ed.schedule_parses();

@@ -17,7 +17,7 @@ const SEEDS: &[u64] = &[0, 1, 2, 7, 10];
 
 const INPUTS: usize = 60;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn a_flash_wakes_on_its_own_steps_and_ends() {

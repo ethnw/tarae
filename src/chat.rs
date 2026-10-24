@@ -3606,7 +3606,7 @@ mod tests {
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + std::time::Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(Instant::now());
             let Some(ev) = ed.events.recv_timeout(left) else {
@@ -3653,7 +3653,7 @@ mod tests {
             // (it starts once what it waits on is read — and nothing after: its exit stays unheard)
             settle_until(&mut ed, |ed| ed.session.chat.as_ref().unwrap().proc.is_some());
             // (the writer has met the ended process once a line can't be handed to it)
-            let end = Instant::now() + std::time::Duration::from_secs(5);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             let p = ed.session.chat.as_ref().unwrap().proc.as_ref().unwrap();
             while p.stdin.send(String::new()).is_ok() {
                 assert!(Instant::now() < end, "the writer still writes");
@@ -4498,7 +4498,7 @@ mod tests {
         assert!(ed.session.chat.as_ref().unwrap().busy(), "sent");
         assert!(took < std::time::Duration::from_millis(500), "the main loop waited {took:?} on the pipe");
         // Everything arrives, in the order it was written: initialize, the message, the interrupt
-        let end = Instant::now() + std::time::Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let sent = loop {
             let s = std::fs::read_to_string(&log).unwrap_or_default();
             if s.lines().count() >= 3 || Instant::now() > end {
@@ -4560,7 +4560,7 @@ mod tests {
         ed.session.chat.as_mut().unwrap().reads.extend([pending("b.png"), pending("c.png")]);
         crate::reads::next(&mut ed);
         // (the folder's offered once it's been looked through for tokens — a worker's)
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while card(&ed).1.is_none() {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("the folder offered before the timeout");
@@ -4613,7 +4613,7 @@ mod tests {
         ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation;
         let until = |ed: &mut Editor, what: &str, done: &dyn Fn(&Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("timed out: {what}"));
@@ -4748,7 +4748,7 @@ mod tests {
             _ => None,
         };
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
-            let end = Instant::now() + std::time::Duration::from_secs(5);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(Instant::now() < end, "timed out");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

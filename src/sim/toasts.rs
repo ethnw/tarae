@@ -20,7 +20,7 @@ const SEEDS: &[u64] = &[0, 1, 2, 7, 10];
 
 const INPUTS: usize = 60;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn a_toasts_time_meets_the_focus() {

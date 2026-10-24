@@ -50,7 +50,7 @@ fn feed(ed: &mut Editor, keys: &str) {
 }
 
 fn settle_until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("{what} before the timeout"));

@@ -73,7 +73,7 @@ fn go_binary(root: &Path, name: &str, src: &str) -> Option<PathBuf> {
     let out = root.join(name);
     let mut go = Command::new("go");
     go.args(["build", "-o"]).arg(&out).arg(&file).envs(base_env(root)).current_dir(root);
-    let (status, ..) = finish(crate::spawn::setsid(&go).ok()?, 300);
+    let (status, ..) = finish(crate::spawn::setsid(&go).ok()?, std::time::Duration::from_secs(300));
     status.is_some_and(|s| s.success()).then_some(out)
 }
 
@@ -127,7 +127,7 @@ fn run_measured(p: &Policy, cmd: &Command, started: impl FnOnce(u32)) -> Ended {
         w.run_started(s.pid);
     }
     started(s.pid);
-    let (status, out, err) = finish(s, 300);
+    let (status, out, err) = finish(s, std::time::Duration::from_secs(300));
     let ms = t.elapsed().as_millis();
     ended();
     Ended { code: status.and_then(|s| s.code()), ms, out, err }
@@ -386,7 +386,7 @@ fn measure_localhost_lookups() {
     let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = l.local_addr().unwrap().port();
     crate::event::thread("tarae-5d-test", move || {
-        while let Some(s) = accept_within(&l, 120) {
+        while let Some(s) = accept_within(&l) {
             let _ = head(&s);
             let _ = (&s).write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
         }
@@ -529,7 +529,7 @@ fn measure_where_a_denied_lookup_waits() {
             // (the run's `sh` exec'd python: the run's own pid is the process looking up)
             let mut s = Command::new("/usr/bin/sample");
             s.arg(pid.to_string()).arg("2").arg("-file").arg(&file);
-            let _ = finish(crate::spawn::setsid(&s).unwrap(), 30);
+            let _ = finish(crate::spawn::setsid(&s).unwrap(), crate::test_results::PATIENCE);
         })
     };
     let mut sampler = None;
@@ -771,9 +771,9 @@ fn stand_in(listener: TcpListener, sid: Arc<OnceLock<i32>>) -> Arc<Mutex<Vec<Che
     let checks = Arc::new(Mutex::new(Vec::new()));
     let kept = checks.clone();
     crate::event::thread("tarae-5d-test", move || {
-        // (none for 120 s: its run is long over — it ends)
-        while let Some(s) = accept_within(&listener, 120) {
-            let by = Instant::now() + Duration::from_secs(5);
+        // (none for `PATIENCE`: its run is long over — it ends)
+        while let Some(s) = accept_within(&listener) {
+            let by = Instant::now() + crate::test_results::PATIENCE;
             while sid.get().is_none() && Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(1));
             }

@@ -15,7 +15,7 @@ const SEEDS: &[u64] = &[0, 1, 2];
 
 const INPUTS: usize = 40;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn a_write_is_read_once_it_settles() {

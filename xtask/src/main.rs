@@ -65,6 +65,11 @@ mod turns;
 
 type Result<T> = std::result::Result<T, String>;
 
+/// How long a test waits for what it waits on before it calls it a hang — tarae's `test_results::PATIENCE`, the
+/// same value (why it's this long is said there).
+#[cfg(test)]
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {

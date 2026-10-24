@@ -393,7 +393,7 @@ fn untrusted(t: &mut Term, within: Duration) {
     if t.poll_for(within, |s| s.contains("Trust this project")).is_some() {
         // (a card that came on its own takes keys once focused — `C-q`, P3 §3.8)
         t.send("\x11");
-        let end = Instant::now() + Duration::from_secs(15);
+        let end = Instant::now() + LIVE_TIMEOUT;
         while t.screen().contains("Trust this project") && Instant::now() < end {
             t.send("n");
             let _ = t.poll_for(Duration::from_millis(500), |s| !s.contains("Trust this project"));
@@ -2631,7 +2631,8 @@ fn a_board_reads_its_diff_from_the_cache() {
     sb.write("src/lib.rs", &format!("pub mod table;\n{lib}"));
     let mut t = sb.spawn(&["src/lib.rs"]);
     t.send(" vC");
-    let deadline = Instant::now() + Duration::from_secs(20 * 60);
+    // (a real review of a whole crate: far past a live wait)
+    let deadline = Instant::now() + LIVE_TIMEOUT * 5;
     let run = loop {
         let st = t.state_json(0);
         let run = st["sessions"][0]["reviewer_run"].clone();

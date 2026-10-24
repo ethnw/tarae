@@ -166,7 +166,7 @@ fn answered(id: u64) -> Option<Result<String, String>> {
 }
 
 fn settle(ed: &mut Editor, done: &dyn Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).expect("settled before the timeout");
@@ -305,7 +305,7 @@ fn the_turns_end_stops_a_read_under_way() {
     ed.session.web_hosts.push(("page.test".into(), 443));
     read(&mut ed, generation, 51, &["https://page.test/slow"]);
     assert_eq!(ed.session.web_reads.len(), 1, "its stop kept while it reads");
-    heads.recv_timeout(std::time::Duration::from_secs(10)).expect("the request reached the server");
+    heads.recv_timeout(crate::test_results::PATIENCE).expect("the request reached the server");
     let stopped = std::time::Instant::now();
     crate::tools::turn_over(&mut ed);
     settle(&mut ed, &|_| answered(51).is_some());
@@ -351,7 +351,7 @@ fn a_page_read_is_a_stop_showing_the_copy_read() {
     crate::follow::on_tool(&mut ed, "t1", "mcp__tarae__read", &input, &look);
     read(&mut ed, generation, 21, &["https://page.test/a:3-3"]);
     settle(&mut ed, &|_| answered(21).is_some());
-    heads.recv_timeout(std::time::Duration::from_secs(1)).expect("fetched once");
+    heads.recv_timeout(crate::test_results::PATIENCE).expect("fetched once");
     let stop = ed.session.chat.as_ref().unwrap().follow.replay.turns.back().unwrap().stops[0].clone();
     let copy = stop.page.as_ref().and_then(|p| p.copy.clone()).expect("the stop has its copy");
     assert_eq!(copy.0, "https://page.test/a");

@@ -21,7 +21,7 @@ const SEEDS: &[u64] = &[0, 1, 2, 3];
 
 const INPUTS: usize = 60;
 
-const LIMIT: Duration = Duration::from_secs(30);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn shuttle_steps_among_the_persons_keys() {

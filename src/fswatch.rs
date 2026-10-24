@@ -13,7 +13,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long a wait lasts when events can be trusted — only a backstop for one we didn't foresee.
+#[cfg(not(test))]
 const BACKSTOP: Duration = Duration::from_secs(5);
+/// A test's is past its patience: a change a test sees, an event brought — never the backstop on a slow machine.
+#[cfg(test)]
+const BACKSTOP: Duration = crate::test_results::PATIENCE.saturating_mul(2);
 /// …and when they can't: the poll interval from before watching.
 const POLL: Duration = Duration::from_millis(500);
 /// A burst of writes (a truncate-then-write save, a checkout) is over after this much quiet…
@@ -473,9 +477,9 @@ mod sys {
 mod tests {
     use super::*;
 
-    /// How long an event that comes at once may take to arrive — generous for a slow runner, yet under
-    /// `BACKSTOP` (a wait that ran out isn't one an event ended).
-    const SOON: Duration = Duration::from_secs(3);
+    /// How long an event that comes at once may take to arrive — a guard (a wait that ran out says so,
+    /// `TimedOut`), under a test's `BACKSTOP`.
+    const SOON: Duration = crate::test_results::PATIENCE;
 
     fn tmp(name: &str) -> PathBuf {
         crate::scratch::Scratch::new(&format!("fswatch-{name}")).into_path()
@@ -616,7 +620,7 @@ mod tests {
                 continue;
             }
             assert!(woke >= last, "woke {:?} before the last write — the burst was split", last - woke);
-            let drained = Instant::now() + BURST_MAX;
+            let drained = crate::test_results::quiet_for(BURST_MAX);
             while Instant::now() < drained && w.wait_for(QUIET) == Woke::Changed {}
             assert_eq!(
                 w.wait_for(Duration::from_millis(200)),

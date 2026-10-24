@@ -11,23 +11,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// A run's time limit: past `secs`, its process group — the run's own, a session of its own (`spawn::setsid`)
+/// A run's time limit: past `limit`, its process group — the run's own, a session of its own (`spawn::setsid`)
 /// that this test started — is killed, so its output ends and a run that hangs fails its test instead of
 /// hanging it. Dropped once the run is reaped.
 pub(super) struct Deadline(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Deadline {
-    pub(super) fn new(pid: u32, secs: u64) -> Deadline {
+    pub(super) fn new(pid: u32, limit: Duration) -> Deadline {
         use std::sync::atomic::Ordering::SeqCst;
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = done.clone();
         crate::event::thread("tarae-5d-test", move || {
-            let by = Instant::now() + Duration::from_secs(secs);
+            let by = Instant::now() + limit;
             while !seen.load(SeqCst) && Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(50));
             }
             if !seen.load(SeqCst) {
-                eprintln!("the run (pid {pid}) passed its {secs} s: its process group killed");
+                eprintln!("the run (pid {pid}) passed its {limit:?}: its process group killed");
                 // SAFETY: a signal to the process group of a run this test started, not reaped yet.
                 unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
             }
@@ -43,12 +43,12 @@ impl Drop for Deadline {
 }
 
 /// What a process started in a session of its own (`spawn::setsid`, `sandbox::spawn`) printed, both streams, and
-/// how it ended — read to its end within `secs` (`Deadline`).
+/// how it ended — read to its end within `limit` (`Deadline`; a guard: `PATIENCE`, or longer).
 pub(super) fn finish(
     s: crate::spawn::Spawned,
-    secs: u64,
+    limit: Duration,
 ) -> (Option<std::process::ExitStatus>, String, String) {
-    let limit = Deadline::new(s.pid, secs);
+    let limit = Deadline::new(s.pid, limit);
     let mut err = s.stderr.expect("its stderr");
     let errs = crate::event::thread("tarae-5d-test", move || {
         let mut e = String::new();
@@ -249,7 +249,7 @@ pub(super) fn serve(
         }
         let _ = child.wait();
     });
-    let first = rx.recv_timeout(Duration::from_secs(60)).expect("the test's server started");
+    let first = rx.recv_timeout(crate::test_results::PATIENCE).expect("the test's server started");
     let port = first.strip_prefix("port ").and_then(|p| p.parse().ok()).expect(&first);
     (port, rx, up)
 }
@@ -340,7 +340,10 @@ fn gradle_resolves_through_the_proxy() {
     let mut cmd = crate::sandbox::command(Some(&p), &gradle.to_string_lossy(), &args);
     cmd.current_dir(&root);
     let ended = crate::sandbox::after_run(Some(&p));
-    let (status, out, err) = finish(crate::sandbox::spawn(Some(&p), &cmd).expect("gradle starts"), 300);
+    let (status, out, err) = finish(
+        crate::sandbox::spawn(Some(&p), &cmd).expect("gradle starts"),
+        std::time::Duration::from_secs(300),
+    );
     ended();
     let said = format!("{out}\n{err}");
     let seen: Vec<String> = requests.try_iter().collect();

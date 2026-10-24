@@ -5082,7 +5082,7 @@ mod tests {
         }
         let script = "grep '^Seccomp:' /proc/self/status; unshare -U true 2>&1; echo \"unshare=$?\"";
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) && std::time::Instant::now() < end {
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
                     ed.handle_event(ev);
@@ -5344,7 +5344,7 @@ mod tests {
             }
         });
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + crate::test_results::PATIENCE;
         // (method, the version it named — initialize's, or _meta's)
         let mut seen: Vec<(String, Option<String>)> = Vec::new();
         let mut listed = false;
@@ -5574,7 +5574,7 @@ mod tests {
         };
         super::run(ed, call, &args).unwrap();
         let ran = || super::ADMITTED.with(|a| a.borrow().len()) > before;
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.offers.is_empty() && !ran() {
             assert!(std::time::Instant::now() < end, "{args}: neither a card nor a run");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -5588,7 +5588,7 @@ mod tests {
     fn run_card(ed: &mut crate::editor::Editor, cmd: &str) -> String {
         ed.offers.clear();
         super::run(ed, super::Call::test(1), &serde_json::json!({ "command": cmd })).unwrap();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.offers.is_empty() && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
                 ed.handle_event(ev);
@@ -5691,7 +5691,7 @@ mod tests {
         let row = |ed: &crate::editor::Editor| ed.session.chat.as_ref().unwrap().msgs[0].ran.clone();
         assert_eq!(row(&ed).map(|r| r.warned.len()), Some(2), "marked from the start");
         // Its end: Claude's report says it, and nothing is said again
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let report = || {
             super::ANSWERED.with(|a| {
                 a.borrow()
@@ -5737,7 +5737,7 @@ mod tests {
         let card = |ed: &mut crate::editor::Editor, n: u64, cmd: &str| {
             let call = super::Call::of(generation, &format!("r{n}"), json!(n));
             super::run(ed, call, &json!({ "command": cmd })).unwrap();
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.offers.is_empty() {
                 assert!(std::time::Instant::now() < end, "a card for {cmd}");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -5816,7 +5816,7 @@ mod tests {
         };
         let pump =
             |ed: &mut crate::editor::Editor, what: &str, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let end = std::time::Instant::now() + crate::test_results::PATIENCE;
                 while !done(ed) {
                     assert!(std::time::Instant::now() < end, "{what}");
                     assert!(ed.offers.is_empty(), "no card: {:?}", ed.offers.first().map(|o| &o.question));
@@ -5893,7 +5893,7 @@ mod tests {
         // Yes to the first, then to the second while the first runs: it runs next (the first starts once the
         // checkout's snapshot is taken — `snapshot.rs`)
         ed.offer_accept();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !ed.session.task_run.as_ref().is_some_and(|r| r.task.cmd == one) {
             assert!(std::time::Instant::now() < end, "the first runs");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(5)) {
@@ -5952,7 +5952,7 @@ mod tests {
         super::run(&mut ed, call, &json!({ "command": cmd })).unwrap();
         ed.offer_accept();
         let pump = |ed: &mut crate::editor::Editor, until: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !until(ed) {
                 assert!(std::time::Instant::now() < end, "timed out");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
@@ -6052,7 +6052,7 @@ mod tests {
             "params": { "name": "run", "arguments": { "command": "seq 1 1000" } } });
         assert!(super::mcp(&mut ed, generation, "r3", &msg).is_none(), "it waits for its end");
         let said = || super::ANSWERED.with(|a| a.borrow().iter().find(|(id, _)| *id == json!(3)).cloned());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while said().is_none() {
             assert!(std::time::Instant::now() < end, "timed out");
             if !ed.offers.is_empty() {
@@ -6237,7 +6237,7 @@ mod tests {
                 })
             })
         };
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !refused() {
             assert!(std::time::Instant::now() < end, "refused");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -6281,7 +6281,7 @@ mod tests {
                     .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
             };
             super::run(ed, super::Call::of(generation, &format!("a{n}"), json!(n)), &args)?;
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             loop {
                 if let Some(o) = ed.offers.first() {
                     return Ok(Some(o.question.clone()));
@@ -6476,7 +6476,7 @@ mod tests {
                 .with(|a| a.borrow().iter().find(|(id, _)| *id == json!(n)).map(|(_, r)| r.clone()))
         };
         super::run(ed, super::Call::of(generation, &format!("h{n}"), json!(n)), &args)?;
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         loop {
             if let Some(o) = ed.offers.first() {
                 return Ok(Some(o.question.clone()));
@@ -6753,7 +6753,7 @@ mod tests {
         };
         let answered = |n: u64| super::ANSWERED.with(|a| a.borrow().iter().any(|(id, _)| *id == json!(n)));
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "waited too long");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -6833,7 +6833,7 @@ mod tests {
         (c.state, c.hosts_next) = (crate::chat::State::Thinking, vec![(HOST.to_string(), 443)]);
         let generation = c.generation();
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "waited too long");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -7007,7 +7007,7 @@ mod tests {
         };
         // Idle, the same conversation: one message, now — nothing left for the next
         rerun(&mut ed, 1);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !sent().contains("REPORT-1") {
             assert!(std::time::Instant::now() < end, "the stand-in claude read nothing: {}", sent());
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -7060,7 +7060,7 @@ mod tests {
         let generation = c.generation();
         let args = json!({ "command": "true", "also": { "port": 47011 }, "reason": "its test server" });
         super::run(&mut ed, super::Call::of(generation, "t1", json!(1)), &args).unwrap();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.offers.is_empty() {
             assert!(std::time::Instant::now() < end, "its card");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -7134,7 +7134,7 @@ mod tests {
         let generation = c.generation();
         let args = json!({ "command": "true", "also": { "port": 47021 }, "reason": "its test server" });
         super::run(&mut ed, super::Call::of(generation, "p1", json!(21)), &args).unwrap();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.offers.is_empty() {
             assert!(std::time::Instant::now() < end, "its card");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -7375,7 +7375,7 @@ mod tests {
             super::run(ed, super::Call::of(generation, &format!("r{n}"), json!(n)), &args)
         };
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "waited too long");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -7548,7 +7548,7 @@ mod tests {
         run_card(&mut ed, "perl run.pl");
         std::fs::write(dir.join("run.pl"), "# changed\n").unwrap();
         ed.offer_accept();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         // (every card here is call 1's: the ones cleared away were answered as lost)
         let changed = || {
             super::ANSWERED.with(|a| {
@@ -7588,7 +7588,7 @@ mod tests {
             ed.offers.clear();
             ed.session.task_run = None;
             super::run(ed, super::Call::test(1), &serde_json::json!({ "command": cmd })).unwrap();
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.offers.is_empty() && ed.session.task_run.is_none() && std::time::Instant::now() < end {
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
                     ed.handle_event(ev);
@@ -8061,7 +8061,7 @@ mod tests {
         let line =
             |n: u32| format!("sh target/x/setup.sh && env TARAE_BACKGROUND=dark echo shot target/x/{n}.png");
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "waited too long");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -8163,7 +8163,7 @@ mod tests {
             super::ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == json!(id)).map(|(_, r)| r.clone()))
         };
         let pump = |ed: &mut crate::editor::Editor, id: &str| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while answered(id).is_none() {
                 assert!(std::time::Instant::now() < end, "waited too long for {id}");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -8184,7 +8184,7 @@ mod tests {
         assert!(said.starts_with(&format!("On HEAD ({})'s tree", sha.trim())), "{said}");
         assert!(said.contains("committed") && !said.contains("working"), "the commit's file: {said}");
         let tree = crate::basetree::folder_for(&p, Some(&dir.join("base"))).unwrap().join("tree");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while tree.exists() {
             assert!(std::time::Instant::now() < end, "the tree is still there");
             std::thread::yield_now();
@@ -8233,7 +8233,7 @@ mod tests {
         let generation = c.generation();
         let line = |t: &str| format!("touch ran && echo cargo xtask linux test -- {t}");
         let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(std::time::Instant::now() < end, "waited too long");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -8788,7 +8788,7 @@ mod tests {
         };
         let pump =
             |ed: &mut crate::editor::Editor, what: &str, done: &dyn Fn(&crate::editor::Editor) -> bool| {
-                let end = Instant::now() + Duration::from_secs(20);
+                let end = Instant::now() + crate::test_results::PATIENCE;
                 while !done(ed) {
                     assert!(Instant::now() < end, "{what}");
                     if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

@@ -453,7 +453,7 @@ fn y_copies_the_text_as_written() {
     let line = mv::line_of(&d.text, d.selection().primary().cursor(&d.text));
     assert!(d.rows.as_deref().unwrap().of(line).len() > 2, "the paragraph drawn over several rows");
     feed(&mut ed, "xy");
-    let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the copy's result");
+    let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the copy's result");
     ed.handle_event(ev);
     let want = format!("{para}\n");
     assert!(crate::clipboard::written(&want), "the paragraph, one line");
@@ -469,7 +469,7 @@ fn a_yank_in_the_view_mode_is_said_by_a_toast() {
     let mut ed = editor();
     ed.motion_drawn = true;
     feed(&mut ed, "<esc>x y");
-    let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the copy's result");
+    let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the copy's result");
     ed.handle_event(ev);
     frame(&mut ed);
     let toasts: Vec<&str> = ed.toasts.iter().map(|t| t.text.as_str()).collect();

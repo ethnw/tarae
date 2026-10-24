@@ -420,7 +420,7 @@ mod tests {
         };
         ed.attach(t);
         assert!(ed.dap.is_some(), "starting");
-        let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("attach job");
+        let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("attach job");
         ed.handle_event(ev);
         // No jdtls here — the reason is shown and F5·attach work again
         assert!(ed.dap.is_none());

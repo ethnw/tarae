@@ -2016,7 +2016,7 @@ mod tests {
 
     /// `settle_until`; `yes`: a board's card in front answered `y`.
     fn settle_with(ed: &mut Editor, done: impl Fn(&Editor) -> bool, yes: bool) {
-        let end = Instant::now() + std::time::Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             if yes && ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::Board(_))) {
                 ed.offer_accept();

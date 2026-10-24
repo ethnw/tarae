@@ -463,7 +463,7 @@ fn loopback_listeners() {
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new()).ok();
         tx.send(()).ok();
     });
-    rx.recv_timeout(std::time::Duration::from_secs(60)).ok();
+    rx.recv_timeout(crate::test_results::PATIENCE).ok();
 }
 
 #[cfg(target_os = "linux")]

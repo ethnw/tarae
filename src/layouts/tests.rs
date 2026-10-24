@@ -2,7 +2,7 @@ use super::*;
 use crate::config::Config;
 
 fn waits_for(path: &Path, what: impl Fn(&Map<String, Value>) -> bool) -> Map<String, Value> {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     loop {
         let kept = read(Some(path));
         if what(&kept) || std::time::Instant::now() > end {

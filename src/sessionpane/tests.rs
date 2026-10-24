@@ -363,7 +363,7 @@ fn a_docked_session_lists_side_is_kept_across_restart() {
     assert_eq!(ed.sizes.sessions_dock, Some(crate::pane::Side::Left), "C-w = keeps where it is");
     // (written on a worker)
     let kept = || crate::sizes::Sizes::read(Some(&path)).sessions_dock;
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while kept().is_none() && std::time::Instant::now() < end {
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
             ed.handle_event(ev);

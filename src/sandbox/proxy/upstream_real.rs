@@ -57,7 +57,7 @@ fn after(s: &mut TcpStream, mut buf: Vec<u8>) -> (String, Option<String>) {
 
 /// An http upstream: a plain request answered as the host would; a CONNECT answered 200, then what comes.
 fn serve_http(mut s: TcpStream) -> Got {
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
     let mut buf = Vec::new();
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") && read_some(&mut s, &mut buf) {}
     let end = buf.windows(4).position(|w| w == b"\r\n\r\n").map_or(buf.len(), |i| i + 4);
@@ -75,7 +75,7 @@ fn serve_http(mut s: TcpStream) -> Got {
 /// A SOCKS5 upstream (RFC 1928, 1929): a user and password where offered, taken; every CONNECT granted; then
 /// what comes.
 fn serve_socks(mut s: TcpStream) -> Got {
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.set_read_timeout(Some(crate::test_results::PATIENCE)).unwrap();
     let mut asked = Vec::new();
     let take = |s: &mut TcpStream, n: usize, asked: &mut Vec<u8>| {
         let mut b = vec![0u8; n];
@@ -178,7 +178,8 @@ fn run_through(
     let mut cmd = crate::sandbox::command(Some(&p), "/bin/sh", &["-c".into(), script]);
     cmd.current_dir(&root);
     let ended = crate::sandbox::after_run(Some(&p));
-    let (_, out, err) = finish(crate::sandbox::spawn(Some(&p), &cmd).expect("the run starts"), 60);
+    let (_, out, err) =
+        finish(crate::sandbox::spawn(Some(&p), &cmd).expect("the run starts"), crate::test_results::PATIENCE);
     ended();
     over.store(true, Ordering::SeqCst);
     let got = took.join().unwrap();

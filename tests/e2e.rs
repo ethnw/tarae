@@ -35,7 +35,7 @@ fn the_nofile_shim_gives_its_program_the_limit_and_refuses_any_other_shape() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(10);
+        let end = std::time::Instant::now() + TIMEOUT;
         while child.try_wait().unwrap().is_none() {
             if std::time::Instant::now() > end {
                 child.kill().ok();
@@ -136,7 +136,7 @@ fn a_subcommand_under_a_low_limit_leaves_no_pin() {
             });
         }
         let mut child = c.spawn().unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(10);
+        let end = std::time::Instant::now() + TIMEOUT;
         while child.try_wait().unwrap().is_none() {
             if std::time::Instant::now() > end {
                 child.kill().ok();
@@ -208,7 +208,7 @@ fn tarae_state_ends_quietly_when_its_reader_is_gone() {
             })
         };
         let mut child = cmd.spawn().unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(10);
+        let end = std::time::Instant::now() + TIMEOUT;
         // (ended, not reaped yet: a signal's sender is read from it first. A diagnostic, not a fix — flaky80 saw a
         // SIGKILL 1 run in 10 and didn't find its sender; it can still come, and on Linux this names no one)
         while !ended(child.id()) {
@@ -778,7 +778,7 @@ fn a_flood_in_the_terminal_panel_leaves_the_keys_working() {
     t.send("\x1c\x1c");
     t.send("i");
     // (an editor the flood takes never handles them — the bound only has to outlast a slow runner)
-    let inserting = t.poll_for(std::time::Duration::from_secs(5), |s| s.status().contains("● insert"));
+    let inserting = t.poll_for(TIMEOUT, |s| s.status().contains("● insert"));
     let took = asked.elapsed();
     eprintln!("flood: keys landed after {took:?}");
     assert!(inserting.is_some(), "keys still not handled after {took:?} of a flood");
@@ -1135,7 +1135,7 @@ fn counting_features_wakes_nothing_and_is_written_at_the_end() {
     t.send("jj");
     t.wait_state("two keys handled", |s| s["input"].as_u64().is_some_and(|n| n >= 2));
     // Settled (a second with no frame), then two seconds: no frame, next to no wakes
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let end = std::time::Instant::now() + TIMEOUT;
     loop {
         let frames = t.frames();
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1211,7 +1211,7 @@ fn a_page_reads_into_its_buffer_and_then_sleeps() {
     // Landed: its toast gone, a second with no frame (what lands late drawn), then two more with none and nothing
     // woken (the line's age is drawn when a frame comes, never a frame of its own)
     t.wait_for("its toast gone", |s| !s.status().contains(" chars · "));
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let end = std::time::Instant::now() + TIMEOUT;
     loop {
         let frames = t.frames();
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1526,7 +1526,7 @@ fn what_a_run_left_running_is_taraes_and_ends_when_it_quits() {
     // Quit: `C-\` gives the keys back to tarae (its view mode), `C-\` again to the code
     t.send("\x1c\x1c:q!\r");
     t.wait_exit();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + TIMEOUT;
     while std::path::Path::new(&format!("/proc/{pid}")).exists() && std::time::Instant::now() < end {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1694,7 +1694,7 @@ fn bleeding_ink_draws_no_frame_after_the_turn() {
     let (head, rest) = (t.fg_of("value."), t.fg_of("cloned"));
     assert_eq!(head, rest, "the turn ended: the head in the ink of the rest\n{}", t.screen());
     // Settled (the frame that draws it dry, what lands late) — then nothing: no tick for the ink drying
-    let end = std::time::Instant::now() + Duration::from_secs(15);
+    let end = std::time::Instant::now() + TIMEOUT;
     loop {
         let frames = t.frames();
         std::thread::sleep(Duration::from_secs(1));
@@ -1732,7 +1732,7 @@ fn a_motion_ends_and_tarae_sleeps() {
     let drawn = t.frames() - before;
     assert!(drawn >= 2, "the key's frame and the flash's going: {drawn} frames\n{}", t.screen());
     // Settled (what the edit asks for after a pause — a save, the gutter) — then nothing: no tick for the flash
-    let end = std::time::Instant::now() + Duration::from_secs(15);
+    let end = std::time::Instant::now() + TIMEOUT;
     loop {
         let frames = t.frames();
         std::thread::sleep(Duration::from_secs(1));
@@ -1972,7 +1972,8 @@ fn big_file(sb: &Sandbox) {
 /// history read on a worker is in.
 fn undo_reaches_back(t: &mut Term) {
     let undone = |s: &Screen| !s.contains("END");
-    for _ in 0..20 {
+    let end = std::time::Instant::now() + TIMEOUT;
+    while std::time::Instant::now() < end {
         t.send("u");
         if t.poll_for(std::time::Duration::from_millis(250), undone).is_some() {
             return;
@@ -2115,7 +2116,7 @@ fn follow_shows_each_edit_and_replays_the_turn() {
     ];
     // (a stop skipped is never seen whatever the bound — it only has to outlast a slow runner's lag)
     for (what, seen) in &stops {
-        if t.poll_for(Duration::from_secs(4), |s| seen(s)).is_none() {
+        if t.poll_for(TIMEOUT, |s| seen(s)).is_none() {
             panic!("{what} never reached the screen in time\n{}", t.screen());
         }
     }

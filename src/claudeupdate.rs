@@ -276,7 +276,7 @@ mod tests {
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
                 ed.handle_event(ev);

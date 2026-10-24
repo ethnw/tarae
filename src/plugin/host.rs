@@ -343,10 +343,10 @@ mod tests {
         let (tx, rx) = channel();
         host.call("demo", Call::Command(command.into()), input, Box::new(move |r| tx.send(r).unwrap()))
             .unwrap();
-        rx.recv_timeout(Duration::from_secs(30)).expect("an answer")
+        rx.recv_timeout(crate::test_results::PATIENCE).expect("an answer")
     }
 
-    const WAIT: Duration = Duration::from_secs(10);
+    const WAIT: Duration = crate::test_results::PATIENCE;
 
     #[test]
     fn loads_runs_reloads_and_drops() {

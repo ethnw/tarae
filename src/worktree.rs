@@ -2448,7 +2448,7 @@ mod tests {
         let (closed, other) = (leave(&there), leave(&here));
         let there_now = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
         let gone = |pid: u32| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while there_now(pid) && std::time::Instant::now() < end {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
@@ -2606,7 +2606,7 @@ mod tests {
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(Instant::now());
             let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("timed out: {}", said(ed)));
@@ -2831,7 +2831,7 @@ mod tests {
         assert_eq!(git_in(&wt, &["status", "--porcelain"]), "", "target/ is ignored: no change");
         feed(&mut ed, ":o a.txt<ret>");
         assert_eq!(ed.doc().path.as_deref(), Some(wt.join("a.txt").as_path()));
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !pid_file.exists() {
             assert!(Instant::now() < end, "its Claude started");
             std::thread::sleep(Duration::from_millis(10));
@@ -2851,7 +2851,7 @@ mod tests {
             !ed.docs.iter().any(|d| d.path.as_ref().is_some_and(|p| p.starts_with(&wt))),
             "its file closed"
         );
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         // SAFETY: signal 0 only asks whether the process is there.
         while unsafe { libc::kill(pid, 0) } == 0 {
             assert!(Instant::now() < end, "its Claude ({pid}) stopped");
@@ -2961,7 +2961,7 @@ mod tests {
         crate::checkpoint::keep(&ed);
         let kept = |n: usize| crate::checkpoint::load(&store, &wt).list.len() == n;
         let wait = |what: &str, done: &dyn Fn() -> bool| {
-            let end = Instant::now() + Duration::from_secs(5);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while !done() {
                 assert!(Instant::now() < end, "{what}");
                 std::thread::sleep(Duration::from_millis(10));
@@ -3286,7 +3286,7 @@ mod tests {
         // Their processes gone (killed, reaped off the main loop)
         // SAFETY: signal 0 only asks whether the process exists; nothing is sent.
         let gone = |pid: u32| unsafe { libc::kill(pid as i32, 0) } != 0;
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !pids.iter().all(|&p| gone(p)) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -3499,7 +3499,7 @@ mod tests {
         assert!(ed.session_switch(0) && ed.sessions.iter().any(|l| l.root == wt), "feat behind");
         ed.session_bring("feat").unwrap();
         let title = "Bring feat into main";
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while card(&ed, title).is_none() {
             assert!(!says(&ed, "bring feat:"), "{}", said(&ed));
             let left = end.saturating_duration_since(Instant::now());
@@ -5400,7 +5400,7 @@ mod tests {
             let s = load(&store, &common);
             s.sessions.len() == n && s.front.as_deref() == Some(front)
         };
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !written(3, &one) {
             assert!(Instant::now() < end, "kept");
             std::thread::sleep(Duration::from_millis(10));
@@ -5444,7 +5444,7 @@ mod tests {
         let told = |ed: &Editor| ed.messages.iter().filter(|m| m.2.contains("removed outside tarae")).count();
         assert_eq!(told(&ed), 1, "{}", said(&ed));
         assert!(says(&ed, "two — its checkout was removed outside tarae; dropped"));
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while load(&store, &common).sessions.len() != 2 {
             assert!(Instant::now() < end, "kept without it");
             std::thread::sleep(Duration::from_millis(10));
@@ -5493,7 +5493,7 @@ mod tests {
         // Ended: what it had is written as it goes — then back (as a failed end brings it back)
         let kept = ed.session_close(&back).expect("closed");
         assert!(ed.sessions.is_empty());
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while crate::checkpoint::load(&store, &back).list.is_empty() {
             assert!(Instant::now() < end, "its turns written as it ended");
             std::thread::sleep(Duration::from_millis(10));
@@ -5891,7 +5891,7 @@ mod tests {
         assert_eq!(card_in_sight(&mut ed), ['y', 'n']);
         feed(&mut ed, "y");
         assert!(ed.bring_queue.run.is_some() && ed.bring_queue.marks.is_empty());
-        let end = Instant::now() + Duration::from_secs(60);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.bring_queue.run.is_some() {
             let left = end.saturating_duration_since(Instant::now());
             let ev = ed
@@ -5925,7 +5925,7 @@ mod tests {
 
     /// The queue's end, said.
     fn queue_over(ed: &mut Editor) {
-        let end = Instant::now() + Duration::from_secs(60);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.bring_queue.run.is_some() {
             let left = end.saturating_duration_since(Instant::now());
             let ev =

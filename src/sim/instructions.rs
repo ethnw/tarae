@@ -19,7 +19,7 @@ const SEEDS: &[u64] = &[0, 1, 4, 6, 22];
 
 const INPUTS: usize = 30;
 
-const LIMIT: Duration = Duration::from_secs(30);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn instruction_files_follow() {

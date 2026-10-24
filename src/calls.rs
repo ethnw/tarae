@@ -387,7 +387,7 @@ impl crate::editor::Editor {
 #[cfg(test)]
 pub fn recorded(dir: &Path, n: usize) -> Vec<Value> {
     let file = dir.join(crate::cards::month_file(std::time::SystemTime::now()));
-    let end = Instant::now() + std::time::Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     loop {
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         let whole: Vec<&str> = text.split_inclusive('\n').filter(|l| l.ends_with('\n')).collect();

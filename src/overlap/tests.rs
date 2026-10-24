@@ -105,7 +105,7 @@ fn change(ed: &mut Editor, path: &Path, n: usize, text: &str) {
 /// Events until `rounds` rounds have landed and nothing more is coming.
 fn settle(ed: &mut Editor, rounds: u64) {
     sync(ed);
-    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while ed.overlap.rounds < rounds || ed.overlap.waiting || ed.overlap.running {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("round {rounds}: no event in time"));
@@ -116,7 +116,7 @@ fn settle(ed: &mut Editor, rounds: u64) {
 /// Events until `rounds` rounds have landed — not the one it armed after.
 fn landed_to(ed: &mut Editor, rounds: u64) {
     sync(ed);
-    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while ed.overlap.rounds < rounds {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("round {rounds}: no event in time"));
@@ -262,7 +262,7 @@ fn an_overlap_is_said_once_far_apart_isnt() {
     change(&mut ed, &fix.join("b.rs"), 12, "twelve, as fix has it");
     // (yours: line 3 of a.rs, saved)
     press(&mut ed, "3ggA, as fix has it<esc>:w<ret>");
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while ed.doc().is_modified() {
         let left = end.saturating_duration_since(std::time::Instant::now());
         ed.handle_event(ed.events.recv_timeout(left).expect("the save"));
@@ -332,7 +332,7 @@ fn nothing_lands_in_the_repository_and_the_folder_goes_with_the_workspace() {
     assert!(files(&folder.join("objects")).len() > 2, "its objects are tarae's");
     let _ = ed.session_close(&fix);
     assert!(ed.overlap.now.is_empty(), "its overlaps went with it");
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while folder.exists() {
         assert!(std::time::Instant::now() < end, "its folder removed");
         std::thread::yield_now();
@@ -376,7 +376,7 @@ fn the_bases_tip_counts_and_a_key_named_file_is_never_named() {
 
 /// Call `n`'s answer (a change's review answered `y` as it comes).
 fn answer(ed: &mut Editor, n: u64) -> String {
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     loop {
         let got = crate::tools::ANSWERED
             .with(|a| a.borrow().iter().find(|(i, _)| *i == json!(n)).map(|(_, r)| r.clone()));
@@ -440,7 +440,7 @@ fn claude_hears_nothing_of_the_others() {
     assert_eq!(ed.overlap.now.len(), 1, "the overlap");
     // (the woven view of it, its conflict worked out)
     crate::typed::execute(&mut ed, "weave").unwrap();
-    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while crate::weave::of(ed.doc()).is_none_or(|m| m.merges == 0 || m.asking) {
         assert!(std::time::Instant::now() < end, "the merge: {:?}", ed.messages);
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -568,7 +568,7 @@ fn the_strip_the_list_and_the_tree_say_it() {
     ed.session.chat = None;
     ed.session.at = crate::session::At::Code;
     press(&mut ed, "<space>e");
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     let p = loop {
         let mut bytes = Vec::new();
         crate::term::render(&mut ed, &mut bytes, 160, 30).unwrap();
@@ -611,7 +611,7 @@ fn two_taraes_keep_their_own_folders_and_a_gone_ones_is_pruned() {
     // (a ends its fix: its folder goes on a worker)
     let a_fix = a.overlap.folder(a.session.id).unwrap();
     let _ = a.session_close(&fix);
-    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while a_fix.exists() {
         assert!(std::time::Instant::now() < end, "a's fix folder removed");
         std::thread::yield_now();

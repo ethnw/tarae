@@ -315,7 +315,7 @@ fn a_hook_is_warned_about() {
 
 /// Events until `done`.
 fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(std::time::Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

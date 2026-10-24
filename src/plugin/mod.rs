@@ -627,7 +627,7 @@ mod tests {
     use crate::config::Config;
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(Instant::now());
             let texts: Vec<String> = ed.docs.iter().map(|d| d.text.to_string()).collect();
@@ -995,7 +995,7 @@ mod tests {
 
     /// `quiet_flags` until a message says `what`.
     fn quiet_until(ed: &mut Editor, what: &str) -> Vec<bool> {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let mut out = Vec::new();
         while !toasts(ed).contains(what) {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now()));

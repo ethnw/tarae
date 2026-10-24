@@ -1395,7 +1395,7 @@ mod tests {
         ed.open(&d.join("src/term_snapshots.rs")).unwrap();
         ed.test_run(Scope::Nearest);
         assert!(ed.session.test_run.is_none(), "found on a worker, not while the key is handled");
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.test_run.is_none() {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
             ed.handle_event(ev);
@@ -1425,7 +1425,7 @@ mod tests {
                     junit: None,
                 },
             });
-            let end = Instant::now() + Duration::from_secs(10);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
                 let ev =
                     ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
@@ -1471,7 +1471,7 @@ mod tests {
             },
         });
         ed.session.test_run.as_mut().unwrap().chat = Some(crate::tools::Call::test(73));
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let mut seen = false;
         while ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
@@ -1534,7 +1534,7 @@ mod tests {
         assert!(ed.status.as_ref().is_some_and(|s| s.0.contains("/nonexistent/python")), "{:?}", ed.status);
         assert_eq!(ed.session.test_run.as_ref().map(|r| r.generation), Some(ed.test_generation));
         // …so its end still lands (not "running" forever)
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.test_run.as_ref().is_some_and(|r| r.state == RunState::Running) {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("event");
             ed.handle_event(ev);

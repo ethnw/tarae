@@ -666,7 +666,7 @@ mod tests {
         for i in 0..64 {
             send(format!("fill {i:03} {}", "x".repeat(50)));
         }
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !on_disk().contains("fill 063") && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -674,9 +674,9 @@ mod tests {
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         ed.open(&path).unwrap();
         ed.disk_watch();
-        // (the backstop is 5 s: well under it, only the watch can have brought the change)
+        // (a test's backstop is past its patience: only the watch can have brought the change)
         let follows = |ed: &mut crate::editor::Editor, what: &str| {
-            let end = Instant::now() + Duration::from_secs(3);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             loop {
                 let shown = ed.doc().text.to_string();
                 if shown.contains(what) && shown == on_disk() {

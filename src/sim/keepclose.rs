@@ -23,7 +23,7 @@ const SEEDS: &[u64] = &[0, 7];
 
 const INPUTS: usize = 40;
 
-const LIMIT: Duration = Duration::from_secs(90);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn workspaces_follow_their_base_only_when_idle() {

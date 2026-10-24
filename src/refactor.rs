@@ -1822,7 +1822,7 @@ mod tests {
                 ),
                 None => land(&mut ed, Call::test(1), what.into(), noun, vec![file()], String::new()),
             }
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.session.review.is_none() {
                 assert!(std::time::Instant::now() < end, "{what}'s review");
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -1919,7 +1919,7 @@ mod tests {
         crate::chat::open(&mut ed);
         ed.session.chat.as_mut().unwrap().edits.at_end = Some(dir.clone());
         land(&mut ed, Call::test(77), "replace".into(), "match", files, String::new());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.session.review.is_none() {
             assert!(std::time::Instant::now() < end, "build.rs's review");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

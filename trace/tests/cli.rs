@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 const TRACE: &str = env!("CARGO_BIN_EXE_tarae-trace");
 const FIXTURE: &str = env!("CARGO_BIN_EXE_trace-fixture");
-/// Longer than any of these tests needs; a hang is caught at it.
-const PATIENCE: Duration = Duration::from_secs(15);
+/// Longer than any of these tests needs; a hang is caught at it — tarae's `test_results::PATIENCE`, the same
+/// value (why it's this long is said there).
+const PATIENCE: Duration = Duration::from_secs(120);
 
 /// A target that won't exit during the test (3 × 20 s of sleep); killed when dropped.
 struct Waiting(Child);

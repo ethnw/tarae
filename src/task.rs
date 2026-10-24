@@ -1278,7 +1278,7 @@ mod tests {
         let mut ed = Editor::new(crate::config::Config::default());
         let cmd = r"printf 'Rebasing (2/2)\r\033[1mSuccessfully\033[0m rebased\n'".to_string();
         ed.task_start(Task { name: "redrawn".into(), cmd, cwd: std::env::temp_dir() });
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.task_run.as_ref().is_some_and(|r| r.state == State::Running) {
             assert!(Instant::now() < end, "the run ended");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

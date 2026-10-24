@@ -406,7 +406,7 @@ mod tests {
         ));
         ed.offer_accept();
         stop(ed);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.offers.iter().any(Offer::installing) {
             let ev =
                 ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now())).unwrap();

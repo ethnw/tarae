@@ -1420,7 +1420,7 @@ mod tests {
 
     /// Events handled until `until` (5 s at most).
     fn settle(ed: &mut Editor, what: &str, until: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !until(ed) {
             assert!(std::time::Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(10)) {
@@ -1556,7 +1556,7 @@ mod tests {
         step(&mut ed, true).unwrap();
         settle(&mut ed, "undone", |_| std::fs::read_to_string(root.join("a.txt")).unwrap() == "one\n");
         let index = index_file(&store, &root);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !load(&store, &root).list.last().is_some_and(|c| c.undone) {
             assert!(std::time::Instant::now() < end, "the undo kept");
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1760,7 +1760,7 @@ mod tests {
         });
         let questions = |l: &[Checkpoint]| l.iter().map(|c| c.question.clone()).collect::<Vec<_>>();
         let want = ["first", "second", "third"];
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         loop {
             let here = questions(&ed.session_by_id(id).unwrap().checkpoints.list);
             let kept = questions(&load(&store, &back).list);

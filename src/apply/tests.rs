@@ -69,7 +69,7 @@ fn editor(dir: &Path) -> Editor {
 
 /// Events until `done` (the patch is worked out and written on workers).
 fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(std::time::Instant::now() < end, "{what} — said: {}", said(ed));
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

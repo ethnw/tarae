@@ -449,10 +449,10 @@ mod tests {
         q.jobs().background(move || {
             let _ = done.send(());
         });
-        ran.recv_timeout(Duration::from_secs(5)).expect("it ran");
+        ran.recv_timeout(crate::test_results::PATIENCE).expect("it ran");
         assert!(q.recv_timeout(Duration::from_millis(100)).is_none(), "nothing came back");
         q.jobs().spawn(|| |_: &mut Editor| {});
-        assert!(q.recv_timeout(Duration::from_secs(5)).is_some(), "a spawned job's result does");
+        assert!(q.recv_timeout(crate::test_results::PATIENCE).is_some(), "a spawned job's result does");
     }
 
     /// Waiting ends when the last write under way does — on another thread, or panicking.
@@ -480,12 +480,12 @@ mod tests {
         let q = Queue::default();
         let (go, wait) = mpsc::channel::<()>();
         q.jobs().detached(move || {
-            let _ = wait.recv_timeout(Duration::from_secs(5));
+            let _ = wait.recv_timeout(crate::test_results::PATIENCE);
         });
         assert!(q.writes().wait(Duration::ZERO), "a detached job held it");
         let (go2, wait2) = mpsc::channel::<()>();
         q.jobs().background(move || {
-            let _ = wait2.recv_timeout(Duration::from_secs(5));
+            let _ = wait2.recv_timeout(crate::test_results::PATIENCE);
         });
         assert!(!q.writes().wait(Duration::from_millis(20)), "a background job didn't hold it");
         let _ = (go.send(()), go2.send(()));

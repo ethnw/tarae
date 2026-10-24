@@ -114,7 +114,7 @@ mod tests {
     }
 
     fn settle_for(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(
                 Instant::now() < end,

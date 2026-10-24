@@ -19,7 +19,7 @@ const SEEDS: &[u64] = &[0, 1, 2];
 
 const INPUTS: usize = 60;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// What the terminal answers its program's `CSI c`.
 const DA1: &[u8] = b"\x1b[?62;22c";

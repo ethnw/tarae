@@ -129,7 +129,7 @@ fn scene(name: &str) -> Scene {
 
 /// Events until `done` (20 s at most).
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     ed.handle_event(crate::event::Event::Resize);
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());

@@ -446,7 +446,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let top = dir.clone();
         std::thread::spawn(move || tx.send(unseen(&top, "HEAD", COMMIT, None)));
-        let hooks = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("never waits on a FIFO");
+        let hooks = rx.recv_timeout(crate::test_results::PATIENCE).expect("never waits on a FIFO");
         assert_eq!(said(&hooks), [(".githooks/pipe", "not a plain file", false)]);
     }
 

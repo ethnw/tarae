@@ -43,7 +43,7 @@ fn recovery(ed: &mut Editor) -> &mut Recovery {
 
 /// Until `done` — looked at every few ms, 5 s at most (what a worker does on disk, seen from outside).
 fn until(what: &str, done: impl Fn() -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done() {
         assert!(Instant::now() < end, "never: {what}");
         std::thread::sleep(Duration::from_millis(5));
@@ -82,7 +82,7 @@ fn left_behind(dir: &Path) -> PathBuf {
 
 /// Events until `done` (5 s at most).
 fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(Instant::now());
         let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -266,7 +266,7 @@ struct HeldBack {
 }
 
 /// How long a held-back child waits to be let go, at most.
-const HELD_AT_MOST: Duration = Duration::from_secs(10);
+const HELD_AT_MOST: Duration = crate::test_results::PATIENCE;
 
 impl HeldBack {
     fn fork() -> HeldBack {

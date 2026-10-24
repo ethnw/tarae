@@ -864,7 +864,7 @@ fn seed_turns(sb: &Sandbox, checkouts: usize) {
         v.dedup();
         v
     };
-    let end = Instant::now() + Duration::from_secs(30);
+    let end = Instant::now() + TIMEOUT;
     while kept().len() < checkouts {
         assert!(Instant::now() < end, "turns kept for {} checkouts of {checkouts}", kept().len());
         std::thread::sleep(Duration::from_millis(100));

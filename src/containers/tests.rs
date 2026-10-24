@@ -254,7 +254,7 @@ fn live_a_stopped_xtask_linux_run_leaves_no_container() {
     let checks = format!("{prefix}-checks");
     // (mid-way: the checkout in, its checks starting — the container's script says `toolchain: …` then. Before
     // that, a client cut off mid-stream takes the checkout's tar down with it, and the container ends itself)
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !ed.session.task_run.as_ref().unwrap().output.iter().any(|l| l.1.starts_with("toolchain: ")) {
         let r = ed.session.task_run.as_ref().unwrap();
         assert!(r.state == crate::task::State::Running, "it ended: {:?}", r.output);
@@ -273,7 +273,7 @@ fn live_a_stopped_xtask_linux_run_leaves_no_container() {
     assert!(names().lines().any(|n| n == checks), "the killed client's container ran on: {}", names());
     // …until tarae's stop: on the engine its line named, by name — said in its session once done
     ed.task_close();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
     while !status(&ed).contains(&checks) {
         assert!(std::time::Instant::now() < end, "said: {}", status(&ed));
@@ -284,7 +284,7 @@ fn live_a_stopped_xtask_linux_run_leaves_no_container() {
     assert_eq!(status(&ed), format!("stopped with it, by name: {checks}"));
     // (gone by then, not some time later: a container whose checks end by themselves would be gone too — it's
     // `--rm` — and say nothing of tarae's stop)
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while names().lines().any(|n| ours(n, &prefix)) {
         assert!(std::time::Instant::now() < end, "no container left: {}", names());
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -304,7 +304,7 @@ fn a_stopped_runs_containers_are_stopped_by_name_and_others_asked_about() {
     run.started = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(MADE as u64);
     assert_eq!(run.stop_now(), [format!("{prefix}-checks")]);
     let card = |ed: &mut Editor| {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Containers(_))) {
             assert!(std::time::Instant::now() < end, "the card came");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -319,7 +319,7 @@ fn a_stopped_runs_containers_are_stopped_by_name_and_others_asked_about() {
     assert!(o.question.contains("Claude's command `cargo xtask linux`") && o.weighty(), "{}", o.question);
     // Said, beside what was stopped: another run's, left alone
     let status = |ed: &Editor| ed.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !status(&ed).starts_with("stopped with it") {
         assert!(std::time::Instant::now() < end, "said: {}", status(&ed));
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -341,7 +341,7 @@ fn a_stopped_runs_containers_are_stopped_by_name_and_others_asked_about() {
     run.stop_now();
     card(&mut ed);
     ed.offer_accept();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !asked(&log).iter().any(|l| l == "stop eager_turing") {
         assert!(std::time::Instant::now() < end, "y stopped it: {:?}", asked(&log));
         if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {

@@ -308,7 +308,7 @@ fn no_pty_here(test: &str) -> bool {
 /// A terminal whose program sits there (`sleep`) — it hangs up when the editor goes.
 fn terminal(ed: &mut Editor) {
     ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()], Vec::new());
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while ed.session.terminal.is_none() {
         assert!(Instant::now() < end, "the terminal started");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -1714,7 +1714,7 @@ fn a_snapshot_waits_for_its_input_and_a_frame() {
     let mut ed = editor();
     frame(&mut ed);
     let (tx, rx) = std::sync::mpsc::channel();
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_results::PATIENCE;
     let input = ed.input_seq;
     ed.ui_asks.push(Ask {
         after_input: input + 1,
@@ -1750,7 +1750,7 @@ fn the_frame_asked_is_the_one_drawn_after_the_keys() {
     let mut ed = editor();
     frame(&mut ed);
     let (tx, rx) = std::sync::mpsc::channel();
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + crate::test_results::PATIENCE;
     let input = ed.input_seq;
     ed.ui_asks.push(Ask { after_input: input + 1, json: true, reply: tx, until, what: Asked::Frame });
     frame(&mut ed);
@@ -1784,7 +1784,7 @@ fn sock_dir(name: &str) -> PathBuf {
 
 /// Pumps the editor's events, drawing after each batch as the main loop does, until `done`.
 fn pump_until(ed: &mut Editor, done: impl Fn() -> bool) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done() {
         assert!(Instant::now() < end, "timed out");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -1839,7 +1839,7 @@ fn the_socket_answers_snapshots_and_refuses_claudes_processes() {
         assert!(a[2].contains("unknown request"), "{}", a[2]);
     }
     // The fourth waits for two keys
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while ed.ui_asks.is_empty() {
         assert!(Instant::now() < end, "the fourth request reached the editor");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -1911,7 +1911,7 @@ fn a_shuttle_types_over_the_socket_once_you_said_yes() {
     ed.config.shuttle_keys = crate::shuttle::Level::Light;
     let step = |to: &str| serde_json::json!({ "keys": "j", "expect": { "keys": { "to": to } } });
     let t = shuttle(vec![step(&pane), step("chat")]);
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !ed.offers.iter().any(|o| o.kind() == "shuttle") {
         assert!(Instant::now() < end, "the card came");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {
@@ -2393,7 +2393,7 @@ fn a_run_keeps_its_id_from_the_line_to_its_end() {
     // Claude's ends; the line moves
     ed.session.task_run.as_mut().unwrap().state = crate::task::State::Passed;
     crate::queued::run_next(&mut ed);
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !ed.session.task_run.as_ref().is_some_and(|r| r.task.name == "check") {
         assert!(Instant::now() < end, "the task started");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {

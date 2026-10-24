@@ -186,7 +186,7 @@ impl Shot {
 
     /// Applies job results until `done` holds (each followed by a frame, like the event loop).
     fn until(&mut self, what: &str, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(&self.ed) {
             let left = end.saturating_duration_since(Instant::now());
             let ev =
@@ -2103,7 +2103,7 @@ fn the_reviewers_verdict_and_findings_go_to_a_driver_whole() {
     let other = s.ed.session_add(std::env::temp_dir().join("tarae-review-report-other"));
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let until = std::time::Instant::now() + Duration::from_secs(10);
+    let until = std::time::Instant::now() + crate::test_results::PATIENCE;
     for json in [true, false] {
         let what = crate::uistate::Asked::Review(String::new());
         s.ed.ui_asks.push(crate::uistate::Ask { after_input: 0, json, reply: tx.clone(), until, what });
@@ -2197,9 +2197,10 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
         assert_eq!(col, first.0, "{ms}ms: {row:?} — 412ms: {:?}", first.1);
     }
     crate::clock::release();
-    // Under a minute, no reads yet: seconds only
+    // Under a minute, no reads yet: seconds only (the clock held: a frame drawn later reads the same 7 s)
+    let held = crate::clock::hold();
     let rv = s.ed.session.reviewer.as_mut().unwrap();
-    (rv.started, rv.reads) = (Instant::now() - Duration::from_secs(7), 0);
+    (rv.started, rv.reads) = (held - Duration::from_secs(7), 0);
     let mut parser = vt100::Parser::new(s.h, s.w, 0);
     parser.process(&s.frame());
     let rows: Vec<String> = parser.screen().rows(0, s.w).collect();
@@ -2216,6 +2217,7 @@ fn the_rail_says_how_long_the_reviewer_has_read() {
     assert!(rows[at + 1].trim_start().starts_with("7s "), "{rows:#?}");
     let next = s.ed.tick_wanted().expect("a frame for its time");
     assert!(next > Duration::from_millis(102), "calm: a frame a second, not ten: {next:?}");
+    crate::clock::release();
     s.ed.config.motion = "full".into();
     s.ed.session.code_review.as_mut().unwrap().wide = true;
     s.frame();
@@ -3937,7 +3939,7 @@ fn diff_frame(
         if done(&p) {
             return p;
         }
-        match s.ed.events.recv_timeout(Duration::from_secs(10)) {
+        match s.ed.events.recv_timeout(crate::test_results::PATIENCE) {
             Some(ev) => s.ed.handle_event(ev),
             None => return p,
         }
@@ -4008,7 +4010,7 @@ fn the_bases_parse_is_a_frame_only_in_sight() {
             true => drop(s.frame()),
             false => s.ed.screen.panes.clear(),
         }
-        let ev = s.ed.events.recv_timeout(Duration::from_secs(10)).expect("the parse");
+        let ev = s.ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the parse");
         s.ed.handle_event(ev);
         assert!(s.ed.doc().base_syntax.is_some(), "parsed");
         assert_eq!(s.ed.unchanged, !seen, "a frame only when seen ({seen})");

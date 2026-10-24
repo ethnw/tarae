@@ -1034,7 +1034,7 @@ mod tests {
         card(&mut ed, Request::Read(Class::Elsewhere), "read, none made");
         card(&mut ed, run(Vec::new()), "run, none made");
         ed.session_kept_back(ed.session.id);
-        let end = Instant::now() + std::time::Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.caps.is_none() {
             let ev =
                 ed.events.recv_timeout(end.saturating_duration_since(Instant::now())).expect("caps made");

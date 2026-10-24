@@ -21,7 +21,7 @@ const SEEDS: &[u64] = &[0];
 
 const INPUTS: usize = 30;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 #[test]
 fn brought_one_after_another() {

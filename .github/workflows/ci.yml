@@ -54,7 +54,12 @@ jobs:
       - run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      - run: cargo test --locked --workspace --features "${{ matrix.features }}"
+      # Linux's tests run here, every failing test binary said at once (cargo stops at the first otherwise: one
+      # failure a round). macOS's run on the maintainer's Mac (`:preflight`, `:preflight-full`): here only built
+      - if: runner.os == 'Linux'
+        run: cargo test --locked --no-fail-fast --workspace --features "${{ matrix.features }}"
+      - if: runner.os == 'macOS'
+        run: cargo test --locked --no-run --workspace --features "${{ matrix.features }}"
       # The time budgets only report here (time is judged on a fixed machine — `cargo perf` in `:preflight-full`;
       # a shared runner's numbers are its neighbours' too): they skip themselves at the test profile's opt-level 0,
       # so here in the `perf` profile (release). The build fails the job, the budgets never: their output is the
@@ -62,6 +67,7 @@ jobs:
       # budgets: only debug builds have them unasked
       - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae --no-run
       - name: perf budgets (report only)
+        if: runner.os == 'Linux'
         shell: bash
         env:
           # the 16 ms key → frame budget times this, so what's reported over is well over
@@ -76,7 +82,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           tail -n 40 perf-budgets.txt
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && runner.os == 'Linux'
         with:
           name: perf-budgets-${{ matrix.os }}${{ matrix.features && format('-{0}', matrix.features) || '' }}
           path: perf-budgets.txt

@@ -399,7 +399,7 @@ fn limits_deadlines_and_a_stop_end_a_fetch() {
     while heads.try_recv().is_ok() {}
     let stop = w.stop.clone();
     let fetching = std::thread::spawn(move || fetch("https://page.test/never", &w));
-    heads.recv_timeout(Duration::from_secs(5)).expect("the request came");
+    heads.recv_timeout(crate::test_results::PATIENCE).expect("the request came");
     let asked = Instant::now();
     stop.stop();
     assert_eq!(fetching.join().unwrap().unwrap_err(), "https://page.test/never: stopped");

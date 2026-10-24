@@ -47,7 +47,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let cards: Vec<&str> = ed.offers.iter().map(|o| o.kind()).collect();
         assert!(Instant::now() < end, "timed out waiting for {what} — cards {cards:?}");

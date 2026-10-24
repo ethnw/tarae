@@ -610,7 +610,7 @@ mod tests {
     }
 
     fn pump(ed: &mut Editor, what: &str, until: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(15);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !until(ed) {
             assert!(Instant::now() < end, "timed out: {what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(10)) {

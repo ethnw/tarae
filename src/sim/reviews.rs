@@ -35,7 +35,7 @@ const SEEDS: &[u64] = &[0, 1, 3, 4, 5, 350];
 const INPUTS: usize = 80;
 
 /// A run's real time at most.
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// The repository's files: (name, committed, now) — two of code, a high one (its rule's `why` quotes the line),
 /// one named like a key (its line no token), one with a token-like line.

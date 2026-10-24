@@ -33,7 +33,7 @@ fn feed(ed: &mut Editor, keys: &str) {
 }
 
 fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -116,7 +116,7 @@ fn the_reset_empties_the_counts_and_the_file() {
     feed(&mut ed, "jj:features-reset<ret>y");
     assert!(ed.offers.iter().all(|o| o.kind() != "features-reset" || o.installing()), "answered");
     assert!(ed.features.pending().is_empty(), "{:?}", ed.features.pending());
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while path.exists() {
         assert!(std::time::Instant::now() < end, "removed on a worker");
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -185,7 +185,7 @@ fn counts_are_saved_with_a_batch_after_a_while_and_at_the_end() {
     assert!(!path.exists(), "too soon");
     ed.features.saved_s -= SAVE_EVERY_S;
     ed.features_turn();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while read(&path).counts.is_empty() {
         assert!(std::time::Instant::now() < end, "saved on a worker");
         std::thread::sleep(std::time::Duration::from_millis(10));

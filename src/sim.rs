@@ -63,13 +63,14 @@ mod writing;
 pub type Site = &'static Location<'static>;
 
 /// How long one thread may hold the baton — a job's work between two yields — before the run fails: a wait
-/// the simulation doesn't see.
-const BATON_MAX: Duration = Duration::from_secs(10);
+/// the simulation doesn't see (a guard: real work, a git run, takes what the machine gives it).
+const BATON_MAX: Duration = crate::test_results::PATIENCE;
 
 /// How long a thread's yield waits for the threads it started (`event::thread`) to end. A joined one has
 /// ended already; a detached one doing finite work (a reaper, a tidy-up) ends within it. One still alive after
-/// it is refused — so whether a detached thread happened to finish before the yield never decides the run.
-const HELPERS_WAIT: Duration = Duration::from_secs(5);
+/// it is refused — so whether a detached thread happened to finish before the yield never decides the run. (A
+/// guard: `Sim::helpers_wait` shortens it for a test of the refusal.)
+const HELPERS_WAIT: Duration = crate::test_results::PATIENCE;
 
 /// Steps after the last input within which a run must go quiet (nothing to run, land or wake).
 const QUIET_WITHIN: usize = 2000;
@@ -108,6 +109,8 @@ struct State {
     failed: Option<String>,
     /// Over: threads still waiting for their turn go without running.
     ended: bool,
+    /// How long a yield waits for the threads it started (`HELPERS_WAIT`).
+    helpers_wait: Duration,
 }
 
 struct Job {
@@ -162,7 +165,7 @@ impl Handle {
     /// At `owner`'s yield: the threads it started have ended, waited for (`HELPERS_WAIT`); one still alive
     /// after that is refused.
     fn helpers_end<'a>(&'a self, mut s: MutexGuard<'a, State>, owner: usize) -> MutexGuard<'a, State> {
-        let until = Instant::now() + HELPERS_WAIT;
+        let until = Instant::now() + s.helpers_wait;
         while let Some(&(_, site, _)) = s.helpers.iter().find(|h| h.0 == owner) {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -439,8 +442,8 @@ pub struct Sim {
 impl Sim {
     /// A simulation of scenario `name`, this thread its driver; the run fails past `limit` of real time.
     pub fn new(name: &str, choices: Choices, limit: Duration) -> Sim {
-        let h =
-            Handle(Arc::new(Shared { state: Mutex::default(), turn: Condvar::new(), base: Instant::now() }));
+        let state = Mutex::new(State { helpers_wait: HELPERS_WAIT, ..State::default() });
+        let h = Handle(Arc::new(Shared { state, turn: Condvar::new(), base: Instant::now() }));
         CURRENT.with(|c| {
             assert!(c.borrow().is_none(), "a simulation already runs on this thread");
             *c.borrow_mut() = Some((h.clone(), Role::Driver));
@@ -462,6 +465,13 @@ impl Sim {
 
     pub fn trace(&self) -> &[String] {
         &self.trace
+    }
+
+    /// A yield waits `d` for the threads it started, not `HELPERS_WAIT` — for a test of the refusal, its thread
+    /// alive throughout.
+    #[cfg(test)]
+    pub fn helpers_wait(&mut self, d: Duration) {
+        self.h.lock().helpers_wait = d;
     }
 
     /// The simulated clock moves on by `d` (the user took that long).
@@ -733,7 +743,7 @@ mod tests {
     use super::*;
 
     /// A run's real time at most, in these tests.
-    const LIMIT: Duration = Duration::from_secs(30);
+    const LIMIT: Duration = crate::test_results::PATIENCE;
 
     /// Every scenario runs on every system but these, each under its own attribute — an attribute holds the one
     /// declaration right after it, so a module put between the two takes it over (the presence scenario did: kept
@@ -838,11 +848,12 @@ mod tests {
     #[should_panic(expected = "outlives the step that started it")]
     fn a_thread_that_outlives_its_step_is_refused() {
         let mut sim = Sim::new("outlives", Choices::seeded(1), LIMIT);
+        sim.helpers_wait(Duration::from_millis(200));
         let mut ed = Editor::new(crate::config::Config::default());
         // (it waits on the test's sender — dropped as the test unwinds, so it ends)
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         ed.events.jobs().background(move || {
-            crate::event::thread("tarae-sim-left", move || rx.recv_timeout(Duration::from_secs(60)));
+            crate::event::thread("tarae-sim-left", move || rx.recv_timeout(crate::test_results::PATIENCE));
         });
         sim.walk(&mut ed, 0, |_, _| String::new(), |_| Ok(()), |_| String::new());
         drop(tx);
@@ -1057,15 +1068,62 @@ pub mod lint {
 
     /// Every file under `src/`: its path from there, its text.
     fn files() -> Vec<(String, String)> {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        files_in(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+    }
+
+    /// Every `.rs` file under `dir`: its path from there, its text.
+    fn files_in(dir: &Path) -> Vec<(String, String)> {
         let mut paths = Vec::new();
-        walk(&src, &mut paths);
+        walk(dir, &mut paths);
         paths
             .iter()
             .map(|p| {
-                (p.strip_prefix(&src).unwrap().display().to_string(), std::fs::read_to_string(p).unwrap())
+                (p.strip_prefix(dir).unwrap().display().to_string(), std::fs::read_to_string(p).unwrap())
             })
             .collect()
+    }
+
+    /// How often each of `patterns` appears per file in test code — tarae's test-only items and files (`src/`),
+    /// every file of its own test crates (`tests/`), xtask's test-only items and files (`xtask/src/`) — keyed by
+    /// the path from the repository's root; `except` (such paths) left out. Never in a comment.
+    pub fn test_counts(patterns: &[&str], except: &[&str]) -> BTreeMap<String, usize> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut out = BTreeMap::new();
+        for (prefix, all_tests) in [("src/", false), ("tests/", true), ("xtask/src/", false)] {
+            let files = files_in(&root.join(prefix));
+            out.extend(test_count_tree(&files, patterns, all_tests).into_iter().filter_map(|(p, n)| {
+                let p = format!("{prefix}{p}");
+                (!except.contains(&p.as_str())).then_some((p, n))
+            }));
+        }
+        out
+    }
+
+    /// `test_counts` over `files` (each its path and its text): in their test-only items and files — or in all of
+    /// them, `all_tests`.
+    pub fn test_count_tree(
+        files: &[(String, String)],
+        patterns: &[&str],
+        all_tests: bool,
+    ) -> BTreeMap<String, usize> {
+        let split: BTreeMap<&str, Split> = files.iter().map(|(p, t)| (p.as_str(), split(t))).collect();
+        let tests = test_only(&split);
+        let mut out = BTreeMap::new();
+        for (path, s) in &split {
+            let whole;
+            let text = match all_tests || tests.contains(*path) {
+                true => {
+                    whole = format!("{}{}", s.code, s.tests);
+                    &whole
+                }
+                false => &s.tests,
+            };
+            let n: usize = patterns.iter().map(|p| text.matches(p).count()).sum();
+            if n > 0 {
+                out.insert(path.to_string(), n);
+            }
+        }
+        out
     }
 
     /// `counts` over `files` (each its path from `src/` and its text): not in comments or literals, nor in a

@@ -18,7 +18,7 @@ const SEEDS: &[u64] = &[0, 1, 2];
 
 const INPUTS: usize = 50;
 
-const LIMIT: Duration = Duration::from_secs(120);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 const LINE: [&str; 3] = ["line 3", "line 3, one way", "line 3, the other way"];
 

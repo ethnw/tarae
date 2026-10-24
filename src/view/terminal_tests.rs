@@ -600,7 +600,7 @@ pub(crate) fn viewing(keys: &str) -> Editor {
 fn y_copies_the_rows() {
     let (mut ed, _sent) = term(Config::default(), 3);
     feed(&mut ed, "<C-\\>kxy");
-    let ev = ed.events.recv_timeout(std::time::Duration::from_secs(5)).expect("the copy's result");
+    let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the copy's result");
     ed.handle_event(ev);
     assert!(crate::clipboard::written("line 3\n"));
     assert_eq!(region(&ed), "view:terminal");

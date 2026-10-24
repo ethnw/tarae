@@ -279,7 +279,7 @@ fn attached(pid: libc::pid_t) -> String {
     let mut c = Command::new(lldb);
     c.args(["--batch", "--no-lldbinit", "-p", &pid.to_string(), "-o", "process detach"]);
     let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() > end {
             child.kill().ok();

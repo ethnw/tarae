@@ -543,8 +543,8 @@ fn loading_is_bounded() {
         refused(format!("(module {})", "(table 1 funcref) ".repeat(101)))
             .is_some_and(|e| e.contains("too many tables"))
     );
-    // A deep operand stack and a local written again and again: each write scans the stack
-    let t = std::time::Instant::now();
+    // A deep operand stack and a local written again and again: each write scans the stack — refused by its
+    // work's count (`MAX_WORK`), never by the clock
     let deep = format!(
         "(module (func (local i32 i32) {} {} {}))",
         "(i32.const 0) ".repeat(60_000),
@@ -552,7 +552,6 @@ fn loading_is_bounded() {
         "(drop) ".repeat(60_000)
     );
     assert!(refused(deep).is_some_and(|e| e.contains("too complex")));
-    assert!(t.elapsed() < std::time::Duration::from_secs(10), "refused in {:?}", t.elapsed());
 }
 
 /// Bounds at the edge of memory, with the fast check (address ≤ length − 4095) failing and the exact one

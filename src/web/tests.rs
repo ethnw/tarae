@@ -624,7 +624,8 @@ fn nesting_past_the_limit_is_left_out_and_said_within_a_workers_stack() {
 }
 
 /// What a page's few bytes could make many of — columns, a table's padding, lines' prefixes — stays within the
-/// text's limit, and quick.
+/// text's limit, and ends (a hang guard, `PATIENCE`: how quick is judged on a fixed machine — `perf_web_read`;
+/// its old 20 s bound failed on this Mac with every core kept busy).
 #[test]
 fn what_a_page_could_multiply_stays_within_the_limits() {
     let wide = format!(
@@ -642,7 +643,7 @@ fn what_a_page_could_multiply_stays_within_the_limits() {
         let t = std::time::Instant::now();
         check::page(page.as_bytes(), Some("text/html"), Prefer::Guess);
         let took = t.elapsed();
-        assert!(took < std::time::Duration::from_secs(20), "{took:?} for {}", &page[..40]);
+        assert!(took < crate::test_results::PATIENCE, "{took:?} for {}", &page[..40]);
         let p = reader::read(page.as_bytes(), "https://x.org/", Some("text/html"), Prefer::Guess);
         assert!(!p.said.unwrap_or_default().contains("nested past"), "{}", &page[..40]);
     }
@@ -776,7 +777,7 @@ fn feed(ed: &mut crate::editor::Editor, keys: &str) {
 }
 
 fn settle_until(ed: &mut crate::editor::Editor, done: impl Fn(&crate::editor::Editor) -> bool) {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).expect("the page read before the timeout");
@@ -1091,7 +1092,7 @@ fn a_pages_commands_read_it_again_reload_it_and_hand_it_to_the_browser() {
     let said = |ed: &mut crate::editor::Editor, typed: &str, words: &str| {
         let before = toasts(ed).len();
         feed(ed, &format!("{typed}<ret>"));
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !(landed(ed) && toasts(ed)[before..].iter().any(|t| t.starts_with(words))) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left);
@@ -1144,7 +1145,7 @@ fn web_reads_into_its_buffer_and_c_c_or_closing_it_stops_the_read() {
     let mut ed = crate::editor::Editor::new(crate::config::Config::default());
     ed.session.web_way = Some(Arc::new(move |stop| super::fetch::Way { stop, ..way(at, yours_rules()) }));
     let dropped = |n: usize| move |ed: &crate::editor::Editor| ed.session.web_dropped == n;
-    let wait = |what: &str| heads.recv_timeout(std::time::Duration::from_secs(5)).expect(what);
+    let wait = |what: &str| heads.recv_timeout(crate::test_results::PATIENCE).expect(what);
     let errors = |ed: &crate::editor::Editor| toasts(ed).iter().filter(|t| t.starts_with("web: ")).count();
 
     feed(&mut ed, ":web https://page.test/a<ret>");
@@ -1218,8 +1219,7 @@ fn a_fifo_is_refused_without_waiting_for_a_writer() {
     std::thread::spawn(move || {
         let _ = tx.send(super::open::bytes_of(&fifo));
     });
-    let got =
-        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("refused without waiting for a writer");
+    let got = rx.recv_timeout(crate::test_results::PATIENCE).expect("refused without waiting for a writer");
     assert_eq!(got.unwrap_err(), want);
 }
 

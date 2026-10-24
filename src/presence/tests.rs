@@ -84,7 +84,7 @@ fn just_wrote(ed: &mut Editor, path: PathBuf) {
 /// Events until `done` holds (a line map is worked out on a worker).
 fn settle(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
     sync(ed);
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let Some(ev) = ed.events.recv_timeout(left) else {

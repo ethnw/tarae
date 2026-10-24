@@ -212,7 +212,7 @@ fn the_message_carries_the_quote_once() {
     assert_eq!(&m.chip[m.linked..], "[scratch] L2");
     let copy = m.attached.clone().expect("its copy").path;
     // (the copy is a job's: its result read)
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !copy.exists() && Instant::now() < end {
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
             ed.handle_event(ev);

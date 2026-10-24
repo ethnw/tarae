@@ -47,6 +47,9 @@ pub struct Terminal {
     /// Answers the reader sent the program (`answer`), as it read their questions — held or not (the tests read it).
     #[cfg_attr(not(test), allow(dead_code))]
     answered: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Drains the wait thread ran out while held, its program gone (the tests read it: its end waited).
+    #[cfg_attr(not(test), allow(dead_code))]
+    drains_held: std::sync::Arc<std::sync::atomic::AtomicU64>,
     master: OwnedFd,
     writer: Sender<Vec<u8>>,
     generation: u64,
@@ -124,6 +127,12 @@ impl Terminal {
     #[cfg(test)]
     pub fn answered(&self) -> u64 {
         self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Drains run out while held so far, its program gone — the tests' record that its end waited.
+    #[cfg(test)]
+    pub fn drains_held(&self) -> u64 {
+        self.drains_held.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Held still now (its view mode) — the simulation checks it's held exactly while viewed.
@@ -330,6 +339,8 @@ fn spawn(
     let held_meanwhile = holds.clone();
     let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let answers_sent = answered.clone();
+    let drains_held = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let drained_held = drains_held.clone();
     // The shell waited for as it ends — a program it left behind holding the terminal (one that ignored
     // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most — counted
     // only while nothing is held: while the view holds, the reader waits for a go-ahead and reaches no end, so
@@ -341,7 +352,10 @@ fn spawn(
             let seen = held_meanwhile.load(SeqCst);
             match read_all.recv_timeout(crate::spawn::DRAIN_AFTER_EXIT) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    if seen % 2 == 1 || held_meanwhile.load(SeqCst) != seen => {}
+                    if seen % 2 == 1 || held_meanwhile.load(SeqCst) != seen =>
+                {
+                    drained_held.fetch_add(1, SeqCst);
+                }
                 _ => break,
             }
         }
@@ -407,6 +421,7 @@ fn spawn(
         waiting: Vec::new(),
         holds,
         answered,
+        drains_held,
         master,
         writer,
         generation,
@@ -803,6 +818,7 @@ pub(crate) fn stand_in(
         waiting: Vec::new(),
         holds: Default::default(),
         answered: Default::default(),
+        drains_held: Default::default(),
         master,
         writer,
         generation: ed.terminal_generation,
@@ -853,7 +869,7 @@ mod tests {
         let argv =
             vec!["/bin/sh".to_string(), "-c".into(), "printf 'hello \\033[1mtarae\\033[0m'; exit 3".into()];
         ed.terminal_run(argv, Vec::new());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.session.terminal.as_ref().is_none_or(|t| t.exited.is_none())
             && std::time::Instant::now() < end
         {
@@ -882,7 +898,7 @@ mod tests {
         let script =
             r"stty -icanon -echo min 9 time 50; printf '\033[c'; head -c 9 | tr '\033' E; printf '|'";
         ed.terminal_run(vec!["/bin/sh".to_string(), "-c".into(), script.into()], Vec::new());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.session.terminal.as_ref().is_none_or(|t| t.exited.is_none())
             && std::time::Instant::now() < end
         {
@@ -907,7 +923,7 @@ mod tests {
         let (config, _) = crate::config::parse("");
         let mut ed = Editor::new(config);
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), "sleep 10".into()], Vec::new());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.session.terminal.is_none() && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
                 ed.handle_event(ev);
@@ -982,7 +998,7 @@ mod tests {
             let argv = ["/bin/sh".to_string(), "-c".into(), "git status --porcelain".into()];
             let t = spawn(&argv, &dir, &inside_env(env, true), 5, 60, ed.events.sender(), 1).unwrap();
             install(&mut ed, t);
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.session.terminal.as_ref().is_none_or(|t| t.exited.is_none())
                 && std::time::Instant::now() < end
             {
@@ -1044,7 +1060,7 @@ mod tests {
         // (caught, not ignored: an ignored signal would stay ignored in the job too)
         t.send(b"trap : HUP\r".to_vec());
         t.send(format!("sh -c 'echo $$ > {}; exec sleep 60'\r", job.display()).into_bytes());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let pid = loop {
             if let Some(pid) = std::fs::read_to_string(&job).ok().and_then(|s| s.trim().parse::<i32>().ok()) {
                 break pid;
@@ -1057,7 +1073,7 @@ mod tests {
         let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
         assert!(alive(pid));
         ed.session.terminal = None;
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while alive(pid) && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1115,11 +1131,7 @@ mod tests {
     }
 
     fn wait(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        wait_up_to(ed, 5, done)
-    }
-
-    fn wait_up_to(ed: &mut Editor, secs: u64, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
                 ed.handle_event(ev);
@@ -1144,7 +1156,7 @@ mod tests {
     /// that waits for good on a program that's gone).
     fn let_go(fifo: &std::path::Path) {
         use std::os::unix::fs::OpenOptionsExt as _;
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let mut w = loop {
             match std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo) {
                 Ok(w) => break w,
@@ -1228,7 +1240,7 @@ mod tests {
         ed.terminal_mouse(MouseKind::Up, Some((0, 4)), false);
         assert_eq!(ed.session.terminal.as_ref().unwrap().selected_text(), "ready");
         // (a moment for anything sent to come back)
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let end = crate::test_results::quiet_for(std::time::Duration::from_millis(300));
         while let Some(ev) = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
         {
             ed.handle_event(ev);
@@ -1257,7 +1269,7 @@ mod tests {
         // (raw: cat gets the end marker too — it has no newline after it)
         let script = "stty raw -echo; printf '\\033[?2004hready'; cat -v";
         ed.terminal_run(vec!["/bin/sh".into(), "-c".into(), script.into()], Vec::new());
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let shows = |ed: &Editor, s: &str| {
             ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains(s))
         };
@@ -1295,7 +1307,7 @@ mod tests {
             vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
         );
         while ed.session.terminal.is_none() {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+            if let Some(ev) = ed.events.recv_timeout(crate::test_results::PATIENCE) {
                 ed.handle_event(ev);
             }
         }
@@ -1305,7 +1317,7 @@ mod tests {
         }
         ed.handle_key(Key::plain(Code::Enter));
         assert_eq!(ed.doc().text.to_string(), "", "the buffer never saw them");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         // Its output on a line of its own — after the prompt, depending on how fast the shell started
         let seen = |ed: &Editor| {
             ed.session.terminal.as_ref().is_some_and(|t| {
@@ -1362,7 +1374,7 @@ mod tests {
             vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
         );
         while ed.session.terminal.is_none() {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+            if let Some(ev) = ed.events.recv_timeout(crate::test_results::PATIENCE) {
                 ed.handle_event(ev);
             }
         }
@@ -1370,7 +1382,7 @@ mod tests {
             ed.handle_key(Key::plain(Code::Char(c)));
         }
         ed.handle_key(Key::plain(Code::Enter));
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let done = |ed: &Editor| {
             ed.session.terminal.as_ref().is_some_and(|t| t.parser.screen().contents().contains("past299"))
         };
@@ -1398,7 +1410,7 @@ mod tests {
         }
         ed.handle_key(Key::plain(Code::Enter));
         let full = |ed: &Editor| ed.session.terminal.as_ref().unwrap().parser.screen().alternate_screen();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !full(&ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
                 ed.handle_event(ev);
@@ -1408,7 +1420,7 @@ mod tests {
         ed.handle_key("S-pageup".parse().unwrap());
         let came =
             |ed: &Editor| ed.session.terminal.as_ref().unwrap().parser.screen().contents().contains("[5;2~");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !came(&ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(200)) {
                 ed.handle_event(ev);
@@ -1457,7 +1469,7 @@ mod tests {
     }
 
     /// A program ending while viewed with output still in the reader (it read the next batch and waits for the
-    /// held one's go-ahead, so it reaches no end): its end waits too — past the drain's 2 s, still not told — and
+    /// held one's go-ahead, so it reaches no end): its end waits too — a drain run out while held, still not told — and
     /// once the view lets go comes after that output, every line on the screen as it's told. It leaves a child
     /// holding the pty: where the pty outlives its session's leader (Linux) there's no end of file, and the end
     /// comes a drain's time after the view let go; macOS revokes it as the leader exits.
@@ -1475,13 +1487,8 @@ mod tests {
         let mut ed = run_until(&script, |ed| ed.session.terminal.is_some());
         ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         let_go(&fifo);
-        // (the drain's 2 s, and some: the program long gone)
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < end {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
-                ed.handle_event(ev);
-            }
-        }
+        // (the program gone and a whole drain run out while held — counted by its wait thread, never timed)
+        wait(&mut ed, |ed| ed.session.terminal.as_ref().is_some_and(|t| t.drains_held() > 0 && t.came()));
         let t = ed.session.terminal.as_ref().unwrap();
         assert_eq!(t.exited, None, "its end waits with its output");
         assert!(t.came() && !shows(&ed, "first-words"), "its output still held");
@@ -1524,7 +1531,7 @@ mod tests {
         // (the old program ends now, the new one running: its end told — to nobody. Its exit 1.8 s after
         // `let_go`, then `DRAIN_AFTER_EXIT` — a drop that left `holds` odd keeps that thread waiting as long as
         // the orphan holds the terminal, 14 s, where it stays open: Linux; macOS revokes it as the shell exits)
-        wait_up_to(&mut ed, 10, |_| std::sync::Arc::strong_count(&old) == 1);
+        wait(&mut ed, |_| std::sync::Arc::strong_count(&old) == 1);
         assert_eq!(std::sync::Arc::strong_count(&old), 1, "the old run's end was sent: its view let it go");
         while let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
             ed.handle_event(ev);
@@ -1547,7 +1554,7 @@ mod tests {
         assert!(shows(&ed, "flood-line"));
         // (the main loop's events — the reader's batches: `n` of them, or `ms` gone)
         let batches = |ed: &mut Editor, n: usize, ms: u64| {
-            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            let end = crate::test_results::quiet_for(std::time::Duration::from_millis(ms));
             let mut taken = 0;
             while taken < n && std::time::Instant::now() < end {
                 if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -1609,7 +1616,7 @@ mod tests {
         ed.session.root = std::fs::canonicalize(&dir).unwrap();
         ed.terminal_run(vec!["/bin/sh".into()], vec![("HISTFILE".into(), "/dev/null".into())]);
         while ed.session.terminal.is_none() {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+            if let Some(ev) = ed.events.recv_timeout(crate::test_results::PATIENCE) {
                 ed.handle_event(ev);
             }
         }
@@ -1658,7 +1665,7 @@ mod tests {
             vec![("PS1".into(), "$ ".into()), ("HISTFILE".into(), "/dev/null".into())],
         );
         while ed.session.terminal.is_none() {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_secs(5)) {
+            if let Some(ev) = ed.events.recv_timeout(crate::test_results::PATIENCE) {
                 ed.handle_event(ev);
             }
         }

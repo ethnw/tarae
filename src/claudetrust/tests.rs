@@ -573,7 +573,7 @@ fn a_look_read_before_a_take_back_isnt_trusted() {
 
 /// Until `done`, handling events as they come (5 s at most).
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(Instant::now() < end, "timed out waiting for {what} — {}", state(ed));
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

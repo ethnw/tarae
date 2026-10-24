@@ -1846,7 +1846,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\necho \"$*\" >> \"$FAKE_DIR/log\"\ncase \"$1\" in\n  run) sleep 30 & echo $! > \"$FAKE_DIR/run.pid\"; \
-             wait ;;\n  kill) kill \"$(cat \"$FAKE_DIR/run.pid\")\"; [ -n \"$FAKE_HANG\" ] && sleep 10; i=0; \
+             wait ;;\n  kill) kill \"$(cat \"$FAKE_DIR/run.pid\")\"; [ -n \"$FAKE_HANG\" ] && echo $$ > \"$FAKE_DIR/kill.pid\" && exec sleep 600; i=0; \
              while kill -0 \"$PPID\" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.01; i=$((i + 1)); done ;;\nesac\n",
         )
         .unwrap();
@@ -1867,7 +1867,7 @@ mod tests {
                 .spawn()
                 .unwrap();
             let logged = || std::fs::read_to_string(&log).unwrap_or_default();
-            let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let by = std::time::Instant::now() + crate::PATIENCE;
             while !logged().contains(&format!("run --rm --name {name}")) {
                 assert!(std::time::Instant::now() < by, "the scene's docker run never came: {}", logged());
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1875,7 +1875,7 @@ mod tests {
             // SAFETY: a signal to a child of ours.
             unsafe { libc::kill(child.id() as i32, sig) };
             if hang {
-                let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let by = std::time::Instant::now() + crate::PATIENCE;
                 while !logged().lines().any(|l| l == format!("kill {name}")) {
                     assert!(std::time::Instant::now() < by, "the hanging kill never came: {}", logged());
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -1883,8 +1883,8 @@ mod tests {
                 // SAFETY: a signal to a child of ours.
                 unsafe { libc::kill(child.id() as i32, sig) };
             }
-            // (the hanging kill takes 10 s: a second signal ends it well before)
-            let by = std::time::Instant::now() + std::time::Duration::from_secs(if hang { 3 } else { 10 });
+            // (the hanging kill never answers — past this guard: ended at all, a second signal ended it)
+            let by = std::time::Instant::now() + crate::PATIENCE;
             let st = loop {
                 if let Some(st) = child.try_wait().unwrap() {
                     break st;
@@ -1901,6 +1901,12 @@ mod tests {
                 "the container ended by name: {}",
                 logged()
             );
+        }
+        // (the hanging kill's stand-in, left by design: ended here)
+        let hung = std::fs::read_to_string(dir.join("kill.pid")).ok().and_then(|p| p.trim().parse().ok());
+        if let Some(pid) = hung {
+            // SAFETY: a signal to the test's own stand-in `docker kill` (its pid from its own file).
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         std::fs::remove_dir_all(&dir).ok();
     }

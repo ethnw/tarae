@@ -637,7 +637,7 @@ mod tests {
         let second = ed.session_add(other.clone());
         ed.caps_sync();
         assert!(ed.session_switch(second));
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let made = |ed: &mut crate::editor::Editor, id| ed.session_by_id(id).and_then(|s| s.caps.clone());
         while made(&mut ed, first).is_none() || made(&mut ed, second).is_none() {
             let left = end.saturating_duration_since(std::time::Instant::now());

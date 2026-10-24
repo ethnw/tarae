@@ -433,7 +433,7 @@ fn the_card_says_what_changed_since_your_y() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -539,7 +539,7 @@ fn the_same_run_in_the_sandbox_says_what_changed_in_what_it_runs() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -653,7 +653,7 @@ fn what_a_run_made_is_a_change_since_its_answer() {
     ed.session.at = crate::session::At::Code;
     let generation = c.generation();
     let pump = |ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str| {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -702,7 +702,7 @@ fn chat_in(root: &Path) -> (crate::editor::Editor, u64) {
 
 /// Events handled until `done` (at most 20 s — then `what` didn't happen).
 fn pump_until(ed: &mut crate::editor::Editor, done: &dyn Fn(&crate::editor::Editor) -> bool, what: &str) {
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

@@ -2552,7 +2552,7 @@ pub(crate) fn outer_pid(k: &Keeper, inner: u32) -> u32 {
         }
         false
     };
-    let end = Instant::now() + Duration::from_secs(1);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     loop {
         for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
             let Some(p) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
@@ -2722,9 +2722,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(crate::spawn::wait(pid)));
         crate::dap::term_group(pid);
-        let status = rx.recv_timeout(Duration::from_secs(5)).expect("it ended once stopped").unwrap();
+        let status = rx.recv_timeout(crate::test_results::PATIENCE).expect("it ended once stopped").unwrap();
         assert_eq!(status.signal(), Some(libc::SIGTERM), "ended by the stop");
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while std::path::Path::new(&format!("/proc/{child}")).exists() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2791,7 +2791,7 @@ mod tests {
         let mut err = String::new();
         io::Read::read_to_string(&mut s.spawned.stderr.unwrap(), &mut err).unwrap();
         crate::spawn::wait(s.spawned.pid).unwrap();
-        let told = rx.recv_timeout(Duration::from_secs(5)).map(|d| format!("{} {}", d.op, d.target));
+        let told = rx.recv_timeout(crate::test_results::PATIENCE).map(|d| format!("{} {}", d.op, d.target));
         let err: Vec<&str> = err.lines().collect();
         println!("scene: {out}{} · told {}", err.join(" / "), told.unwrap_or_else(|e| e.to_string()));
         k.end();
@@ -2809,7 +2809,7 @@ mod tests {
         assert!(status.success(), "{out}");
         let sleep = outer_pid(&k, out.trim().parse().unwrap());
         let parent = || crate::procs::read(sleep).map(|o| o.ppid);
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while parent() != Some(k.pid) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2839,9 +2839,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(crate::spawn::wait(run).map_err(|e| e.to_string())));
         kill(&k);
-        let waited = rx.recv_timeout(Duration::from_secs(2)).expect("its wait answered");
+        let waited = rx.recv_timeout(crate::test_results::PATIENCE).expect("its wait answered");
         assert!(waited.as_ref().is_err_and(|e| e.contains("the session's keeper ended")), "{waited:?}");
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while crate::procs::read(run).is_some_and(|o| !o.zombie) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2891,7 +2891,7 @@ mod tests {
         *lock(&SLOW_BIRTH) = Some((root.clone(), tx));
         let r = root.clone();
         let birth = std::thread::spawn(move || ready(&r, Some("a key"), ns()));
-        began.recv_timeout(Duration::from_secs(5)).expect("its birth began");
+        began.recv_timeout(crate::test_results::PATIENCE).expect("its birth began");
         let at = Instant::now();
         let _ = of(None);
         let took = at.elapsed();
@@ -2939,7 +2939,7 @@ mod tests {
         let (out, status) = sh_through(&old, &rules, "setsid sleep 30 >/dev/null 2>&1 & echo $!");
         assert!(status.success(), "{out}");
         let left = outer_pid(&old, out.trim().parse().unwrap());
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while crate::procs::read(left).map(|o| o.ppid) != Some(old.pid) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -3063,7 +3063,7 @@ mod tests {
             let call = Call::of(c.generation(), &format!("r{n}"), id.clone());
             let job = Job::Command(command.into(), self.root.clone());
             crate::tools::guard_then_go(&mut self.ed, For::Claude(call), job, Default::default());
-            let end = Instant::now() + Duration::from_secs(30);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             loop {
                 if let Some((_, answer)) =
                     ANSWERED.with(|a| a.borrow().iter().find(|(i, _)| *i == id).cloned())
@@ -3094,7 +3094,7 @@ mod tests {
         fn daemon(&mut self) -> u32 {
             let said = self.run("setsid sleep 60 >/dev/null 2>&1 &");
             let k = self.keeper();
-            let end = Instant::now() + Duration::from_secs(5);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             loop {
                 match k.leftovers()[..] {
                     [pid] => return pid,
@@ -3624,7 +3624,7 @@ mod tests {
         let keep = kept.clone();
         std::thread::spawn(move || {
             for s in l.incoming().flatten() {
-                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                s.set_read_timeout(Some(crate::test_results::PATIENCE)).ok();
                 let mut line = String::new();
                 let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
                 let _ = io::Write::write_all(&mut &s, b"out hello\n");
@@ -4077,7 +4077,7 @@ mod tests {
             "proxyhold" => {
                 let (said, _kept) = proxied(&std::env::var("TARAE_TO").unwrap_or_default());
                 println!("helper: {said}");
-                let by = Instant::now() + Duration::from_secs(120);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 while !Path::new("done").exists() && Instant::now() < by {
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -4133,7 +4133,7 @@ mod tests {
                 // SAFETY: just made, owned by nothing else.
                 let s = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
                 println!("helper: made");
-                let by = Instant::now() + Duration::from_secs(30);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 while !Path::new("swept").exists() && Instant::now() < by {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -4162,7 +4162,7 @@ mod tests {
                 let (tcp, udp) = (tcp.unwrap(), udp.unwrap());
                 let late = bound_only(true, "127.0.0.1:0", true, None).unwrap();
                 println!("helper: tcp={} udp={} late={}", port_of(&tcp), port_of(&udp), port_of(&late));
-                let by = Instant::now() + Duration::from_secs(30);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 let mut listened = false;
                 while !Path::new("done").exists() && Instant::now() < by {
                     if !listened && Path::new("listen").exists() {
@@ -4189,7 +4189,7 @@ mod tests {
                             "helper: bound-late={}",
                             tried(s.as_ref().map(drop).map_err(|e| io::Error::new(e.kind(), e.to_string())))
                         );
-                        let by = Instant::now() + Duration::from_secs(30);
+                        let by = Instant::now() + crate::test_results::PATIENCE;
                         while !Path::new("go").exists() && Instant::now() < by {
                             std::thread::sleep(Duration::from_millis(10));
                         }
@@ -4219,7 +4219,7 @@ mod tests {
                 let port: u16 = std::env::var("TARAE_PORT").unwrap().parse().unwrap();
                 let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
                 println!("helper: aimed={port} connected={}", tried(s.connect(("127.0.0.1", port))));
-                let by = Instant::now() + Duration::from_secs(30);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 while !Path::new("done").exists() && Instant::now() < by {
                     let _ = s.send(apart_marker("theirs-sent").as_bytes());
                     std::thread::sleep(Duration::from_millis(10));
@@ -4249,7 +4249,7 @@ mod tests {
                 // never bound there, another session's, is answered at once.)
                 let mut made = false;
                 let after_made = |made: bool, bind: &mut dyn FnMut() -> io::Result<std::os::fd::OwnedFd>| {
-                    let by = Instant::now() + Duration::from_secs(2);
+                    let by = Instant::now() + crate::test_results::PATIENCE;
                     loop {
                         match bind() {
                             Err(e)
@@ -4291,7 +4291,7 @@ mod tests {
                 };
                 // (its bind the kernel's, on the send: waits as a bind does, after one made there)
                 let mut s = narrowed();
-                let by = Instant::now() + Duration::from_secs(2);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 let sent = loop {
                     match s.send_to(b"x", "127.0.0.1:9") {
                         Err(e)
@@ -4335,7 +4335,7 @@ mod tests {
             "hold" => {
                 let h = held("theirs");
                 println!("helper: {}", h.said);
-                let by = Instant::now() + Duration::from_secs(30);
+                let by = Instant::now() + crate::test_results::PATIENCE;
                 while !Path::new("done").exists() && Instant::now() < by {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -4509,7 +4509,7 @@ mod tests {
         let holder = crate::spawn::setsid_as(&hold, crate::spawn::Acts::User).expect("unshare -U starts");
         let ns = format!("/proc/{}/ns/user", holder.pid);
         let ours = std::fs::read_link("/proc/self/ns/user").unwrap();
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while std::fs::read_link(&ns).is_ok_and(|n| n == ours) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -4577,7 +4577,7 @@ mod tests {
         let mut ed = crate::editor::Editor::new(crate::config::Config::default());
         let argv: Vec<String> = std::iter::once(exe.display().to_string()).chain(args).collect();
         ed.terminal_run(argv, vec![(HELPER.into(), "userns".into())]);
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let screen = |ed: &crate::editor::Editor| {
             ed.session.terminal.as_ref().map(|t| t.parser.screen().contents()).unwrap_or_default()
         };
@@ -4620,7 +4620,7 @@ mod tests {
             Ok(s) => s,
             Err(e) => return tried::<()>(Err(e)),
         };
-        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = s.set_read_timeout(Some(crate::test_results::PATIENCE));
         let _ = io::Write::write_all(&mut &s, b"hello\n");
         let mut line = String::new();
         let _ = io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut line);
@@ -4823,7 +4823,7 @@ mod tests {
         };
         // SAFETY: the socket made above, ours from here.
         let s = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.set_read_timeout(Some(crate::test_results::PATIENCE)).ok();
         let _ = (&s).write_all(format!("GET http://{host}/ HTTP/1.1\r\n\r\n").as_bytes());
         let mut reply = String::new();
         let _ = std::io::BufReader::new(&s).read_line(&mut reply);
@@ -5078,7 +5078,7 @@ mod tests {
         let fd_moved =
             unsafe { libc::open(c_moved.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) } as libc::c_long;
         std::fs::write("ready_to_move", "").unwrap();
-        let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let by = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !std::path::Path::new("moved_done").exists() && std::time::Instant::now() < by {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -6470,7 +6470,7 @@ mod tests {
                 drop(m);
                 match sh {
                     Ok(mut sh) => {
-                        let until = Instant::now() + Duration::from_secs(3);
+                        let until = Instant::now() + crate::test_results::PATIENCE;
                         while sh.try_wait().ok().flatten().is_none() && Instant::now() < until {
                             std::thread::sleep(Duration::from_millis(20));
                         }
@@ -6818,7 +6818,7 @@ mod tests {
         let stat = || std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
         let nice =
             || stat().rsplit_once(')').and_then(|(_, s)| s.split_whitespace().nth(16).map(String::from));
-        let by = Instant::now() + Duration::from_secs(5);
+        let by = Instant::now() + crate::test_results::PATIENCE;
         let cmdline = || std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
         while !String::from_utf8_lossy(&cmdline()).contains(&apart_marker("arg")) && Instant::now() < by {
             std::thread::sleep(Duration::from_millis(10));
@@ -7989,7 +7989,7 @@ mod tests {
         let refused: Vec<super::super::Denial> = refused.try_iter().collect();
         std::fs::write(theirs.root.join("done"), "").unwrap();
         // (its rows go as its sockets do: asked again from 100 ms, doubling)
-        let by = Instant::now() + Duration::from_secs(15);
+        let by = Instant::now() + crate::test_results::PATIENCE;
         while owners.of(session) > 0 && Instant::now() < by {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -8860,7 +8860,7 @@ mod tests {
         let to = at.to_string();
         let (said, _) = served_said(&k, (&p, &c, &root), "connect", &[("TARAE_TO", &to)]);
         assert_eq!(said, "reached machine hello");
-        assert!(served.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(served.recv_timeout(crate::test_results::PATIENCE).is_ok());
         let port = at.port().to_string();
         let (mut one, first, _) = served_helper(&k, (&p, &c, &root), "listen", &[("TARAE_PORT", &port)]);
         assert_eq!(said_next(&mut one), format!("port {port}"), "the same port, in the session");
@@ -8890,7 +8890,7 @@ mod tests {
         let (p, c, root) = routed_project("swap", &k, own);
         let (said, refused) = served_said(&k, (&p, &c, &root), "swap", &[("TARAE_TO", &at.to_string())]);
         assert_eq!(said, swapped_said(), "{refused:?}");
-        assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "its connection arrived");
+        assert!(served.recv_timeout(crate::test_results::PATIENCE).is_ok(), "its connection arrived");
         k.end();
         std::fs::remove_dir_all(&root).ok();
     }
@@ -8937,7 +8937,7 @@ mod tests {
                 said, "connect=0 family=2 stream=1 nodelay=1 nonblock=1 peer=127.0.0.1 reply=out hello",
                 "{tier}: {refused:?}"
             );
-            assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: it arrived outside");
+            assert!(served.recv_timeout(crate::test_results::PATIENCE).is_ok(), "{tier}: it arrived outside");
             k.end();
             std::fs::remove_dir_all(&root).ok();
         }
@@ -8988,7 +8988,7 @@ mod tests {
             let (first, second) = (listed(5_000_001), listed(5_000_002));
             // The main loop, stood in: the session's answer to the first question
             let answer = std::thread::spawn(move || {
-                let ask = asked.recv_timeout(Duration::from_secs(10)).ok()?;
+                let ask = asked.recv_timeout(crate::test_results::PATIENCE).ok()?;
                 let FromProxy::Ask { run, host, port, .. } = ask.clone();
                 proxy::get().send(ToProxy::Answer { session, run, host, port, scope: Scope::Session });
                 Some((ask, asked))
@@ -9012,7 +9012,7 @@ mod tests {
             assert!(asked.try_recv().is_err(), "{tier}: not asked again");
             for n in ["first", "second"] {
                 assert!(
-                    served.recv_timeout(Duration::from_secs(5)).is_ok(),
+                    served.recv_timeout(crate::test_results::PATIENCE).is_ok(),
                     "{tier}: the {n} arrived outside"
                 );
             }
@@ -9070,7 +9070,7 @@ mod tests {
             let main = std::thread::spawn(move || {
                 let mut seen = Vec::new();
                 for scope in [Scope::Run, Scope::Refused] {
-                    let Ok(a) = asked.recv_timeout(Duration::from_secs(10)) else { break };
+                    let Ok(a) = asked.recv_timeout(crate::test_results::PATIENCE) else { break };
                     let FromProxy::Ask { run, host, port, .. } = a.clone();
                     proxy::get().send(ToProxy::Answer { session, run, host, port, scope });
                     seen.push(a);
@@ -9087,7 +9087,7 @@ mod tests {
                 said.ends_with("reply=out hello"),
                 "{tier}: `y` — the held request went on: {said} {refused:?}"
             );
-            assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: it arrived outside");
+            assert!(served.recv_timeout(crate::test_results::PATIENCE).is_ok(), "{tier}: it arrived outside");
             let (said, refused) = reach(&second);
             assert!(!said.ends_with("reply=out hello"), "{tier}: `n` — refused: {said} {refused:?}");
             let seen = main.join().unwrap();
@@ -9308,7 +9308,10 @@ mod tests {
                 (format!("connect={e} listen={inval}"), format!("connect=0 unspec=0 listen={inval}")),
                 "{tier}: {refused:?} {refused_after:?}"
             );
-            assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "{tier}: its connection arrived");
+            assert!(
+                served.recv_timeout(crate::test_results::PATIENCE).is_ok(),
+                "{tier}: its connection arrived"
+            );
             for r in [refused, refused_after] {
                 assert!(r.iter().any(|d| d.op == "network-bind"), "{tier}: {r:?}");
             }
@@ -9345,7 +9348,7 @@ mod tests {
             users.accept().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock),
             "the user's listener: nothing"
         );
-        assert!(served.recv_timeout(Duration::from_secs(5)).is_ok(), "the swapped connect arrived");
+        assert!(served.recv_timeout(crate::test_results::PATIENCE).is_ok(), "the swapped connect arrived");
         k.end();
         std::fs::remove_dir_all(&root).ok();
     }
@@ -9647,7 +9650,7 @@ mod tests {
                 "attr_calls",
                 &[("TARAE_OUTSIDE", &real_outside)],
             );
-            let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let by = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !root.join("ready_to_move").exists() && std::time::Instant::now() < by {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -9664,7 +9667,7 @@ mod tests {
             // its mode and times calls')
             let ended =
                 |id| super::super::supervisor::ENDED.lock().unwrap().iter().find(|e| e.0 == id).map(|e| e.1);
-            let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let by = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ended(run_id).is_none() && std::time::Instant::now() < by {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

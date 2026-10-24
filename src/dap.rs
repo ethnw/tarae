@@ -1169,7 +1169,7 @@ mod tests {
 
     /// Processes events until the condition holds.
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -1218,7 +1218,7 @@ mod tests {
         let mut d = Dap::placeholder(State::Running, "app".into());
         d.child = Some(child);
         drop(d);
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while (alive(adapter) || alive(debuggee)) && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(50));
         }

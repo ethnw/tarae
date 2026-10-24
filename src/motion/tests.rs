@@ -118,7 +118,7 @@ fn a_yank_is_a_note_where_its_flash_is_drawn_else_a_toast() {
     frame(&mut ed);
     assert_eq!((last(&ed), toasts(&ed)), ("yanked 1 selection to register a".into(), vec![]));
     feed(&mut ed, " y");
-    let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("the copy's result");
+    let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the copy's result");
     ed.handle_event(ev);
     frame(&mut ed);
     assert_eq!((last(&ed), toasts(&ed)), ("copied 1 selection".into(), vec![]), "space y: the same rule");

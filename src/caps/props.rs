@@ -574,7 +574,7 @@ impl World {
 /// The events applied until every session's `Caps` asked has landed and `done` says so (`said`: the messages since
 /// `from`).
 fn settle(ed: &mut Editor, what: &str, from: usize, done: &dyn Fn(&Editor, &[String]) -> bool) {
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     loop {
         let said: Vec<String> = ed.messages.iter().skip(from).map(|m| m.2.clone()).collect();
         // (what it waits for read first: a write whose turn ends on its worker between the two reads is then served
@@ -1583,7 +1583,7 @@ fn settle_waits_for_a_write_whose_turn_ends_while_it_looks() {
     crate::allow::grant(&mut ed, &Grant::Port(5432), Scope::Always);
     let path = w.allow.clone();
     let target = crate::storewrite::served(&path) + 1;
-    let (end, from) = (Instant::now() + Duration::from_secs(20), ed.messages.len());
+    let (end, from) = (Instant::now() + crate::test_results::PATIENCE, ed.messages.len());
     settle(&mut ed, "its turn ending as settle looks", from, &|_, _| {
         crate::storewrite::release(&path, 1);
         // (the worker takes its turn and ends it — no event of it applied meanwhile)
@@ -1599,7 +1599,7 @@ fn settle_waits_for_a_write_whose_turn_ends_while_it_looks() {
 
 /// `f` true before long, the editor's events applied meanwhile (a background write brings none back).
 fn until(ed: &mut Editor, what: &str, f: &dyn Fn() -> bool) {
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !f() {
         assert!(Instant::now() < end, "{what}");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2375,7 +2375,7 @@ fn a_sessions_write_records_its_repository_where_it_lands() {
     ed.session.allowed.add(&Grant::Port(8080));
     ed.sessions_keep();
     // (landed, its result not applied)
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while crate::storewrite::served(&w.sessions) < crate::storewrite::given_turns(&w.sessions) {
         assert!(Instant::now() < end, "never landed");
         std::thread::yield_now();

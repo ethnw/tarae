@@ -2,7 +2,6 @@
 //! what's shown, in whose colour, and what keys do there.
 
 use std::process::Command;
-use std::time::Duration;
 
 use super::*;
 use crate::config::Config;
@@ -232,7 +231,7 @@ fn shown(ed: &Editor) -> &Shown {
 /// Events until the woven view in front has had `n` merges land and none is under way.
 fn woven_to(ed: &mut Editor, n: u64) {
     sync(ed);
-    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let end = std::time::Instant::now() + crate::test_results::PATIENCE;
     while shown(ed).merges < n || shown(ed).asking {
         let left = end.saturating_duration_since(std::time::Instant::now());
         let ev = ed.events.recv_timeout(left).unwrap_or_else(|| panic!("merge {n}: no event in time"));

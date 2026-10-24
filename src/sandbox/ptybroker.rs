@@ -264,7 +264,7 @@ mod tests {
         // asked for once the pair's node is gone, as the broker reads it)
         let closed = |node: Option<crate::pty::Node>| {
             let node = node.expect("the broker names its pair");
-            let end = std::time::Instant::now() + Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while still_open(&node) {
                 assert!(
                     std::time::Instant::now() < end,
@@ -368,7 +368,7 @@ mod tests {
         let (pid, done) = (s.pid, Arc::new(AtomicBool::new(false)));
         let watch = done.clone();
         let watchdog = std::thread::spawn(move || {
-            let by = std::time::Instant::now() + Duration::from_secs(20);
+            let by = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !watch.load(Ordering::SeqCst) && std::time::Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -417,7 +417,7 @@ mod tests {
         let (pid, done) = (s.pid, Arc::new(AtomicBool::new(false)));
         let watch = done.clone();
         std::thread::spawn(move || {
-            let by = std::time::Instant::now() + Duration::from_secs(1200);
+            let by = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !watch.load(Ordering::SeqCst) && std::time::Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(200));
             }

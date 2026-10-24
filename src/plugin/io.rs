@@ -1230,7 +1230,7 @@ mod tests {
                 clock.cancel(key);
             }
         }
-        let got: Vec<_> = (0..2).map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
+        let got: Vec<_> = (0..2).map(|_| rx.recv_timeout(crate::test_results::PATIENCE).unwrap()).collect();
         assert_eq!(got, ["early", "late"]);
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
     }

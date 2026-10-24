@@ -248,7 +248,7 @@ fn a_sleeping_threads_wait_channel_is_read_on_linux() {
     let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("sleep");
     let pid = child.id();
     // (until it's past its exec and asleep — a second at most)
-    let end = Instant::now() + Duration::from_secs(2);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     let mut threads = crate::procs::threads(pid);
     while !threads.first().is_some_and(|t| t.name == "sleep" && t.state == "sleeping" && t.wchan.is_some()) {
         if Instant::now() > end {
@@ -280,7 +280,7 @@ fn sample(pid: u32, pct: f32) -> Sample {
 }
 
 fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         let left = end.saturating_duration_since(Instant::now());
         let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -362,7 +362,7 @@ fn a_stuck_run_is_captured_then_asked_about() {
     settle_until(&mut ed, |ed| {
         ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
     });
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !std::fs::read_to_string(&asked).unwrap_or_default().contains(&format!("stop {prefix}-checks")) {
         assert!(Instant::now() < end, "its container stopped by name");
         std::thread::sleep(Duration::from_millis(20));
@@ -405,7 +405,7 @@ fn a_stop_from_the_card_ends_what_left_the_runs_group() {
     let user = crate::tools::For::User("apart".into());
     assert!(ed.task_start_for(task, user, None, Default::default()).is_ok());
     let file = dir.join("pid");
-    let by = Instant::now() + Duration::from_secs(20);
+    let by = Instant::now() + crate::test_results::PATIENCE;
     while !file.exists() {
         assert!(Instant::now() < by, "the stand-in never said its pid");
         std::thread::sleep(Duration::from_millis(10));
@@ -614,7 +614,7 @@ fn a_runs_connection_to_a_daemon_is_read_from_its_tree() {
         .spawn()
         .expect("nc");
     let _conn = daemon.accept().unwrap();
-    let end = Instant::now() + Duration::from_secs(3);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     let mut said = connected_outside(child.id());
     while !said.iter().any(|s| s.ends_with("d.sock")) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(20));

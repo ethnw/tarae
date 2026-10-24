@@ -91,6 +91,81 @@ pub fn unoptimized(name: &str) -> bool {
     true
 }
 
+/// How long a test waits for what it waits on before it calls it a hang. A guard, never the test's logic: it
+/// only stops a test that would otherwise never end, so it's generous — a shared runner, or this Mac while several
+/// sessions build at once, runs the suite 3–5× slower, and guards of a few seconds tripped there one a round
+/// (CI's rounds 1–6). A passing test
+/// never waits this long. One value for every test: the e2e harness's `TIMEOUT` and xtask's `PATIENCE` are the
+/// same (`every_test_waits_with_one_patience`, which also keeps new deadlines off). What a test checks against
+/// time — a timer under test, a program's own `read -t`, "viewed past 3 s" — is a condition or the
+/// simulation's clock, never a deadline; a look that nothing happens meanwhile is `quiet_for`'s.
+#[cfg(test)]
+pub const PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The end of a while in which a test looks that nothing happens (no event, no frame, nothing sent) — never a
+/// wait for what must happen (that's a condition, `PATIENCE` its guard): a slower machine only sees less happen
+/// in it, so it can't fail there.
+#[cfg(test)]
+pub fn quiet_for(d: std::time::Duration) -> std::time::Instant {
+    std::time::Instant::now() + d
+}
+
+/// Every test waits with one patience: a deadline written in a test (`Instant::now() + Duration…`, a
+/// `recv_timeout` of whole seconds) outside these helpers fails here — a hang guard is `PATIENCE`, a look that
+/// nothing happens `quiet_for`, what a test checks against time a condition or the simulation's clock. The list
+/// holds what's left, per file, and only shrinks (the message prints the table as it is now). The e2e harness's
+/// `TIMEOUT`, xtask's and tarae-trace's `PATIENCE` say the same value.
+#[cfg(test)]
+#[test]
+fn every_test_waits_with_one_patience() {
+    let now = crate::sim::lint::test_counts(DEADLINES, &["src/test_results.rs"]);
+    crate::sim::lint::only_shrinks("deadlines in tests", &now, TEST_DEADLINES);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let same = format!("Duration::from_secs({})", PATIENCE.as_secs());
+    for (file, name) in [
+        ("tests/harness/mod.rs", "pub const TIMEOUT: Duration = "),
+        ("xtask/src/main.rs", "const PATIENCE: std::time::Duration = std::time::"),
+        ("trace/tests/cli.rs", "const PATIENCE: Duration = "),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        assert!(text.contains(&format!("{name}{same};")), "{file}: its {name}… isn't {same}");
+    }
+}
+
+/// What a deadline written in a test looks like (`every_test_waits_with_one_patience`).
+#[cfg(test)]
+const DEADLINES: &[&str] = &[
+    "Instant::now() + Duration::from_",
+    "Instant::now() + std::time::Duration::from_",
+    "recv_timeout(Duration::from_secs(",
+    "recv_timeout(std::time::Duration::from_secs(",
+];
+
+/// Deadlines left in tests, per file (from the repository's root) — none a guard of a test that runs unasked.
+#[cfg(test)]
+const TEST_DEADLINES: &[(&str, usize)] = &[
+    // (a by-hand measure's run limit, its row saying `killed after N s`)
+    ("src/sandbox/macdeny_measure.rs", 1),
+    // (the mutation properties' length by hand, `TARAE_WEB_MUTATE_SECS`: how long, never a wait)
+    ("src/web/tests.rs", 2),
+];
+
+/// Only test code counts — a test-only item or file, every file of `tests/` — never a comment, and not code a
+/// build without tests has (its deadlines are the program's).
+#[cfg(test)]
+#[test]
+fn a_deadline_counts_only_in_test_code() {
+    let main = "mod a;\n#[cfg(test)]\nmod t;\nfn f() { let end = Instant::now() + Duration::from_secs(5); }\n\
+                #[cfg(test)]\nmod tests {\n    fn g() { let end = Instant::now() + Duration::from_millis(9); }\n}\n";
+    let a = "// Instant::now() + Duration::from_secs(1)\nfn h() {}\n";
+    let t = "fn k() { rx.recv_timeout(std::time::Duration::from_secs(3)); }\n";
+    let files = [("main.rs", main), ("a.rs", a), ("t.rs", t)].map(|(p, s)| (p.to_string(), s.to_string()));
+    let n = crate::sim::lint::test_count_tree(&files, DEADLINES, false);
+    assert_eq!(n.into_iter().collect::<Vec<_>>(), [("main.rs".to_string(), 1), ("t.rs".to_string(), 1)]);
+    let n = crate::sim::lint::test_count_tree(&files, DEADLINES, true);
+    assert_eq!(n.get("main.rs"), Some(&2), "all of it a test crate's");
+}
+
 /// A skip's line as `said_skip` writes it, for a fixture to hold (a run's skips file, an output) — never said.
 #[cfg(test)]
 pub fn skip_line(rest: &str) -> String {

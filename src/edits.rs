@@ -856,7 +856,7 @@ mod tests {
 
     /// Events until `done` (where the edit leads is worked out on a worker).
     fn pump(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(std::time::Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {

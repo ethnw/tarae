@@ -39,7 +39,7 @@ const SEEDS: &[u64] = &[0, 3, 6, 7, 18, 169];
 const INPUTS: usize = 40;
 
 /// A run's real time at most.
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// The board's members reading at once at most (`review.board-at-once`): fewer than its angles, so the line
 /// holds some.

@@ -2105,7 +2105,7 @@ pub(crate) mod tests {
         let (pid, stdin) = (ours.id(), ours.stdin.take());
         pump(ours, false, ed.events.sender(), |_| None);
         kill(pid);
-        let end = std::time::Instant::now() + Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while UNREAPED.lock().unwrap().contains(&pid) {
             assert!(std::time::Instant::now() < end, "killed and reaped");
             std::thread::sleep(Duration::from_millis(10));
@@ -2131,7 +2131,7 @@ pub(crate) mod tests {
             let _ = tx.send(matches!(ev, StreamEv::Exit(_)));
             None
         });
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "its end told");
+        assert_eq!(rx.recv_timeout(crate::test_results::PATIENCE), Ok(true), "its end told");
         assert!(!UNREAPED.lock().unwrap().contains(&pid), "reaped");
     }
 
@@ -2185,7 +2185,7 @@ pub(crate) mod tests {
         });
         let mut got: Vec<(std::time::Instant, String)> = Vec::new();
         while !got.iter().any(|g| g.1.contains("three")) {
-            got.push(rx.recv_timeout(Duration::from_secs(10)).expect("the stream's lines"));
+            got.push(rx.recv_timeout(crate::test_results::PATIENCE).expect("the stream's lines"));
         }
         // (what came at once may go in one batch: `text onetwo`, `input xy`)
         let at = |kind: &str, end: &str| {
@@ -2486,7 +2486,7 @@ pub(crate) mod tests {
     /// The names the stand-in wrote in `dir`, once it has (5 s at most), the file taken away for the next.
     fn names_in(ed: &mut Editor, dir: &Path) -> Vec<String> {
         let file = dir.join("env.names");
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !file.exists() {
             assert!(Instant::now() < end, "the stand-in claude wrote no env.names");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2602,7 +2602,7 @@ pub(crate) mod tests {
                 .find(|m| m.text.contains("no login"))
                 .map(|m| m.text.clone())
         };
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while hint(&ed).is_none() {
             assert!(
                 Instant::now() < end,

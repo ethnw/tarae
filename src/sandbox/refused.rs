@@ -1937,7 +1937,7 @@ fn run_proxy_row(
                 .name("tarae-refused-answer".into())
                 .spawn(move || {
                     if let Ok(FromProxy::Ask { run, host, port, .. }) =
-                        asked.recv_timeout(Duration::from_secs(10))
+                        asked.recv_timeout(crate::test_results::PATIENCE)
                     {
                         super::proxy::get().send(ToProxy::Answer {
                             session,

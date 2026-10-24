@@ -3425,7 +3425,7 @@ mod tests {
         assert_eq!(got, want);
         // (the run is gone: what it left empty goes, on a thread of its own)
         let left_empty = ["sub/target", "app/.gradle", "app/target"];
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while left_empty.iter().any(|e| r.join(e).exists()) && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -4063,7 +4063,7 @@ mod tests {
         let (l, root, seen) = (log.clone(), s.root.clone(), w.clone());
         let held: crate::sandbox::Held = Arc::new(move |pid: u32, comm: &str| {
             append(&l, &vm_records(pid, comm, &root));
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while seen.blocked().seen.is_empty() && std::time::Instant::now() < end {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -4274,7 +4274,7 @@ mod tests {
         let w = crate::sandbox::Watch::start_audit_from("t.", stream);
         w.owned_by(Owner { pid: 4242, comm: "tl-9".into() });
         std::fs::write(&go, "").unwrap();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while w.blocked().seen.is_empty() && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -4283,7 +4283,7 @@ mod tests {
         assert_eq!((b.seen[0].op.as_str(), b.seen[0].target.as_str()), ("file-write*", "/w/p/build.rs"));
         let pid = w.pid().unwrap();
         w.finish();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         // SAFETY: signal 0 only asks.
         while unsafe { libc::kill(pid as i32, 0) } == 0 && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(10));

@@ -891,7 +891,7 @@ mod tests {
         ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 let ev = ed.events.recv_timeout(left).expect("settled before the timeout");
@@ -954,7 +954,7 @@ mod tests {
         ed.session.at = crate::session::At::Chat;
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let settle = |ed: &mut Editor| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !ed.offers.iter().any(|o| matches!(o.what, crate::offer::What::Read { .. })) {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 let ev = ed.events.recv_timeout(left).expect("its card before the timeout");
@@ -1000,7 +1000,7 @@ mod tests {
         let generation = ed.session.chat.as_ref().unwrap().generation();
         let o = outside.join("o.txt");
         let settle = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 let ev = ed.events.recv_timeout(left).expect("settled before the timeout");

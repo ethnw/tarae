@@ -1627,7 +1627,7 @@ mod tests {
         wait_for(vec![pid]);
         // SAFETY: signal 0 only asks whether the process is there (a zombie still is).
         let gone = || unsafe { libc::kill(pid as i32, 0) } != 0;
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !gone() && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1713,7 +1713,7 @@ mod tests {
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -1754,7 +1754,7 @@ mod tests {
 
     /// `settle_until`, a restart's card answered `y` (the checkout tarae started in) as it comes.
     fn settle_answering(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             if ed.offers.first().is_some_and(|o| matches!(o.what, crate::offer::What::Restart(_))) {
                 ed.offer_accept();
@@ -1812,7 +1812,7 @@ mod tests {
         assert_eq!(c.edits.at_end.as_deref(), Some(dir.as_path()), "review at the end stays on");
         assert_eq!(c.conversation.as_deref(), Some("s-1"));
         assert_eq!(c.msgs.last().unwrap().text, crate::chat::RESTARTED);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let started = || std::fs::read_to_string(&argv).unwrap_or_default();
         while !started().lines().last().unwrap_or_default().contains("--resume s-1") {
             assert!(std::time::Instant::now() < end, "resumed: {}", started());
@@ -1917,11 +1917,11 @@ mod tests {
         assert_eq!(ed.session.root, back, "the other checkout in front");
         // As the event loop starts: then your config changes (again, until the watch has seen it)
         ed.watches_start();
-        let mut n = 1;
-        while ed.config.scrolloff == 1 && n < 50 {
+        let (mut n, end) = (1, std::time::Instant::now() + crate::test_results::PATIENCE);
+        while ed.config.scrolloff == 1 && std::time::Instant::now() < end {
             n += 1;
             std::fs::write(&user, format!("[editor]\nscrolloff = {n}\n")).unwrap();
-            let end = std::time::Instant::now() + Duration::from_millis(200);
+            let end = crate::test_results::quiet_for(Duration::from_millis(200));
             while ed.config.scrolloff == 1
                 && let Some(ev) =
                     ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()))
@@ -2066,7 +2066,7 @@ mod tests {
         let c = ed.session.chat.as_mut().unwrap();
         c.input.set("go on");
         crate::chat::send(&mut ed);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !argv().contains("--resume c-back") {
             assert!(std::time::Instant::now() < end, "resumed: {}", argv());
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -2438,7 +2438,7 @@ mod tests {
             ed.handle_event(crate::event::Event::Key(k.parse().unwrap()));
         }
         let mine = |ed: &Editor| ed.offers.iter().find(|o| matches!(o.what, What::Restart(_))).map(|o| o.id);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while mine(&ed).is_none() {
             let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
             ed.handle_event(ev.unwrap_or_else(|| panic!("no restart card: {}", toasts(&ed))));
@@ -3505,7 +3505,7 @@ mod tests {
             toasts(&ed)
         );
         drop(ed);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while crate::procs::read(pid).is_some_and(|p| !p.zombie) && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

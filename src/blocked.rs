@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(head.then.as_deref(), Some("tarae's AppArmor profile would give own namespaces"));
         assert_eq!((head.note.as_deref(), &p.empty), (Some(NOTHING_BLOCKED), &None), "said above the row");
         feed(&mut ed, "<ret>");
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let said = "copied the step for own namespaces — run it in a terminal, then restart tarae";
         while !ed.toasts.iter().any(|t| t.text == said) {
             let left = end.saturating_duration_since(std::time::Instant::now());
@@ -1122,7 +1122,7 @@ mod tests {
         let card = |ed: &mut Editor, row: &str| {
             ed.offers.clear();
             ed.sandbox_grant(row).unwrap();
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while ed.offers.is_empty() {
                 let left = end.saturating_duration_since(std::time::Instant::now());
                 let ev = ed.events.recv_timeout(left).expect("the card before the timeout");

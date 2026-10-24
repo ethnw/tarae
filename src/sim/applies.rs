@@ -20,7 +20,7 @@ const SEEDS: &[u64] = &[0, 1];
 
 const INPUTS: usize = 40;
 
-const LIMIT: Duration = Duration::from_secs(60);
+const LIMIT: Duration = crate::test_results::PATIENCE;
 
 /// The project as it starts: a changed file, a deleted one (the patch's are a move or delete — its card has
 /// no `r`), the patch's new one not yet there.

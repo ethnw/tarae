@@ -5116,7 +5116,7 @@ mod tests {
     }
 
     fn settle_until(ed: &mut Editor, done: impl Fn(&Editor) -> bool) {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             let left = end.saturating_duration_since(std::time::Instant::now());
             let ev = ed.events.recv_timeout(left).expect("event before timeout");
@@ -5646,7 +5646,7 @@ mod tests {
             };
             list(d).iter().flat_map(|sub| list(sub)).find(|p| p.ends_with(&file))
         };
-        let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let by = std::time::Instant::now() + crate::test_results::PATIENCE;
         while written(&store).is_none() {
             assert!(std::time::Instant::now() < by, "its texts never written");
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -7644,7 +7644,7 @@ mod tests {
             }
             let mut per_key = Vec::new();
             // (no frame's time running out: what's one batch is the rule's, not the machine's speed)
-            let never = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            let never = std::time::Instant::now() + crate::test_results::PATIENCE;
             while let Some(ev) = ed.events.try_recv() {
                 crate::term::handle_batch(ed, ev, never);
                 frame(ed);
@@ -7745,7 +7745,7 @@ mod tests {
                 tx.send(crate::event::Event::Key(k.parse().unwrap())).unwrap();
             }
             let mut per_key = Vec::new();
-            let never = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            let never = std::time::Instant::now() + crate::test_results::PATIENCE;
             while let Some(ev) = ed.events.try_recv() {
                 crate::term::handle_batch(ed, ev, never);
                 frame(ed);

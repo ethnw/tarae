@@ -1523,7 +1523,7 @@ mod tests {
             ed.events.set_asked(was);
         };
         let land = |ed: &mut Editor| {
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             while !ed.offers.iter().any(|o| o.title == "Delete branch x") {
                 let ev = ed.events.recv_timeout(end.saturating_duration_since(std::time::Instant::now()));
                 ed.handle_event(ev.expect("its card before timeout"));
@@ -1897,7 +1897,7 @@ mod tests {
         ed.push_offer(screen_card(2));
         assert_eq!(ed.doing(session_by(&ed, id)), Doing::Waiting);
         feed(&mut ed, "<space>l");
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while session_by(&ed, id).chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "back's turn ends");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2020,7 +2020,7 @@ mod tests {
                 false => matches!(o.what, crate::offer::What::Run(_)),
             })
         };
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !(is(&ed, 0, false) && is(&ed, 1, true)) {
             assert!(Instant::now() < end, "front's run card, and the Read's under it");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2035,7 +2035,7 @@ mod tests {
         let back_log = back.join("claude-heard.log");
         claude_calls(&mut ed, &back_log, &[]);
         let (id, _) = back_at_work(&mut ed, &back);
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while session_by(&ed, id).chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "back's turn ends");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2049,7 +2049,7 @@ mod tests {
         assert!(ed.card_has_keys(), "C-q finds it");
         // …and it's answered from there
         ed.offer_accept();
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while answered(&log, "run").is_none() {
             assert!(Instant::now() < end, "Claude hears how it ran");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2068,7 +2068,7 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert!(ed.card_has_keys(), "C-q finds it");
         ed.offer_accept();
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while answered(&log, "Read").is_none() {
             assert!(Instant::now() < end, "Claude hears the Read's answer");
             std::thread::sleep(Duration::from_millis(20));
@@ -2089,7 +2089,7 @@ mod tests {
         ed.config.llm.sandbox = false;
         let (front_log, back_log) = (front.join("claude-heard.log"), back.join("claude-heard.log"));
         let pump = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool, what: &str| {
-            let end = Instant::now() + Duration::from_secs(10);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(Instant::now() < end, "{what}");
                 if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2123,7 +2123,7 @@ mod tests {
         feed(&mut ed, "<C-q>");
         assert!(ed.card_has_keys() && runs(&ed.offers), "C-q brings them to it again");
         // Front's turn ends behind: the card stays, with the keys
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while session_by(&ed, 0).chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "front's turn ends");
             serve(&mut ed, &front.join("main.rs"));
@@ -2155,7 +2155,7 @@ mod tests {
         claude_calls(&mut ed, &front_log, &[("run", run(&front))]);
         feed(&mut ed, "<space>lfront<ret><esc>");
         let pump = |ed: &mut Editor, done: &dyn Fn(&Editor) -> bool, what: &str| {
-            let end = Instant::now() + Duration::from_secs(10);
+            let end = Instant::now() + crate::test_results::PATIENCE;
             while !done(ed) {
                 assert!(Instant::now() < end, "{what}");
                 if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2321,7 +2321,7 @@ mod tests {
         let call = crate::tools::Call::of(generation, "r2", json!(2));
         ed.with_session(other, |ed| crate::tools::answer(ed, call, Ok("two".into())));
         assert_eq!(waits(&ed), 1, "not inside that swap");
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         loop {
             let left = end.saturating_duration_since(Instant::now());
             let ev = ed.events.recv_timeout(left).expect("the hop");
@@ -2490,7 +2490,7 @@ mod tests {
         let (id, file) = back_at_work(&mut ed, &back);
         let back_server =
             ed.docs.iter().find(|d| d.path.as_deref() == Some(file.as_path())).unwrap().lsp.client;
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let mut published = false;
         while session_by(&ed, id).chat.as_ref().unwrap().busy() {
             assert!(
@@ -2542,7 +2542,7 @@ mod tests {
         // (front's chat open: the tabs over it)
         feed(&mut ed, "<space>l");
         let asked = |ed: &Editor| ed.lsp.pending.values().any(|p| matches!(p.kind, Kind::ToolSymbols { .. }));
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !asked(&ed) {
             assert!(Instant::now() < end, "back's Claude called symbols");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2601,7 +2601,7 @@ mod tests {
         assert!(narrow.contains(" · +1 ◦1 ─"), "the stuck one in `+1`, its sign with it: {narrow}");
         // Answered: the mark goes
         serve(&mut ed, &file);
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while session_by(&ed, id).chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "back's turn ends once answered");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2625,7 +2625,7 @@ mod tests {
         let back_id = ed.session_open(&back).unwrap();
         assert!(ed.session_switch(0) && ed.session.id == 0, "front in front");
         feed(&mut ed, "<space>lgo<ret><esc>");
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.tool_waits.is_empty() {
             assert!(Instant::now() < end, "front's Claude called symbols");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2637,7 +2637,7 @@ mod tests {
         // Answered from inside `back`'s swap: front's call still waits as the swap ends
         ed.with_session(back_id, |ed| crate::tools::answer(ed, call, Ok("from behind".into())));
         assert_eq!(ed.session.tool_waits.len(), 1, "not delivered inside another session's swap");
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while ed.session.chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "the answer went out — front's turn ends");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {
@@ -2698,7 +2698,7 @@ mod tests {
 
     /// Events handled until session `id`'s Claude is idle again.
     fn turn_ends(ed: &mut Editor, id: SessionId) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while session_by(ed, id).chat.as_ref().unwrap().busy() {
             assert!(Instant::now() < end, "its turn ends");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

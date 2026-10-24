@@ -863,7 +863,7 @@ mod tests {
         ed.disk_poll(false);
         let round = ed.disk_poll_gen;
         while ed.disk_poll_gen == round {
-            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("disk stat");
             ed.handle_event(ev);
         }
     }
@@ -905,9 +905,9 @@ mod tests {
             self.ed.on_disk(vec![(self.id, known, stamp(&self.file), Some(body.into()))]);
         }
 
-        /// The editor's events for `ms` (its timers land).
+        /// The editor's events for `ms` (its timers land) — a slice of a loop that waits on its condition.
         fn pump(&mut self, ms: u64) {
-            let end = std::time::Instant::now() + Duration::from_millis(ms);
+            let end = crate::test_results::quiet_for(Duration::from_millis(ms));
             while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
                 if let Some(ev) = self.ed.events.recv_timeout(left.min(Duration::from_millis(10))) {
                     self.ed.handle_event(ev);
@@ -928,10 +928,10 @@ mod tests {
         }
 
         /// The didSaves sent, once there are `n` — waited for, not a fixed while (the writer thread, and
-        /// with `pump` the editor's timers too, can take longer on a slow runner); after 10 s, what there is.
+        /// with `pump` the editor's timers too, can take longer on a slow runner); past `PATIENCE`, what there is.
         /// Without `pump` no event is handled: what's counted went out before any.
         fn saves_reach(&mut self, n: usize, pump: bool) -> usize {
-            let end = std::time::Instant::now() + Duration::from_secs(10);
+            let end = std::time::Instant::now() + crate::test_results::PATIENCE;
             loop {
                 let count = self.saves_now();
                 if count >= n || std::time::Instant::now() >= end {
@@ -1239,7 +1239,7 @@ mod tests {
         ed.disk_poll(false);
         assert!(ed.session_switch(0));
         ed.toasts.clear();
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         let reloaded = |ed: &Editor| ed.docs.iter().any(|d| d.id == front_doc && d.text.len_lines() == 4);
         while !reloaded(&ed) && std::time::Instant::now() < end {
             if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -1352,7 +1352,7 @@ mod tests {
         ed.disk_batch_end(7);
         let round = ed.disk_poll_gen;
         while ed.disk_poll_gen == round || !ed.disk_batch.is_empty() {
-            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("disk stat");
             ed.handle_event(ev);
         }
         let shown = texts(&ed);
@@ -1388,13 +1388,13 @@ mod tests {
         ed.disk_batch_start("rebase", 7);
         std::fs::write(&file, "").unwrap();
         // (the watch's round read it empty; its result held while git writes the file whole and ends)
-        let early = ed.events.recv_timeout(Duration::from_secs(5)).expect("the watch's round");
+        let early = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("the watch's round");
         std::fs::write(&file, "one\ntwo\n").unwrap();
         ed.disk_batch_end(7);
         ed.handle_event(early);
         assert_eq!(ed.doc().text.to_string(), "", "the early round's reload");
         while !ed.disk_batch.is_empty() {
-            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("disk stat");
             ed.handle_event(ev);
         }
         assert_eq!(ed.doc().text.to_string(), "one\ntwo\n", "the line said once the file's last text is in");
@@ -1441,7 +1441,7 @@ mod tests {
         ed.disk_batch_end(7);
         let round = ed.disk_poll_gen;
         while ed.disk_poll_gen == round || !ed.disk_batch.is_empty() {
-            let ev = ed.events.recv_timeout(Duration::from_secs(5)).expect("disk stat");
+            let ev = ed.events.recv_timeout(crate::test_results::PATIENCE).expect("disk stat");
             ed.handle_event(ev);
         }
         assert!(ed.messages.iter().any(|m| m.2.ends_with(" · rebase: 1 file reloaded")), "{:?}", ed.messages);
@@ -1630,7 +1630,7 @@ mod tests {
             ed.on_focus(true);
         }
         // Run the watch for a while: count the rounds still going once the immediate checks are done
-        let end = std::time::Instant::now() + Duration::from_millis(1600);
+        let end = crate::test_results::quiet_for(Duration::from_millis(1600));
         let mut rounds = 0;
         while let Some(left) = end.checked_duration_since(std::time::Instant::now()) {
             let Some(ev) = ed.events.recv_timeout(left) else { break };
@@ -1657,7 +1657,7 @@ mod tests {
         ed.disk_sync(); // (the main loop does this after every event)
         std::thread::sleep(Duration::from_millis(100)); // the new round arms its watch
         std::fs::write(&b, "b changed\n").unwrap();
-        let end = std::time::Instant::now() + Duration::from_secs(3);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while ed.doc().text != "b changed\n" {
             let left = end.checked_duration_since(std::time::Instant::now()).expect("b reloaded in time");
             if let Some(ev) = ed.events.recv_timeout(left) {
@@ -1753,7 +1753,7 @@ mod tests {
         ed.flush_saves();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "TWOne\n");
         // Handle whatever arrives for a while (the round re-arms itself, so don't wait for it to stop)
-        let until = std::time::Instant::now() + Duration::from_millis(700);
+        let until = crate::test_results::quiet_for(Duration::from_millis(700));
         while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
             if let Some(ev) = ed.events.recv_timeout(left) {
                 ed.handle_event(ev);

@@ -277,7 +277,7 @@ mod tests {
 
     /// Events handled until session `id`'s Claude is idle again.
     fn turn_ends(ed: &mut Editor, id: crate::event::SessionId) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         let busy = |ed: &Editor| {
             std::iter::once(&ed.session)
                 .chain(&ed.sessions)
@@ -295,7 +295,7 @@ mod tests {
 
     /// Events handled one at a time until `done` holds after one.
     fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + crate::test_results::PATIENCE;
         while !done(ed) {
             assert!(Instant::now() < end, "{what}");
             if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

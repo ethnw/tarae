@@ -459,7 +459,7 @@ fn the_message_carries_what_was_pointed_at_and_the_ui_line() {
     c.pointed = vec![format!("card#{id}")];
     c.input = "why did this come up?".into();
     crate::chat::send(&mut ed);
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     let sent = loop {
         let s = std::fs::read_to_string(&log).unwrap_or_default();
         if !s.is_empty() || Instant::now() > end {

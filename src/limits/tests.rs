@@ -234,7 +234,7 @@ fn chat_with(name: &str, cases: &str) -> (Editor, std::path::PathBuf) {
 }
 
 fn until(ed: &mut Editor, what: &str, done: impl Fn(&Editor) -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + crate::test_results::PATIENCE;
     while !done(ed) {
         assert!(Instant::now() < end, "timed out waiting for {what}");
         if let Some(ev) = ed.events.recv_timeout(Duration::from_millis(20)) {

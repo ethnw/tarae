@@ -5995,7 +5995,7 @@ mod tests {
 
     /// Waits (5 s at most) for `pid` to be gone — killed and reaped.
     fn gone(pid: u32) -> bool {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let end = std::time::Instant::now() + crate::test_results::PATIENCE;
         while there(pid) && std::time::Instant::now() < end {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -11817,7 +11817,7 @@ mod tests {
                 let mut c = command(Some(&p), "/bin/sh", &["-c".into(), script.into()]);
                 c.current_dir(&root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
                 let mut child = c.spawn().unwrap();
-                let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let end = std::time::Instant::now() + crate::test_results::PATIENCE;
                 while child.try_wait().unwrap().is_none() {
                     if std::time::Instant::now() > end {
                         child.kill().ok();
@@ -12768,7 +12768,7 @@ mod tests {
                         Some("times") => "file-write-times",
                         _ => "file-write-xattr",
                     };
-                    let by = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                    let by = std::time::Instant::now() + crate::test_results::PATIENCE;
                     while w.blocked().seen.is_empty() && std::time::Instant::now() < by {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -13917,7 +13917,7 @@ mod tests {
         // (the system log hands the denials over when it does — under load past any fixed time: both waited for,
         // bounded — frictions 52: `WATCH_LAST * 2` of sleep missed the second)
         let seen = |end: &str| w.blocked().seen.iter().any(|d| d.target.ends_with(end));
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let until = std::time::Instant::now() + crate::test_results::PATIENCE;
         while !(seen("/build.rs") && seen("/d/.git")) && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
