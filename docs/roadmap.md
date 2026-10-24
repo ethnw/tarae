@@ -464,9 +464,14 @@ main that has what it waits for, and the user says go:
   your own key's at once, its frame faint while it waits and lit once focused; the settle and typing-quiet guards gone;
   step 7c (`f7eea996`): toasts are panes — a faint frame named `messages`, focused by a press or `C-w w`'s round, its
   rect unchanged; `:messages` a floating list (oldest first; the toasts go while it's up, a message whose row isn't in
-  sight still a toast); a floating list done once used; step 7d next — every session's asks in one stack bottom-right,
-  named in their colours, the follow card a floating pane, the chat's line with whole names and `+N`, the session list
-  docking — user, 2026-10-22/24), beside it **C1–C3** of the participants plan (the user, 2026-10-22:
+  sight still a toast); a floating list done once used; step 7d (`bb50abad`): every session's asks in one stack
+  bottom-right — over the chat's foot, or a right-docked session list's — named in their colours (another session's a
+  peek, alone when none of yours waits), the follow card a floating pane, every card at the foot on one row, the chat's
+  line with whole names and `+N` carrying the folded ones' signs, the session list docking (`C-w H/J/K/L`, kept across
+  `:restart`, floating for a frame with no room); the chat's foot (`f9d9d59e`): its text `PAD` from the screen's edge, the
+  outer cell the transcript's thumb, the usage row the conversation's (the weekly window only while it presses — user,
+  2026-10-24); next the toast look (borderless rows beside the faint frame, on shots), then step 8, follow per pane),
+  beside it **C1–C3** of the participants plan (the user, 2026-10-22:
   a session = one participant, a workspace = a checkout with its layout; C1 (`1eb04ee5`) where
   every session reads and writes, shown wherever that file is, each session its name in its colour; C2 (`c4513975`) an overlap between workspaces said the moment it
   would conflict (to you; a Claude hears nothing of the others — the user, 2026-10-23) — 1 rebase in 3 stopped on a conflict over 10-16…21, ~6 min each; C2b the woven view (`:weave` — the user's name, 2026-10-22: a view, never a merge done) — everyone works in their own workspace and tarae shows the merge, each change in its
@@ -613,12 +618,16 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   no web pane — beside the code is your own split): read-only in the pane you're in, its links answered by a language
   server of tarae's own on the LSP routes (`gd` a link, `gr` the links to a heading, `space k` where it goes, `space s`
   its headings), `C-c` stops a read, `:w <path>` saves a copy, `gf` opens a path or address from any buffer; a page in
-  front is named to Claude by its address only; the server's answers fuzzed. Next: the rendered view (P5); **the goal
-  is the text browser**, a real browser (carbonyl in the terminal pane) not now.
+  front is named to Claude by its address only; the server's answers fuzzed. **The goal stops at the text browser**
+  (user, 2026-10-24, on P5a's shots: a page as its markdown reads cleaner than a rendering without CSS — the rendered
+  view was built and dropped, its patch kept); `ctrl`+click goes there inside tarae (`61775e37`: a page's link, an
+  address written in code as a page, a name to its definition; the system browser is `:web-open`).
 - **Motion that says something** (user, 2026-10-24, the motion session's plan): what an invisible act touched
   flashes (undo/redo, `.`, a paste that doesn't select), Claude's fresh writing dries, an honest shimmer on the turn's
   word (moved by the stream), the turn's stops as a strip of marks (one vocabulary with the knots), a card's answer
-  pressed as a stamp — `editor.motion` yours, contact sheets for the user's look.
+  pressed as a stamp — `editor.motion` yours, contact sheets for the user's look. Built: the flash (`01b1f1b8`: undo,
+  redo, `.`, a yank — its "yanked" then a note), the stamp's press (`4bee0287`); the drying ink built, its sheets with
+  the user; next the honest shimmer (the stream measured first) and the strip.
 - **Short videos, made ahead** (user, 2026-10-23): scripted scenes as docshots are — 16:9, English captions, no
   voice — for YouTube, the homepage and the README; a live stream once orchestra drives (Part I) and there's a
   homepage and a release to point at. Planned and measured (collab's spike: 1080p, MP4 ~600 KB a clip); made — `cargo xtask

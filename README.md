@@ -44,16 +44,20 @@ macOS or Linux (WSL on Windows), with rustup and a C compiler. Claude features n
 - **Claude as a verb** — select, `space i`, say it. Review the diff.
 - **Sandboxed by default** — Claude's commands run confined: Seatbelt, or Landlock and seccomp. The network goes
   through tarae.
-- **Sessions side by side** — a checkout, a Claude and a terminal each. Bring them back.
+- **Sessions side by side** — a checkout, a Claude and a terminal each. See where each Claude reads and writes,
+  and what would conflict, as it happens; `:weave` shows a file as they all merge. Bring them back.
 - **Review like a pull request** — hunk by hunk, or at the turn's end. A second Claude reviews too.
+- **The web as text** — `:web <url>` reads a page as its markdown, a buffer like code: `gd` follows a link.
+  Claude reads pages through the same gate as its commands.
 - **Helix's keys** — the same keymap and command names ([coming from Helix](docs/coming-from-helix.md)).
 - **Plugins in Rust** — sandboxed WebAssembly. [Kubernetes](docs/plugins.md) beside your manifests.
 
 ## Docs
 
 [Features](docs/features.md) · [Claude](docs/claude-integration.md) · [Threat model](docs/threat-model.md) ·
-[Configuration](docs/configuration.md) · [Languages](docs/languages.md) · [Plugins](docs/plugins.md) ·
-[Keymap](docs/reference/keymap.md) · [Architecture](docs/architecture.md)
+[Web pages](docs/web.md) · [Configuration](docs/configuration.md) · [Languages](docs/languages.md) ·
+[Plugins](docs/plugins.md) · [Keymap](docs/reference/keymap.md) · [Architecture](docs/architecture.md) ·
+[Roadmap](docs/roadmap.md)
 
 ## License
 
