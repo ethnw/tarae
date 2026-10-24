@@ -30,7 +30,7 @@
 ## Install
 
 ```sh
-git clone https://github.com/ethnw/tarae && cd tarae
+git clone https://github.com/tarae-sh/tarae && cd tarae
 cargo install --path .
 tarae .
 ```

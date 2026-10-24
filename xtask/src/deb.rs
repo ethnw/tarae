@@ -114,11 +114,11 @@ fn deb(p: &Parts) -> Result<Vec<u8>> {
         "Package: tarae\n\
          Version: {}\n\
          Architecture: {}\n\
-         Maintainer: tarae <https://github.com/ethnw/tarae>\n\
+         Maintainer: tarae <https://github.com/tarae-sh/tarae>\n\
          Installed-Size: {kib}\n\
          Section: editors\n\
          Priority: optional\n\
-         Homepage: https://github.com/ethnw/tarae\n\
+         Homepage: https://tarae.sh\n\
          Description: terminal code editor with Helix's keys and Claude built in\n \
          Its sandbox for Claude's commands makes user namespaces; the AppArmor\n \
          profile installed with it lets /usr/bin/tarae make them under Ubuntu's\n \
