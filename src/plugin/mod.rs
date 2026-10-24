@@ -835,7 +835,8 @@ mod tests {
             let mut got = [0u8; 4];
             s.read_exact(&mut got).unwrap();
             s.write_all(b"pong").unwrap();
-            got
+            // (the listener kept for the second dial: a port let go can be another test's before it's bound again)
+            (got, listener)
         });
         let (mut ed, dir) = setup("socket", "x\n");
         answer(&mut ed, approval, true);
@@ -852,10 +853,10 @@ mod tests {
         let flags = quiet_until(&mut ed, r#"closed 20 ""#);
         assert!(toasts(&ed).contains("data 20 [112, 111, 110, 103]"), "{}", toasts(&ed));
         assert!(flags.contains(&true) && flags.last() == Some(&false), "{flags:?}");
-        assert_eq!(&server.join().unwrap(), b"ping", "what the plugin sent arrived");
+        let (got, listener) = server.join().unwrap();
+        assert_eq!(&got, b"ping", "what the plugin sent arrived");
         assert!(ed.plugins.as_ref().unwrap().socks.is_empty(), "closed: gone");
         // The same host:port again: not asked
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let hold = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
         ed.toasts.clear();
         ed.plugin_run("dial", &port.to_string()).unwrap();
