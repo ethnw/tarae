@@ -14050,8 +14050,10 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
             // Thinking: an aside — faint bar, italic; finished ones fold to two rows
             Role::Thought => {
                 lines.push(ChatRow::default());
-                let all = thought_rows(&m.text, mw - 2, dim, faint, editor);
                 let live = i + 1 == n && c.busy();
+                // (room kept for the `…` that says rows are folded away: before its first row live, after its
+                // last folded)
+                let all = thought_rows(&m.text, mw - 2 - if live { 2 } else { 1 }, dim, faint, editor);
                 let keep = if live { 8 } else { 2 };
                 // Folded: the first two rows with words (a bold step title and the start of its text)
                 let body: Vec<&Vec<Span>> = all.iter().filter(|r| live || !blank(r)).collect();
@@ -14246,10 +14248,12 @@ fn chat_laid(c: &crate::chat::Chat, editor: &Editor, ui: &Ui, chat_w: usize) -> 
 }
 
 /// The chat's text width `chat_w` wide (the gutter, the padding on both sides off) and its measure — prose keeps
-/// one in it, the rest is margin.
+/// one in it, the rest is margin. The chat is the screen's right column (`Layout::new`: the code is what it leaves),
+/// so its text stays `PAD` from the screen's edge as from its line — the side panel's left is so too — the outer
+/// cell its transcript's scroll thumb.
 fn chat_widths(chat_w: usize) -> (usize, usize) {
-    use crate::chrome::{GAP, MEASURE, PAD, PAD_R};
-    let w = chat_w.saturating_sub(GAP + PAD + PAD_R).max(8);
+    use crate::chrome::{GAP, MEASURE, PAD};
+    let w = chat_w.saturating_sub(GAP + PAD + PAD).max(8);
     (w, w.min(MEASURE))
 }
 
@@ -14481,7 +14485,7 @@ fn draw_chat(
     let mut chat_calls = editor.screen.chat_calls.borrow_mut();
     let mut chat_ran = editor.screen.chat_ran.borrow_mut();
 
-    // ── Draw row by row: [gutter][padding][text w][padding]
+    // ── Draw row by row: [gutter][padding][text w][padding — its outer cell the transcript's thumb]
     // (the gutter's left half the bottom slot's on its rows; in the accent while it's being dragged — U1)
     let edge = chat_gutter(ui, editor, lay, card);
     let text_x = x0 + GAP + PAD;
@@ -14652,6 +14656,9 @@ fn draw_chat(
         at.extend(cursors.into_iter().filter(|&x| x < w).map(|x| (text_x + x, y)));
         Some(p)
     };
+    // (the transcript taller than its rows: its thumb in the outer cell, as the code's last column says its view)
+    let (area_top, thumb_x) = (y, x0 + lay.chat_w.saturating_sub(1));
+    let bar = (total > area && area > 0).then(|| scroll_thumb(area, total, from));
     for i in 0..area {
         chat_row_start(out, x0, y, edge(y), card)?;
         if let Some((a, b)) = shown.get(i).and_then(|r| r.ran) {
@@ -14691,6 +14698,10 @@ fn draw_chat(
         };
         chat_row_end(out, card, lay.chat_w, used)?;
         y += 1;
+    }
+    for i in (0..area).filter(|i| bar.as_ref().is_some_and(|b| b.contains(i))) {
+        apply(out, faint)?;
+        queue!(out, MoveTo(thumb_x as u16, (area_top + i) as u16), Print(THUMB))?;
     }
     // Input — the line over it says when the screen goes with the message (`C-s`)
     chat_row_start(out, x0, y, edge(y), card)?;
@@ -14921,15 +14932,17 @@ fn draw_chat(
     }))
 }
 
-/// The chat's usage row: `● warm until 14:32  weekly 93 % · resets Tue 10:00  ctx 4% of 200k  turn ≈ API $0.0011
-/// read 8.2k write 75 in 10 out 30` — the widest form that fits in `w`, folding the split first, then the context
-/// and the cost, then the weekly window's reset (the cache stays; both said by the clock, so true however long
-/// nothing redraws). A ping that keeps it warm is said with the cache (`keepwarm.rs`) — ahead, `· keeps warm
-/// 14:27`, and after, `kept warm 14:27 · ≈$0.12` — a group of its own, folded last but the cache (its next
-/// first, to `kept ≈$0.12` last); a narrower row never shows a group a wider one doesn't. The weekly window shows while claude runs on the plan (`limits::on_plan`), from claude's
-/// start — before any turn. An API session's row starts with `api` (dim: a state, not something asking — D5),
-/// always there, never folded. None: nothing reported in this conversation yet, nor any limit, on the plan.
-/// Styles: accent, dim, faint, warning.
+/// The chat's usage row — this conversation's: `● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.0011  read 8.2k
+/// write 75 in 10 out 30` — the widest form that fits in `w`, folding the split first, then the context, then the
+/// cost (the cache stays; said by the clock, so true however long nothing redraws). A ping that keeps it warm is
+/// said with the cache (`keepwarm.rs`) — ahead, `· keeps warm 14:27`, and after, `kept warm 14:27 · ≈$0.12` — a
+/// group of its own, folded last but the cache (its next first, to `kept ≈$0.12` last); a narrower row never shows a
+/// group a wider one doesn't. The plan's weekly window is on it only while it presses (`limits::pressing`: claude
+/// warns, or 80 % and over) and claude runs on the plan (`limits::on_plan`, from claude's start — before any turn):
+/// `weekly 93 % · resets Sun 15:00` in warning after the cache, its reset outlasting the cost and the context; below
+/// that, and the plan's name ever, are `:usage`'s. An API session's row starts with `api` (dim: a state, not
+/// something asking — D5), always there, never folded. None: nothing reported in this conversation yet, nor a
+/// window pressing, on the plan. Styles: accent, dim, faint, warning.
 fn usage_spans(
     u: &crate::usage::Usage,
     warm: &crate::keepwarm::Said,
@@ -14950,7 +14963,7 @@ fn usage_spans(
     let weekly = crate::limits::on_plan(u.key_source.as_deref(), u.plan_event)
         .then(|| limits.get(crate::limits::WEEKLY, now_ms))
         .flatten()
-        .filter(|_| !other_login);
+        .filter(|r| !other_login && crate::limits::pressing(r));
     let api = billing == crate::billing::Billing::Api;
     if !reported && weekly.is_none() && !api {
         return None;
@@ -15003,19 +15016,13 @@ fn usage_spans(
         }
         v
     };
-    // (the plan's weekly window: `weekly 93 % · resets Tue 10:00`, in the warning colour near its limit)
+    // (the plan's weekly window while it presses: `weekly 93 % · resets Sun 15:00`, its figure in warning)
     let limit = |long: bool| -> Vec<Span> {
         let Some(r) = weekly else { return Vec::new() };
-        let shown = if crate::limits::pressing(r) { warn } else { dim };
-        // (the plan it's on, long — `max · weekly 93 %`; never the account's email: #3)
-        let mut v = match u.account.as_ref().and_then(|a| a.plan.as_ref()).filter(|_| long) {
-            Some(p) => vec![sp(p.clone(), dim), sp(" · ".into(), faint)],
-            None => Vec::new(),
-        };
-        v.extend([
+        let mut v = vec![
             sp(format!("{} ", crate::limits::label(&r.window)), faint),
-            sp(crate::limits::used(r), shown),
-        ]);
+            sp(crate::limits::used(r), warn),
+        ];
         if let Some(at) = r.resets_at_ms.filter(|_| long) {
             v.extend([sp(" · resets ".into(), faint), sp(crate::limits::resets(at), dim)]);
         }
@@ -15072,12 +15079,12 @@ fn usage_spans(
         }
         v
     };
-    // (the split's words go last — its letters are the hardest to read. Then, near the limit, the turn's cost and
-    // the context give way before the weekly window's reset — when it's back is what matters then; else the reset
-    // goes first)
+    // (the split's words go last — its letters are the hardest to read. Then, with the weekly window on the row, the
+    // turn's cost and the context give way before its reset — when it's back is what matters then; else the
+    // context before the cost)
     // (each row narrower holds no group the one before didn't: one order of folds. The pings' group stays to the
     // last but the cache — a ping is never silent — its next first, its time and form last)
-    let urgent = weekly.is_some_and(crate::limits::pressing);
+    let urgent = weekly.is_some();
     let (c, k) = (|| Some(cache(true)), |level: u8| Some(keep(level)));
     let mut tiers: Vec<[Option<Vec<Span>>; 6]> = vec![
         [c(), k(2), Some(limit(true)), Some(context(true)), Some(cost(true)), Some(split(true))],
@@ -15089,11 +15096,10 @@ fn usage_spans(
     if urgent {
         tiers.push([c(), k(1), Some(limit(true)), Some(context(false)), None, None]);
         tiers.push([c(), k(1), Some(limit(true)), None, None, None]);
+        tiers.push([c(), k(1), Some(limit(false)), None, None, None]);
     } else {
-        tiers.push([c(), k(1), Some(limit(false)), Some(context(false)), Some(cost(false)), None]);
-        tiers.push([c(), k(1), Some(limit(false)), None, Some(cost(false)), None]);
+        tiers.push([c(), k(1), None, None, Some(cost(false)), None]);
     }
-    tiers.push([c(), k(1), Some(limit(false)), None, None, None]);
     tiers.push([c(), k(1), None, None, None, None]);
     tiers.push([c(), k(0), None, None, None, None]);
     tiers.push([c(), None, None, None, None, None]);
@@ -17838,6 +17844,51 @@ mod tests {
         assert_eq!(text(Billing::Subscription, 80), None, "the plan: nothing new");
     }
 
+    /// The row is this conversation's: on the plan, the weekly window joins it only while it presses (≥ 80 %, or
+    /// claude warns) — in warning, its reset beside it, before any turn too; below that it isn't there, and the row
+    /// isn't before anything is reported. The plan's name never (`:usage` says it).
+    #[test]
+    fn the_usage_row_says_the_weekly_window_only_while_it_presses() {
+        use crate::limits::{Limits, Reading, Report, Source, Status, WEEKLY};
+        let now = crate::usage::now_ms();
+        let mut u = crate::usage::Usage::default();
+        u.key_source = Some("none".into());
+        u.account =
+            Some(crate::usage::Account { organization: None, plan: Some("Claude Max".into()), login: 1 });
+        let warn = Style { bold: true, ..Style::default() };
+        let row = |percent: u32, status: Status| {
+            let mut limits = Limits { login: Some(1), ..Default::default() };
+            let far = now + 3 * 86_400_000;
+            let weekly = Reading {
+                window: WEEKLY.into(),
+                percent: Some(percent),
+                resets_at_ms: Some(far),
+                status: Some(status),
+                seen_at_ms: now,
+                from: Source::Event,
+            };
+            limits.seen(Report { readings: vec![weekly], ..Report::default() });
+            let styles = [Style::default(), Style::default(), Style::default(), warn];
+            usage_spans(
+                &u,
+                &Default::default(),
+                &limits,
+                crate::billing::Billing::Subscription,
+                now,
+                80,
+                styles,
+            )
+        };
+        assert_eq!(row(41, Status::Allowed), None, "41 %: nothing on the row");
+        let pressing = row(93, Status::Allowed).expect("93 %: the row");
+        let text: String = pressing.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.starts_with("weekly 93 % · resets "), "{text:?}");
+        assert!(pressing.iter().any(|s| s.text == "93 %" && s.style == warn), "in warning: {pressing:?}");
+        assert!(!text.contains("Max"), "the plan's name: {text:?}");
+        let warned = row(60, Status::Warning).expect("claude warns: the row");
+        assert!(warned.iter().any(|s| s.text == "60 %"), "{warned:?}");
+    }
+
     /// The chat's tool row keeps its suffix when it fits whole — a command's `ok` too, the command cut for it.
     #[test]
     fn a_short_suffix_stays_on_a_long_row() {
@@ -20216,7 +20267,7 @@ mod tests {
     #[test]
     fn a_turns_stops_are_knots_in_the_chat() {
         let mut ed = threaded_turn();
-        let edit = format!("  ▲ edit   src/main.rs{}▐y▌", " ".repeat(21));
+        let edit = format!("  ▲ edit   src/main.rs{}▐y▌", " ".repeat(20));
         let turn = |hand: [&str; 2]| {
             vec![
                 "  ▎ why does insert clone the name?".to_string(),
@@ -20231,7 +20282,7 @@ mod tests {
                 format!("  {} run    cargo test", hand[1]),
                 String::new(),
                 "  Done now.".into(),
-                format!("  {}5.2s", " ".repeat(40)),
+                format!("  {}5.2s", " ".repeat(39)),
             ]
         };
         assert_eq!(chat_rows(&mut ed, 120, "5.2s"), turn(["◦", "◦"]), "at rest: no stop in hand");
@@ -21732,9 +21783,9 @@ mod tests {
         r.wait.looked(100.0, std::time::Instant::now());
         let s = shown(&mut ed);
         // (the chat's row cut where it's narrow — the CPU before the key, the key whole)
-        let said = s.lines().filter(|l| l.contains("no output for 10m 0") && l.contains(" · 100% C")).count();
+        let said = s.lines().filter(|l| l.contains("no output for 10m 0") && l.contains(" · 100% ")).count();
         assert_eq!(said, 2, "the panel's header and the chat's row: {s}");
-        assert!(s.lines().any(|l| l.contains("100% C…  space m c stop it")), "{s}");
+        assert!(s.lines().any(|l| l.contains("100% …  space m c stop it")), "{s}");
     }
 
     /// The side panel grows with a wide terminal — up to 12 more columns, the code keeping 100.

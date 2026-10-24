@@ -5,7 +5,7 @@
 02   2                                                                     │
 03   3 ▎ Counts how often each word appears.                               │  ● run    cargo test -p tarae
 04     ▎                                                                   │    queued 1st, behind a stopped turn's run
-05     ▎ Words are split on whitespace; case is kept.                      │    grep -rn TOD… ·  7m 12s  space m c stop it
+05     ▎ Words are split on whitespace; case is kept.                      │    grep -rn TO… ·  7m 12s  space m c stop it
 06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {            │
 07   7     let mut counts = HashMap::new();                                │
 08   8     for word in text.split_whitespace() {                           │
@@ -26,7 +26,7 @@
 23                                                                         │
 24                                                                         │
 25                                                                         │
-26 ─ grep -rn TODO src ▂▅▆ ── 7m 12s ───────────────────── space m c stop ─┤  ────────────────────────────────────────────
+26 ─ grep -rn TODO src ▂▅▆ ── 7m 12s ───────────────────── space m c stop ─┤  ───────────────────────────────────────────
 27   grep -rn TODO src                                                     │  › Ask about demo.rs…
 28   claude · cargo te…   queued · 1st · behind grep -rn TODO src ·   0ms  │  C-c stop  esc normal  C-f follow
 29  ● chat                                                                                          rust   utf-8 LF   1:1
@@ -67,7 +67,7 @@
 02   f                                                                     a
 03   f f                                                                   a  a fff    ggggg gggg gg ggggg
 04     f                                                                   a    ffffff ffff ffffff f fffffff ffffff fff
-05     f                                                                   a    dddd ddd dddd f  ff fff  BBBBB B B ffff ff
+05     f                                                                   a    dddd ddd ddd f  ff fff  BBBBB B B ffff ff
 06   f                                                                     a
 07   f                                                                     a
 08   f                                                                     a
@@ -88,7 +88,7 @@
 23                                                                         a
 24                                                                         a
 25                                                                         a
-26 f TTTT TTT TTTT TTT aaa ff dd ddd fffffffffffffffffffff DDDDD D D ffff fa  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+26 f TTTT TTT TTTT TTT aaa ff dd ddd fffffffffffffffffffff DDDDD D D ffff fa  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 27   ffff fff ffff fff                                                     a  A fff fffff ffffffff
 28   dddddd d ddddd ddd   ffffff f fff f ffffff ffff fff ffff fff f   fff  a  DDD ffff  DDD ffffff  DDD ffffff
 29  a TTTT                                                                                          dddd   ddddd dd   TTT

@@ -26,7 +26,7 @@
 23                                                                         │      ▎ fix-login asks · Claude asks to…
 24                                ╭─ messages ───────────────────────────╮ │    ▎ fix-login asks · Claude changes 3 f…
 25                                │▎ fix-login · waiting 3m 00s — Claude │ │
-26                                │  changes 3 files · C-q goes there    │ │  ────────────────────────────────────────────
+26                                │  changes 3 files · C-q goes there    │ │  ───────────────────────────────────────────
 27                                ╰──────────────────────────────────────╯ │  › Ask about demo.rs…
 28                                                                         │  space l focus  space L close
 29  ● normal   ▲2 waiting · C-q                                                                     rust   utf-8 LF   1:1
@@ -88,7 +88,7 @@
 23                                                                         a
 24                                ff BBBBBBBB ffffffffffffffffffffffffffff a
 25                                fw                                     f a
-26                                f                                      f a  ffffffffffffffffffffffffffffffffffffffffffff
+26                                f                                      f a  fffffffffffffffffffffffffffffffffffffffffff
 27                                ffffffffffffffffffffffffffffffffffffffff a  f fff fffff ffffffff
 28                                                                         a  DDDDD D fffff  DDDDD D fffff
 29  a TTTTTT   ww wwwwwww w www                                                                     dddd   ddddd dd   TTT

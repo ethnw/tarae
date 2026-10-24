@@ -12,7 +12,7 @@
 09                                                                                                 │  › Why is this diagnostic happening?
 10                                                                                                 │
 11                                                                                                 │  C-t for another model
-12                                                                                                 │  ────────────────────────────────────────────────────────────
+12                                                                                                 │  ───────────────────────────────────────────────────────────
 13                                                                                                 │  › Ask about [scratch]…
 14                                                                                                 │  space l focus  space L close
 15  ● normal   ¶ reviewing · 0 reads                                                                                                               utf-8 LF   1:1
@@ -46,7 +46,7 @@
 09                                                                                                 a  f ddd dd dddd dddddddddd dddddddddd
 10                                                                                                 a
 11                                                                                                 a  DDD fff fffffff fffff
-12                                                                                                 a  ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+12                                                                                                 a  fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 13                                                                                                 a  f fff fffff ffffffffff
 14                                                                                                 a  DDDDD D fffff  DDDDD D fffff
 15  a TTTTTT               d d ddddd                                                                                                               ddddd dd   TTT

@@ -9,7 +9,9 @@
 //!   it starts on the next cell, so every panel's text is `PAD` from its line — the side panel, the slot and the
 //!   chat alike. Against the screen's edge (a panel filling the screen) the panel takes the cell whole — no line
 //!   against nothing.
-//! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge.
+//! - **Padding.** Text starts `PAD` cells in from a panel's edge and stops `PAD_R` before its other edge —
+//!   against the screen's edge `PAD` from it, as from a line (the chat's right; its outer cell the transcript's
+//!   scroll thumb, as the code's last column is its scrollbar).
 //!   The code has none of its own: its sign column is the first cell after the gutter (so a server attaching
 //!   doesn't move the text), its numbers right after — they inset its text already; its top line's path starts
 //!   `PAD` in, as every line's names do.

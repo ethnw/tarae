@@ -25,7 +25,7 @@
 22  │  • open terminals, yours too             you · 20s ago │ │
 23  │  • read /private/tmp/…notes              you · 12m ago │ │  tab for a suggestion
 24  │                                                        │ │  › Explain what this file does
-25  │  tarae's project settings · every checkout             │ │  › Where is this used across the pro…
+25  │  tarae's project settings · every checkout             │ │  › Where is this used across the pr…
 26  │  • .tarae.toml               you · 2d ago · 2 versions │ │  › Why is this diagnostic happening?
 27  │                                                        │ │
 28  │  Claude's settings · every checkout                    │ │  C-t for another model
@@ -46,7 +46,7 @@
 43  │                                                        │ │
 44  │  4 more kept for other checkouts — not used here       │ │
 45  │                                                        │ │
-46  ╰────────────────────────────────────────────────────────╯ │  ────────────────────────────────────
+46  ╰────────────────────────────────────────────────────────╯ │  ───────────────────────────────────
 47                                                             │  › Ask about demo.rs…
 48                                                             │  space l focus  space L close
 49  ● picker   d take it back  j k move  esc close                              rust   utf-8 LF   1:1
@@ -127,7 +127,7 @@
 22  a  d                                       ddd d ddd ddd a f
 23  a  d                                       ddd d ddd ddd a f  DDD fff f ffffffffff
 24  a                                                        a f  f ddddddd dddd dddd dddd dddd
-25  a  fffffff fffffff ffffffff f fffff ffffffff             a f  f ddddd dd dddd dddd dddddd ddd dddd
+25  a  fffffff fffffff ffffffff f fffff ffffffff             a f  f ddddd dd dddd dddd dddddd ddd ddd
 26  a  d                           ddd d dd ddd d d dddddddd a f  f ddd dd dddd dddddddddd dddddddddd
 27  a                                                        a f
 28  a  ffffffff ffffffff f fffff ffffffff                    a f  DDD fff fffffff fffff
@@ -148,7 +148,7 @@
 43  a                                                        a f
 44  a  f ffff ffff fff fffff fffffffff f fff ffff ffff       a f
 45  a                                                        a f
-46  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f  ffffffffffffffffffffffffffffffffffff
+46  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa f  fffffffffffffffffffffffffffffffffff
 47                                                             f  f fff fffff ffffffff
 48                                                             f  DDDDD D fffff  DDDDD D fffff
 49  a TTTTTT   D ffff ff ffff  D D ffff  DDD fffff                              dddd   ddddd dd   TTT

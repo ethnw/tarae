@@ -11,8 +11,8 @@
 08   8     for word in text.split_whitespace() {                                                                                                   │  • entry keeps the first one it was given, and every later strand with
 09   9     │   *counts.entry(word).or_insert(0) += 1;                                                                                              │    the same name is dropped quietly
 10  10     }                                                                                                                                       │
-11  11     counts                                                                                                                                  │   let counts: HashMap<String, Vec<Thread>> = threads.into_iter().fold(HashMap::new(), |mut …
-12  12 }                                                                                                                                           │                                                                                          2.0s
+11  11     counts                                                                                                                                  │   let counts: HashMap<String, Vec<Thread>> = threads.into_iter().fold(HashMap::new(), |mut…
+12  12 }                                                                                                                                           │                                                                                         2.0s
 13  13                                                                                                                                             │
 14  14 fn main() {                                                                                                                                 │
 15  15     let text = "the quick brown fox jumps over the lazy dog";                                                                               │
@@ -26,7 +26,7 @@
 23                                                                                                                                                 │
 24                                                                                                                                                 │
 25                                                                                                                                                 │
-26                                                                                                                                                 │  ────────────────────────────────────────────────────────────────────────────────────────────
+26                                                                                                                                                 │  ───────────────────────────────────────────────────────────────────────────────────────────
 27                                                                                                                                                 │  › Ask about demo.rs…
 28                                                                                                                                                 │  enter send  esc normal  C-r apply  C-s screen  C-o point  C-y copy  C-l new  C-f unfollow
 29  ● chat                                                                                                                                                                                                                  rust   utf-8 LF   1:1
@@ -73,8 +73,8 @@
 08   f                                                                                                                                             a  a
 09   f                                                                                                                                             a
 10  ff                                                                                                                                             a
-11  ff                                                                                                                                             a                                                                                            f
-12  ff                                                                                                                                             a                                                                                          ffff
+11  ff                                                                                                                                             a                                                                                           f
+12  ff                                                                                                                                             a                                                                                         ffff
 13  ff                                                                                                                                             a
 14  ff                                                                                                                                             a
 15  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg gggg                                                                                a
@@ -88,7 +88,7 @@
 23                                                                                                                                                 a
 24                                                                                                                                                 a
 25                                                                                                                                                 a
-26                                                                                                                                                 a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+26                                                                                                                                                 a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 27                                                                                                                                                 a  A fff fffff ffffffff
 28                                                                                                                                                 a  DDDDD ffff  DDD ffffff  DDD fffff  DDD ffffff  DDD fffff  DDD ffff  DDD fff  DDD ffffffff
 29  a TTTT                                                                                                                                                                                                                  dddd   ddddd dd   TTT

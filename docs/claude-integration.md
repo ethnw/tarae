@@ -1603,24 +1603,31 @@ over the same stream as the conversation, so no server or port is involved.
 
 ### What it costs
 
-The last row of the chat says how warm Claude's prompt cache is, where your plan's weekly limit stands, and what
-the conversation costs:
+The last row of the chat is this conversation's: how warm Claude's prompt cache is, how full its context is, and
+what its last turn cost:
 
 ```
-● warm until 14:32  weekly 93 % · resets Tue 10:00  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185
+● warm until 14:32  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k in 18 out 185
+```
+
+Your plan's weekly window joins it only while it presses, in the warning colour, with when it resets:
+
+```
+● warm until 14:32  weekly 93 % · resets Sun 15:00  ctx 4% of 200k  turn ≈ API $0.018  read 7.9k write 8.1k …
 ```
 
 The cost is what claude reports (`total_cost_usd`): the API price by Claude Code's own table. On a subscription
 that's not what you pay, so it's said as `≈ API` — in the chat's row, the session list — and once at the top of
 `:usage`, with the Claude Code version whose table it is.
 
-- **The weekly limit**: how much of your plan's weekly window is used and when it resets, as claude says it. It
-  shows once the session's own claude has said it runs on the plan. Either its `apiKeySource` is `none` (in its
-  answer to tarae's `initialize` as it starts, and again as each turn starts), or, before it says that, it sent a
-  `rate_limit_event` itself, which Claude Code sends to plan users only. So the row can have it before your first
-  message. In the warning colour when claude warns or from 80 %; `limit reached` when claude refuses. Not shown
-  while the session's claude runs on an API key (its limits aren't the plan's), before its claude has said which
-  credential it runs on, or when nothing has said where the window stands: never a guess.
+- **The weekly limit**: how much of your plan's weekly window is used and when it resets, as claude says it —
+  only while it presses: when claude warns or from 80 %; `limit reached` when claude refuses. Below that it isn't
+  on the row (`:usage` says it, and the plan's name). It shows once the session's own claude has said it runs on
+  the plan. Either its `apiKeySource` is `none` (in its answer to tarae's `initialize` as it starts, and again as
+  each turn starts), or, before it says that, it sent a `rate_limit_event` itself, which Claude Code sends to plan
+  users only. So the row can have it before your first message. Not shown while the session's claude runs on an
+  API key (its limits aren't the plan's), before its claude has said which credential it runs on, or when nothing
+  has said where the window stands: never a guess.
 - **Cache**: warm until its TTL runs out, by the clock — 5 minutes or an hour from the last request that wrote
   or read it, as that request's cache write says; then `◦ cold`. Said as a time, it stays true while nothing
   redraws; the only frame while you're idle is the one when it turns cold. (`tarae state` says the seconds
@@ -1631,8 +1638,8 @@ that's not what you pay, so it's said as `≈ API` — in the chat's row, the se
 - **The last turn**: its cost, then its tokens read from the cache, written to it, sent as input and written out.
   Claude reports the cost as a whole; the four numbers are tokens, not dollars.
 
-When the chat is narrow the words fold first, then the split, then the context; the cache stays. Near the weekly
-limit its reset outlasts the turn's cost and the context; otherwise it folds first. The session list (`space W`)
+When the chat is narrow the words fold first, then the split, then the context; the cache stays. With the weekly
+window on the row, its reset outlasts the turn's cost and the context. The session list (`space W`)
 has a column with each session's cache and its total so far. `:usage` opens a buffer with the plan's limits (each
 window claude has said: used, when it resets, as of when, and whether a `rate_limit_event` or `get_usage` said it),
 the credential the session's claude reported it runs on (`apiKeySource`; on an API key, Console is where billing
@@ -1642,11 +1649,10 @@ system prompt, the tools, CLAUDE.md and the first message), and today's total ac
 end and as limits come.
 
 Which account a chat runs on is what its claude says as it starts: `:usage` says the organization and the plan
-(`Account: Acme · plan max`), `tarae state` too (`account`), and the chat's last row the plan beside the weekly
-window (`max · weekly 84 %`) — never the account's email, anywhere. A claude that starts on another login (you
-logged in again elsewhere) makes the plan's limits unknown until one on the new login says them, and every chat
-still on the old login says so, shows no weekly window, and what its claude says of the limits isn't kept (they
-are the other account's); `:claude-restart` starts every chat's claude again on its conversation — idle
+(`Account: Acme · plan max`), `tarae state` too (`account`) — never the account's email, anywhere; the chat's
+last row never names the plan. A claude that starts on another login (you logged in again elsewhere) makes the
+plan's limits unknown until one on the new login says them, and every chat still on the old login says so, shows
+no weekly window, and what its claude says of the limits isn't kept (they are the other account's); `:claude-restart` starts every chat's claude again on its conversation — idle
 ones at once, a busy one when its turn ends — without `:restart`, which would end the terminal and what runs there.
 
 **Tool calls**, a row per turn: model requests, calls, calls a request, what a request carried, the time split

@@ -6900,6 +6900,205 @@ fn every_panel_starts_its_text_the_same_distance_in() {
     assert_eq!((c.contents(), c.bgcolor()), ("│", ground), "the chat's gutter beside the picker");
 }
 
+/// A long chat as `the_chats_rows_*` make it — a question, then `n` answers of words that wrap — the weekly
+/// window at 93 % on its last row (its claude on the plan).
+fn chat_of(w: u16, h: u16, n: usize) -> Shot {
+    use crate::chat::{Msg, Role};
+    use crate::limits::{Reading, Report, Source, Status, WEEKLY};
+    let mut s = Shot::new(w, h);
+    let mut chat = crate::chat::Chat::new();
+    chat.msgs.push(Msg::new(Role::User, "Parse hours too.", "lib.rs"));
+    for i in 0..n {
+        chat.msgs.push(Msg::new(Role::Assistant, format!("answer {i}: {}", "strand ".repeat(12)), ""));
+    }
+    s.ed.session.chat = Some(chat);
+    s.ed.session.usage.key_source = Some("none".into());
+    let now = crate::usage::now_ms();
+    let weekly = Reading {
+        window: WEEKLY.into(),
+        percent: Some(93),
+        resets_at_ms: Some(now + 3 * 86_400_000),
+        status: Some(Status::Warning),
+        seen_at_ms: now,
+        from: Source::Event,
+    };
+    s.ed.limits.seen(Report { readings: vec![weekly], ..Report::default() });
+    s
+}
+
+/// The chat's rows of `s`'s frame under its top line, each with the column its text ends at — checked against the
+/// edge rule on the way: no text past `PAD` from the screen's edge, the outer cell blank or the transcript's thumb.
+fn chat_rows_within(s: &mut Shot, w: u16, h: u16, what: &str) -> Vec<(String, Option<usize>)> {
+    use crate::chrome::PAD;
+    let p = cells(&s.frame(), w, h);
+    let x0 = s.ed.screen.chat_x.expect("the chat");
+    let at = |y: usize, x: usize| match p.screen().cell(y as u16, x as u16).unwrap().contents() {
+        "" => " ".to_string(),
+        c => c.to_string(),
+    };
+    let edge = w as usize - 1;
+    (1..h as usize - 1)
+        .map(|y| {
+            let row: String = (x0 + 1..w as usize).map(|x| at(y, x)).collect();
+            let outer = at(y, edge);
+            assert!(
+                outer.trim().is_empty() || outer == super::THUMB,
+                "{what} at {w}, row {y}: outer {outer:?}"
+            );
+            let end = (x0 + 1..edge).rev().find(|&x| !at(y, x).trim().is_empty());
+            if let Some(end) = end {
+                assert!(
+                    end <= edge - PAD,
+                    "{what} at {w}, row {y} ends at {end}, past {}: {row:?}",
+                    edge - PAD
+                );
+            }
+            (row, end)
+        })
+        .collect()
+}
+
+/// `n` words each its own, of 1 to 7 letters of `stem` and a number — a row cut silently is a word lost or cut.
+fn words_of(stem: &str, n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("{}{i}", &stem[..1 + i % 7])).collect()
+}
+
+/// The words of `stem`'s shape on `rows`, in order (`words_of`'s: its letters, then digits).
+fn words_on(rows: &[(String, Option<usize>)], stem: &str) -> Vec<String> {
+    let ours = |t: &&str| {
+        let digits = t.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+        let letters = &t[..t.len() - digits.len()];
+        !letters.is_empty()
+            && stem.starts_with(letters)
+            && !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+    };
+    rows.iter()
+        .flat_map(|(r, _)| r.split_whitespace().filter(ours).map(String::from).collect::<Vec<_>>())
+        .collect()
+}
+
+/// A chat whose rows are cut on their own: a thought folded (its `…` after its last row), a tool row with a
+/// suffix past a long path — then (`live`) a live thought (`… ` before its first row) as the turn goes on, else a
+/// run Claude waits on, quiet and busy (`no output for … · 100% …  space m c stop it`).
+fn chat_cut(w: u16, h: u16, live: bool) -> Shot {
+    use crate::chat::{Look, Msg, Role, State};
+    let mut s = chat_of(w, h, 0);
+    let c = s.ed.session.chat.as_mut().unwrap();
+    (c.state, c.unfolded) = (State::Thinking, true);
+    c.msgs.push(Msg::new(Role::Thought, words_of("strands", 160).join(" "), ""));
+    let look = |verb, what: String, range: &str| Look {
+        verb,
+        what,
+        pattern: false,
+        range: range.into(),
+        link: None,
+    };
+    let mut read = Msg::new(Role::Tool, "", "");
+    read.look = Some(look("read", format!("src/{}main.rs", "deep/".repeat(30)), "L1–40"));
+    c.msgs.push(read);
+    if live {
+        c.msgs.push(Msg::new(Role::Assistant, "Reading on.", ""));
+        c.msgs.push(Msg::new(Role::Thought, words_of("weaving", 160).join(" "), ""));
+        return s;
+    }
+    let cmd = "printf x | some-server";
+    let mut run = Msg::new(Role::Tool, "", "");
+    run.look = Some(Look { pattern: true, ..look("run", cmd.into(), "") });
+    c.msgs.push(run);
+    use crate::task::{Run, State as Ran, Task};
+    let mut r = Run::for_test(Task { name: cmd.into(), cmd: cmd.into(), cwd: std::env::temp_dir() });
+    (r.state, r.by_claude, r.chat) = (Ran::Running, true, Some(crate::tools::Call::test(1)));
+    let now = std::time::Instant::now();
+    r.last_output =
+        now.checked_sub(crate::waits::BUSY + Duration::from_secs(3)).expect("a machine up a while");
+    r.wait.looked(100.0, now);
+    s.ed.session.task_run = Some(r);
+    s
+}
+
+/// Against the screen's edge the chat's text stays `PAD` from it, as the side panel's left does from its edge:
+/// every row under its top line — the transcript, the rule over the input, the input, the hints, the usage row —
+/// ends `PAD` short of it, the rule exactly there; the outer cell holds nothing but the transcript's thumb. And
+/// where rows are cut on their own: a thought folded keeps its `…` and the words before it whole, a live one its
+/// `… ` and its last words whole, a tool row its suffix, a run's wait cut there with its key whole.
+#[test]
+fn every_chat_row_ends_its_text_pad_from_the_screens_edge() {
+    use crate::chrome::PAD;
+    let h = 30u16;
+    // (a width a cell at a time: somewhere a thought's row fills its wrap width, where its `…` had no room)
+    for w in (100u16..=140).chain([210]) {
+        let edge = w as usize - 1;
+        let mut s = chat_of(w, h, 30);
+        let rows = chat_rows_within(&mut s, w, h, "prose");
+        assert!(
+            rows[rows.len() - 1].0.contains("weekly 93 %"),
+            "{w}: the usage row {:?}",
+            rows[rows.len() - 1]
+        );
+        let rule =
+            rows.iter().find(|(r, _)| r.chars().nth(PAD) == Some('─')).expect("the rule over the input");
+        assert_eq!(rule.1, Some(edge - PAD), "{w}: the rule over the input ends `PAD` from the edge");
+        for live in [true, false] {
+            let what = if live { "a live thought" } else { "a run's wait" };
+            let mut s = chat_cut(w, h, live);
+            let rows = chat_rows_within(&mut s, w, h, what);
+            let all = rows.iter().map(|(r, _)| r.trim_end()).collect::<Vec<_>>().join("\n");
+            // (folded: its first words, whole and in order, then its `…`)
+            let folded = words_on(&rows, "strands");
+            assert!(!folded.is_empty(), "{what} at {w}: the folded thought\n{all}");
+            assert_eq!(folded, words_of("strands", folded.len()), "{what} at {w}: its words whole\n{all}");
+            let last = rows.iter().rev().find(|(r, _)| r.contains(folded.last().unwrap().as_str())).unwrap();
+            assert!(last.0.trim_end().ends_with('…'), "{what} at {w}: its `…`\n{all}");
+            assert!(
+                rows.iter().any(|(r, _)| r.contains("L1–40")),
+                "{what} at {w}: the tool row's suffix\n{all}"
+            );
+            if live {
+                // (live: its last words, whole and in order, `… ` before its first row)
+                let shown = words_on(&rows, "weaving");
+                let whole = words_of("weaving", 160);
+                assert!(
+                    !shown.is_empty() && whole.ends_with(&shown),
+                    "{what} at {w}: its last words whole\n{all}"
+                );
+                assert!(rows.iter().any(|(r, _)| r.contains("▎ … ")), "{what} at {w}: its `… `\n{all}");
+            } else {
+                let wait = rows.iter().find(|(r, _)| r.contains("stop it")).expect("the run's wait row");
+                assert!(wait.0.contains("no output for") && wait.0.contains("space m c stop it"), "{wait:?}");
+                if wait.0.contains('…') {
+                    assert_eq!(wait.1, Some(edge - PAD), "{what} at {w}: cut where the text ends\n{all}");
+                }
+            }
+        }
+    }
+}
+
+/// The chat's outer cell is its transcript's scroll thumb only while the transcript is taller than its rows — at
+/// the foot at the newest, at the top scrolled back to the start; a short one has none.
+#[test]
+fn the_chats_thumb_shows_only_while_its_transcript_overflows() {
+    let (w, h) = (120u16, 24u16);
+    let thumb = |s: &mut Shot| -> Vec<usize> {
+        let p = cells(&s.frame(), w, h);
+        (0..h as usize)
+            .filter(|&y| p.screen().cell(y as u16, w - 1).unwrap().contents() == super::THUMB)
+            .collect()
+    };
+    let mut long = chat_of(w, h, 30);
+    let newest = thumb(&mut long);
+    assert!(!newest.is_empty(), "a long transcript: its thumb");
+    long.ed.session.chat.as_mut().unwrap().scroll = 10_000;
+    let first = thumb(&mut long);
+    assert!(
+        !first.is_empty() && first[0] < newest[0],
+        "scrolled to its start the thumb moves up: {first:?} {newest:?}"
+    );
+    assert_eq!(first[0], 1, "at its start, the row under the chat's line");
+    let mut short = chat_of(w, h, 1);
+    assert_eq!(thumb(&mut short), Vec::<usize>::new(), "a short transcript: no thumb");
+}
+
 /// A slot's header is the line its leaves' lines start from: where one goes down, a `┬` — the
 /// details (the debugger's program, state and reason; the tests' summary) end short of it and the keys start past
 /// it, never a `│` starting under a letter. They fold whole pieces, the time, then the counts (together: never `● 1`

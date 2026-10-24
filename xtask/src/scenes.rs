@@ -50,6 +50,9 @@ const FOCUS_CARD_Y: &[&str] =
 const FOCUS_CARD_Q: &[&str] =
     &["@1", " ", "l", "@1", "run the tests", "\r", "\x17", "h", "@?Its reason", "@1", "j", "j", "\x11", "@1"];
 
+/// The chat opened, a question asked, its answer waited for to its end.
+const FOOT: &[&str] = &["@1", " ", "l", "@1", "how is the map filled?", "\r", "@30?That is all.", "@1"];
+
 /// Three messages said one after another: a save, two commands that don't exist (errors, so they stay).
 const TOAST_THREE: &[&str] = &["@1", ":w\r", "@1", ":nope\r", "@1", ":wat\r", "@1"];
 
@@ -1969,6 +1972,11 @@ const SCENES: &[Scene] = &[
             "@1",
         ],
     },
+    // (the chat's foot: a long answer — the transcript's thumb in its outer cell — with the plan's weekly window at
+    // 41 % (not on the row) and at 93 % (on it, with its reset); a short one, no thumb)
+    Scene { name: "chatfoot41", claude: "foot41", files: MAIN, keys: FOOT },
+    Scene { name: "chatfoot93", claude: "foot93", files: MAIN, keys: FOOT },
+    Scene { name: "chatfootshort", claude: "footshort", files: MAIN, keys: FOOT },
     // (a run outside the sandbox: its card)
     Scene {
         name: "card",
@@ -2928,6 +2936,9 @@ fn claude(script: &str, input: impl BufRead, out: &mut impl Write, pause: Durati
             "grants" => turn.grants()?,
             "warm" => turn.warm(false)?,
             "warmfork" => turn.warm(true)?,
+            "foot41" => turn.foot(41, true)?,
+            "foot93" => turn.foot(93, true)?,
+            "footshort" => turn.foot(41, false)?,
             "boardmid" => turn.board(&line, false)?,
             "boarddone" => turn.board(&line, true)?,
             "reviewing" => turn.reviewer(false)?,
@@ -3118,6 +3129,36 @@ impl<W: Write, L: Iterator<Item = io::Result<String>>> Turn<'_, W, L> {
         let cost = if fork { 0.0911 } else { 1.8125 };
         self.line(
             json!({"type": "result", "result": "ok", "session_id": id, "total_cost_usd": cost, "usage": usage,
+            "modelUsage": model}),
+        )
+    }
+
+    /// A turn that says the plan's weekly window at `percent` (its own `rate_limit_event`, which puts the session on
+    /// the plan), then answers — `long`: a step a line for longer than the chat is tall — and its result.
+    fn foot(&mut self, percent: u32, long: bool) -> io::Result<()> {
+        let id = "conv-foot";
+        let info = json!({"status": "allowed", "resetsAt": 4_071_000_000u64, "rateLimitType": "seven_day",
+            "utilization": f64::from(percent) / 100.0});
+        self.line(json!({"type": "rate_limit_event", "rate_limit_info": info}))?;
+        self.line(
+            json!({"type": "system", "subtype": "init", "session_id": id, "model": "claude-opus-5-5"}),
+        )?;
+        let usage = json!({"input_tokens": 3, "cache_read_input_tokens": 7_924, "cache_creation_input_tokens": 8_125,
+            "cache_creation": {"ephemeral_1h_input_tokens": 8_125}, "output_tokens": 185});
+        let message = json!({"id": format!("{id}-1"), "model": "claude-opus-5-5", "usage": usage});
+        self.line(json!({"type": "stream_event", "event": {"type": "message_start", "message": message}}))?;
+        self.text("The map is filled in one pass over the strands:\n\n")?;
+        if long {
+            for n in 1..=40 {
+                self.text(&format!("{n}. strand {n} is read, its name cloned, and it goes into the map\n"))?;
+            }
+            self.text("\n")?;
+        }
+        self.text("Nothing else writes to it.\n\nThat is all.")?;
+        let model = json!({"claude-opus-5-5": {"inputTokens": 3, "cacheReadInputTokens": 7_924,
+            "cacheCreationInputTokens": 8_125, "outputTokens": 185, "contextWindow": 200_000}});
+        self.line(
+            json!({"type": "result", "result": "ok", "session_id": id, "total_cost_usd": 0.018, "usage": usage,
             "modelUsage": model}),
         )
     }

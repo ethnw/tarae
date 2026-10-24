@@ -15,7 +15,7 @@
 12  11     counts                                              │
 13  12 }                                                       │  tab for a suggestion
 14  13                                                         │  › Explain what this file does
-15  14 fn main() {                                             │  › Where is this used across the pro…
+15  14 fn main() {                                             │  › Where is this used across the pr…
 16  15     let text = "the quick brown fox jumps over the lazy │  › Why is this diagnostic happening?
 17         dog";                                               │
 18  16     let counts = word_counts(text);                     │  C-t for another model
@@ -26,7 +26,7 @@
 23                                                             │
 24                                                             │
 25                                                             │
-26                                                             │  ────────────────────────────────────
+26                                                             │  ───────────────────────────────────
 27                                                             │  › Ask about demo.rs…
 28                                                             │  enter send  esc code  C-s screen
 29  ● chat                                                                      rust   utf-8 LF   1:1
@@ -77,7 +77,7 @@
 12  ff                                                         a
 13  ff                                                         a  DDD fff f ffffffffff
 14  ff                                                         a  f ddddddd dddd dddd dddd dddd
-15  ff                                                         a  f ddddd dd dddd dddd dddddd ddd dddd
+15  ff                                                         a  f ddddd dd dddd dddd dddddd ddd ddd
 16  ff                gggg ggggg ggggg ggg ggggg gggg ggg gggg a  f ddd dd dddd dddddddddd dddddddddd
 17         gggg                                                a
 18  ff                                                         a  DDD fff fffffff fffff
@@ -88,7 +88,7 @@
 23                                                             a
 24                                                             a
 25                                                             a
-26                                                             a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+26                                                             a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 27                                                             a  A fff fffff ffffffff
 28                                                             a  DDDDD ffff  DDD ffff  DDD ffffff
 29  a TTTT                                                                      dddd   ddddd dd   TTT

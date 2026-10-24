@@ -296,8 +296,8 @@ fn retries_are_said_in_place_in_the_chat() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// The chat's last row says the weekly window — before any turn — as `weekly 93 % · resets Tue 10:00`, once the
-/// session's claude said it runs on the plan: its answer to `initialize` says so as it starts
+/// The chat's last row says the weekly window near its limit — before any turn — as `weekly 93 % · resets Tue
+/// 10:00`, once the session's claude said it runs on the plan: its answer to `initialize` says so as it starts
 /// (`account.apiKeySource`). Not before it said (a key session's claude would show another session's reading of
 /// the plan), nor while it runs on a key.
 #[test]
@@ -554,8 +554,8 @@ fn its_own_rate_limit_event_puts_a_session_on_the_plan() {
 }
 
 /// After a turn the row is crowded (the cache, the context, the turn's cost): near the limit the weekly window's
-/// reset outlasts the cost and the context — when it's back is what matters then — and far from it the reset goes
-/// first, the row as it was before limits were said.
+/// reset outlasts the cost and the context — when it's back is what matters then — and far from it the window isn't
+/// on the row at all (the row is the conversation's), the cost kept.
 #[test]
 fn near_the_limit_the_reset_outlasts_the_turns_cost() {
     use crate::usage::{Counts, Seen, Spent, Ttl};
@@ -600,7 +600,7 @@ fn near_the_limit_the_reset_outlasts_the_turns_cost() {
     let near = row(92, Status::Warning);
     assert!(near.contains("weekly 92 % · resets") && !near.contains('$'), "{near:?}");
     let far = row(30, Status::Allowed);
-    assert!(far.contains("weekly 30 %") && far.contains("≈$0.018") && !far.contains("resets"), "{far:?}");
+    assert!(!far.contains("weekly") && far.contains("≈$0.018"), "{far:?}");
 }
 
 /// A fake claude whose answer to `initialize` says it runs on the plan, on `email`'s login in `org` — and whose
@@ -622,8 +622,8 @@ fn on_login(ed: &mut Editor, email: &str, org: &str) {
     ];
 }
 
-/// frictions29 #3 + #7: which account a chat runs on — its organization and plan in `:usage`, `tarae state` and
-/// (the plan) on the chat's last row, never the email; a claude on another login makes the limits unknown and is
+/// frictions29 #3 + #7: which account a chat runs on — its organization and plan in `:usage` and `tarae state`
+/// (never on the chat's last row: the conversation's), never the email; a claude on another login makes the limits unknown and is
 /// said on the chat still on the old one; `:claude-restart` starts every chat's claude again on its
 /// conversation.
 #[test]
@@ -651,7 +651,7 @@ fn a_chat_says_its_account_and_another_login_is_said_and_restarted_into() {
     let mut vt = vt100::Parser::new(40, 200, 0);
     vt.process(&bytes);
     let shown = vt.screen().contents();
-    assert!(shown.contains("max · weekly 93 %"), "{shown}");
+    assert!(shown.contains("weekly 93 %") && !shown.contains("max · "), "{shown}");
     let now = crate::usage::now_ms();
     let r = crate::usage::report("s", &ed.session.usage, &ed.limits, &[], now);
     assert!(r.contains("Account: Acme · plan max."), "{r}");
@@ -697,7 +697,7 @@ fn a_chat_says_its_account_and_another_login_is_said_and_restarted_into() {
     ed.limits.seen(Report { readings: vec![weekly], ..Report::default() });
     assert!(!rows(&mut ed).contains("weekly"), "the old login's row: {}", rows(&mut ed));
     ed.session_switch(other);
-    assert!(rows(&mut ed).contains("max · weekly 93 %"), "{}", rows(&mut ed));
+    assert!(rows(&mut ed).contains("weekly 93 %"), "{}", rows(&mut ed));
     ed.session_switch(first);
     // A turn of the chat still on the old login: its claude's reading (50 %) is that account's — not kept
     let generation = ed.session.chat.as_ref().unwrap().generation();

@@ -6,7 +6,7 @@
 03   3 ▎ Counts how often each word appears.                                                 │  Two ways to draw a cell that doesn't fit:
 04     ▎                                                                                     │
 05     ▎ Words are split on whitespace; case is kept.                                        │  방식              장점                단점
-06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                              │  ────────────────  ──────────────────  ──────────────────
+06   6 pub fn word_counts(text: &str) -> HashMap<&str, usize> {                              │  ────────────────  ──────────────────  ─────────────────
 07   7     let mut counts = HashMap::new();                                                  │  셀 안에서 줄바꿈  내용이 전부 보이고  행 높이가
 08   8     for word in text.split_whitespace() {                                             │                    열 정렬이 유지된다  들쭉날쭉해진다
 09   9     │   *counts.entry(word).or_insert(0) += 1;                                        │
@@ -29,7 +29,7 @@
 26                                                                                           │    설명    채팅 패널이 차지하는 화면 비율
 27                                                                                           │    예시    :set chat.width 0.5
 28                                                                                           │    비고    좁으면 전체 화면
-29                                                                                           │                                                      3.1s
+29                                                                                           │                                                     3.1s
 30                                                                                           │
 31                                                                                           │
 32                                                                                           │
@@ -40,9 +40,9 @@
 37                                                                                           │
 38                                                                                           │
 39                                                                                           │
-40                                                                                           │  ────────────────────────────────────────────────────────
+40                                                                                           │  ───────────────────────────────────────────────────────
 41                                                                                           │  › Ask about demo.rs…
-42                                                                                           │  enter send  esc normal  C-s screen  C-o point  C-l new
+42                                                                                           │  enter send  esc normal  C-s screen  C-o point
 43  ● chat                                                                                                                        rust   utf-8 LF   1:1
 ## bg · surface per cell, blank = ui.background
 00
@@ -96,7 +96,7 @@
 03   f f                                                                                     a
 04     f                                                                                     a
 05     f                                                                                     a  BBBB              BBBB                BBBB
-06   f                                                                                       a  ffffffffffffffff  ffffffffffffffffff  ffffffffffffffffff
+06   f                                                                                       a  ffffffffffffffff  ffffffffffffffffff  fffffffffffffffff
 07   f                                                                                       a
 08   f                                                                                       a
 09   f                                                                                       a
@@ -119,7 +119,7 @@
 26                                                                                           a    dddd
 27                                                                                           a    dddd
 28                                                                                           a    dddd
-29                                                                                           a                                                      ffff
+29                                                                                           a                                                     ffff
 30                                                                                           a
 31                                                                                           a
 32                                                                                           a
@@ -130,9 +130,9 @@
 37                                                                                           a
 38                                                                                           a
 39                                                                                           a
-40                                                                                           a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+40                                                                                           a  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 41                                                                                           a  A fff fffff ffffffff
-42                                                                                           a  DDDDD ffff  DDD ffffff  DDD ffffff  DDD fffff  DDD fff
+42                                                                                           a  DDDDD ffff  DDD ffffff  DDD ffffff  DDD fffff
 43  a TTTT                                                                                                                        dddd   ddddd dd   TTT
 ## legend
 bg: c=ui.cursorline.primary
