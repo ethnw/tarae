@@ -19471,8 +19471,11 @@ mod tests {
         let rope = Rope::from_str(&text);
         let keys =
             ["j", "C-d", "w", "C-w", "l", "k", "C-u", "C-w", "j", "i", "a", "esc", "C-w", "w", "G", "g", "g"];
+        // (the session's root a scratch folder: the session list asks git of it, never of tarae's own repository)
+        let scratch = crate::scratch::Scratch::new("perf-four-panes");
         let (worst, key) = worst_of_best(&keys, || {
             let mut ed = Editor::new(Config::default());
+            ed.session.root = scratch.path().to_path_buf();
             ed.docs[0].text = rope.clone();
             ed.docs[0].path = Some(std::path::PathBuf::from("/nonexistent/four.rs"));
             let root = ed.session.root.clone();
@@ -20076,7 +20079,7 @@ mod tests {
                 .filter(|l| l.contains("card") || l.contains("enter"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(s.contains("esc esc answer card"), "the row says the twin:\n{row}");
+            assert!(s.contains("esc esc space I answer card"), "the row says the twin:\n{row}");
             keys.iter()
                 .map(|d| {
                     let m = ed.session.chat.as_mut().unwrap().msgs.last_mut().unwrap();
