@@ -124,18 +124,34 @@ optimized build: `cargo xtask linux [--env TARAE_EXPECT_TIER=own --userns] test 
 real-use runs of the built editor on a pseudo-terminal (startup, a key in a big file, scrolling, idle CPU, memory
 with this repository open), in the `perf` profile — release, with line tables. It runs them three times, keeps
 each number's median in `target/perf/history.tsv` with the commit and date, and says which are more than 15% slower
-than the median of their last runs. On a busy machine (load 5 or more) it measures nothing and says so. A slow
-change thus fails a budget, and a slower one shows up as a number. `cargo test` builds at opt-level 0 for a quick
-edit-and-test loop, where these skip themselves, saying so. On a slow shared machine, `TARAE_PERF_SLACK=3`
-multiplies the budget (CI does this).
+than the median of their last runs. On a busy machine (load 5 or more) it waits for the load to fall, up to 10
+minutes before each run (`TARAE_PERF_WAIT` seconds instead), and a run other processes kept 3 cores busy through is
+dropped and run again (6 runs at most); a machine that stays busy fails it, saying it couldn't measure — "not
+measured" is never a pass. A slow change thus fails a budget, and a slower one shows up as a number. This machine's
+`cargo perf` is the gate on time; `cargo test` builds at opt-level 0 for a quick edit-and-test loop, where these skip
+themselves, saying so. On a slow shared machine, `TARAE_PERF_SLACK=3` multiplies the budget.
 
 [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run workflow) — fmt,
 clippy (warnings are errors), and tests on Linux and macOS, with and without bundled grammars — except `cargo perf`:
-shared runners are too noisy for numbers, so CI runs only the budgets, in the `perf` profile. It also downloads and
+time is judged on a fixed machine, so CI runs only the time budgets, in the `perf` profile, and they only report (the
+`perf-budgets-…` artifact, what went over in the step's summary; never a failed job) — its gate is the deterministic
+tests and budgets of work, the same on any machine. A test that fails there and passes here waits on the wrong
+thing: it's made to wait on its condition, never run again until green. It also downloads and
 builds a grammar from GitHub (the tests that need the network, `#[ignore = "network: …"]`, named in its `cargo test --
 --ignored --exact` line — the rest of `--ignored` is children run in a process of their own, measurements and checks by
 hand, and `installed_claude_speaks_a_revision_we_speak`, a local check). It builds with the pinned toolchain too
 (`rustup toolchain install` reads `rust-toolchain.toml`), so a check that passes here passes there.
+
+### Checks by hand
+
+What only the OS can say in its own time is checked by hand, never in CI: the test is `#[ignore = "by hand: …"]`,
+and what tarae does with what the OS says is a test of its own on recorded input, CI's. Run one outside tarae's
+sandbox (Seatbelt can't start inside it), on a quiet machine:
+
+- macOS's denials as `log stream` delivers them (the deny-default profile, macdeny): `cargo test --bin tarae --
+  --ignored --exact sandbox::tests::what_the_default_refuses_and_the_base_lets_through` — after a change to
+  `sandbox::BASE` or the profile. CI's half reads the recorded lines
+  (`sandbox::tests::the_defaults_refusals_are_read_and_judged_from_their_log_lines`).
 
 ### The toolchain
 

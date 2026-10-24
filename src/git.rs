@@ -85,21 +85,7 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
                 (last, first) = (Some(now), false);
                 let branch = read_branch(&head);
                 let dir = dir.clone();
-                // (only the session it's for: one ended meanwhile sends it to the front)
-                let apply = move |ed: &mut Editor| {
-                    if ed.session.root == dir {
-                        ed.session.git_branch = branch;
-                        // (the log names it as the list does: the checkout tarae started in by its branch)
-                        ed.session.in_log.named(ed.session.label());
-                        if moved {
-                            ed.git_reload_bases_in(&dir);
-                            // (moved into the branch a review is since: that review may be of nothing now)
-                            crate::codereview::base_reached(ed);
-                            // (a checkout or reset changes the files the reviewer read, no save of tarae's)
-                            crate::reviewer::since_sync_shown(ed);
-                        }
-                    }
-                };
+                let apply = move |ed: &mut Editor| watch_round(ed, &dir, branch, moved);
                 if tx.send(Event::Job(Box::new(apply))).is_err() {
                     break;
                 }
@@ -107,6 +93,26 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
             watcher.wait();
         }
     });
+}
+
+/// A watch round of `dir`'s, applied: the branch read then (`branch`), and whether HEAD moved since the last
+/// round (`moved`) — the index taken again then. Only the session it's for (one ended meanwhile sends it to
+/// the front); a round that changed nothing draws nothing (`unchanged`: the branch already known, another
+/// session's — a late first round drew a frame of nothing in an idle test, CI's macOS).
+pub(crate) fn watch_round(ed: &mut Editor, dir: &Path, branch: Option<String>, moved: bool) {
+    if ed.session.root != dir || (!moved && ed.session.git_branch == branch) {
+        return ed.unchanged = true;
+    }
+    ed.session.git_branch = branch;
+    // (the log names it as the list does: the checkout tarae started in by its branch)
+    ed.session.in_log.named(ed.session.label());
+    if moved {
+        ed.git_reload_bases_in(dir);
+        // (moved into the branch a review is since: that review may be of nothing now)
+        crate::codereview::base_reached(ed);
+        // (a checkout or reset changes the files the reviewer read, no save of tarae's)
+        crate::reviewer::since_sync_shown(ed);
+    }
 }
 
 // ── Changed-line markers (bar next to line numbers) ──────────────────────────
@@ -358,6 +364,26 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A watch round that changes nothing draws nothing: the first round's branch already known, a round of
+    /// another session's; a new branch or a HEAD moved is a change (`watch_round`).
+    #[test]
+    fn a_watch_round_that_changes_nothing_draws_nothing() {
+        let mut ed = Editor::new(crate::config::Config::default());
+        let dir = ed.session.root.clone();
+        let round = |ed: &mut Editor, dir: &Path, branch: &str, moved| {
+            ed.unchanged = false;
+            watch_round(ed, dir, Some(branch.into()), moved);
+            std::mem::take(&mut ed.unchanged)
+        };
+        assert!(!round(&mut ed, &dir, "main", false), "the first: the branch learnt");
+        assert_eq!(ed.session.git_branch.as_deref(), Some("main"));
+        assert!(round(&mut ed, &dir, "main", false), "the same branch again");
+        assert!(round(&mut ed, Path::new("/elsewhere"), "fix", true), "another session's");
+        assert_eq!(ed.session.git_branch.as_deref(), Some("main"));
+        assert!(!round(&mut ed, &dir, "fix", false), "another branch");
+        assert!(!round(&mut ed, &dir, "fix", true), "HEAD moved: the index again");
+    }
 
     #[test]
     fn head_contents() {

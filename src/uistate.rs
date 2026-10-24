@@ -749,6 +749,19 @@ pub struct UiState {
     pub notes: Vec<NoteState>,
     /// Motions on a clock under way (`motion.rs`) — a driver waits for one to end, never sleeps; never Claude's.
     pub motions: Vec<MotionState>,
+    /// The last frame went out in parts and the whole screen is still to go once input rests
+    /// (`term::RESTING_REDRAW`, `Editor.redraw_due`) — a frame of its own a driver waiting for quiet waits for;
+    /// said only while true, never Claude's.
+    pub redraw_due: bool,
+    /// Frames that went to the terminal, this one too (`Editor.frames_written`) — what a driver reading the
+    /// terminal has read once it caught up with this answer (the answer comes on the socket, the frame on the
+    /// terminal: either may come first); never Claude's.
+    pub frames_written: u64,
+    /// When a frame is next wanted with nothing else happening (`Editor::tick_wanted`: the waiting animation's
+    /// step, a toast's fade, …), in ms — None: nothing wakes it; never Claude's.
+    pub tick_in_ms: Option<u64>,
+    /// The terminal said its focus went elsewhere (`CSI O`, until `CSI I`) — the animation rests; never Claude's.
+    pub unfocused: bool,
 }
 
 /// A motion as the state lists it: its kind (`flash`), what it shows (`undo`, `yank`, …), the ms until it's gone.
@@ -1690,6 +1703,10 @@ impl Editor {
                         as u64,
                 })
                 .collect(),
+            redraw_due: self.redraw_due,
+            frames_written: self.frames_written,
+            tick_in_ms: self.tick_wanted().map(|d| d.as_millis() as u64),
+            unfocused: self.unfocused,
         }
     }
 
@@ -1920,7 +1937,7 @@ impl UiState {
                 |t| json!({ "id": t.id, "kind": t.kind, "text": t.text, "where": t.place, "shown": t.shown }),
             )
             .collect();
-        json!({
+        let mut v = json!({
             "v": V,
             "tarae": { "pid": self.pid, "boot": self.boot, "version": self.version },
             "frame": self.frame,
@@ -1947,7 +1964,20 @@ impl UiState {
                 .iter()
                 .map(|m| json!({ "kind": m.kind, "act": m.act, "until_ms": m.until_ms }))
                 .collect::<Vec<_>>(),
-        })
+        });
+        if self.redraw_due {
+            v["redraw_due"] = json!(true);
+        }
+        if self.frames_written > 0 {
+            v["frames_written"] = json!(self.frames_written);
+        }
+        if let Some(ms) = self.tick_in_ms {
+            v["tick_in_ms"] = json!(ms);
+        }
+        if self.unfocused {
+            v["unfocused"] = json!(true);
+        }
+        v
     }
 
     /// The short text form, for people (not a contract — the JSON is; Claude's is `text_claude`).

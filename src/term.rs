@@ -148,6 +148,30 @@ fn tests_skip_seek() -> bool {
 /// How long input rests before a screen sent in parts is drawn whole again (`event_loop`).
 const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// When the whole screen goes again (`event_loop`): `RESTING_REDRAW` after the last write that went out in
+/// parts. Its time runs from that write: an event that writes nothing (a job's result that changed nothing, a
+/// state asked) doesn't put it off — else events a little under `RESTING_REDRAW` apart would hold it back, to
+/// come in the quiet after them, a frame nothing asked for then (`Editor.redraw_due` says it's due).
+#[derive(Default)]
+struct Resting(Option<std::time::Instant>);
+
+impl Resting {
+    /// A frame went out at `now`: in parts (`patched`) — the whole screen due `RESTING_REDRAW` from now — or whole,
+    /// none due.
+    fn wrote(&mut self, patched: bool, now: std::time::Instant) {
+        self.0 = patched.then(|| now + RESTING_REDRAW);
+    }
+
+    /// How long the main loop waits for an event at `now` before the whole screen goes — None: none is due.
+    fn wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.0.map(|at| at.saturating_duration_since(now))
+    }
+
+    fn due(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 fn event_loop(editor: &mut Editor) -> Result<()> {
     spawn_input(editor.events.shared_sender());
     spawn_signals(editor.events.shared_sender());
@@ -161,6 +185,8 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     // which a terminal may redraw its own way, and on `:redraw`.
     let mut frame = Vec::with_capacity(1 << 16);
     let mut screen = crate::screen::Screen::new();
+    // (when the whole screen goes again — below)
+    let mut resting = Resting::default();
     while !editor.should_quit {
         if draw {
             let (w, h) = terminal::size()?;
@@ -168,21 +194,31 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
                 screen.invalidate();
             }
             frame.clear();
-            render(editor, &mut frame, w, h)?;
+            render_drawn(editor, &mut frame, w, h)?;
             let bytes = screen.present(&frame, w, h);
-            let own = std::mem::take(&mut editor.term_out);
-            if !bytes.is_empty() || !own.is_empty() {
+            let (own, wrote) = (std::mem::take(&mut editor.term_out), !bytes.is_empty());
+            // (a frame that couldn't be read goes as it is, no synchronized update around it)
+            let ended = bytes.ends_with(b"\x1b[?2026l");
+            if wrote || !own.is_empty() {
                 out.write_all(bytes)?;
                 // (after the frame's synchronized update has ended: OSC 52 — `clipboard.rs`)
                 out.write_all(&own)?;
                 out.flush()?; // stdout holds back what has no newline
             }
+            if wrote {
+                resting.wrote(screen.patched(), crate::clock::now());
+            }
+            editor.frames_written += ended as u64;
+            editor.redraw_due = resting.due();
+            // (snapshots asked: as of this frame, written — what went to the terminal and what's still to go)
+            crate::uistate::after_frame(editor);
         }
         // After only parts went out, the whole screen goes again once input rests: what a terminal leaves of
         // its own (Terminal.app, measured: a cursor drawn past its cell next to a wide character, a line up)
-        // or anything else that drifted is gone a moment later — the next frame used to wipe it anyway.
-        let ev = if screen.patched() {
-            match editor.events.recv_within(RESTING_REDRAW) {
+        // or anything else that drifted is gone a moment later — the next frame used to wipe it anyway. Its time
+        // runs from the last write, not the last event (`Resting`).
+        let ev = if let Some(wait) = resting.wait(crate::clock::now()) {
+            match editor.events.recv_within(wait) {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
                     screen.invalidate();
@@ -395,7 +431,17 @@ fn spawn_input(tx: crate::event::Tx) {
 }
 
 /// One frame: layout → scroll → draw. Callable without a terminal (performance budget test).
+#[cfg(test)]
 pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
+    render_drawn(editor, out, w, h)?;
+    // (snapshots of the UI state asked over its socket: as of this frame)
+    crate::uistate::after_frame(editor);
+    Ok(())
+}
+
+/// A frame drawn into `out`, all but the UI state's watchers and snapshots (`uistate::after_frame`) — the main
+/// loop tells them once the frame went out (`event_loop`), `render` at once.
+fn render_drawn(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::Result<()> {
     // (the run panels' documents as their runs are now: what they printed since the last event)
     crate::rundoc::sync(editor);
     // Reading an answer moved the editor to what the chat now shows (its links are only known once drawn)
@@ -441,8 +487,6 @@ pub fn render(editor: &mut Editor, out: &mut impl Write, w: u16, h: u16) -> io::
     // (the reviews under way: what of them this frame shows — the review record's time)
     crate::reviews::after_frame(editor);
     crate::seeing::after_frame(editor);
-    // (snapshots of the UI state asked over its socket: as of this frame)
-    crate::uistate::after_frame(editor);
     Ok(())
 }
 
@@ -18919,6 +18963,28 @@ mod tests {
             vec![ms(1), ms(7), ms(2)]
         });
         assert_eq!((slow, rounds), ((ms(7), "k".to_string()), ROUNDS));
+    }
+
+    /// The whole screen goes again `RESTING_REDRAW` after the last write that went out in parts (`Resting`):
+    /// events that write nothing, however close together, don't put it off — the wait shrinks to the deadline;
+    /// a write in parts starts it again; a whole frame leaves none due. `Term::settle` and the idle e2e count on
+    /// it (`redraw_due`).
+    #[test]
+    fn the_resting_redraw_is_timed_from_the_last_write() {
+        let (t0, ms) = (std::time::Instant::now(), Duration::from_millis);
+        let mut r = Resting::default();
+        assert_eq!((r.wait(t0), r.due()), (None, false), "nothing written yet");
+        r.wrote(true, t0);
+        assert_eq!(r.wait(t0), Some(RESTING_REDRAW));
+        // (events 400 ms apart that write nothing: each wait what's left, never the whole again)
+        for (at, left) in [(400, 100), (499, 1), (800, 0)] {
+            assert_eq!(r.wait(t0 + ms(at)), Some(ms(left)), "an event at {at} ms");
+        }
+        assert!(r.due());
+        r.wrote(true, t0 + ms(450));
+        assert_eq!(r.wait(t0 + ms(800)), Some(ms(150)), "a write in parts at 450 ms: due at 950");
+        r.wrote(false, t0 + ms(950));
+        assert_eq!((r.wait(t0 + ms(950)), r.due()), (None, false), "the whole screen went");
     }
 
     /// One frame at 60 Hz. `TARAE_PERF_SLACK` (a multiplier) loosens it on slow shared machines — CI sets 3,

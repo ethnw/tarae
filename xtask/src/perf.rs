@@ -16,10 +16,12 @@
 //! meant. A size's failure is said after the table: the timings measured are shown, none kept (`report`).
 //!
 //! Only on a quiet machine: with a load of `BUSY` or more it waits up to `WAIT` for it to fall (a fat-LTO
-//! build leaves the load up), then says "not measured (machine busy)" and keeps nothing — numbers from a
-//! busy machine (or a sandboxed parallel run) would only be noise. A run during which other processes kept
-//! `OTHERS_BUSY` cores busy is dropped (`others_cores`, `quiet_runs`), and without all `RUNS` it's "not
-//! measured" too. A budget broken on a quiet machine is a failure.
+//! build leaves the load up) — numbers from a busy machine (or a sandboxed parallel run) would only be noise.
+//! A run during which other processes kept `OTHERS_BUSY` cores busy is dropped (`others_cores`,
+//! `quiet_runs`) and run again once the machine is quiet, `TRIES` runs in all at most. "Not measured" is
+//! never a pass (user, 2026-10-24: a preflight that passed it hid two broken budgets): a machine still busy
+//! after the wait, or fewer than `RUNS` quiet runs, fails, saying it couldn't measure. A budget broken on a
+//! quiet machine is a failure.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,8 +40,11 @@ const SLOWER: f64 = 1.15;
 /// …when the difference is also more than the number's noise — unless it says its own (`noise=`), this, in
 /// milliseconds: above the worst-of-N frame numbers' jumps between quiet runs (+0.13 ms measured).
 const DEFAULT_NOISE: f64 = 0.25;
-/// How long a busy machine is waited for (`TARAE_PERF_WAIT` seconds instead).
-const WAIT: u64 = 90;
+/// How long a busy machine is waited for, before the first run and before each after it (`TARAE_PERF_WAIT`
+/// seconds instead): another session's release build on this machine is a few minutes.
+const WAIT: u64 = 600;
+/// Runs tried at most: a busy one is dropped and tried again, `RUNS` more at most.
+const TRIES: usize = 2 * RUNS;
 
 /// One measured number.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,10 +60,11 @@ struct Perf {
 /// long editing: 48 s a run, measured 2026-10-03).
 const ONCE: [&str; 1] = ["perf_e2e_memory_over_long_editing"];
 
-/// What run `i` (from 0) asks of the perf tests: all of them in the first, the `ONCE` ones left out after.
-fn filters(i: usize) -> Vec<&'static str> {
+/// What a run asks of the perf tests: all of them until one run was kept (`first`), the `ONCE` ones left
+/// out after.
+fn filters(first: bool) -> Vec<&'static str> {
     let mut f = vec!["--quiet", "--", "perf_", "--test-threads=1"];
-    if i > 0 {
+    if !first {
         for t in ONCE {
             f.extend(["--skip", t]);
         }
@@ -70,8 +76,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let all_sizes = args.iter().any(|a| a == "--sizes");
     let root = root();
     if let Some(load) = wait_quiet() {
-        println!("not measured (machine busy: load {load:.1}, under {BUSY} needed)");
-        return Ok(());
+        return Err(not_measured(load, "before the first run"));
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let test = |extra: &[&str]| {
@@ -97,14 +102,13 @@ pub fn run(args: &[String]) -> Result<()> {
     if !st.success() {
         return Err("building the perf profile failed".into());
     }
-    let runs = runs(|i| {
+    let runs = runs(|i, first| {
         if let Some(load) = wait_quiet() {
-            println!("not measured (machine busy: load {load:.1} before run {})", i + 1);
-            return Ok(None);
+            return Err(not_measured(load, &format!("before run {}", i + 1)));
         }
-        eprintln!("run {} of {RUNS} …", i + 1);
+        eprintln!("run {} ({RUNS} needed, {TRIES} at most) …", i + 1);
         let before = Cpu::now();
-        let out = test(&filters(i)).output();
+        let out = test(&filters(first)).output();
         let others = Cpu::now().others_since(&before);
         let out = out.map_err(|e| format!("cargo: {e}"))?;
         let text =
@@ -112,14 +116,13 @@ pub fn run(args: &[String]) -> Result<()> {
         if !out.status.success() {
             return Err(format!("run {} of {RUNS} failed:\n{}", i + 1, failures(&text)));
         }
-        Ok(Some((parse(&text), others)))
+        Ok((parse(&text), others))
     })?;
-    let Some(runs) = runs else { return Ok(()) };
     let (said, runs) = quiet_runs(runs);
+    let Some(runs) = runs else { return Err(said.join("\n")) };
     for l in said {
         println!("{l}");
     }
-    let Some(runs) = runs else { return Ok(()) };
     let mut now = medians(&runs);
     if now.is_empty() {
         return Err("no PERF lines — did the tests run in the perf profile?".into());
@@ -198,21 +201,30 @@ struct Run {
     busy: Option<f64>,
 }
 
-/// Up to `RUNS` runs, one at a time — `one(i)`: its numbers and the cores other processes kept busy during
-/// it (`Cpu::others_since`), or `None` when the machine stayed busy before it (said there, nothing
-/// measured). `OTHERS_BUSY` or more marks the run busy, and the loop stops after it: fewer than `RUNS` are
-/// left to keep then, and the rest would be thrown away (minutes each).
-fn runs(mut one: impl FnMut(usize) -> Result<Option<(Vec<Perf>, f64)>>) -> Result<Option<Vec<Run>>> {
-    let mut runs = Vec::new();
-    for i in 0..RUNS {
-        let Some((perf, others)) = one(i)? else { return Ok(None) };
-        let busy = (others >= OTHERS_BUSY).then_some(others);
-        runs.push(Run { perf, busy });
-        if busy.is_some() {
+/// Runs, one at a time, until `RUNS` were quiet or `TRIES` ran — `one(i, first)`: run `i`'s numbers and the
+/// cores other processes kept busy during it (`Cpu::others_since`), `first` while no run was kept yet (the
+/// `ONCE` scenarios with it); an `Err` (a failure, the machine busy before it) ends them. `OTHERS_BUSY` or
+/// more marks the run busy: kept in the list, dropped by `quiet_runs`, and another tried in its place.
+fn runs(mut one: impl FnMut(usize, bool) -> Result<(Vec<Perf>, f64)>) -> Result<Vec<Run>> {
+    let mut runs: Vec<Run> = Vec::new();
+    for i in 0..TRIES {
+        let quiet = runs.iter().filter(|r| r.busy.is_none()).count();
+        if quiet == RUNS {
             break;
         }
+        let (perf, others) = one(i, quiet == 0)?;
+        let busy = (others >= OTHERS_BUSY).then_some(others);
+        runs.push(Run { perf, busy });
     }
-    Ok(Some(runs))
+    Ok(runs)
+}
+
+/// The failure of a machine that stayed busy (`load`) through the wait, `when`.
+fn not_measured(load: f64, when: &str) -> String {
+    let wait = wait_s();
+    format!(
+        "not measured: the machine stayed busy {when} (load {load:.1} after {wait}s, under {BUSY} needed)"
+    )
 }
 
 /// Cores other processes kept busy, on average over a run, at or above which the run is dropped. The load
@@ -319,8 +331,8 @@ const TICK_MASK: u64 = u64::MAX;
 
 /// The runs whose numbers count, and what's said of the others: a run during which other processes kept
 /// `OTHERS_BUSY` cores busy (`others_cores`) is dropped (`run 2 dropped: 3.1 cores busy outside it`). Fewer
-/// than all `RUNS` left: "not measured", nothing kept, as with a busy start — a median of fewer runs is one
-/// run's word.
+/// than all `RUNS` left (`TRIES` ran): "not measured", nothing kept, a failure — a median of fewer runs is
+/// one run's word.
 fn quiet_runs(runs: Vec<Run>) -> (Vec<String>, Option<Vec<Vec<Perf>>>) {
     let ran = runs.len();
     let mut said = Vec::new();
@@ -332,9 +344,8 @@ fn quiet_runs(runs: Vec<Run>) -> (Vec<String>, Option<Vec<Vec<Perf>>>) {
         }
     }
     if kept.len() < RUNS {
-        let not_run = if ran < RUNS { format!(", {} not run", RUNS - ran) } else { String::new() };
         said.push(format!(
-            "not measured (machine busy: {} of {ran} run{} had under {OTHERS_BUSY} cores busy outside{not_run}; all {RUNS} needed)",
+            "not measured: the machine was busy — {} of {ran} run{} had under {OTHERS_BUSY} cores busy outside; {RUNS} needed",
             kept.len(),
             if ran == 1 { "" } else { "s" }
         ));
@@ -411,9 +422,13 @@ fn report(
 /// 13 and bundled 18 (2026-10-15, 11.98 and 17.07 then; 8.7 and 12.5 on 2026-10-04): the user's call — grown with
 /// the Linux sandbox (keeper, supervisor, proxy), the card model and the compatibility suite; the roadmap's
 /// stabilization (§9, "Less code") brings it back under 12 / 17 or says why not.
+/// 17 and bundled 22 (2026-10-24, 16.55 and 21.62 then; 11.98 and 17.07 on 2026-10-15): the user's call — grown
+/// with the web reader (rustls, ring, the platform verifier, html5ever, encoding_rs), the image decoder
+/// (readimg), panes P3 and collab C1–C3, hidden while `cargo perf` passed "not measured"; the size pass stays at
+/// stabilization (§9), `SIZE_JUMP` catches a dependency's jump meanwhile.
 const SIZES: [(&str, &[&str], &str, f64); 2] = [
-    ("release_size_mb", &[], "target", 13.0),
-    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 18.0),
+    ("release_size_mb", &[], "target", 17.0),
+    ("release_size_bundled_mb", &["--features", "bundled-grammars"], "target/bundled-size", 22.0),
 ];
 const SIZE_NOISE: f64 = 0.05;
 
@@ -611,7 +626,7 @@ fn failures(text: &str) -> String {
 /// None once the machine is quiet — waiting up to `WAIT` for it, saying so; else the load it stayed at.
 fn wait_quiet() -> Option<f64> {
     let mut load = busy()?;
-    let wait = std::env::var("TARAE_PERF_WAIT").ok().and_then(|w| w.parse().ok()).unwrap_or(WAIT);
+    let wait = wait_s();
     let end = std::time::Instant::now() + std::time::Duration::from_secs(wait);
     eprintln!("waiting up to {wait}s for the machine to quiet down (load {load:.1}) …");
     while std::time::Instant::now() < end {
@@ -619,6 +634,11 @@ fn wait_quiet() -> Option<f64> {
         load = busy()?;
     }
     Some(load)
+}
+
+/// How long a busy machine is waited for, in seconds (`WAIT`, `TARAE_PERF_WAIT`).
+fn wait_s() -> u64 {
+    std::env::var("TARAE_PERF_WAIT").ok().and_then(|w| w.parse().ok()).unwrap_or(WAIT)
 }
 
 /// The 1-minute load when it's `BUSY` or more.
@@ -787,11 +807,9 @@ mod tests {
     /// The long editing runs in the first run only; a number measured once is that run's value.
     #[test]
     fn a_once_only_number_is_its_one_value() {
-        assert!(!filters(0).contains(&"--skip"));
-        for i in 1..RUNS {
-            let f = filters(i);
-            assert!(f.windows(2).any(|w| w == ["--skip", "perf_e2e_memory_over_long_editing"]), "{f:?}");
-        }
+        assert!(!filters(true).contains(&"--skip"));
+        let f = filters(false);
+        assert!(f.windows(2).any(|w| w == ["--skip", "perf_e2e_memory_over_long_editing"]), "{f:?}");
         let p = |name: &str, value: f64| Perf { name: name.into(), value, budget: 100.0, noise: 1.0 };
         let runs = vec![vec![p("a", 1.0), p("long", 80.0)], vec![p("a", 3.0)], vec![p("a", 2.0)]];
         let m = medians(&runs);
@@ -806,7 +824,8 @@ mod tests {
     }
 
     /// A busy run is dropped and said; with fewer than all `RUNS` left nothing is kept and it's "not
-    /// measured" — a quiet set is kept whole, each run's numbers in its median.
+    /// measured" — a quiet set is kept whole, each run's numbers in its median, the busy ones tried again
+    /// beside it only said.
     #[test]
     fn a_busy_run_is_dropped_and_then_nothing_is_kept() {
         let run = |i: usize, busy| Run { perf: vec![perf("a", i as f64, 16.0)], busy };
@@ -822,23 +841,19 @@ mod tests {
                 [
                     format!("run {} dropped: 6.1 cores busy outside it", busy_at + 1),
                     format!(
-                        "not measured (machine busy: {} of {RUNS} runs had under 3 cores busy outside; all {RUNS} needed)",
+                        "not measured: the machine was busy — {} of {RUNS} runs had under 3 cores busy outside; {RUNS} needed",
                         RUNS - 1
                     )
                 ]
             );
             assert!(kept.is_none(), "a median of {} runs was kept", RUNS - 1);
         }
-        // As the loop leaves it (`runs`): the busy one last, the runs after it not run — and said so
-        let (said, kept) = quiet_runs(vec![run(0, None), run(1, Some(6.14))]);
-        assert_eq!(
-            said[1],
-            format!(
-                "not measured (machine busy: 1 of 2 runs had under 3 cores busy outside, {} not run; all {RUNS} needed)",
-                RUNS - 2
-            )
-        );
-        assert!(kept.is_none());
+        // As the loop leaves it (`runs`): a busy one tried again — all `RUNS` quiet ones kept, the busy one said
+        let runs = (0..=RUNS).map(|i| run(i, (i == 1).then_some(6.14))).collect();
+        let (said, kept) = quiet_runs(runs);
+        assert_eq!(said, ["run 2 dropped: 6.1 cores busy outside it"]);
+        let kept = kept.expect("the quiet runs kept");
+        assert_eq!(kept.iter().map(|p| p[0].value).collect::<Vec<_>>(), [0.0, 2.0, 3.0]);
     }
 
     /// What the machine spent outside the run decides, not what it spent: a run keeping 6 of 14 cores busy
@@ -854,8 +869,8 @@ mod tests {
         let beside = others_cores((1100, 1400), cores, 600.0, wall);
         assert!((beside - 5.0).abs() < 1e-9, "{beside}");
         let mut readings = [alone, beside].into_iter();
-        let judged = runs(|_| Ok(Some((Vec::new(), readings.next().unwrap_or(0.0))))).unwrap().unwrap();
-        assert_eq!(judged.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(beside)]);
+        let judged = runs(|_, _| Ok((Vec::new(), readings.next().unwrap_or(0.0)))).unwrap();
+        assert_eq!(judged.iter().take(2).map(|r| r.busy).collect::<Vec<_>>(), [None, Some(beside)]);
         // Own CPU over the machine's share (counters read a tick apart) isn't negative; nothing read is 0
         assert_eq!(others_cores((100, 1400), cores, 600.0, wall), 0.0);
         assert_eq!(
@@ -865,35 +880,45 @@ mod tests {
     }
 
     /// The loop judges each run by what was read for it: all `RUNS` on a quiet machine (just under
-    /// `OTHERS_BUSY` is quiet), a stop right after the first busy one (at `OTHERS_BUSY` itself; the rest would
-    /// be thrown away), and nothing measured once the machine stayed busy before a run.
+    /// `OTHERS_BUSY` is quiet), a busy one (at `OTHERS_BUSY` itself) tried again — the `ONCE` scenarios with
+    /// the retry while no run was kept —, `TRIES` at most, and nothing more once a run failed (the machine
+    /// busy before it: `not_measured`).
     #[test]
-    fn the_runs_stop_at_the_first_busy_one() {
-        let mut started = Vec::new();
-        let quiet = runs(|i| {
-            started.push(i);
-            Ok(Some((vec![perf("a", 1.0, 16.0)], OTHERS_BUSY - 0.1)))
-        })
-        .unwrap()
-        .unwrap();
-        assert_eq!(quiet.iter().map(|r| r.busy).collect::<Vec<_>>(), vec![None; RUNS]);
-        assert_eq!(started, (0..RUNS).collect::<Vec<_>>());
-        let mut started = Vec::new();
-        let loads = [1.0, OTHERS_BUSY, 1.0];
-        let busy = runs(|i| {
-            started.push(i);
-            Ok(Some((Vec::new(), loads[i])))
-        })
-        .unwrap()
-        .unwrap();
-        assert_eq!(busy.iter().map(|r| r.busy).collect::<Vec<_>>(), [None, Some(OTHERS_BUSY)]);
-        assert_eq!(started, [0, 1], "none after a busy run");
+    fn a_busy_run_is_tried_again_up_to_tries() {
+        let judge = |loads: &[f64]| {
+            let mut started = Vec::new();
+            let r = runs(|i, first| {
+                started.push(first);
+                Ok((vec![perf("a", 1.0, 16.0)], loads.get(i).copied().unwrap_or(OTHERS_BUSY)))
+            })
+            .unwrap();
+            (r.iter().map(|r| r.busy.is_some()).collect::<Vec<_>>(), started)
+        };
+        let b = OTHERS_BUSY;
+        assert_eq!(judge(&[b - 0.1; RUNS]), (vec![false; RUNS], vec![true, false, false]));
+        assert_eq!(
+            judge(&[1.0, b, 1.0, 1.0]),
+            (vec![false, true, false, false], vec![true, false, false, false]),
+            "a busy run tried again"
+        );
+        assert_eq!(
+            judge(&[b, 1.0, 1.0, 1.0]),
+            (vec![true, false, false, false], vec![true, true, false, false]),
+            "the first busy: the next is the first kept, the long scenarios with it"
+        );
+        let (busy, started) = judge(&[]);
+        assert_eq!((busy, started.len()), (vec![true; TRIES], TRIES), "busy throughout: {TRIES} tried");
         let mut started = 0;
-        let before = runs(|i| {
+        let before = runs(|i, _| {
             started += 1;
-            Ok((i == 0).then(|| (Vec::new(), 1.0)))
+            if i == 1 { Err(not_measured(6.0, "before run 2")) } else { Ok((Vec::new(), 1.0)) }
         });
-        assert_eq!((before.map(|r| r.is_none()), started), (Ok(true), 2), "busy before run 2: nothing kept");
+        assert_eq!(started, 2);
+        let why = before.err().expect("busy before run 2: a failure");
+        assert!(
+            why.starts_with("not measured: the machine stayed busy before run 2 (load 6.0 after "),
+            "{why}"
+        );
     }
 
     /// The bundled size's key is written only with the numbers: a run that keeps nothing writes neither (and

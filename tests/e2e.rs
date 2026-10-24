@@ -1080,36 +1080,46 @@ fn git_tab_section_header_takes_k_and_stages_all() {
     assert_eq!(t.wait_exit().code(), Some(0));
 }
 
-/// N6: while Claude works the waiting animation draws 10 frames a second — in a terminal that never says
-/// where its focus is, too. The terminal saying focus went elsewhere (`CSI O`, focus reporting being on —
-/// CSI ?1004) rests it: nothing goes out after the last frame and the whole-screen redraw that follows
-/// half a second later. Focus back (`CSI I`) and it goes on.
+/// N6: while Claude works the waiting animation wants its frames — in a terminal that never says where its
+/// focus is, too. The terminal saying focus went elsewhere (`CSI O`, focus reporting being on — CSI ?1004)
+/// rests it: no tick wanted, and once settled nothing goes out. Focus back (`CSI I`) and it goes on. Judged from
+/// the state (`tick_in_ms`, `unfocused`) — frames only as a sign it draws, never a rate: a shared runner draws
+/// fewer of them (CI's macOS: 2 a second).
 #[test]
 fn the_waiting_animation_rests_while_the_terminal_is_unfocused() {
     let sb = Sandbox::new("waiting-focus");
     sb.write("a.txt", "some text\n");
     let mut t = sb.waiting_turn(&["a.txt"], COLS, ROWS, 60);
-    let frames_in = |t: &Term, d: Duration| {
-        let (before, start) = (t.frames(), std::time::Instant::now());
-        std::thread::sleep(d);
-        (t.frames() - before, start.elapsed())
+    // (it draws: two frames past `from` — focus back's whole redraw is one —, waited for)
+    let draws = |t: &mut Term, what: &str, from: usize| {
+        let deadline = std::time::Instant::now() + sb.timeout();
+        while t.frames() < from + 2 {
+            assert!(std::time::Instant::now() < deadline, "{what}: {} frames, no more", t.frames() - from);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     };
-    // Frames a second over the time that actually passed — a runner stretches a sleep (CI's macOS: 5 ms → 25).
-    // At most the 10 a second (what's guarded: never more); at least a few — it animates — not near 10: a
-    // slow runner draws fewer of them, and a stopped animation draws none.
-    let per_second = |(n, took): (usize, Duration)| (n as f64 / took.as_secs_f64()).round() as usize;
-    let second = Duration::from_secs(1);
-    let n = per_second(frames_in(&t, second));
-    assert!((3..=12).contains(&n), "{n} frames a second, no focus event yet");
+    let s = t.wait_state("the animation's tick, no focus event yet", |s| s["tick_in_ms"].is_u64());
+    assert!(s["tick_in_ms"].as_u64() <= Some(1000) && s.get("unfocused").is_none(), "{s:#}");
+    let from = t.frames();
+    draws(&mut t, "the animation, no focus event yet", from);
     t.send("\x1b[O");
-    // The tick already set, then the redraw of the whole screen when nothing more came (`RESTING_REDRAW`,
-    // half a second): waited for — a stretch with no frame longer than that — not a fixed time
-    let end = std::time::Instant::now() + Duration::from_secs(10);
-    while frames_in(&t, Duration::from_millis(700)).0 > 0 && std::time::Instant::now() < end {}
-    assert_eq!(frames_in(&t, Duration::from_millis(1500)).0, 0, "unfocused: nothing drawn");
+    t.wait_state("unfocused: no tick", |s| s["unfocused"] == true && s.get("tick_in_ms").is_none());
+    // Settled (the redraw that follows a frame sent in parts gone out, every frame read): then nothing goes out
+    // (a tick asked while focused may land after `CSI O`: it draws nothing — `Editor::tick_landed`)
+    t.settle("unfocused, settled", |s| s.get("tick_in_ms").is_none());
+    let (from, raw_at) = (t.frames(), t.raw().len());
+    std::thread::sleep(Duration::from_millis(1500));
+    let raw = t.raw();
+    assert_eq!(
+        t.frames() - from,
+        0,
+        "unfocused: nothing drawn — it wrote {:?}\n{}",
+        String::from_utf8_lossy(&raw[raw_at..]).chars().take(300).collect::<String>(),
+        t.screen()
+    );
     t.send("\x1b[I");
-    let n = per_second(frames_in(&t, second));
-    assert!((3..=13).contains(&n), "{n} frames a second after focus came back");
+    t.wait_state("focused again: the tick", |s| s.get("unfocused").is_none() && s["tick_in_ms"].is_u64());
+    draws(&mut t, "the animation after focus came back", from);
 }
 
 /// Counting which features get used (`features.count` on, `features.rs`) wakes nothing: after keys counted,
@@ -1236,21 +1246,26 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     sb.write_config(&format!("{BASE_CONFIG}\n[ui]\nshuttle-keys = \"light\"\n"));
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");
-    // (the line's blame lands late — git on a worker; a loaded machine drew it inside the measured window)
-    t.wait_for("the line's blame", |s| s.contains(" ago · base"));
+    // (the line's blame and the gutter's mark land late — git on workers; a loaded machine drew them inside the
+    // measured window)
+    // (the blame is the cursor's line's: line 1 at the first start, line 2 — restored there — at the second)
+    let git_landed =
+        |s: &Screen| (s.contains(" ago · base") || s.contains("not committed yet")) && s.contains("▎two");
+    t.wait_for("the line's blame and its change's mark", git_landed);
     let idle = |t: &mut Term, what: &str| {
-        // Settled: what lands late (the git bar, the blame, the whole-screen redraw that follows frames sent
-        // in parts — `RESTING_REDRAW`) is drawn — a second with no frame; a loaded machine takes longer, so
-        // that's waited for, not a fixed time. One that never goes quiet is caught below all the same.
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            let frames = t.frames();
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if t.frames() == frames || std::time::Instant::now() > end {
-                break;
-            }
-        }
+        // Settled on what lands late, as the state says it — never a quiet second (CI's macOS: a frame that
+        // changed no row came after one): the git watch's first round (the branch), the blame (waited for
+        // above), no motion under way, the whole-screen redraw that follows a frame sent in parts
+        // (`RESTING_REDRAW`) gone out, and every frame written read here (`Term::settle`). Each scene waited
+        // for its own text before.
+        let s = t.settle(what, |s| {
+            s["sessions"][0]["branch"] == "main" && s["motions"].as_array().is_some_and(Vec::is_empty)
+        });
         let (frames, before, was, threads) = (t.frames(), t.usage(), t.screen(), t.threads());
+        let settled = format!(
+            "settled at {frames} frames read: {} written, redraw due {}, tick {}",
+            s["frames_written"], s["redraw_due"], s["tick_in_ms"]
+        );
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (drawn, used) = (t.frames() - frames, t.usage() - before);
         let woke = woke(&threads, &t.threads());
@@ -1267,7 +1282,7 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         // (a wake is a few switches: 14 a second came to ~100 in 2 s; at rest it's under 10)
         assert!(
             drawn == 0 && used.switches < 30,
-            "{what}: {drawn} frames, {used:?} in 2 s — woke:\n{woke}\nchanged:\n{}\n{now}",
+            "{what}: {drawn} frames, {used:?} in 2 s ({settled}) — woke:\n{woke}\nchanged:\n{}\n{now}",
             changed.join("\n")
         );
     };
@@ -1351,6 +1366,8 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     drop(t);
     let mut t = sb.spawn(&["a.txt"]);
     t.wait_text("two");
+    // (as at the first start: the gutter's mark under the picker landed in the window — its `+1`, its `▎`)
+    t.wait_for("the line's blame and its change's mark", git_landed);
     t.send(" f");
     t.wait_for("the picker", |s| s.contains("files in work"));
     sb.write_config(&format!("{BASE_CONFIG}tab-width = \"wide\"\n"));

@@ -424,16 +424,20 @@ fn perf_e2e_busy_session_behind() {
     t.send(" l");
     t.send("go\r");
     t.wait_text("word word");
-    // (Esc alone — with a key right behind it, it reads as alt+that key: on a loaded machine the `:` went out
-    // right behind it, both came in one read, alt+`:`, the switch typed into the chat, a timeout —
-    // :preflight 2026-10-04. A screen grep for the follow card's words passed too early once. Now: the Esc
-    // handled and drawn — `after_input` — and the state saying the code has the keys)
-    t.esc_state("the chat's view mode", |s| s["keys"]["region"] == "view:chat");
+    // (the chat minimized while Claude works, the keys still its — slip 3 — then Esc alone: with a key right
+    // behind it, it reads as alt+that key: on a loaded machine the `:` went out right behind it, both came in one
+    // read, alt+`:`, the switch typed into the chat, a timeout — :preflight 2026-10-04. A screen grep for the
+    // follow card's words passed too early once. Now: the Esc handled and drawn — `after_input` — and the state
+    // saying the code has the keys)
+    t.wait_state("the chat minimized, working", |s| s["keys"]["region"] == "chat-minimized");
     t.esc_state("the chat let go of the keys", |s| s["keys"]["region"] == "code");
     t.send(":session-switch 0\r");
     t.wait_for("the first session in front", |s| !s.contains("word word") && s.contains("fn f1("));
-    // (past the toasts' fade and the switch's frames)
-    std::thread::sleep(Duration::from_secs(4));
+    // (past the toasts' fade and the switch's frames: none up, nothing on a clock, every frame owed read —
+    // `Term::settle`, never a fixed wait)
+    t.settle("the switch settled", |s| {
+        s["toasts"].as_array().is_some_and(Vec::is_empty) && s.get("tick_in_ms").is_none()
+    });
     let (before, frames) = (t.usage(), t.frames());
     let secs = 3.0;
     std::thread::sleep(Duration::from_secs_f64(secs));
@@ -465,12 +469,15 @@ fn perf_e2e_memory_in_this_repo() {
     report("e2e_rss_in_this_repo_mb", t.usage().rss as f64 / (1024.0 * 1024.0), 400.0, 2.0);
 }
 
-/// The live search's count on its input row (`› <typed> … search  <n>`): how many it found, and whether a
-/// search is still under way (`…` after it). None while the row doesn't show `typed` yet.
+/// The live search's count on its input row (`│ › <typed>   <n>  │`, the frame named `search` — panes P3 step
+/// 7): how many it found, and whether a search is still under way (`…` after it). None while the row doesn't
+/// show `typed` yet. Read off the screen, not the state: what's timed is the results drawn, and an ask is a
+/// frame of its own.
 fn search_count(s: &Screen, typed: &str) -> Option<(usize, bool)> {
-    let row = s.rows.iter().find(|r| r.contains(&format!("› {typed} ")))?;
-    // (the preview's title is further along the same screen row — the count is right after `search`)
-    let after = row.split_once(" search ")?.1.trim_start();
+    let input = format!("› {typed} ");
+    let row = s.rows.iter().find(|r| r.contains(&input))?;
+    // (the preview is further along the same screen row, past the list's `│`)
+    let after = row.split_once(&input)?.1.split('│').next()?.trim();
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
     let n = digits.parse().ok()?;
     Some((n, after[digits.len()..].starts_with('…')))
@@ -632,25 +639,39 @@ fn perf_e2e_memory_over_long_editing() {
         // (TARAE_LONG_SKIP=review,chat leaves those parts out — to see what a number comes from)
         let skip = std::env::var("TARAE_LONG_SKIP").unwrap_or_default();
         // A code review of what changed, started and ended
+        // (each step waited for in the state: the review open, then gone — its files unviewed, ending it asks
+        // first, the card yours and focused: `y`)
         if !skip.contains("review") {
             t.send(" vv");
-            std::thread::sleep(Duration::from_millis(800));
+            t.wait_state("the review", |s| s["panels"]["review"].is_object());
             t.send(" vq");
-            std::thread::sleep(Duration::from_millis(300));
+            let ending = |c: &serde_json::Value| c["kind"] == "review-end" && c["focused"] == true;
+            let s = t.wait_state("the review ending", |s| {
+                s["panels"]["review"].is_null() || s["cards"].as_array().is_some_and(|c| c.iter().any(ending))
+            });
+            if s["panels"]["review"].is_object() {
+                t.send("y");
+            }
+            t.wait_state("the review ended", |s| {
+                s["panels"]["review"].is_null() && s["keys"]["region"] == "code"
+            });
         }
         if skip.contains("chat") {
             return;
         }
         // A few turns of the chat
         t.send(" l");
+        t.wait_state("the chat's input", |s| s["keys"]["region"] == "chat");
         for _ in 0..3 {
             asked += 1;
             t.send(&format!("tell me more {asked}\r"));
             let fin = format!("fin{asked}");
             t.wait_for("the answer", |s| s.contains(&fin));
+            t.wait_state("the turn over", |s| s["panels"]["chat"]["busy"] == false);
         }
-        t.send("\x1b");
-        std::thread::sleep(Duration::from_millis(300));
+        // (from the input its view mode, then the code)
+        t.esc_state("the chat's view mode", |s| s["keys"]["region"] == "view:chat");
+        t.esc_state("the code has the keys", |s| s["keys"]["region"] == "code");
     };
     // Two rounds to warm up: the kept undo steps fill, and malloc's high-water mark settles (each parse
     // makes a fresh layer set and frees the last — RSS keeps the pages: +34 MB in the second round, with the
@@ -900,15 +921,11 @@ fn restored_sessions(n: usize) -> Restored {
         t.wait_state(what, |s| front(s) == Some(true))
     };
     let sessions = |s: &serde_json::Value| s["sessions"].as_array().map_or(0, Vec::len);
+    // (what it opened read and drawn: nothing on a clock, no toast up, every frame owed read — `Term::settle`)
     let settled = |t: &mut Term| {
-        let mut last = t.frames();
-        loop {
-            std::thread::sleep(Duration::from_millis(1500));
-            if t.frames() == last {
-                break;
-            }
-            last = t.frames();
-        }
+        t.settle("settled", |s| {
+            s.get("tick_in_ms").is_none() && s["toasts"].as_array().is_some_and(Vec::is_empty)
+        });
     };
     let mut t = Term::spawn(&sb, &files, 160, 50);
     // (the project's trust card — its `.tarae.toml` names the binary `:restart` runs: set aside, as
@@ -920,9 +937,11 @@ fn restored_sessions(n: usize) -> Restored {
         front_card(&mut t, "the new session's card", "");
         t.send("y");
         t.wait_state("the session made, in front", |s| sessions(s) == i + 1 && s["front"] == format!("s{i}"));
-        // (a new session opens with its chat focused: the keys back to the code first)
-        t.send("\x1b");
-        t.wait_state("the keys back in the code", |s| s["keys"]["to"] != "chat");
+        // (a new session opens with its chat's input focused: the keys back to the code first — its view mode,
+        // then the code)
+        t.wait_state("its chat's input", |s| s["keys"]["region"] == "chat");
+        t.esc_state("its chat's view mode", |s| s["keys"]["region"] == "view:chat");
+        t.esc_state("the keys back in the code", |s| s["keys"]["region"] == "code");
         for f in files {
             t.command(&format!("o {f}"));
         }

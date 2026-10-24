@@ -749,6 +749,12 @@ pub struct Editor {
     pub frame_input: u64,
     /// `:redraw` — the next frame draws the whole screen, not only what changed (the main loop takes it).
     pub redraw: bool,
+    /// The last frame went out in parts: the whole screen goes again once input rests (`term::RESTING_REDRAW`) —
+    /// the main loop sets it after each write; the state says it (`redraw_due`) for a driver waiting for quiet.
+    pub redraw_due: bool,
+    /// Frames that went to the terminal (a frame like the last writes nothing) — what a driver reading the
+    /// terminal counts (each ends its synchronized update); the state's `frames_written`.
+    pub frames_written: u64,
     /// A git diff is running on a worker thread.
     pub git_diffing: bool,
     /// Whether to read HEAD contents when opening a file (off in tests — keeps event order stable;
@@ -1075,6 +1081,8 @@ impl Editor {
             frame_at: None,
             frame_input: 0,
             redraw: false,
+            redraw_due: false,
+            frames_written: 0,
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
@@ -3427,15 +3435,23 @@ impl Editor {
         self.ticking = Some(at);
         self.events.jobs().spawn(move || {
             crate::event::sleep(delay);
-            move |ed: &mut Editor| {
-                if ed.ticking == Some(at) {
-                    ed.ticking = None;
-                } else {
-                    // Overtaken by an earlier one (a new toast, an error let go): nothing to draw
-                    ed.unchanged = true;
-                }
-            }
+            move |ed: &mut Editor| ed.tick_landed(at)
         });
+    }
+
+    /// The wake-up `tick_ask` set for `at`, come: the frame it was for — nothing to draw when an earlier one
+    /// overtook it (a new toast, an error let go), or when it was asked while focused and lands after the
+    /// terminal said it's unfocused with nothing else on a clock (only the resting animation's step: CI's macOS
+    /// drew it after `CSI O`).
+    pub(crate) fn tick_landed(&mut self, at: std::time::Instant) {
+        if self.ticking != Some(at) {
+            self.unchanged = true;
+            return;
+        }
+        self.ticking = None;
+        if self.unfocused && self.tick_wanted().is_none() {
+            self.unchanged = true;
+        }
     }
 
     // ── Pickers ──────────────────────────────────────────────────────────
@@ -5484,6 +5500,28 @@ mod tests {
         ed.handle_event(Event::Focus(false));
         ed.set_status("saved");
         assert_eq!(ed.tick_wanted(), Some(TICK), "a toast's fade-in still draws");
+    }
+
+    /// A wake-up asked while focused that lands after focus went (`tick_landed`): the resting animation's step
+    /// draws nothing; a toast still on its clock is drawn; one overtaken draws nothing whatever the focus.
+    #[test]
+    fn a_tick_asked_while_focused_draws_nothing_once_unfocused() {
+        use std::time::Instant;
+        let mut ed = waiting_chat("x\n");
+        let landed = |ed: &mut Editor, focused: bool| {
+            let at = Instant::now();
+            (ed.ticking, ed.unfocused, ed.unchanged) = (Some(at), !focused, false);
+            ed.tick_landed(at);
+            assert_eq!(ed.ticking, None);
+            std::mem::take(&mut ed.unchanged)
+        };
+        assert!(!landed(&mut ed, true), "focused: the animation's step");
+        assert!(landed(&mut ed, false), "unfocused: nothing on a clock");
+        ed.set_status("saved");
+        assert!(!landed(&mut ed, false), "unfocused, a toast fading in: drawn");
+        (ed.ticking, ed.unchanged) = (Some(Instant::now()), false);
+        ed.tick_landed(Instant::now() - std::time::Duration::from_millis(5));
+        assert!(ed.unchanged, "overtaken");
     }
 
     /// `:preflight` runs every step one after another in the task panel — the ones after a failure too —

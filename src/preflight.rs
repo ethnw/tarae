@@ -1382,7 +1382,8 @@ mod tests {
     /// The checks are one set in three places: `.tarae.toml`'s `[preflight]` (what `:preflight` runs here),
     /// CONTRIBUTING's list, and CI's jobs — CI read as it runs them (`--locked` aside, `RUSTFLAGS: -D
     /// warnings` making clippy's warnings errors, its feature matrix spelled out). Where CI differs on
-    /// purpose: `cargo perf` (it runs only the budgets — noisy runners) and the network job (`--ignored`).
+    /// purpose: `cargo perf` (it runs only the time budgets, and only to report — time is judged on a fixed
+    /// machine) and the network job (`--ignored`).
     #[test]
     fn the_checks_are_the_same_here_in_contributing_and_in_ci() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

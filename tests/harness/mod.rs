@@ -834,6 +834,28 @@ impl Term {
         }
     }
 
+    /// Settled: `done` holds, and every frame owed as of that answer has been read here — those tarae wrote
+    /// (`frames_written`: the answer comes on the socket, the frame on the terminal) and the whole-screen
+    /// redraw still to go after a frame sent in parts (`redraw_due`, half a second after it). Nothing asked
+    /// after it (an ask is a frame: a clock or a wave on screen would write again), so from here a frame is
+    /// something new — what an idle check measures from, never a quiet second.
+    pub fn settle(&mut self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let s = self.wait_state(what, done);
+        let owed =
+            s["frames_written"].as_u64().unwrap_or(0) as usize + s.get("redraw_due").is_some() as usize;
+        let deadline = Instant::now() + self.timeout;
+        while self.frames() < owed {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: {owed} frames owed, {} read here after {:?}",
+                self.frames(),
+                self.timeout
+            );
+            thread::sleep(POLL);
+        }
+        s
+    }
+
     /// Esc on its own — handled and drawn before anything else is sent (an Esc with a key right behind it
     /// reads as Alt + that key) — then `done` waited for in the state.
     pub fn esc_state(&mut self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {

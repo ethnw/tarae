@@ -195,6 +195,17 @@ side git · 4 rows · in hand git:src/term.rs
 - **`motions`** (motion, `motion.rs`) — motions on a clock under way: `kind` (`flash`), `act` (`undo` · `redo` ·
   `repeat` · `yank` · `paste`), `until_ms` (left until it's gone) — a driver waits for one to end, never sleeps.
   Not at Claude's level.
+- **`redraw_due`**, **`frames_written`** (ci, 2026-10-24) — how the terminal is written to, as of the frame the
+  answer came after, once it went out: `redraw_due` (only while true) the last frame went in parts and the whole
+  screen goes again once input rests (`term::RESTING_REDRAW`, half a second after that write — an event that writes
+  nothing doesn't put it off); `frames_written` (from the first) the frames that went to the terminal, each ending
+  its synchronized update — what a driver reading the terminal has read once it caught up with the answer (the
+  socket and the terminal are two roads). An idle check settles on both (e2e `Term::settle`), never a quiet second.
+  Not at Claude's level.
+- **`tick_in_ms`**, **`unfocused`** (ci, 2026-10-24) — when a frame is next wanted with nothing else happening
+  (`Editor::tick_wanted`: the waiting animation's step, a toast's fade, a motion's …; absent: nothing wakes it), and
+  (only while true) that the terminal said its focus went elsewhere (`CSI O`, until `CSI I`: the animation rests). A
+  check of what animates judges these, never frames per second. Not at Claude's level.
 - **`limits`** (apibill, `limits.rs`) — the account's plan limits as any claude said them: each window known now
   by Claude Code's name (`five_hour`, `seven_day`, `seven_day_<family>`, `seven_day:<model_scoped name>`) →
   `percent` (whole), `resets_at` and `seen_at` (unix ms), `status` (`allowed` · `allowed_warning` · `rejected`,

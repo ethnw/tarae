@@ -44,6 +44,9 @@ pub struct Terminal {
     /// while nothing is held and none began or ended meanwhile — so the program's end comes after what the
     /// reader holds (`spawn`).
     holds: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Answers the reader sent the program (`answer`), as it read their questions — held or not (the tests read it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    answered: std::sync::Arc<std::sync::atomic::AtomicU64>,
     master: OwnedFd,
     writer: Sender<Vec<u8>>,
     generation: u64,
@@ -115,6 +118,12 @@ impl Terminal {
     /// Output came while held (`● view · output waits`).
     pub fn came(&self) -> bool {
         self.held.as_ref().is_some_and(|h| !h.is_empty())
+    }
+
+    /// Answers the reader sent the program so far (`answer`) — the tests' record of one sent while held.
+    #[cfg(test)]
+    pub fn answered(&self) -> u64 {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Held still now (its view mode) — the simulation checks it's held exactly while viewed.
@@ -319,6 +328,8 @@ fn spawn(
     let answering = writer.clone();
     let holds = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let held_meanwhile = holds.clone();
+    let answered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let answers_sent = answered.clone();
     // The shell waited for as it ends — a program it left behind holding the terminal (one that ignored
     // the hangup) mustn't keep it a zombie (#131); then what's left to read, `DRAIN_AFTER_EXIT` at most — counted
     // only while nothing is held: while the view holds, the reader waits for a go-ahead and reaches no end, so
@@ -358,7 +369,8 @@ fn spawn(
                     }
                     // Its questions answered now, as it's read — before it waits for the last batch's go-ahead,
                     // kept while the view holds: a question never waits with the output (fish waits 10 s)
-                    answer(&answering, &bytes);
+                    let sent = answer(&answering, &bytes);
+                    answers_sent.fetch_add(sent, std::sync::atomic::Ordering::SeqCst);
                     // (an error: the batch was dropped unshown — the editor is going)
                     if let Some(rx) = shown.take() {
                         let _ = rx.recv();
@@ -394,6 +406,7 @@ fn spawn(
         held: None,
         waiting: Vec::new(),
         holds,
+        answered,
         master,
         writer,
         generation,
@@ -412,11 +425,13 @@ fn answers(bytes: &[u8]) -> Vec<&'static [u8]> {
     std::iter::repeat_n(DA1, asks(b"\x1b[c") + asks(b"\x1b[0c")).collect()
 }
 
-/// The reader's answers to what a batch it read asks of the terminal, sent to the program at once.
-fn answer(writer: &Sender<Vec<u8>>, bytes: &[u8]) {
-    for reply in answers(bytes) {
+/// The reader's answers to what a batch it read asks of the terminal, sent to the program at once — how many.
+fn answer(writer: &Sender<Vec<u8>>, bytes: &[u8]) -> u64 {
+    let replies = answers(bytes);
+    for reply in &replies {
         let _ = writer.send(reply.to_vec());
     }
+    replies.len() as u64
 }
 
 /// For the tests and the simulation, whose stand-in has no reader thread: what the reader does as it reads a
@@ -787,6 +802,7 @@ pub(crate) fn stand_in(
         held: None,
         waiting: Vec::new(),
         holds: Default::default(),
+        answered: Default::default(),
         master,
         writer,
         generation: ed.terminal_generation,
@@ -1403,8 +1419,10 @@ mod tests {
     }
 
     /// fish's case, for real: while viewed, a question in the batch the reader reads as it waits for the last
-    /// one's go-ahead is answered at once — the program (bash, its terminal raw) gets the answer within its 3 s and
-    /// says ANSWERED, seen once caught up. Answered only as the batch is handed on, it would say TIMEOUT.
+    /// one's go-ahead is answered at once — the reader's record says it sent the answer while the view still
+    /// holds the first batch, and the program (bash, its terminal raw, waiting with no time limit) says ANSWERED
+    /// once caught up. Each step waits on its condition, never on the program's clock (CI's ubuntu: a `read -t 3`
+    /// raced the runner): the question comes only after the first batch is held, by the test's go-ahead.
     #[test]
     fn a_question_read_while_the_view_holds_is_answered_at_once() {
         if no_pty_here("a_question_read_while_the_view_holds_is_answered_at_once") {
@@ -1413,26 +1431,29 @@ mod tests {
         let scratch = crate::scratch::Scratch::new("terminal-question-held");
         let fifo = fifo_in(&scratch);
         let script = format!(
-            "exec bash -c 'read -r _ < \"{}\"; stty -icanon -echo; echo first-batch; sleep 0.5; printf \"\\033[c\"; \
-             if IFS= read -r -d c -t 3 _; then echo ANSWERED; else echo TIMEOUT; fi; sleep 30'",
+            "exec bash -c 'read -r _ < \"{0}\"; stty -icanon -echo; echo first-batch; read -r _ < \"{0}\"; \
+             printf \"\\033[c\"; IFS= read -r -d c _; echo ANSWERED; sleep 30'",
             fifo.display()
         );
         let mut ed = run_until(&script, |ed| ed.session.terminal.is_some());
         ed.handle_key(Key { code: Code::Char('\\'), ctrl: true, alt: false, shift: false });
         assert!(crate::view::terminal_viewed(&ed));
         let_go(&fifo);
-        // (viewed past bash's 3 s: the first batch held, the question in the reader's next)
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(3600);
-        while std::time::Instant::now() < end {
-            if let Some(ev) = ed.events.recv_timeout(std::time::Duration::from_millis(20)) {
-                ed.handle_event(ev);
-            }
+        fn term(ed: &Editor) -> &Terminal {
+            ed.session.terminal.as_ref().unwrap()
         }
-        assert!(ed.session.terminal.as_ref().unwrap().came(), "output held while viewed");
+        wait(&mut ed, |ed| term(ed).came());
+        assert!(term(&ed).came(), "the first batch held while viewed");
+        assert_eq!(term(&ed).answered(), 0);
+        // The question, in the reader's next batch — read while the first one's go-ahead is kept back
+        let_go(&fifo);
+        wait(&mut ed, |ed| term(ed).answered() > 0);
+        assert_eq!(term(&ed).answered(), 1, "answered as it was read");
+        assert!(term(&ed).holding() && !shows(&ed, "ANSWERED"), "while the view still holds");
         ed.handle_key(Key::plain(Code::Esc));
-        wait(&mut ed, |ed| shows(ed, "ANSWERED") || shows(ed, "TIMEOUT"));
-        let contents = ed.session.terminal.as_ref().map(|t| t.parser.screen().contents());
-        assert!(shows(&ed, "ANSWERED"), "answered while held: {contents:?}");
+        wait(&mut ed, |ed| shows(ed, "ANSWERED"));
+        let contents = term(&ed).parser.screen().contents();
+        assert!(shows(&ed, "ANSWERED"), "the program had it: {contents:?}");
     }
 
     /// A program ending while viewed with output still in the reader (it read the next batch and waits for the

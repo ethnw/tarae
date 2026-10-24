@@ -745,7 +745,9 @@ and watch." · "An editor where AI does the work and you keep the say. Watch tar
   sessions at work). What's left is CPU contention and showing the wait. It's scheduled then if that shows.
 - **Core audit**: a session's own build folders. (Sandbox rules as pack data are done.)
 - **A size pass.** The release binary's budget was raised to 12 MB (2026-10-09), then to 13 MB (18 bundled,
-  2026-10-15) until stabilization (§9) brings it back; `cargo perf` fails a jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
+  2026-10-15), then to 17 MB (22 bundled, 2026-10-24: 16.55 and 21.62 then — the web reader's TLS and parsers, the
+  image decoder, panes P3 and collab C1–C3, hidden while `cargo perf` passed "not measured") until stabilization
+  (§9) brings it back; `cargo perf` fails a jump of more than 0.3 MB meanwhile. Four helpers LTO had copied into many callers are kept out of line
   (−66 KB measured). From the size audit (2026-10-09):
   - Per-package `opt-level = "s"` for crates off the hot path, the frame path kept at 3 (tarae, ropey,
     tree-sitter, the grep crates, vt100), decided by a full `cargo perf` A/B. The whole binary at `s` measured

@@ -11851,16 +11851,106 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// What the deny-default profile refuses that the base doesn't hold, as a run's watch hears it: each (op, a part
+    /// of its target) — `sysctl(8)`'s name lookup, the process list (`pgrep`), another program's System V segment and
+    /// its priority, the clipboard, the keychain; a pty without the grant besides (`Denial::terminal`).
+    const DEFAULT_REFUSES: [(&str, &str); 6] = [
+        ("sysctl-read", "sysctl."),
+        ("mach-lookup", "com.apple.sysmond"),
+        ("ipc-sysv-shm", ""),
+        ("system-sched", ""),
+        ("mach-lookup", "com.apple.pasteboard."),
+        ("mach-lookup", "com.apple.SecurityServer"),
+    ];
+
+    /// Whether `seen` holds a refusal of `op` on a target holding `target`.
+    fn heard(seen: &[Denial], op: &str, target: &str) -> bool {
+        seen.iter().any(|d| d.op == op && d.target.contains(target))
+    }
+
+    /// The live check's verdict on what its watch heard: the refusals of `DEFAULT_REFUSES` it didn't (none: passed).
+    fn unheard(seen: &[Denial]) -> Vec<(&'static str, &'static str)> {
+        DEFAULT_REFUSES.into_iter().filter(|(op, target)| !heard(seen, op, target)).collect()
+    }
+
+    /// Whether `d` is one the deny-default profile's run is refused by design (`DEFAULT_REFUSES`, a terminal, a
+    /// service `BY_DESIGN` names) or by today's rules rather than the base's — anything else refused is a `BASE`
+    /// row missing.
+    fn refused_by_default(d: &Denial) -> bool {
+        (d.op == "sysctl-read" && d.target.starts_with("sysctl."))
+            || d.target.starts_with("com.apple.pasteboard.")
+            || KEYCHAIN.contains(&d.target.as_str())
+            || ["ipc-sysv-shm", "system-sched"].contains(&d.op.as_str())
+            || d.target == "com.apple.sysmond"
+            || d.terminal()
+            || d.by_design()
+            // (today's rules, not the base's: the resolver's socket and getaddrinfo's sorting connect — the
+            // network's; the JVM's perf data in temp, which a project there doesn't get)
+            || d.target == "/private/var/run/mDNSResponder"
+            || (d.op == "network-outbound" && d.target.is_empty())
+            || (d.op.starts_with("file-write") && d.target.contains("/hsperfdata_"))
+    }
+
+    /// The live check's verdict on recorded lines, deterministic and on every system (`log stream` brings what it
+    /// will, when it will: on CI's macOS the `ipc-sysv-shm` one never came, nine others did): each refusal of
+    /// `DEFAULT_REFUSES` and a pty's as `log stream --style ndjson` wrote it on macOS 27 (macdeny's runs,
+    /// 2026-10-17 — `target/sb/sessions/macdeny/macdeny/discover/*.ndjson`), read by its run's tag and judged; the
+    /// same line of another run never this one's; one refused besides them told apart; and the verdict without the
+    /// System V one failing, as the live check's does.
+    #[test]
+    fn the_defaults_refusals_are_read_and_judged_from_their_log_lines() {
+        let tag = "tarae-69790-1792225179979-9.";
+        let recorded = [
+            "Sandbox: debugserver(48894) deny(1) sysctl-read sysctl.proc_translated",
+            "Sandbox: pgrep(69863) deny(1) mach-lookup com.apple.sysmond",
+            "Sandbox: perl(69879) deny(1) ipc-sysv-shm",
+            "Sandbox: renice(69875) deny(1) system-sched others [sleep(69792)]",
+            "Sandbox: script(69892) deny(1) file-write-data /dev/ptmx",
+            "Sandbox: pbpaste(63807) deny(1) mach-lookup com.apple.pasteboard.1",
+            "Sandbox: security(69923) deny(1) mach-lookup com.apple.SecurityServer",
+            "Sandbox: Python(74953) deny(1) network-outbound /private/var/run/mDNSResponder",
+        ];
+        let mut blocked = Blocked::default();
+        for m in recorded {
+            // (as log stream escapes a path's slashes)
+            let line = ndjson(&format!("{m}\n{tag}")).replace('/', "\\/");
+            blocked.add(parse_denial(&line, tag).unwrap_or_else(|| panic!("not read: {line}")));
+        }
+        let other = ndjson(&format!("{}\ntarae-69790-1792225179979-8.", recorded[2]));
+        assert_eq!(parse_denial(&other, tag), None, "another run's");
+        let seen = blocked.seen.iter().chain(&blocked.quiet).cloned().collect::<Vec<_>>();
+        assert_eq!(unheard(&seen), [], "{seen:?}");
+        assert!(seen.iter().any(Denial::terminal), "{seen:?}");
+        let besides: Vec<&Denial> = seen.iter().filter(|d| !refused_by_default(d)).collect();
+        assert!(besides.is_empty(), "refused besides: {besides:?}");
+        let base_row_missing = parse_denial(
+            &ndjson(&format!(
+                "Sandbox: id(70001) deny(1) mach-lookup com.apple.system.opendirectoryd.libinfo\n{tag}"
+            )),
+            tag,
+        )
+        .unwrap();
+        assert!(!refused_by_default(&base_row_missing), "a refusal the base should have let through");
+        // (what CI's macOS heard: all but the System V one — the verdict names it)
+        let without: Vec<Denial> = seen.iter().filter(|d| d.op != "ipc-sysv-shm").cloned().collect();
+        assert_eq!(without.len(), seen.len() - 1);
+        assert_eq!(unheard(&without), [("ipc-sysv-shm", "")], "the System V one missing: the verdict fails");
+    }
+
     /// For real, on macOS (macdeny): a run under the deny-default profile does what the tools measured did —
     /// starts and signals its child, finds the user's name, reads the system's settings through libc, asks
     /// `/dev/null` (an ioctl), reads the global preferences as outside, takes Python's semaphores and name
-    /// lookups, starts Apple's `java` where there's a JDK — and is refused what the base doesn't hold: `sysctl(8)`'s
-    /// name lookup, the process list (`pgrep`), a pty without the grant, another program's System V segment and
-    /// its priority (both the test's own: a key of its pid's, a `sleep`, removed after). Every refusal is heard
-    /// through the watch with the run's tag, and nothing else is refused — so a `BASE` row taken out fails it
-    /// (`target/sb/macdeny/break.sh`).
+    /// lookups, starts Apple's `java` where there's a JDK — and is refused what the base doesn't hold
+    /// (`DEFAULT_REFUSES`; another program's System V segment and priority the test's own: a key of its pid's, a
+    /// `sleep`, removed after). Every refusal is heard through the watch with the run's tag, and nothing else is
+    /// refused — so a `BASE` row taken out fails it (`target/sb/macdeny/break.sh`). By hand, on a Mac outside
+    /// tarae's sandbox: `log stream` brings the kernel's reports when it will (CI's macOS never brought the System V
+    /// one) — the parsing and the verdict are CI's, on recorded lines
+    /// (`the_defaults_refusals_are_read_and_judged_from_their_log_lines`). `cargo test --bin tarae -- --ignored
+    /// --exact sandbox::tests::what_the_default_refuses_and_the_base_lets_through` (CONTRIBUTING, "Checks by hand").
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "by hand: the OS's own denial log, delivered when it will (CONTRIBUTING, checks by hand)"]
     fn what_the_default_refuses_and_the_base_lets_through() {
         let test = "sandbox::tests::what_the_default_refuses_and_the_base_lets_through";
         if skipped_inside(test) {
@@ -11940,28 +12030,9 @@ mod tests {
         }
         std::thread::sleep(WATCH_LAST + std::time::Duration::from_millis(500));
         let seen = p.watch.as_ref().unwrap().blocked().seen;
-        let has = |op: &str, target: &str| seen.iter().any(|d| d.op == op && d.target.contains(target));
-        assert!(has("sysctl-read", "sysctl."), "the default's refusal, heard by its tag: {seen:?}");
-        assert!(has("mach-lookup", "com.apple.sysmond") && has("ipc-sysv-shm", ""), "{seen:?}");
-        assert!(has("system-sched", "") && seen.iter().any(Denial::terminal), "{seen:?}");
-        assert!(
-            has("mach-lookup", "com.apple.pasteboard.") && has("mach-lookup", "com.apple.SecurityServer")
-        );
-        let expected = |d: &Denial| {
-            (d.op == "sysctl-read" && d.target.starts_with("sysctl."))
-                || d.target.starts_with("com.apple.pasteboard.")
-                || KEYCHAIN.contains(&d.target.as_str())
-                || ["ipc-sysv-shm", "system-sched"].contains(&d.op.as_str())
-                || d.target == "com.apple.sysmond"
-                || d.terminal()
-                || d.by_design()
-                // (today's rules, not the base's: the resolver's socket and getaddrinfo's sorting connect — the
-                // network's; the JVM's perf data in temp, which a project there doesn't get)
-                || d.target == "/private/var/run/mDNSResponder"
-                || (d.op == "network-outbound" && d.target.is_empty())
-                || (d.op.starts_with("file-write") && d.target.contains("/hsperfdata_"))
-        };
-        let other: Vec<&Denial> = seen.iter().filter(|d| !expected(d)).collect();
+        assert_eq!(unheard(&seen), [], "the default's refusals, each heard by its tag: {seen:?}");
+        assert!(seen.iter().any(Denial::terminal), "{seen:?}");
+        let other: Vec<&Denial> = seen.iter().filter(|d| !refused_by_default(d)).collect();
         assert!(other.is_empty(), "refused besides: {other:?}");
     }
 

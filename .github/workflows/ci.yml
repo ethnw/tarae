@@ -13,8 +13,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Shared runners are slower than a dev machine — the 16 ms key → frame budget gets this multiplier.
-  TARAE_PERF_SLACK: "3"
 
 # Every job builds with the toolchain rust-toolchain.toml pins (its components and targets too):
 # `rustup toolchain install` with no name installs that one — the version is written there only.
@@ -57,10 +55,32 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.com
       - run: cargo test --locked --workspace --features "${{ matrix.features }}"
-      # The perf budgets skip themselves at the test profile's opt-level 0 — here in the `perf` profile
-      # (release), pass or fail with TARAE_PERF_SLACK above; `cargo perf` keeps numbers, which shared runners
-      # are too noisy for. The dev grammars (rust) for the syntax budgets: only debug builds have them unasked
-      - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget
+      # The time budgets only report here (time is judged on a fixed machine — `cargo perf` in `:preflight-full`;
+      # a shared runner's numbers are its neighbours' too): they skip themselves at the test profile's opt-level 0,
+      # so here in the `perf` profile (release). The build fails the job, the budgets never: their output is the
+      # `perf-budgets-…` artifact, what went over the step's summary. The dev grammars (rust) for the syntax
+      # budgets: only debug builds have them unasked
+      - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae --no-run
+      - name: perf budgets (report only)
+        shell: bash
+        env:
+          # the 16 ms key → frame budget times this, so what's reported over is well over
+          TARAE_PERF_SLACK: "3"
+        run: |
+          cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae -- perf_budget > perf-budgets.txt 2>&1 && code=0 || code=$?
+          {
+            echo "### perf budgets, report only (exit $code)"
+            echo '```'
+            grep -E '^test .*FAILED$|panicked at|^test result' perf-budgets.txt || echo 'no result line: see the artifact'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          tail -n 40 perf-budgets.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-budgets-${{ matrix.os }}${{ matrix.features && format('-{0}', matrix.features) || '' }}
+          path: perf-budgets.txt
+          if-no-files-found: ignore
 
   # The tests that need the network, by name (`#[ignore = "network: …"]`): a grammar downloaded and built from
   # GitHub, a new plugin built with the SDK's crates, a page fetched through tarae's proxy (which in a test dials
