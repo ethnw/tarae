@@ -834,26 +834,20 @@ impl Term {
         }
     }
 
-    /// Settled: `done` holds, and every frame owed as of that answer has been read here — those tarae wrote
-    /// (`frames_written`: the answer comes on the socket, the frame on the terminal) and the whole-screen
-    /// redraw still to go after a frame sent in parts (`redraw_due`, half a second after it). Nothing asked
-    /// after it (an ask is a frame: a clock or a wave on screen would write again), so from here a frame is
-    /// something new — what an idle check measures from, never a quiet second.
+    /// Settled: `done` holds, and an answer owes nothing that wasn't read here (`settled`) — every frame tarae
+    /// wrote (`frames_written`: the answer comes on the socket, the frame on the terminal) and no whole-screen
+    /// redraw still to go after a frame sent in parts (`redraw_due`, half a second after it). An answer that
+    /// owes one is waited out and asked again: the frame read may not be the one it owed (CI's macOS: a
+    /// shuttle's end drew just after the answer, taken for the redraw — which then came in the idle check's
+    /// window). Nothing asked after it (an ask is a frame: a clock or a wave on screen would write again), so
+    /// from here a frame is something new — what an idle check measures from, never a quiet second.
     pub fn settle(&mut self, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
-        let s = self.wait_state(what, done);
-        let owed =
-            s["frames_written"].as_u64().unwrap_or(0) as usize + s.get("redraw_due").is_some() as usize;
         let deadline = Instant::now() + self.timeout;
-        while self.frames() < owed {
-            assert!(
-                Instant::now() < deadline,
-                "{what}: {owed} frames owed, {} read here after {:?}",
-                self.frames(),
-                self.timeout
-            );
-            thread::sleep(POLL);
-        }
-        s
+        let owes = |s: &serde_json::Value| {
+            (s["frames_written"].as_u64().unwrap_or(0), s.get("redraw_due").is_some())
+        };
+        settle_on(self, |t| t.wait_state(what, &done), owes, |t| t.frames(), deadline)
+            .unwrap_or_else(|e| panic!("{what}: {e} after {:?}", self.timeout))
     }
 
     /// Esc on its own — handled and drawn before anything else is sent (an Esc with a key right behind it
@@ -940,6 +934,42 @@ impl Drop for Watching {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Whether an answer of the state (`written` frames, the resting redraw `due`) leaves nothing owed once `read`
+/// frames were read here (`Term::settle`): no redraw to come, and no frame read past what it knew of — one is
+/// something that drew after the answer, never the redraw it owed, and its own redraw may be to come.
+pub fn settled(written: u64, due: bool, read: usize) -> bool {
+    !due && read as u64 == written
+}
+
+/// `Term::settle`'s loop, apart from the terminal: `ask` an answer, wait until `read` has caught up with what it
+/// owes (`owes`: its frames written, its redraw due), and ask again until one leaves nothing owed (`settled`) —
+/// that answer. Err: the deadline passed, with what was owed and read.
+pub fn settle_on<T, A>(
+    t: &mut T,
+    mut ask: impl FnMut(&mut T) -> A,
+    owes: impl Fn(&A) -> (u64, bool),
+    read: impl Fn(&T) -> usize,
+    deadline: Instant,
+) -> Result<A, String> {
+    loop {
+        let a = ask(t);
+        let (written, due) = owes(&a);
+        let owed = written as usize + due as usize;
+        while read(t) < owed {
+            if Instant::now() >= deadline {
+                return Err(format!("{owed} frames owed, {} read here", read(t)));
+            }
+            thread::sleep(POLL);
+        }
+        if settled(written, due, read(t)) {
+            return Ok(a);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("never settled: {written} written, redraw due {due}, {} read", read(t)));
+        }
     }
 }
 
@@ -1141,4 +1171,43 @@ pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
 
 pub fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).rposition(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tarae as `settle_on` sees it: each answer (frames written, redraw due) and the frames read here once it
+    /// came — the answers asked so far counted.
+    struct Scripted {
+        answers: Vec<((u64, bool), usize)>,
+        asked: usize,
+        read: usize,
+    }
+
+    fn settle(script: Vec<((u64, bool), usize)>) -> (Result<(u64, bool), String>, usize) {
+        let mut t = Scripted { answers: script, asked: 0, read: 0 };
+        let ask = |t: &mut Scripted| {
+            let (answer, read) = t.answers[t.asked.min(t.answers.len() - 1)];
+            (t.asked, t.read) = (t.asked + 1, read);
+            answer
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let got = settle_on(&mut t, ask, |a| *a, |t| t.read, deadline);
+        (got, t.asked)
+    }
+
+    /// A settle ends only on an answer that owes nothing unread: CI's macOS (ci round 4) had an answer say 19
+    /// frames and the redraw due, then a frame of the shuttle's end came first — 20 read, taken for the redraw,
+    /// which came in the idle check's window (1 frame, no row changed). It asks again — that frame's own
+    /// redraw is owed then — until an answer owes nothing past what's read.
+    #[test]
+    fn a_settle_takes_no_other_frame_for_the_redraw_it_owed() {
+        let (got, asked) = settle(vec![((19, true), 20), ((20, true), 21), ((21, false), 21)]);
+        assert_eq!((got, asked), (Ok((21, false)), 3), "asked until nothing was owed");
+        // (nothing owed at the first answer: no second ask)
+        assert_eq!(settle(vec![((5, false), 5)]), (Ok((5, false)), 1));
+        // (a frame read past an answer that owed none: its redraw may be to come — asked again)
+        assert_eq!(settle(vec![((5, false), 6), ((6, false), 6)]), (Ok((6, false)), 2));
+    }
 }

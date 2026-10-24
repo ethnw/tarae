@@ -187,6 +187,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
     let mut screen = crate::screen::Screen::new();
     // (when the whole screen goes again — below)
     let mut resting = Resting::default();
+    editor.drawn_by.push(crate::editor::DrawnFor::Named("the first frame"));
     while !editor.should_quit {
         if draw {
             let (w, h) = terminal::size()?;
@@ -209,6 +210,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
                 resting.wrote(screen.patched(), crate::clock::now());
             }
             editor.frames_written += ended as u64;
+            editor.frame_went(ended);
             editor.redraw_due = resting.due();
             // (snapshots asked: as of this frame, written — what went to the terminal and what's still to go)
             crate::uistate::after_frame(editor);
@@ -222,6 +224,7 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
                     screen.invalidate();
+                    editor.drawn_by.push(crate::editor::DrawnFor::Named("the resting redraw"));
                     draw = true;
                     continue;
                 }
@@ -277,17 +280,33 @@ pub(crate) fn handle_batch(editor: &mut Editor, ev: Event, until: std::time::Ins
 /// — and when none is, the UI state's watchers hear what changed all the same (`uistate::undrawn`).
 pub(crate) fn batch_done(editor: &mut Editor, unchanged: bool) -> bool {
     let draw = editor.frame_due(unchanged);
+    if draw
+        && unchanged
+        && let Some(what) = editor.frame_owed()
+    {
+        editor.drawn_by.push(crate::editor::DrawnFor::Owed(what));
+    }
     if !draw {
         crate::uistate::undrawn(editor);
     }
     draw
 }
 
-/// Handles `ev` — whether it said it changed nothing on screen.
+/// Handles `ev` — whether it said it changed nothing on screen. One that changed something is among the next
+/// frame's reasons (`Editor.drawn_by`): its kind, a job's result as its sender says it (`Editor.event_from`).
 pub(crate) fn handle_noting(editor: &mut Editor, ev: crate::event::Event) -> bool {
+    use crate::editor::DrawnFor;
     editor.unchanged = false;
+    let kind = DrawnFor::of(&ev);
+    editor.event_from = None;
     editor.handle_event(ev);
-    std::mem::take(&mut editor.unchanged)
+    let unchanged = std::mem::take(&mut editor.unchanged);
+    let from = editor.event_from.take().or(kind).unwrap_or(DrawnFor::Named("a job"));
+    // (a burst — a server's messages, a run's lines — said once, a few kinds at most)
+    if !unchanged && !editor.drawn_by.contains(&from) && editor.drawn_by.len() < 8 {
+        editor.drawn_by.push(from);
+    }
+    unchanged
 }
 
 /// The write end the signal handler wakes `spawn_signals`' thread through, and the read end it takes.

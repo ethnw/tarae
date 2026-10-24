@@ -1280,11 +1280,23 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
             .map(|(i, (a, b))| format!("row {i}: {a:?}\n    → {b:?}"))
             .collect();
         // (a wake is a few switches: 14 a second came to ~100 in 2 s; at rest it's under 10)
-        assert!(
-            drawn == 0 && used.switches < 30,
-            "{what}: {drawn} frames, {used:?} in 2 s ({settled}) — woke:\n{woke}\nchanged:\n{}\n{now}",
-            changed.join("\n")
-        );
+        if drawn > 0 || used.switches >= 30 {
+            // (what drew each frame since the settle, as tarae says it — `frames_for`: an event's kind, a job's
+            // result by where it was sent from or its own name, `owed: …`, the resting redraw)
+            let written = frames as u64;
+            let late: Vec<String> = t.state_json(0)["frames_for"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f["frame"].as_u64().is_some_and(|n| n > written))
+                .map(|f| format!("frame {}: {}", f["frame"], f["for"]))
+                .collect();
+            panic!(
+                "{what}: {drawn} frames, {used:?} in 2 s ({settled}) — drawn for:\n{}\nwoke:\n{woke}\nchanged:\n{}\n{now}",
+                late.join("\n"),
+                changed.join("\n")
+            );
+        }
     };
     idle(&mut t, "a file");
     // The UI state's socket listens all along (on by default); a snapshot asked is one frame that writes
@@ -1340,6 +1352,9 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     assert_eq!(second.last().map(String::as_str), Some("exit 1"), "paused: refused — {second:?}");
     assert!(second[0].starts_with("refused (paused): you typed at "), "{second:?}");
     shuttle.wait().unwrap();
+    // (its process's end is heard by a thread of tarae's waiting on it, and the chip goes then — CI's macOS drew
+    // that just after the next scene's settle: a frame, and the whole-screen redraw after it, in the window)
+    t.wait_state("its process's end heard", |s| s["keys"]["shuttle"].is_null());
     t.send(" e");
     t.wait_state("the side panel has the keys", |s| s["keys"]["region"] == "side:files");
     idle(&mut t, "the side panel");

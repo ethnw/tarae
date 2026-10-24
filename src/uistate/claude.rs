@@ -55,6 +55,7 @@ impl Editor {
         s.prompt = s.prompt.map(|(label, _)| (label, String::new()));
         // (how the terminal is written to: the drivers')
         (s.redraw_due, s.frames_written, s.tick_in_ms, s.unfocused) = (false, 0, None, false);
+        s.frames_for.clear();
         // (the floating lists are the person's: the session list names every session, `:messages` says what came of
         // the others — none of it at Claude's level)
         s.panels.lists.clear();

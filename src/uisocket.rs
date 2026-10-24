@@ -309,6 +309,7 @@ fn watch(mut out: UnixStream, kinds: &Value, line: &[u32], tx: &crate::event::Tx
     let overflowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (line, flag, asked) = (line.to_vec(), overflowed.clone(), kinds.clone());
     let job = move |ed: &mut crate::editor::Editor| {
+        ed.drawn_for("a UI-state watch");
         let claude = ed.claude_pids();
         if let Some(p) = line.iter().find(|p| claude.contains(p)) {
             let _ = ok.send(Err(format!("refused: under a process of Claude's (pid {p})")));
@@ -381,6 +382,7 @@ fn answer(req: &str, line: &[u32], tx: &crate::event::Tx) -> Value {
     let until = std::time::Instant::now() + wait;
     let refused = reply.clone();
     let job = move |ed: &mut crate::editor::Editor| {
+        ed.drawn_for("a UI-state ask");
         let claude = ed.claude_pids();
         if let Some(p) = line.iter().find(|p| claude.contains(p)) {
             let e = format!("refused: under a process of Claude's (pid {p}) — Claude has a view of its own");

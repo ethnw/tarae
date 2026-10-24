@@ -200,8 +200,15 @@ side git · 4 rows · in hand git:src/term.rs
   screen goes again once input rests (`term::RESTING_REDRAW`, half a second after that write — an event that writes
   nothing doesn't put it off); `frames_written` (from the first) the frames that went to the terminal, each ending
   its synchronized update — what a driver reading the terminal has read once it caught up with the answer (the
-  socket and the terminal are two roads). An idle check settles on both (e2e `Term::settle`), never a quiet second.
-  Not at Claude's level.
+  socket and the terminal are two roads). An idle check settles on both (e2e `Term::settle`), never a quiet second:
+  an answer that owes a frame is waited out and asked again, until one owes nothing unread (`harness::settled` — a
+  frame read past an answer may be another than the one it owed). Not at Claude's level.
+- **`frames_for`** (ci, 2026-10-24) — the last 16 frames written, each `{frame, for}`: its number (as
+  `frames_written` counts) and what drew it — each event of the batch before it that changed something (`key`,
+  `mouse`, `focus`, …; a job's result by the line that sent or spawned it, `job src/shuttle.rs:535`, or the name it
+  gives itself: `a tick`, `a git watch round`, `a UI-state ask`), `owed: …` when none did, `the resting redraw`,
+  `the first frame`. A late frame in an idle check says its cause the first time. Said only when there are any;
+  not at Claude's level.
 - **`tick_in_ms`**, **`unfocused`** (ci, 2026-10-24) — when a frame is next wanted with nothing else happening
   (`Editor::tick_wanted`: the waiting animation's step, a toast's fade, a motion's …; absent: nothing wakes it), and
   (only while true) that the terminal said its focus went elsewhere (`CSI O`, until `CSI I`: the animation rests). A

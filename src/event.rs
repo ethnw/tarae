@@ -178,6 +178,19 @@ pub struct Tx {
 impl Tx {
     #[track_caller]
     pub fn send(&self, ev: Event) -> Result<(), mpsc::SendError<Event>> {
+        self.send_from(ev, Location::caller())
+    }
+
+    /// `send`, a job's result named by `site` — where it was sent from, or where the job that sent it was
+    /// spawned: what a frame it draws was drawn for (`Editor.event_from`, the state's `frames_for`).
+    fn send_from(&self, ev: Event, site: &'static Location<'static>) -> Result<(), mpsc::SendError<Event>> {
+        let ev = match ev {
+            Event::Job(apply) => Event::Job(Box::new(move |ed: &mut Editor| {
+                ed.event_from = Some(crate::editor::DrawnFor::Job(site));
+                apply(ed)
+            })),
+            ev => ev,
+        };
         let ev = match (ev, self.session) {
             (Event::Job(apply), Some(session)) => Event::For(session, apply),
             (ev, _) => ev,
@@ -212,9 +225,9 @@ impl Jobs {
         W: FnOnce() -> A + Send + 'static,
         A: FnOnce(&mut Editor) + Send + 'static,
     {
-        let (tx, asked) = (self.tx.clone(), self.asked);
+        let (tx, asked, site) = (self.tx.clone(), self.asked, Location::caller());
         run(
-            Location::caller(),
+            site,
             Box::new(move || {
                 let apply = work();
                 let apply = move |ed: &mut Editor| match asked {
@@ -225,7 +238,7 @@ impl Jobs {
                         ed.events.set_asked(was);
                     }
                 };
-                let _ = tx.send(Event::Job(Box::new(apply)));
+                let _ = tx.send_from(Event::Job(Box::new(apply)), site);
             }),
         );
     }

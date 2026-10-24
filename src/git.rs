@@ -100,6 +100,7 @@ pub fn watch(tx: crate::event::Tx, dir: PathBuf) {
 /// the front); a round that changed nothing draws nothing (`unchanged`: the branch already known, another
 /// session's — a late first round drew a frame of nothing in an idle test, CI's macOS).
 pub(crate) fn watch_round(ed: &mut Editor, dir: &Path, branch: Option<String>, moved: bool) {
+    ed.drawn_for("a git watch round");
     if ed.session.root != dir || (!moved && ed.session.git_branch == branch) {
         return ed.unchanged = true;
     }

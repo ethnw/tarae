@@ -530,6 +530,49 @@ impl View {
     }
 }
 
+/// Frames kept with what drew them (`Editor.frames_for`).
+pub const FRAMES_FOR_KEPT: usize = 16;
+
+/// What drew a frame (`Editor.frames_for`, the state's `frames_for`): each event of the batch before it that
+/// changed something, or why one was drawn though none did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DrawnFor {
+    /// Input or the terminal: `key`, `mouse`, `paste`, `focus`, `resize`, `hover`.
+    Event(&'static str),
+    /// A job's result, by where it was sent from (`Jobs::spawn`'s caller, `Tx::send`'s).
+    Job(&'static std::panic::Location<'static>),
+    /// A job's result that names itself (`Editor::drawn_for`), or the main loop's own: `a tick`, `a git watch
+    /// round`, `the resting redraw`, `the first frame`.
+    Named(&'static str),
+    /// Every event said nothing changed, but what came no frame had shown (`Editor::frame_owed`).
+    Owed(String),
+}
+
+impl DrawnFor {
+    /// An event's own kind; None for a job's result (its sender says it as it's applied).
+    pub fn of(ev: &Event) -> Option<DrawnFor> {
+        Some(DrawnFor::Event(match ev {
+            Event::Key(_) => "key",
+            Event::Mouse(_) => "mouse",
+            Event::Hover(..) => "hover",
+            Event::Focus(_) => "focus",
+            Event::Resize => "resize",
+            Event::Paste(_) => "paste",
+            Event::Job(_) | Event::For(..) => return None,
+        }))
+    }
+}
+
+impl std::fmt::Display for DrawnFor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DrawnFor::Event(what) | DrawnFor::Named(what) => f.write_str(what),
+            DrawnFor::Job(at) => write!(f, "job {}:{}", at.file(), at.line()),
+            DrawnFor::Owed(what) => write!(f, "owed: {what}"),
+        }
+    }
+}
+
 pub struct Editor {
     pub docs: Vec<Document>,
     pub current: usize,
@@ -755,6 +798,15 @@ pub struct Editor {
     /// Frames that went to the terminal (a frame like the last writes nothing) — what a driver reading the
     /// terminal counts (each ends its synchronized update); the state's `frames_written`.
     pub frames_written: u64,
+    /// What the event under way is, as its sender said it (`event::Tx::send`'s site, or the name a job gives
+    /// itself — `drawn_for`) — for the frame it draws, should it change something.
+    pub event_from: Option<DrawnFor>,
+    /// What the events of the batch under way that changed something were (`term::handle_noting`) — the next
+    /// frame's reasons.
+    pub drawn_by: Vec<DrawnFor>,
+    /// The last `FRAMES_FOR_KEPT` frames written, each its number (`frames_written` then) and what drew it — the
+    /// state's `frames_for`: a late frame in an idle check says its cause the first time, never guessed.
+    pub frames_for: std::collections::VecDeque<(u64, Vec<DrawnFor>)>,
     /// A git diff is running on a worker thread.
     pub git_diffing: bool,
     /// Whether to read HEAD contents when opening a file (off in tests — keeps event order stable;
@@ -1083,6 +1135,9 @@ impl Editor {
             redraw: false,
             redraw_due: false,
             frames_written: 0,
+            event_from: None,
+            drawn_by: Vec::new(),
+            frames_for: Default::default(),
             git_diffing: false,
             git_auto: !cfg!(test),
             chats_dir: if cfg!(test) { None } else { crate::chats::default_dir() },
@@ -3385,7 +3440,7 @@ impl Editor {
     /// What came that no frame has shown yet: input (a key, a click, a paste — whatever it changed, you look
     /// for it), a card, a toast (since the last frame), a UI-state ask whose input has come (answered after
     /// the next frame — `uistate::after_frame`).
-    fn frame_owed(&self) -> Option<String> {
+    pub(crate) fn frame_owed(&self) -> Option<String> {
         if self.input_seq > self.frame_input {
             return Some("input (a key, click or paste)".into());
         }
@@ -3401,6 +3456,25 @@ impl Editor {
             .iter()
             .any(|a| self.input_seq >= a.after_input && a.until > now)
             .then(|| "a UI-state ask".to_string())
+    }
+
+    /// The job applied now names what it is (`DrawnFor::Named`: a tick, a watch round, a UI-state ask) — a frame
+    /// it draws says that rather than where its result was sent from.
+    pub(crate) fn drawn_for(&mut self, what: &'static str) {
+        self.event_from = Some(DrawnFor::Named(what));
+    }
+
+    /// A frame went to the terminal (`term::event_loop`): its number and what drew it kept, the last
+    /// `FRAMES_FOR_KEPT`; the reasons gathered for it go either way.
+    pub(crate) fn frame_went(&mut self, written: bool) {
+        let by = std::mem::take(&mut self.drawn_by);
+        if !written {
+            return;
+        }
+        if self.frames_for.len() == FRAMES_FOR_KEPT {
+            self.frames_for.pop_front();
+        }
+        self.frames_for.push_back((self.frames_written, by));
     }
 
     pub(crate) fn schedule_tick(&mut self) {
@@ -3444,6 +3518,7 @@ impl Editor {
     /// terminal said it's unfocused with nothing else on a clock (only the resting animation's step: CI's macOS
     /// drew it after `CSI O`).
     pub(crate) fn tick_landed(&mut self, at: std::time::Instant) {
+        self.drawn_for("a tick");
         if self.ticking != Some(at) {
             self.unchanged = true;
             return;
@@ -12262,6 +12337,68 @@ mod tests {
         let unchanged = std::mem::take(&mut ed.unchanged);
         assert!(unchanged, "the event said nothing changed");
         (ed.frame_due(unchanged), FRAMES_OWED.with(|o| o.borrow().clone()))
+    }
+
+    /// ci round 4 (CI's macOS: a frame in the idle check's window, its cause guessed): a frame says what drew it
+    /// (`frames_for`, the state's) — a job's result by the line that sent or spawned it, one that names itself
+    /// by its name; an event that changed nothing isn't among them, and a frame that wrote nothing isn't kept.
+    #[test]
+    fn a_frame_says_what_drew_it() {
+        let mut ed = editor("one\n");
+        let tx = ed.events.sender();
+        let sent = line!() + 1;
+        tx.send(Event::Job(Box::new(|_: &mut Editor| {}))).unwrap();
+        tx.send(Event::Job(Box::new(|ed: &mut Editor| ed.unchanged = true))).unwrap();
+        tx.send(Event::Job(Box::new(|ed: &mut Editor| ed.drawn_for("a named job")))).unwrap();
+        let spawned = line!() + 1;
+        ed.events.jobs().spawn(|| |_: &mut Editor| {});
+        let mut unchanged = true;
+        for _ in 0..4 {
+            let ev = ed.events.recv_timeout(std::time::Duration::from_secs(10)).expect("each job's result");
+            unchanged &= crate::term::handle_noting(&mut ed, ev);
+        }
+        assert!(crate::term::batch_done(&mut ed, unchanged));
+        ed.frames_written += 1;
+        ed.frame_went(true);
+        let said: Vec<String> =
+            ed.frames_for.iter().flat_map(|(_, by)| by.iter().map(|b| b.to_string())).collect();
+        let here = |line: u32| format!("job src/editor.rs:{line}");
+        assert_eq!(said, [here(sent), "a named job".into(), here(spawned)]);
+        assert_eq!(ed.frames_for.back().map(|f| f.0), Some(1));
+        // (a frame that wrote nothing: its reasons go, nothing kept)
+        ed.drawn_by.push(DrawnFor::Named("the resting redraw"));
+        ed.frame_went(false);
+        assert!(ed.drawn_by.is_empty() && ed.frames_for.len() == 1);
+    }
+
+    /// A frame drawn though every event of its batch said nothing changed says what was owed (`batch_done`'s
+    /// `owed: …`): a card that came, a toast — the reason #200's guard drew it, never an empty list.
+    #[test]
+    fn a_frame_drawn_for_what_was_owed_says_so() {
+        let mut ed = editor("one\n");
+        crate::term::render(&mut ed, &mut Vec::new(), 100, 30).unwrap();
+        let drawn = |ed: &mut Editor, what: Box<dyn FnOnce(&mut Editor) + Send>| {
+            let job = Event::Job(Box::new(move |ed: &mut Editor| {
+                what(ed);
+                ed.unchanged = true;
+            }));
+            let unchanged = crate::term::handle_noting(ed, job);
+            assert!(unchanged && crate::term::batch_done(ed, unchanged), "owed: drawn");
+            ed.frames_written += 1;
+            ed.frame_went(true);
+            crate::term::render(ed, &mut Vec::new(), 100, 30).unwrap();
+            ed.frames_for.back().map(|(_, by)| by.iter().map(ToString::to_string).collect::<Vec<_>>())
+        };
+        let card = drawn(
+            &mut ed,
+            Box::new(|ed| {
+                let what = crate::offer::What::ReviewAtEnd;
+                ed.push_offer(crate::offer::Offer::new("Owed card".into(), "q", "w", String::new(), what));
+            }),
+        );
+        assert_eq!(card, Some(vec!["owed: card \"Owed card\"".to_string()]));
+        let toast = drawn(&mut ed, Box::new(|ed| ed.set_status("an owed toast")));
+        assert_eq!(toast, Some(vec!["owed: toast \"an owed toast\"".to_string()]));
     }
 
     /// #200's guard: an event that wrongly says it changed nothing still gets its frame when something came

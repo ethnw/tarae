@@ -757,6 +757,10 @@ pub struct UiState {
     /// terminal has read once it caught up with this answer (the answer comes on the socket, the frame on the
     /// terminal: either may come first); never Claude's.
     pub frames_written: u64,
+    /// The last frames written (`Editor.frames_for`, up to `FRAMES_FOR_KEPT`): each its number and what drew it —
+    /// an event's kind, a job's result by where it was sent from or the name it gives itself, `owed: …`, the
+    /// resting redraw — so a frame an idle check didn't expect says its cause; never Claude's.
+    pub frames_for: Vec<(u64, Vec<String>)>,
     /// When a frame is next wanted with nothing else happening (`Editor::tick_wanted`: the waiting animation's
     /// step, a toast's fade, …), in ms — None: nothing wakes it; never Claude's.
     pub tick_in_ms: Option<u64>,
@@ -1705,6 +1709,11 @@ impl Editor {
                 .collect(),
             redraw_due: self.redraw_due,
             frames_written: self.frames_written,
+            frames_for: self
+                .frames_for
+                .iter()
+                .map(|(n, by)| (*n, by.iter().map(ToString::to_string).collect()))
+                .collect(),
             tick_in_ms: self.tick_wanted().map(|d| d.as_millis() as u64),
             unfocused: self.unfocused,
         }
@@ -1970,6 +1979,14 @@ impl UiState {
         }
         if self.frames_written > 0 {
             v["frames_written"] = json!(self.frames_written);
+        }
+        if !self.frames_for.is_empty() {
+            v["frames_for"] = self
+                .frames_for
+                .iter()
+                .map(|(n, by)| json!({ "frame": n, "for": by }))
+                .collect::<Vec<_>>()
+                .into();
         }
         if let Some(ms) = self.tick_in_ms {
             v["tick_in_ms"] = json!(ms);
