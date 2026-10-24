@@ -33,17 +33,15 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets --features bundled-grammars
 
+  # Linux's tests: x86_64, an unprivileged user, a newer git — what the maintainer's Mac isn't. macOS's tests aren't
+  # CI's at all: the Mac builds and runs them at every landing (`:preflight`, `:preflight-full`)
   test:
-    name: test (${{ matrix.os }}${{ matrix.features && format(', {0}', matrix.features) || '' }})
+    name: test (linux${{ matrix.features && format(', {0}', matrix.features) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        features: [""]
-        include:
-          - os: ubuntu-latest
-            features: bundled-grammars
-    runs-on: ${{ matrix.os }}
+        features: ["", bundled-grammars]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -54,12 +52,8 @@ jobs:
       - run: |
           git config --global user.name ci
           git config --global user.email ci@example.com
-      # Linux's tests run here, every failing test binary said at once (cargo stops at the first otherwise: one
-      # failure a round). macOS's run on the maintainer's Mac (`:preflight`, `:preflight-full`): here only built
-      - if: runner.os == 'Linux'
-        run: cargo test --locked --no-fail-fast --workspace --features "${{ matrix.features }}"
-      - if: runner.os == 'macOS'
-        run: cargo test --locked --no-run --workspace --features "${{ matrix.features }}"
+      # Every failing test binary said at once (cargo stops at the first otherwise: one failure a round)
+      - run: cargo test --locked --no-fail-fast --workspace --features "${{ matrix.features }}"
       # The time budgets only report here (time is judged on a fixed machine — `cargo perf` in `:preflight-full`;
       # a shared runner's numbers are its neighbours' too): they skip themselves at the test profile's opt-level 0,
       # so here in the `perf` profile (release). The build fails the job, the budgets never: their output is the
@@ -67,7 +61,6 @@ jobs:
       # budgets: only debug builds have them unasked
       - run: cargo test --locked --features dev-grammars --features "${{ matrix.features }}" --profile perf --bin tarae --no-run
       - name: perf budgets (report only)
-        if: runner.os == 'Linux'
         shell: bash
         env:
           # the 16 ms key → frame budget times this, so what's reported over is well over
@@ -82,9 +75,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           tail -n 40 perf-budgets.txt
       - uses: actions/upload-artifact@v4
-        if: always() && runner.os == 'Linux'
+        if: always()
         with:
-          name: perf-budgets-${{ matrix.os }}${{ matrix.features && format('-{0}', matrix.features) || '' }}
+          name: perf-budgets-linux${{ matrix.features && format('-{0}', matrix.features) || '' }}
           path: perf-budgets.txt
           if-no-files-found: ignore
 

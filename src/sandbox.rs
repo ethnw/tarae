@@ -11768,9 +11768,10 @@ mod tests {
         // Its open port on this machine answers; TEST-NET-1 (never routed) is refused at once, not timed out
         assert!(sh(&format!("/usr/bin/nc -z -w 2 127.0.0.1 {port}")).status.success());
         drop(listener);
+        // (refused, not timed out: its time-out is longer than any patience)
         let started = std::time::Instant::now();
-        assert!(!sh("/usr/bin/nc -z -w 5 192.0.2.1 9").status.success());
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "refused, not timed out");
+        assert!(!sh("/usr/bin/nc -z -w 300 192.0.2.1 9").status.success());
+        assert!(started.elapsed() < crate::test_results::PATIENCE, "refused, not timed out");
         std::fs::remove_dir_all(&t).ok();
     }
 

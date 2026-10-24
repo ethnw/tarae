@@ -174,12 +174,14 @@ mod tests {
     fn a_run_past_its_limit_is_stopped_with_what_it_started() {
         let d = dir("limit");
         let child = d.join("child.pid");
-        let script = format!("sleep 30 & echo $! > '{}'; echo waiting; wait", child.display());
+        // (what it starts outlasts any patience: a run that waited for it, not stopping at its limit, never ends here)
+        let script = format!("sleep 600 & echo $! > '{}'; echo waiting; wait", child.display());
         let cmd = sh(&script);
-        let ran = {
+        let (ran_tx, ran) = std::sync::mpsc::channel();
+        {
             let (cmd, d) = (cmd.clone(), d.clone());
-            std::thread::spawn(move || run(&cmd, &d, &d, Duration::from_millis(1500)))
-        };
+            std::thread::spawn(move || ran_tx.send(run(&cmd, &d, &d, Duration::from_millis(1500))));
+        }
         let end = Instant::now() + crate::test_results::PATIENCE;
         while !child.exists() {
             assert!(Instant::now() < end, "it started");
@@ -190,9 +192,8 @@ mod tests {
         let ed = Editor::new(crate::config::Config::default());
         let known = ed.procs_known();
         assert!(known.iter().any(|k| k.title == "session.ended" && k.what == shown), "in :procs");
-        let t = Instant::now();
-        assert_eq!(ran.join().unwrap().result, Err("stopped after 1.5s: waiting".into()));
-        assert!(t.elapsed() < Duration::from_secs(5), "not waited for past its stop");
+        let ran = ran.recv_timeout(crate::test_results::PATIENCE).expect("not waited for past its stop");
+        assert_eq!(ran.result, Err("stopped after 1.5s: waiting".into()));
         assert!(!running().iter().any(|(_, c)| *c == shown), "gone from :procs");
         let pid: i32 = std::fs::read_to_string(&child).unwrap().trim().parse().unwrap();
         let end = Instant::now() + crate::test_results::PATIENCE;

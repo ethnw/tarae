@@ -569,8 +569,10 @@ fn copy_in(from: &Path, to: &Path, left: &mut u64) {
         if std::fs::create_dir_all(to).is_err() {
             return;
         }
-        for e in std::fs::read_dir(from).into_iter().flatten().flatten() {
-            copy_in(&e.path(), &to.join(e.file_name()), left);
+        // (in name order: what the budget leaves out is the same on every file system)
+        let Ok(rd) = std::fs::read_dir(from) else { return };
+        for (name, e) in crate::sorting::listing(rd, usize::MAX).unwrap_or_default() {
+            copy_in(&e.path(), &to.join(name), left);
         }
     } else if m.is_file() && m.len() <= *left {
         let open = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(from);

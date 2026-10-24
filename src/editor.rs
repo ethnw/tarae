@@ -5027,20 +5027,23 @@ impl Editor {
                     return;
                 }
                 self.events.jobs().spawn(move || {
-                    let mut entries: Vec<(String, bool)> = std::fs::read_dir(&dir)
-                        .map(|rd| {
-                            rd.flatten()
-                                .take(5000)
-                                .map(|e| {
-                                    let is_dir = e.path().is_dir(); // folder symlinks count as folders
-                                    (e.file_name().to_string_lossy().into_owned(), is_dir)
-                                })
-                                .collect()
-                        })
+                    // (read so far only — a folder of millions isn't held whole — and a bigger one said: `cut`)
+                    let (listed, cut) = std::fs::read_dir(&dir)
+                        .map(|rd| crate::sorting::listing_first(rd, crate::cmdline::DIR_MAX))
                         .unwrap_or_default();
+                    let mut entries: Vec<(String, bool)> = listed
+                        .into_iter()
+                        .map(|(name, e)| {
+                            let is_dir = e.path().is_dir(); // folder symlinks count as folders
+                            (name.to_string_lossy().into_owned(), is_dir)
+                        })
+                        .collect();
                     crate::sorting::sort(&mut entries);
                     move |ed: &mut Editor| {
                         ed.cmd_loading.remove(&dir);
+                        if cut {
+                            ed.cmd_lists.cut.insert(dir.clone());
+                        }
                         ed.cmd_lists.dirs.insert(dir, entries);
                     }
                 });
@@ -7810,14 +7813,28 @@ mod tests {
     }
 
     /// A command of Claude's runs without `CDPATH` — a `cd` lands where the read-only check resolved it, not
-    /// in a folder of that name on `CDPATH`; the user's own task keeps their environment. (The test's own
-    /// `CDPATH` is an empty folder of its own: any other test's `cd` finds nothing there, as without it.)
+    /// in a folder of that name on `CDPATH`; the user's own task keeps their environment. In a process of its
+    /// own, `CDPATH` in that one's environment (`cdpath_in_its_own_process`): a variable set in this binary
+    /// races every other test's `getenv` — a spawn reads the environment (ci5: glibc's `setenv` beside a
+    /// `getenv` on another thread is undefined).
     #[test]
     fn claudes_commands_run_without_cdpath() {
-        let dir = std::env::temp_dir().join(format!("tarae-cdpath-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: an empty folder of this test's own — a cd elsewhere falls back as if it weren't set
-        unsafe { std::env::set_var("CDPATH", &dir) };
+        let dir = crate::scratch::Scratch::new("cdpath");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "editor::tests::cdpath_in_its_own_process", "--ignored", "--nocapture"])
+            .env("CDPATH", dir.path())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "the child ran it: {said}");
+    }
+
+    /// `claudes_commands_run_without_cdpath`'s child: `CDPATH` (an empty folder of its own) is in this
+    /// process's environment.
+    #[test]
+    #[ignore = "run by claudes_commands_run_without_cdpath in a process of its own"]
+    fn cdpath_in_its_own_process() {
+        let Some(dir) = std::env::var_os("CDPATH").map(PathBuf::from) else { return };
         let mut ed = editor("");
         let task = |name: &str| crate::task::Task {
             name: name.into(),
@@ -7848,7 +7865,6 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(printed(&mut ed, "claudes"), "cdpath=none");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #27: a card's `a` lets its command (`tools::again` — this exact one, #193) run without asking for the
@@ -14481,9 +14497,11 @@ mod tests {
         ed.flush_saves(); // (on disk before git stashes it)
         ed.session.at = crate::session::At::Side;
         feed(&mut ed, "z");
-        settle_until(&mut ed, |_| {
-            std::fs::read_to_string(&file).unwrap_or_default() == "one\ntwo\nthree\nfour\nfive\n"
-        });
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Success, "Stashed — Z takes them back") == 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\nfour\nfive\n");
+        // (nothing left: told by `refs/stash`, never git's words — the hooked form keeps the user's language)
+        feed(&mut ed, "z");
+        settle_until(&mut ed, |ed| said(ed, ToastKind::Info, "nothing to stash") == 1);
         feed(&mut ed, "Z");
         settle_until(&mut ed, |_| std::fs::read_to_string(&file).unwrap_or_default().contains("FOUR"));
         feed(&mut ed, "?");
@@ -16935,18 +16953,29 @@ mod tests {
     }
 
     /// A big ask (a 200 KB selection) to a claude still starting — not reading yet — goes out off the main
-    /// loop, and the answer still comes.
+    /// loop, and the answer still comes. The stand-in reads only once the test says (`PATIENCE` at most): a main
+    /// loop that waited on the pipe would be back only once it read.
     #[test]
     fn a_big_ask_to_a_claude_still_starting_doesnt_hold_the_main_loop() {
+        let dir = crate::scratch::Scratch::new("ask-cold");
+        let (gate, reading) = (dir.join("gate"), dir.join("reading"));
         let mut ed = editor(&"word ".repeat(40 * 1024));
         let json = serde_json::json!({"type": "result", "is_error": false, "result": "<r i=\"1\">X</r>"});
         ed.config.llm.command = "sh".into();
-        ed.config.llm.args = vec!["-c".into(), format!("sleep 1; read -r line; printf '%s\\n' '{json}'")];
+        ed.config.llm.args = vec![
+            "-c".into(),
+            format!(
+                "i=0; while [ ! -e '{}' ] && [ $i -lt {} ]; do sleep 0.05; i=$((i+1)); done; : > '{}'; read -r line; \
+                 printf '%s\\n' '{json}'",
+                gate.display(),
+                crate::test_results::PATIENCE.as_millis() / 50,
+                reading.display()
+            ),
+        ];
         feed(&mut ed, "%");
-        let t = std::time::Instant::now();
         feed(&mut ed, ":ask x<ret>");
-        let took = t.elapsed();
-        assert!(took < std::time::Duration::from_millis(500), "the main loop waited {took:?} on the pipe");
+        assert!(!reading.exists(), "the main loop waited on the pipe");
+        std::fs::write(&gate, "").unwrap();
         settle_until(&mut ed, |ed| ed.session.review.as_ref().is_some_and(|r| r.ready));
         feed(&mut ed, "y");
         assert_eq!(text(&ed), "X");

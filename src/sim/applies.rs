@@ -118,7 +118,7 @@ fn input(sim: &mut Sim, ed: &mut Editor, repo: &Path, patch: &Path) -> String {
         2 => {
             let a = repo.join("a.txt");
             let now = std::fs::read_to_string(&a).unwrap_or_default();
-            std::fs::write(&a, now + OUTSIDE).unwrap();
+            super::write(&a, now + OUTSIDE);
             let n: usize = std::fs::read_to_string(outside(repo)).unwrap().parse().unwrap();
             std::fs::write(outside(repo), (n + 1).to_string()).unwrap();
             "another program writes a.txt".into()

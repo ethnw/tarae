@@ -129,19 +129,15 @@ fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// `job` written as `:w` always has (or beneath its folder through no link), its outcome kept for the main loop —
-/// whether nothing is left to write now. `_slow`: tests' slow disk.
-fn write_one(job: Job, shared: &(Mutex<Shared>, Condvar), _slow: Duration) -> bool {
+/// whether nothing is left to write now. `pause`: what the write waits through (`Saver::pause`: tests' slow disk).
+fn write_one(job: Job, shared: &(Mutex<Shared>, Condvar), pause: &dyn Fn()) -> bool {
     let write = |w: &mut std::io::BufWriter<std::fs::File>| {
         // (inside the write: its temp file is there meanwhile, as on a slow disk)
-        #[cfg(test)]
-        std::thread::sleep(_slow);
+        pause();
         job.text.write_to(w)
     };
     let result = match job.beneath.as_deref() {
-        Some(root) => write_beneath(root, &job.path, &job.text, &|| {
-            #[cfg(test)]
-            std::thread::sleep(_slow);
-        }),
+        Some(root) => write_beneath(root, &job.path, &job.text, &|| pause()),
         None => job.folders.as_deref().map_or(Ok(()), |root| make_folders(root, &job.path)).and_then(|()| {
             crate::disk::write_atomic(&job.path, write)
                 .map(|()| crate::disk::stamp(&job.path))
@@ -173,6 +169,36 @@ pub struct Saver {
     /// the first save)
     #[cfg(test)]
     pub slow: Duration,
+    /// Tests: each write held after `slow` until the test lets it go — a save that can't end before the test says,
+    /// so "the main loop didn't wait for it" is a condition, never a time.
+    #[cfg(test)]
+    pub held: Held,
+    /// Tests: how many times something waited for the saves (`wait`) — the main loop never should while it runs keys.
+    #[cfg(test)]
+    pub waited: std::sync::atomic::AtomicUsize,
+}
+
+/// Tests: `Saver.held`.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct Held(Arc<(Mutex<bool>, Condvar)>);
+
+#[cfg(test)]
+impl Held {
+    pub fn hold(&self) {
+        *locked(&self.0.0) = true;
+    }
+
+    pub fn release(&self) {
+        *locked(&self.0.0) = false;
+        self.0.1.notify_all();
+    }
+
+    /// Until let go — `PATIENCE` at most: a test that never lets go still ends.
+    fn wait(&self) {
+        let held = locked(&self.0.0);
+        let _ = self.0.1.wait_timeout_while(held, crate::test_results::PATIENCE, |h| *h);
+    }
 }
 
 impl Saver {
@@ -185,6 +211,23 @@ impl Saver {
             waits: Vec::new(),
             #[cfg(test)]
             slow: Duration::ZERO,
+            #[cfg(test)]
+            held: Held::default(),
+            #[cfg(test)]
+            waited: Default::default(),
+        }
+    }
+
+    /// What each write waits through: nothing — in tests, the slow disk's `slow`, then `held`.
+    fn pause(&self) -> impl Fn() + Send + 'static {
+        #[cfg(test)]
+        let (slow, held) = (self.slow, self.held.clone());
+        move || {
+            #[cfg(test)]
+            {
+                std::thread::sleep(slow);
+                held.wait();
+            }
         }
     }
 
@@ -205,10 +248,7 @@ impl Saver {
         }
         let (queue, writing, shared) = (self.queue.clone(), self.writing.clone(), self.shared.clone());
         let events = self.events.clone();
-        #[cfg(test)]
-        let slow = self.slow;
-        #[cfg(not(test))]
-        let slow = Duration::ZERO;
+        let pause = self.pause();
         jobs.background(move || {
             loop {
                 let idle = {
@@ -225,7 +265,7 @@ impl Saver {
                             }
                         }
                     };
-                    write_one(job, &shared, slow)
+                    write_one(job, &shared, &pause)
                 };
                 // Out of work: the main loop finishes the batch (one message for `:wa`), and starts what waited for it
                 if idle {
@@ -251,9 +291,8 @@ impl Saver {
     /// (in a simulation, one only it would run); one under way (a slow disk) is waited for, `within` at most.
     pub fn wait(&self, within: Duration) -> bool {
         #[cfg(test)]
-        let slow = self.slow;
-        #[cfg(not(test))]
-        let slow = Duration::ZERO;
+        self.waited.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pause = self.pause();
         loop {
             let _one = match self.writing.try_lock() {
                 Ok(g) => g,
@@ -261,7 +300,7 @@ impl Saver {
                 Err(std::sync::TryLockError::WouldBlock) => break,
             };
             let Some(job) = locked(&self.queue).jobs.pop_front() else { break };
-            write_one(job, &self.shared, slow);
+            write_one(job, &self.shared, &pause);
         }
         let (lock, cv) = &*self.shared;
         let s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -497,9 +536,8 @@ mod tests {
             let q = locked(&ed.saver.queue);
             assert!(q.draining && q.jobs.len() == 3, "one drainer for the three, none run yet");
         }
-        let began = std::time::Instant::now();
+        // (a flush that waited on the drainer instead would wait out `QUIT_WAIT` and say not all written)
         assert!(ed.flush_saves(), "all written");
-        assert!(began.elapsed() < Duration::from_secs(2), "not waited out");
         for p in &paths {
             assert_eq!(std::fs::read_to_string(p).unwrap(), "xone\n", "{}", p.display());
         }
@@ -704,20 +742,25 @@ mod tests {
     }
 
     /// A run starts once the saves before it are written — the saver's idle event, not a wait on the main
-    /// loop (a slow disk held the screen up to 10 s) — and it reads what was saved.
+    /// loop (a slow disk held the screen up to 10 s) — and it reads what was saved. The save is held until the
+    /// run was asked: a main loop that waited for it would wait out the hold.
     #[test]
     fn a_run_starts_once_its_saves_are_written() {
         let (mut ed, path) = opened("run");
-        ed.saver.slow = Duration::from_millis(800);
+        ed.saver.held.hold();
         feed(&mut ed, "cTWO<esc>");
         let dir = path.parent().unwrap().to_path_buf();
         let task = crate::task::Task { name: "cat".into(), cmd: "cat a.txt".into(), cwd: dir.clone() };
-        let t = std::time::Instant::now();
         ed.task_start(task);
-        let took = t.elapsed();
-        eprintln!("run asked with a save being written: {:.2} ms on the main loop", took.as_secs_f64() * 1e3);
-        assert!(took < Duration::from_millis(300), "the main loop waited {took:?} for the save");
+        // (neither waited for — that'd be back once written — nor waited on a while: a bounded wait gives up held)
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), "TWOne\n", "the main loop waited for the save");
+        assert_eq!(
+            ed.saver.waited.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the main loop waited on the saves"
+        );
         assert!(ed.session.task_run.is_none(), "started before its save was written");
+        ed.saver.held.release();
         settle_until(&mut ed, |ed| {
             ed.session.task_run.as_ref().is_some_and(|r| r.state != crate::task::State::Running)
         });

@@ -4479,24 +4479,27 @@ mod tests {
     /// writer thread, the main loop going on — and what's written keeps its order.
     #[test]
     fn a_big_message_to_a_claude_still_starting_doesnt_hold_the_main_loop() {
-        let dir = std::env::temp_dir().join(format!("tarae-chat-cold-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let log = dir.join("stdin.log");
-        // (a stand-in: reads nothing for two seconds, then everything into the log)
-        let script = format!("sleep 2; cat > '{}'", log.display());
+        let dir = crate::scratch::Scratch::new("chat-cold");
+        let (log, gate) = (dir.join("stdin.log"), dir.join("gate"));
+        // (a stand-in: reads nothing until the test says — `PATIENCE` at most — then everything into the log)
+        let script = format!(
+            "i=0; while [ ! -e '{}' ] && [ $i -lt {} ]; do sleep 0.05; i=$((i+1)); done; cat > '{}'",
+            gate.display(),
+            crate::test_results::PATIENCE.as_millis() / 50,
+            log.display()
+        );
         let mut ed = editor("fn main() {}\n");
         ed.config.llm.command = "sh".into();
         ed.config.llm.args = vec!["-c".into(), script];
         open(&mut ed);
         let question = format!("{}\nend of the question", "x".repeat(200 * 1024));
         ed.session.chat.as_mut().unwrap().input.set(&question);
-        let t = Instant::now();
         send(&mut ed);
-        let took = t.elapsed();
         stop(&mut ed);
-        eprintln!("chat write: send took {:.2} ms with a 200 KB message", took.as_secs_f64() * 1000.0);
         assert!(ed.session.chat.as_ref().unwrap().busy(), "sent");
-        assert!(took < std::time::Duration::from_millis(500), "the main loop waited {took:?} on the pipe");
+        // (nothing read yet: a main loop that waited on the pipe would be back only once the stand-in read)
+        assert!(!log.exists(), "the main loop waited on the pipe");
+        std::fs::write(&gate, "").unwrap();
         // Everything arrives, in the order it was written: initialize, the message, the interrupt
         let end = Instant::now() + crate::test_results::PATIENCE;
         let sent = loop {
@@ -4511,7 +4514,6 @@ mod tests {
         assert!(lines[0].contains("initialize"), "{}", &lines[0][..lines[0].len().min(200)]);
         assert!(lines[1].contains("end of the question"));
         assert!(lines[2].contains("interrupt"), "{}", lines[2]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// #102: a read outside the project beside another one asking (or one let through once) offers its

@@ -236,7 +236,9 @@ impl Refused {
 
 /// Why git refused, from what it printed. A rejected ref (` ! [rejected] main -> main (fetch first)`) said in
 /// plain words; else the first `fatal:`/`error:` line; else the last line that isn't a `hint:` — git's last
-/// lines are its hints on what to do next, never what went wrong.
+/// lines are its hints on what to do next, never what went wrong. (A push's, pull's or fetch's words are in the
+/// user's language — `gitrepo::ENGLISH` isn't on the hooked form: `[rejected]` and its reasons git never
+/// translates; a translated `fatal:` falls to the last line.)
 pub fn refusal(stderr: &str) -> Refused {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let rejected = lines.iter().find_map(|l| {
@@ -617,14 +619,25 @@ impl Editor {
         let args: &'static [&'static str] =
             if pop { &["stash", "pop"] } else { &["stash", "push", "--include-untracked"] };
         self.git_hooked("stash", hooks::STASH, move |ed, pre| {
-            ed.git_do_rewriting(
-                Box::new(move |top| crate::gitrepo::hooked(top, &hooks::with(pre, args))),
-                Box::new(move |ed, r| match r {
+            if ed.session.git_status.is_none() {
+                return ed.set_warning("not a git repository");
+            }
+            // (whether it stashed: `refs/stash` before and after — never git's words, in the user's language here)
+            let tip = |top: &Path| {
+                crate::gitrepo::git(top, &["rev-parse", "-q", "--verify", "refs/stash"], None).ok()
+            };
+            ed.git_queued_as(
+                true,
+                move |top| {
+                    let before = tip(top);
+                    crate::gitrepo::hooked(top, &hooks::with(pre, args)).map(|_| tip(top) != before)
+                },
+                move |ed, r| match r {
                     Ok(_) if pop => ed.set_success("Took the stashed changes back"),
-                    Ok(out) if out.contains("No local changes") => ed.set_status("nothing to stash"),
-                    Ok(_) => ed.set_success("Stashed — Z takes them back"),
+                    Ok(false) => ed.set_status("nothing to stash"),
+                    Ok(true) => ed.set_success("Stashed — Z takes them back"),
                     Err(e) => ed.set_error(format!("stash: {e}")),
-                }),
+                },
             );
         });
     }
@@ -1312,16 +1325,20 @@ impl Editor {
         let (what, names) = if push { ("push", hooks::PUSH) } else { ("pull", hooks::PULL) };
         self.git_hooked(what, names, move |ed, pre| {
             let top = st.top.clone();
+            // (`Ok(true)`: HEAD as it was — a pull that brought nothing, told by git's state, never its words, which
+            // the hooked form leaves in the user's language)
             let work = move || {
                 let a: Vec<&str> = args.iter().map(String::as_str).collect();
-                git_remote(&top, &hooks::with(pre, &a))
+                let head = || crate::gitrepo::git(&top, &["rev-parse", "-q", "--verify", "HEAD"], None).ok();
+                let before = head();
+                git_remote(&top, &hooks::with(pre, &a)).map(|_| head() == before)
             };
             let said = if push { "Pushing…" } else { "Pulling…" };
             ed.step(ed.events.jobs(), "git", said, work, move |ed, result| {
                 match result {
                     Ok(_) if push => ed.set_success(format!("Pushed {}", st.branch)),
-                    Ok(out) if out.contains("Already up to date") => ed.set_status("Already up to date"),
-                    Ok(_) => ed.set_success(format!("Pulled into {}", st.branch)),
+                    Ok(true) => ed.set_status("Already up to date"),
+                    Ok(false) => ed.set_success(format!("Pulled into {}", st.branch)),
                     Err(r) if push && r.diverged() && st.upstream.is_some() => ed.git_force_ask(Some(r.why)),
                     Err(r) => ed.set_error(format!("{}: {}", if push { "push" } else { "pull" }, r.why)),
                 }

@@ -306,10 +306,11 @@ fn the_turns_end_stops_a_read_under_way() {
     read(&mut ed, generation, 51, &["https://page.test/slow"]);
     assert_eq!(ed.session.web_reads.len(), 1, "its stop kept while it reads");
     heads.recv_timeout(crate::test_results::PATIENCE).expect("the request reached the server");
-    let stopped = std::time::Instant::now();
     crate::tools::turn_over(&mut ed);
     settle(&mut ed, &|_| answered(51).is_some());
-    assert!(stopped.elapsed() < std::time::Duration::from_secs(5), "{:?}", stopped.elapsed());
+    // (stopped, not left to its deadline: that one's answer would say no whole answer came)
+    let said = format!("{:?}", answered(51));
+    assert!(said.contains("stopped") && !said.contains("no whole answer"), "{said}");
     assert!(ed.session.web_reads.is_empty(), "its stop dropped as it lands");
 }
 

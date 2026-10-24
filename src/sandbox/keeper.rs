@@ -122,9 +122,12 @@ static KEEPERS: Mutex<Vec<Arc<Keeper>>> = Mutex::new(Vec::new());
 /// Held through `ready` — a birth too (≤ `READY_WITHIN`): two runs' policies made at once get one keeper,
 /// workers waiting on it, never `KEEPERS`'s readers.
 static BIRTHS: Mutex<()> = Mutex::new(());
-/// Tests: a birth for this root says it began and takes a second more (`a_birth_under_way_holds_up_no_reader`).
+/// Tests: a birth for this root says it began and waits for the test's word, `PATIENCE` at most
+/// (`a_birth_under_way_holds_up_no_reader`).
 #[cfg(test)]
-static SLOW_BIRTH: Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>)>> = Mutex::new(None);
+#[allow(clippy::type_complexity)]
+static SLOW_BIRTH: Mutex<Option<(PathBuf, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> =
+    Mutex::new(None);
 /// When each session's keeper died (not asked to end).
 static DEATHS: Mutex<Vec<(PathBuf, Instant)>> = Mutex::new(Vec::new());
 /// The runs of every keeper by pid (tarae's numbering): its keeper and its id.
@@ -193,11 +196,15 @@ fn ready_in(root: &Path, key: Option<&str>, ns: Ns, held: bool) -> Result<Arc<Ke
         ));
     }
     #[cfg(test)]
-    let slow = lock(&SLOW_BIRTH).as_ref().filter(|(r, _)| r == root).map(|(_, tx)| tx.clone());
+    let slow = {
+        let mut s = lock(&SLOW_BIRTH);
+        if s.as_ref().is_some_and(|(r, ..)| r == root) { s.take() } else { None }
+    };
     #[cfg(test)]
-    if let Some(began) = slow {
+    if let Some((_, began, go)) = slow {
         let _ = began.send(());
-        std::thread::sleep(Duration::from_secs(1));
+        // (waited out: `go` is dropped with this block — the test's send then fails, saying an `of` waited)
+        let _ = go.recv_timeout(crate::test_results::PATIENCE);
     }
     let k = Keeper::born(root, key, ns).map_err(|e| format!("the session's keeper couldn't start: {e}"))?;
     lock(&k.state).holds = usize::from(held);
@@ -2881,23 +2888,22 @@ mod tests {
         other.wait().unwrap();
     }
 
-    /// A keeper's birth (≤ `READY_WITHIN`, here made a second longer) holds up nothing that reads the keepers —
-    /// `of`, which `:procs` and `end_leftovers` ask: it answers while the birth is under way on a worker, and
+    /// A keeper's birth (≤ `READY_WITHIN`, here held until the test says) holds up nothing that reads the keepers
+    /// — `of`, which `:procs` and `end_leftovers` ask: it answers while the birth is under way on a worker, and
     /// finds that keeper once born.
     #[test]
     fn a_birth_under_way_holds_up_no_reader() {
         let root = std::env::temp_dir().join(format!("tarae-keeper-slow-{}", std::process::id()));
-        let (tx, began) = std::sync::mpsc::channel();
-        *lock(&SLOW_BIRTH) = Some((root.clone(), tx));
+        let ((tx, began), (go, held)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+        *lock(&SLOW_BIRTH) = Some((root.clone(), tx, held));
         let r = root.clone();
         let birth = std::thread::spawn(move || ready(&r, Some("a key"), ns()));
         began.recv_timeout(crate::test_results::PATIENCE).expect("its birth began");
-        let at = Instant::now();
         let _ = of(None);
-        let took = at.elapsed();
-        *lock(&SLOW_BIRTH) = None;
+        // (the birth still waits for `go`: an `of` that waited on it was back only once that wait ran out, and the
+        // birth had dropped its end of `go` then — the send fails every time, however soon after its thread ends)
+        assert!(go.send(()).is_ok(), "`of` waited on a birth");
         let k = birth.join().unwrap().expect("born");
-        assert!(took < Duration::from_millis(300), "`of` waited {took:?} on a birth");
         assert!(of(Some(&root)).iter().any(|o| Arc::ptr_eq(o, &k)), "found once born");
         k.end();
     }

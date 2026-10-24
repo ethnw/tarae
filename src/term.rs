@@ -17540,7 +17540,13 @@ fn draw_prompt(
     apply(out, card)?;
     queue!(out, Spaces(inner.saturating_sub(used) + 2))?;
     card_edge(out, card, x0, y + 1, width)?;
-    let name = pane_names(ui, editor, card, &[prompt_name(p)], 0);
+    let mut name = pane_names(ui, editor, card, &[prompt_name(p)], 0);
+    // (a folder bigger than what a completion reads: its list isn't all of it)
+    if completion.is_some_and(|c| c.cut) {
+        name.push((" ── ".into(), frame_line(ui, card)));
+        let only = format!("only {} read", crate::cmdline::DIR_MAX);
+        name.push((only, Style { fg: ui.linenr.fg, ..card }));
+    }
     draw_frame(out, ui, card, (x0, y0, width, h), &name, &[], &[], true)?;
     Ok(cursor)
 }

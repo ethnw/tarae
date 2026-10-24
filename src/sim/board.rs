@@ -267,7 +267,7 @@ fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &mut Seen
                     (l.join("\n") + "\n", format!("line {} changed", k + 1))
                 }
             };
-            std::fs::write(&path, now).unwrap();
+            super::write(&path, now);
             seen.edits.push(n);
             format!("you edit a.txt: {said}")
         }

@@ -496,6 +496,8 @@ const WORKTREE_HOMES: &[&str] = &[".claude/worktrees"];
 /// How deep `nested_checkouts` looks, and how many folders at most (a huge tree mustn't hold up the start).
 const NESTED_DEPTH: usize = 4;
 const NESTED_BUDGET: usize = 5000;
+/// A folder's entries `nested_checkouts` reads at most (files too: they cost a read, not the budget).
+const NESTED_LIST_MAX: usize = 20_000;
 
 /// Folders `nested_checkouts` doesn't go into: git's own, and tools' output (the packs' `outputs`).
 pub(crate) fn nested_skips(name: &str) -> bool {
@@ -519,7 +521,15 @@ pub fn nested_checkouts(root: &Path) -> Vec<String> {
     let mut seen = 0;
     while let Some((dir, depth)) = queue.pop_front() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
+        // (in name order: what the budget lets through is the same on every file system, not its listing order;
+        // a folder past `NESTED_LIST_MAX` entries isn't held and sorted whole — not looked into, as one too deep)
+        let Some(listed) = crate::sorting::listing(entries, NESTED_LIST_MAX) else {
+            let said =
+                format!("{} holds more than {NESTED_LIST_MAX} entries: not looked into", dir.display());
+            crate::log::line("lsp", "info", &said);
+            continue;
+        };
+        for (_, e) in listed {
             // (not through links — a link out of the project isn't the project's to scan)
             if !e.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
@@ -795,8 +805,9 @@ pub struct Client {
     pub ready: bool,
     queue: Vec<Out>,
     pub encoding: Encoding,
-    /// Work in progress (token → what it's doing).
-    pub progress: HashMap<String, Progress>,
+    /// Work in progress (token → what it's doing) — in the tokens' order: the status line shows the first, the
+    /// answers list them, the same on every run (a HashMap's order is another each run).
+    pub progress: std::collections::BTreeMap<String, Progress>,
     /// Server capabilities (initialize response) — completion trigger characters etc.
     pub caps: Value,
     /// (taken by `Drop` — killed and reaped on a thread of its own)
@@ -967,7 +978,7 @@ impl Client {
             ready: false,
             queue: Vec::new(),
             encoding: Encoding::Utf16,
-            progress: HashMap::new(),
+            progress: Default::default(),
             caps: Value::Null,
             child: Some(child),
             started: std::time::Instant::now(),
@@ -1097,7 +1108,7 @@ impl Client {
             ready: false,
             queue: Vec::new(),
             encoding: Encoding::Utf8,
-            progress: HashMap::new(),
+            progress: Default::default(),
             caps: Value::Null,
             child: None,
             started: crate::clock::now(),

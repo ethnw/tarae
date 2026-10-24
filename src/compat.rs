@@ -1209,7 +1209,7 @@ const BRANCHES: &[(&str, &str, &str)] = &[
         "none unless the run's project is in the two-deep test's own scratch folder: compat's never are",
     ),
     ("src/sandbox/keeper.rs", "in fn of: leak", SEAM),
-    ("src/sandbox/keeper.rs", "in fn ready_in: if let Some(began) = slow {", HOOK),
+    ("src/sandbox/keeper.rs", "in fn ready_in: if let Some((_, began, go)) = slow {", HOOK),
     ("src/sandbox/keeper.rs", "in fn ready_in: slow", HOOK),
     ("src/sandbox/keeper.rs", "in fn start_with: covers", SEAM),
     ("src/sandbox/linux.rs", "in fn confine_in: granted", SEAM),

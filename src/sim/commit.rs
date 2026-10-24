@@ -147,7 +147,7 @@ fn input(sim: &mut Sim, ed: &mut Editor, repo: &std::path::Path, seen: &RefCell<
             let f = *c.pick(&FILES);
             let mut s = seen.borrow_mut();
             s.n += 1;
-            std::fs::write(repo.join(f), format!("one\nfix {}\n", s.n)).unwrap();
+            super::write(&repo.join(f), format!("one\nfix {}\n", s.n));
             if let Some(d) = ed.docs.iter_mut().find(|d| d.path.as_deref() == Some(&repo.join(f))) {
                 crate::disk::reload_text(
                     d,

@@ -225,13 +225,15 @@ fn a_file_outside_the_sessions_is_read_only_away_from_writes() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The shell line the rebase runs: both folders given, quoted, the guard on, no fetch.
+/// The shell line the rebase runs: both folders given, quoted, the guard on, no fetch, git's words in English
+/// (`ENGLISH`: `rebase_ended` reads its `error:` lines).
 #[test]
 fn the_shell_line_names_the_repository() {
     let mut r = plain("/r/it's/.git".into(), Some("/r/it's".into()), "/r/it's".into());
     let start = r"git --git-dir '/r/it'\''s/.git' --work-tree '/r/it'\''s' -c safe.bareRepository=explicit";
     let no_fetch = ("GIT_NO_LAZY_FETCH".to_string(), "1".to_string());
-    assert_eq!(r.shell_line(), Line { text: start.into(), env: vec![no_fetch.clone()] });
+    let english = ("LANGUAGE".to_string(), "en".to_string());
+    assert_eq!(r.shell_line(), Line { text: start.into(), env: vec![no_fetch.clone(), english.clone()] });
     // (what's held goes in as on every run: each value in a variable of its own, named by `--config-env` — a
     // key that holds a `=` whole — the values only in the environment, the network's held too; no flags)
     let config = vec![
@@ -251,6 +253,7 @@ fn the_shell_line_names_the_repository() {
     );
     let env = [
         ("GIT_NO_LAZY_FETCH", "1"),
+        ("LANGUAGE", "en"),
         ("TARAE_GIT_HELD_0", "git merge-file %A"),
         ("TARAE_GIT_HELD_1", "store --file /x/tarae-fake-token"),
         ("TARAE_GIT_HELD_2", "it's"),
@@ -316,5 +319,20 @@ fn a_tests_git_reads_no_global_ignore_from_its_default_place() {
     std::fs::write(home.join(".config/git/ignore"), ".env\n").unwrap();
     let out = base(&dir).env("HOME", &home).args(["check-ignore", "-q", ".env"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "not ignored: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// tarae's own git speaks English (`ENGLISH`: tarae reads its words); the hooked form leaves the user's language as
+/// it is — the user's hooks get git's environment, and a translated tool in them stays translated.
+#[test]
+fn taraes_own_git_is_in_english_and_the_hooked_form_in_the_users_language() {
+    let dir = temp("english");
+    repository(&dir, &[("a.txt", "a\n")]);
+    let r = repo(&dir).unwrap();
+    let language = |cmd: &Command| {
+        cmd.get_envs().find(|(k, _)| *k == "LANGUAGE").map(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+    };
+    assert_eq!(language(&r.command(&["status"])), Some(Some("en".into())), "tarae's own");
+    assert_eq!(language(&r.hooked_command(&["status"]).unwrap()), None, "the user's, inherited");
     std::fs::remove_dir_all(&dir).ok();
 }

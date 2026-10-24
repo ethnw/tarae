@@ -5,7 +5,7 @@
 //! half only where the file stayed half-done for `disk::SETTLE` at least (a writer that stopped there).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::{Choices, Sim};
@@ -48,7 +48,7 @@ fn run(choices: Choices) -> Vec<String> {
     trace
 }
 
-fn input(sim: &mut Sim, ed: &mut Editor, path: &PathBuf, halves: &Halves) -> String {
+fn input(sim: &mut Sim, ed: &mut Editor, path: &Path, halves: &Halves) -> String {
     let c = &mut sim.choices;
     let under_way = halves.borrow().last().is_some_and(|h| h.2.is_none());
     // (by arm: a write begins 2, it ends 2, a round 3, time 2, a frame 1)
@@ -56,14 +56,14 @@ fn input(sim: &mut Sim, ed: &mut Editor, path: &PathBuf, halves: &Halves) -> Str
         0 if !under_way => {
             let n = halves.borrow().len();
             let half = format!("one {n}\n");
-            std::fs::write(path, &half).unwrap();
+            super::write(path, &half);
             halves.borrow_mut().push((half, crate::clock::now(), None));
             format!("write {n} begins")
         }
         1 if under_way => {
             let mut h = halves.borrow_mut();
             let last = h.last_mut().expect("under way");
-            std::fs::write(path, format!("{}two\n", last.0)).unwrap();
+            super::write(path, format!("{}two\n", last.0));
             last.2 = Some(crate::clock::now());
             "the write ends".into()
         }

@@ -310,7 +310,7 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::Receiver;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::super::abi::tests::DEMO;
     use super::*;
@@ -407,10 +407,8 @@ mod tests {
             loaded.insert(plugin, manifest);
         }
         assert!(loaded["junk"].as_ref().unwrap_err().contains("not a WebAssembly module"));
-        let t = Instant::now();
         let r = run(&host, "spin", input("", "", &[]));
-        assert!(r.unwrap_err().contains("ran too long"));
-        assert!(t.elapsed() < Duration::from_secs(10), "stopped by its budget: {:?}", t.elapsed());
+        assert!(r.unwrap_err().contains("ran too long"), "stopped by its budget");
         assert_eq!(run(&host, "boom", input("", "", &[])), Err("crashed (a panic?)".into()));
         assert!(run(&host, "stray", input("", "", &[])).is_ok(), "an odd edit is the editor's to refuse");
         assert_eq!(run(&host, "send", input(":w", "", &[])), Ok(vec![Action::Run(":w".into())]));

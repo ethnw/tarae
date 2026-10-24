@@ -2509,12 +2509,18 @@ mod tests {
         let dir = temp("slow");
         let bin = fake_tarae(&dir, "tarae 9.9.9");
         let mut ed = editing(&dir, "", &bin);
-        ed.saver.slow = Duration::from_millis(500);
-        let t = Instant::now();
+        // (the save held until `:restart!` came back: a main loop that waited for it would wait out the hold)
+        ed.saver.held.hold();
         feed(&mut ed, ":restart!<ret>");
-        let took = t.elapsed();
-        assert!(took < Duration::from_millis(300), "the main loop waited {took:?} for the save");
+        assert_ne!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "Xone\n",
+            "the main loop waited for the save"
+        );
+        let waited = ed.saver.waited.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(waited, 0, "the main loop waited on the saves a while");
         assert_eq!(ed.restart.as_ref().unwrap().stage, Stage::Saving, "{}", toasts(&ed));
+        ed.saver.held.release();
         settle_answering(&mut ed, |ed| ed.should_quit || ed.restart.is_none());
         assert_eq!(ed.restart.as_ref().and_then(Restart::ready), Some(bin.as_path()), "{}", toasts(&ed));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "Xone\n", "saved first");

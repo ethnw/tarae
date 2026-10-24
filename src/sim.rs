@@ -244,6 +244,16 @@ pub fn system() -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(EPOCH_S) + now)
 }
 
+/// `text` written to `path` as another program writes it, mid-run, its modified time the simulated wall clock's
+/// (`system`). The real one ticks coarsely on Linux (the kernel's coarse clock), so two writes of one size within a
+/// tick stamp alike (`disk::Stamp` is mtime and size) and whether a disk round saw a change was the machine's timing,
+/// not the seed's (ci5, the VM: `a_write_is_read_once_it_settles` "isn't deterministic: step 35").
+pub fn write(path: &std::path::Path, text: impl AsRef<[u8]>) {
+    std::fs::write(path, text).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(crate::clock::system()).unwrap();
+}
+
 /// `job` as a thread of the simulation (`event::run`) — given back outside one, for the caller to start.
 pub fn spawn_job(site: Site, job: Box<dyn FnOnce() + Send>) -> Option<Box<dyn FnOnce() + Send>> {
     let Some((h, role)) = current_role() else { return Some(job) };
@@ -836,7 +846,7 @@ mod tests {
         sim.walk(&mut ed, 0, |_, _| String::new(), |_| Ok(()), |_| String::new());
         assert_eq!(*took.lock().unwrap(), Some(Duration::from_secs(600)));
         assert_eq!(crate::clock::since(at), Duration::from_secs(600));
-        assert!(began.elapsed() < Duration::from_secs(5), "no real sleep");
+        assert!(began.elapsed() < crate::test_results::PATIENCE, "no real sleep: 600 s weren't slept");
         assert!(sim.trace().iter().any(|l| l.starts_with("+600000 ms")), "{:?}", sim.trace());
         drop(sim);
         assert!(crate::clock::since(at) < Duration::from_secs(600), "the real clock again");

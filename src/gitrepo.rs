@@ -508,7 +508,7 @@ impl Repo {
         #[cfg(test)]
         not_in_this_repository(&self.dir, &args);
         let mut cmd = base(&self.dir);
-        cmd.arg("--git-dir").arg(&self.git_dir);
+        cmd.env(ENGLISH.0, ENGLISH.1).arg("--git-dir").arg(&self.git_dir);
         // (a git folder alone: a submodule's not checked out names a work tree that isn't there — git stops
         // before reading its config, measured — so one that is)
         if self.work_tree.is_none() {
@@ -690,6 +690,14 @@ impl Repo {
     }
 }
 
+/// git's messages untranslated, whatever the user's language, on tarae's own git (`command`, `listing`): tarae reads
+/// its words (a rebase's `error:` lines, a fetch's) and tests check them, so a translated git (a distribution's, with
+/// the user's `LANG`) read wrong. gettext's `LANGUAGE` picks the catalog only, never `LC_ALL=C`; git has no `en`
+/// catalog, so its messages are its own. Never on the hooked form (`hooked_command`): the user's hooks would get it
+/// too, a translated tool in them switched to English — what tarae reads of those actions goes by git's state (a
+/// pull's HEAD, a stash's ref) or words git never translates (a push's `[rejected]`).
+const ENGLISH: (&str, &str) = ("LANGUAGE", "en");
+
 /// git in `dir`: no prompt, no optional lock (a read — status, diff — never takes the index lock: a commit
 /// or stage running then would fail on it).
 fn base(dir: &Path) -> Command {
@@ -821,13 +829,13 @@ impl Repo {
         r
     }
 
-    /// git on this repository: its folders given, run in `dir` — to run with `ran` or `finish` (an
-    /// environment variable added first, say).
+    /// git on this repository: its folders given, run in `dir`, its words in English (`ENGLISH`) — to run with
+    /// `ran` or `finish` (an environment variable added first, say).
     pub fn command(&self, args: &[&str]) -> Command {
         #[cfg(test)]
         not_in_this_repository(&self.dir, args);
         let mut cmd = base(&self.dir);
-        cmd.arg("--git-dir").arg(&self.git_dir);
+        cmd.env(ENGLISH.0, ENGLISH.1).arg("--git-dir").arg(&self.git_dir);
         if let Some(top) = &self.work_tree {
             cmd.arg("--work-tree").arg(top);
         }
@@ -839,7 +847,7 @@ impl Repo {
     /// git for an action that runs the user's own hooks (`hooked`): from the work tree's top, the repository
     /// found there — the top's own `.git` comes first — not named; the climb stopped at the top
     /// (`GIT_CEILING_DIRECTORIES` = its parent), a bare look-alike refused. No `GIT_DIR` or `GIT_WORK_TREE`
-    /// from tarae's own environment either.
+    /// from tarae's own environment either, and the user's language as it is (never `ENGLISH`: the hooks get it).
     pub fn hooked_command(&self, args: &[&str]) -> Result<Command, String> {
         let top = self.work_tree.as_deref().ok_or("not a checkout")?;
         #[cfg(test)]
@@ -880,7 +888,10 @@ impl Repo {
             text += &format!(" --work-tree {}", q(top));
         }
         text = text + " " + &SAFE.join(" ");
-        let mut env = vec![(NO_LAZY_FETCH.0.to_string(), NO_LAZY_FETCH.1.to_string())];
+        let mut env = vec![
+            (NO_LAZY_FETCH.0.to_string(), NO_LAZY_FETCH.1.to_string()),
+            (ENGLISH.0.to_string(), ENGLISH.1.to_string()),
+        ];
         if let Some(h) = self.held.as_deref().map(Hold::for_line) {
             for (arg, var, value) in h.settings() {
                 text += &format!(" {}", crate::packs::sh_quote(&arg));

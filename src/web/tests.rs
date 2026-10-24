@@ -599,10 +599,9 @@ fn nesting_past_the_limit_is_left_out_and_said_within_a_workers_stack() {
             for (open, close) in shapes {
                 for prefer in [Prefer::Guess, Prefer::Article, Prefer::Page] {
                     let page = nested(20_000, open, close);
-                    let t = std::time::Instant::now();
+                    // (unbounded, html5ever took 4–17 s on these at 20,000 — the limit said below is what bounds
+                    // it; how quick a read is, `perf_web_read`'s)
                     let p = reader::read(page.as_bytes(), "https://x.org/", None, prefer);
-                    // (unbounded, html5ever took 4–17 s on these at 20,000)
-                    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{open}: {:?}", t.elapsed());
                     let said = p.said.unwrap_or_default();
                     assert!(said.contains(&format!("nested past {DEPTH_MAX} levels")), "{open}: {said}");
                     assert!(!p.text.contains("deep"), "{open}");

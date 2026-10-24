@@ -709,12 +709,11 @@ pub fn run(ed: &mut Editor, s: Step) -> (Value, bool) {
         swallowed["keys"] = crate::uistate::keys_json(&ed.keys_to());
         return (swallowed, true);
     }
-    let went: Vec<String> = ed
-        .ui_card_how
-        .iter()
-        .filter(|(id, how)| gone_before.get(id) != Some(how))
-        .map(|(id, how)| format!("card#{id} went: {how}"))
-        .collect();
+    // (the oldest card first: two gone at once say the same one every run)
+    let mut went: Vec<(&u64, &String)> =
+        ed.ui_card_how.iter().filter(|(id, how)| gone_before.get(id) != Some(how)).collect();
+    crate::sorting::sort(&mut went);
+    let went: Vec<String> = went.into_iter().map(|(id, how)| format!("card#{id} went: {how}")).collect();
     if let Some(w) = went.first() {
         v["said"] = json!(w);
     } else if ed.said != toasts_before

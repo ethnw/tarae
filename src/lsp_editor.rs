@@ -814,7 +814,9 @@ impl Editor {
     fn saves_again(&mut self) {
         self.lsp_flush();
         let now = (self.lsp.clock.0)();
-        let cids: Vec<ClientId> = self.lsp.resaves.keys().copied().collect();
+        let mut cids: Vec<ClientId> = self.lsp.resaves.keys().copied().collect();
+        // (in order: what each server hears, and when, is the same every run)
+        crate::sorting::sort(&mut cids);
         let mut later = false;
         for cid in cids {
             if self.lsp.changed_at.get(&cid).is_some_and(|t| now.duration_since(*t) < RESAVE_QUIET) {
@@ -869,13 +871,15 @@ impl Editor {
             return;
         }
         let writing = |id: &DocId| self.docs.iter().any(|d| d.id == *id && d.saving > 0);
-        let due: Vec<DocId> = self
+        let mut due: Vec<DocId> = self
             .lsp
             .held_saves
             .iter()
             .filter(|(id, t)| (now || t.elapsed() >= SAVE_QUIET) && !writing(id))
             .map(|(id, _)| *id)
             .collect();
+        // (in the documents' order: a server hears two held saves in the same order every run)
+        crate::sorting::sort(&mut due);
         // (each taken off the held ones by `lsp_did_save`)
         for id in due {
             self.lsp_did_save(id);

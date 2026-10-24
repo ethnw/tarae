@@ -479,7 +479,7 @@ fn plain_http_goes_through_a_socks5_upstream_in_origin_form() {
 /// refused, no way of signing in it takes (without credentials, and with), the host refused by its rules (a tunnel
 /// and a plain request), silent, unreachable — the run gets 502, the report names the variable, never where it is,
 /// and `:sandbox-blocked` offers nothing. Only the silent one is waited on to the proxy's limit (0.4 s, a proxy of
-/// its own); the others answer, and their proxy waits for that up to `WAIT` — under load a 0.4 s limit had one
+/// its own); the others answer, and their proxy waits for that up to `HOLD` — under load a 0.4 s limit had one
 /// that answers said as silent (#232).
 #[test]
 fn a_socks5_upstreams_failures_are_said_as_its_own() {
@@ -492,7 +492,7 @@ fn a_socks5_upstreams_failures_are_said_as_its_own() {
         outside(silent),
     );
     let quick = start(resolver(Vec::new()).0, Limits { connect: Duration::from_millis(400), ..limits() });
-    let f = start(resolver(Vec::new()).0, Limits { connect: WAIT, ..limits() });
+    let f = start(resolver(Vec::new()).0, Limits { connect: HOLD, ..limits() });
     let creds = Some(("u", "tarae-fake-token-7"));
     let get = "GET http://example.invalid/ HTTP/1.1\r\n\r\n".to_string();
     let connect = connect_head("example.invalid:443");

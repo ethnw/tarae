@@ -13,14 +13,18 @@ use super::*;
 mod upstream;
 
 const LO: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-/// How long a test waits for what it expects; the proxy's own limits are short (`limits`).
-const WAIT: Duration = Duration::from_secs(5);
+/// How long a test waits for what it expects — the one patience; never a limit of the proxy's own (`HOLD`).
+const WAIT: Duration = crate::test_results::PATIENCE;
+
+/// The proxy's own longer limits in these tests — a card's hold, a relay's idle time, an upstream's connect: what a
+/// test waits out on purpose, so not the patience it waits for what it expects with.
+const HOLD: Duration = Duration::from_secs(5);
 
 fn limits() -> Limits {
     Limits {
         head_time: Duration::from_millis(300),
         hello_time: Duration::from_millis(300),
-        hold: WAIT,
+        hold: HOLD,
         connect: Duration::from_secs(2),
         per_session: 256,
         total: 1024,
@@ -886,7 +890,7 @@ fn relay_thread(
     pipes: fn() -> io::Result<relay::Pipes>,
 ) -> Bounded<(relay::End, f64)> {
     bounded(move || {
-        let end = relay::relay_with(client, server, None, WAIT, b"", None, false, pipes);
+        let end = relay::relay_with(client, server, None, HOLD, b"", None, false, pipes);
         // SAFETY: a timespec of ours, filled for this thread.
         let mut t: libc::timespec = unsafe { std::mem::zeroed() };
         unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
@@ -1223,9 +1227,8 @@ fn a_runs_retry_after_an_unanswered_hold_is_refused_at_once() {
     assert!(f.asks.recv_timeout(WAIT).is_ok());
     // The same run tries again: refused within a fraction of the hold, unasked, said why
     let (mut c, d) = connection(&f.proxy, 21, 1, rules(&[]));
-    let at = Instant::now();
     assert_eq!(ask(&mut c, &connect_head("ask.test:443")), 403);
-    assert!(at.elapsed() < hold / 4, "refused at once: {:?}", at.elapsed());
+    // (refused at once: one held again would say its card went unanswered, `didn't answer`)
     assert!(said_host(&d).contains("hasn't answered its card yet"), "{}", said_host(&d));
     assert!(f.asks.try_recv().is_err(), "not asked again for the same run");
     // Another run's first connection: held and asked

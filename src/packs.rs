@@ -1432,7 +1432,13 @@ fn download_way(w: &Table) -> Result<crate::fetch::Download, String> {
 /// `~/go/bin`, `${GOPATH}/bin` → a folder (None if a variable isn't set). A variable holding a list of
 /// folders (`GOPATH=/a:/b`) gives its first, where tools install to.
 pub(crate) fn expand_dir(d: &str) -> Option<PathBuf> {
-    let home = || std::env::var("HOME").ok().filter(|h| !h.is_empty());
+    expand_dir_with(d, &|k| std::env::var_os(k))
+}
+
+/// `expand_dir`, the variables from `var` (tests: their own, never the process's — a `set_var` in the test binary
+/// races every other test's `getenv`).
+fn expand_dir_with(d: &str, var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let home = || var("HOME").and_then(|h| h.into_string().ok()).filter(|h| !h.is_empty());
     let d = match d.strip_prefix("~/") {
         Some(rest) => format!("{}/{rest}", home()?),
         None => d.to_string(),
@@ -1442,7 +1448,7 @@ pub(crate) fn expand_dir(d: &str) -> Option<PathBuf> {
     while let Some(i) = rest.find("${") {
         out.push_str(&rest[..i]);
         let end = rest[i..].find('}')? + i;
-        let v = std::env::var_os(&rest[i + 2..end])?;
+        let v = var(&rest[i + 2..end])?;
         let first = std::env::split_paths(&v).next().filter(|p| !p.as_os_str().is_empty())?;
         out.push_str(&first.to_string_lossy());
         rest = &rest[end + 1..];
@@ -2455,15 +2461,18 @@ mod tests {
             "the rest in the home folder"
         );
         assert_eq!(expand_dir("${HOME}/x"), Some(PathBuf::from(format!("{home}/x"))));
-        // SAFETY: the variable is this test's own
-        unsafe { std::env::set_var("TARAE_TEST_GOPATH", "/a/go:/b/go") };
+        let var = |k: &str| match k {
+            "GOPATH" => Some("/a/go:/b/go".into()),
+            "LOOP" => Some("${LOOP}".into()),
+            _ => None,
+        };
         assert_eq!(
-            expand_dir("${TARAE_TEST_GOPATH}/bin"),
+            expand_dir_with("${GOPATH}/bin", &var),
             Some(PathBuf::from("/a/go/bin")),
             "a list: its first"
         );
-        unsafe { std::env::set_var("TARAE_TEST_LOOP", "${TARAE_TEST_LOOP}") };
-        assert_eq!(expand_dir("${TARAE_TEST_LOOP}"), Some(PathBuf::from("${TARAE_TEST_LOOP}")), "not again");
+        assert_eq!(expand_dir_with("${LOOP}", &var), Some(PathBuf::from("${LOOP}")), "not again");
+        assert_eq!(expand_dir_with("${NONE}/x", &var), None, "not set: none");
     }
 
     /// `[server.<name>] leave-out`: the built-in ones read; a broken one says what's wrong (logged, skipped);

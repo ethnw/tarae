@@ -1134,15 +1134,9 @@ fn counting_features_wakes_nothing_and_is_written_at_the_end() {
     t.wait_text("three");
     t.send("jj");
     t.wait_state("two keys handled", |s| s["input"].as_u64().is_some_and(|n| n >= 2));
-    // Settled (a second with no frame), then two seconds: no frame, next to no wakes
-    let end = std::time::Instant::now() + TIMEOUT;
-    loop {
-        let frames = t.frames();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if t.frames() == frames || std::time::Instant::now() > end {
-            break;
-        }
-    }
+    // Settled (no motion, every frame written read, no redraw owed — `Term::settle`, never a quiet second), then two
+    // seconds: no frame, next to no wakes
+    t.settle("the keys' frames", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
     let (frames, before, was, threads) = (t.frames(), t.usage(), t.screen(), t.threads());
     std::thread::sleep(std::time::Duration::from_secs(2));
     let (drawn, used) = (t.frames() - frames, t.usage() - before);
@@ -1208,17 +1202,10 @@ fn a_page_reads_into_its_buffer_and_then_sleeps() {
     go.send(()).unwrap();
     let s = t.wait_text("# Held page");
     assert!(s.contains("localhost › Held") && !s.contains("reading localhost"), "{s}");
-    // Landed: its toast gone, a second with no frame (what lands late drawn), then two more with none and nothing
-    // woken (the line's age is drawn when a frame comes, never a frame of its own)
+    // Landed: its toast gone, settled (`Term::settle`, never a quiet second), then two seconds with no frame and
+    // nothing woken (the line's age is drawn when a frame comes, never a frame of its own)
     t.wait_for("its toast gone", |s| !s.status().contains(" chars · "));
-    let end = std::time::Instant::now() + TIMEOUT;
-    loop {
-        let frames = t.frames();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if t.frames() == frames || std::time::Instant::now() > end {
-            break;
-        }
-    }
+    t.settle("the page landed", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
     let (frames, before) = (t.frames(), t.usage());
     std::thread::sleep(std::time::Duration::from_secs(2));
     let (drawn, used) = (t.frames() - frames, t.usage() - before);
@@ -1249,8 +1236,10 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
     // (the line's blame and the gutter's mark land late — git on workers; a loaded machine drew them inside the
     // measured window)
     // (the blame is the cursor's line's: line 1 at the first start, line 2 — restored there — at the second)
+    // (its age is whatever the run's speed made it: `just now` within the commit's second, else `Ns ago` — ci5: the
+    // VM's full suite read `t, just now · base`, never redrawn, and waited it out)
     let git_landed =
-        |s: &Screen| (s.contains(" ago · base") || s.contains("not committed yet")) && s.contains("▎two");
+        |s: &Screen| (s.contains(" · base") || s.contains("not committed yet")) && s.contains("▎two");
     t.wait_for("the line's blame and its change's mark", git_landed);
     let idle = |t: &mut Term, what: &str| {
         // Settled on what lands late, as the state says it — never a quiet second (CI's macOS: a frame that
@@ -1693,15 +1682,9 @@ fn bleeding_ink_draws_no_frame_after_the_turn() {
     t.wait_for("the answer in the panel", |s| s.contains("value.") && !s.contains("C-c stop"));
     let (head, rest) = (t.fg_of("value."), t.fg_of("cloned"));
     assert_eq!(head, rest, "the turn ended: the head in the ink of the rest\n{}", t.screen());
-    // Settled (the frame that draws it dry, what lands late) — then nothing: no tick for the ink drying
-    let end = std::time::Instant::now() + TIMEOUT;
-    loop {
-        let frames = t.frames();
-        std::thread::sleep(Duration::from_secs(1));
-        if t.frames() == frames || std::time::Instant::now() > end {
-            break;
-        }
-    }
+    // Settled (the frame that draws it dry, every frame read, no redraw owed — `Term::settle`) — then nothing: no
+    // tick for the ink drying
+    t.settle("the turn's last frame", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
     // (nor a wake: a tick that draws nothing new is no frame, but it wakes the loop — at rest it's a few
     // switches in 2 s, a 100 ms tick ~100, as `an_idle_editor_draws_nothing_and_sleeps` measures)
     let (frames, before) = (t.frames(), t.usage());
@@ -1731,15 +1714,9 @@ fn a_motion_ends_and_tarae_sleeps() {
     t.wait_state("the flash gone", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
     let drawn = t.frames() - before;
     assert!(drawn >= 2, "the key's frame and the flash's going: {drawn} frames\n{}", t.screen());
-    // Settled (what the edit asks for after a pause — a save, the gutter) — then nothing: no tick for the flash
-    let end = std::time::Instant::now() + TIMEOUT;
-    loop {
-        let frames = t.frames();
-        std::thread::sleep(Duration::from_secs(1));
-        if t.frames() == frames || std::time::Instant::now() > end {
-            break;
-        }
-    }
+    // Settled (every frame read, no redraw owed — `Term::settle`, never a quiet second) — then nothing: no tick for
+    // the flash
+    t.settle("the flash's last frame", |s| s["motions"].as_array().is_some_and(Vec::is_empty));
     let (frames, before) = (t.frames(), t.usage());
     std::thread::sleep(Duration::from_secs(2));
     let (drawn, used) = (t.frames() - frames, t.usage() - before);

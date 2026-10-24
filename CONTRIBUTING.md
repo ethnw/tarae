@@ -131,8 +131,8 @@ measured" is never a pass. A slow change thus fails a budget, and a slower one s
 `cargo perf` is the gate on time; `cargo test` builds at opt-level 0 for a quick edit-and-test loop, where these skip
 themselves, saying so. On a slow shared machine, `TARAE_PERF_SLACK=3` multiplies the budget.
 
-Where each OS is tested: macOS's tests run here, on the maintainer's Mac (`:preflight`, `:preflight-full`); CI
-only builds them. [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run
+Where each OS is tested: macOS's tests run here, on the maintainer's Mac (`:preflight`, `:preflight-full`), at
+every landing; CI neither builds nor runs them. [CI](.github/workflows/ci.yml) runs the same checks when started by hand (Actions → CI → Run
 workflow) — fmt, clippy (warnings are errors), and the tests on Linux, with and without bundled grammars, every
 failing test binary said at once (`--no-fail-fast`) — except `cargo perf`:
 time is judged on a fixed machine, so CI runs only the time budgets, in the `perf` profile, and they only report (the
@@ -364,7 +364,7 @@ process, or the disk.
   another. Under a sandboxed `cargo test` (`TARAE_SANDBOXED` is set), the real Seatbelt tests skip themselves
   through `sandbox::skipped_inside`, which writes `tarae-test: skipped <name> — <why>` past libtest's capture.
   libtest still prints `ok`, but tarae's test pane and Claude's results count them as skipped, not passed.
-  They run in full in your own `cargo test` and in CI. Under `cfg(test)` Claude's commands skip the sandbox
+  They run in full in your own `cargo test` on a Mac. Under `cfg(test)` Claude's commands skip the sandbox
   (`Availability::Bypass`) unless a test sets it.
 - Background behavior that would make single-event tests flaky is off under `cfg(test)`: the git gutter
   (`git_auto`), restore and recent-file state, grammar download offers, and the waiting animation. The clipboard uses

@@ -313,12 +313,15 @@ impl Kept {
         // (whether `dir` holds no file; its fileless folders, parents first, pushed to `out`)
         fn walk(dir: &Path, mode: u32, budget: &mut usize, out: &mut Vec<(PathBuf, u32)>) -> bool {
             let Ok(entries) = std::fs::read_dir(dir) else { return false };
+            // (a folder whole or not at all, in name order: what a walk cut short noted is the same on every
+            // file system)
+            let Some(listed) = crate::sorting::listing(entries, *budget) else {
+                *budget = 0;
+                return false;
+            };
+            *budget -= listed.len();
             let (mut fileless, mut below) = (true, Vec::new());
-            for e in entries.flatten() {
-                if *budget == 0 {
-                    return false;
-                }
-                *budget -= 1;
+            for (_, e) in listed {
                 match e.file_type() {
                     Ok(t) if t.is_dir() => {
                         let mode = e.metadata().map(|m| m.permissions().mode()).unwrap_or(0o755);
@@ -937,7 +940,9 @@ pub struct There {
 /// it the run starts, the folders not reached named in its report. Measured (`perf_a_walk_of_the_key_places`, Linux
 /// 7.0 on the GCP VM, warm, the `perf` profile): 2.18 µs an entry — 20,011 of them 43.7 ms, about what a run in tier
 /// own takes to start (~39 ms); a checkout of tarae (2,314 files, 250 folders) 4.8 ms, 1,000 files 2.8 ms, an empty
-/// `/tmp` 14 µs (`target/sb/sandbox-d2-walk.md`). Every run walks afresh (user decision 2026-10-20, request 3's question 4):
+/// `/tmp` 14 µs (`target/sb/sandbox-d2-walk.md`). Each folder sorted by name before it's queued (ci5: a walk cut
+/// short finds the same on every disk) adds 0.04–0.07 µs an entry — +0.8 ms in folders of 99, +1.5 ms of 999 or one
+/// of 20,000 (`sorting::tests::perf_a_listing_in_name_order`, this Mac): 2–3 % of the walk. Every run walks afresh (user decision 2026-10-20, request 3's question 4):
 /// nothing kept from one run to the next, so a key made anywhere below a place since is found.
 pub const WALK_MAX: usize = 20_000;
 
@@ -958,7 +963,8 @@ pub struct Outside {
 }
 
 /// The files named like keys (`key_named_below` its place) in the places outside the project runs read
-/// (`Policy::key_places`) but those the user opened (`opened`), at most `max` entries read; the folders not reached
+/// (`Policy::key_places`) but those the user opened (`opened`), at most `max` entries read — each folder's in name
+/// order, a folder whole or not at all, so a walk cut short finds the same on every machine; the folders not reached
 /// past it, in the order they would have been. First what no run writes (the repository's other checkouts, the read
 /// grants), then what runs write (`Policy::write_places`: the temp folders, the write grants, one inside a place of
 /// the first) — each breadth-first over its places at once, the cap over both: a run that fills `/tmp` can't stop
@@ -1067,18 +1073,20 @@ pub fn outside_keys(
                     continue;
                 }
             };
-            for e in entries.flatten() {
-                // (a folder the cap stops in is named too: what it holds past there wasn't read)
-                if read >= max {
-                    groups[g].push_front((place, from, dir));
-                    walked.unwalked = groups.into_iter().flatten().map(|(_, _, d)| d).collect();
-                    return walked;
-                }
-                read += 1;
-                let path = dir.join(e.file_name());
+            // (in name order, a folder whole or not at all — the one the cap stops at named, none of it taken:
+            // which of its entries the cap would stop among is the filesystem's listing order, another on each
+            // machine)
+            let Some(listed) = crate::sorting::listing(entries, max.saturating_sub(read)) else {
+                groups[g].push_front((place, from, dir));
+                walked.unwalked = groups.into_iter().flatten().map(|(_, _, d)| d).collect();
+                return walked;
+            };
+            read += listed.len();
+            for (name, e) in listed {
+                let path = dir.join(&name);
                 let first = g == 0;
                 let entered =
-                    |path: &Path| enters(&dir, &e.file_name()) && !skipped(path) && !(first && written(path));
+                    |path: &Path| enters(&dir, &name) && !skipped(path) && !(first && written(path));
                 // (a mount point is another filesystem: named, never touched — not even for its type, which is asked
                 // of it where its folder's filesystem gives none)
                 if mounts.contains(&path) {
@@ -2714,6 +2722,53 @@ mod tests {
         std::fs::remove_dir_all(&t).ok();
     }
 
+    /// CI's 7th round: the walk of the key places takes each folder's entries in name order, a folder whole or not
+    /// at all — one cut short at its cap finds the same keys and names the same folders as not walked whatever order
+    /// the disk lists them in (ext4's hash order took `big/` before `a/` on CI's runner, the VM's overlayfs after it).
+    /// The same tree made twice, its folders and files created in opposite orders (tmpfs lists the newest first).
+    #[test]
+    fn a_walk_cut_short_finds_the_same_keys_whatever_order_the_disk_lists() {
+        let t = std::fs::canonicalize(crate::scratch::Scratch::new("sb-outside-order").into_path()).unwrap();
+        let names: Vec<String> = (0..12).map(|i| format!("d{i:02}")).collect();
+        let walk = |at: &str, reversed: bool| {
+            let g = t.join(at);
+            let mut dirs = names.clone();
+            if reversed {
+                dirs.reverse();
+            }
+            for d in &dirs {
+                std::fs::create_dir_all(g.join(d)).unwrap();
+                let mut files = ["f0.txt", "f1.txt", "f2.txt", "k.pem"];
+                if reversed {
+                    files.reverse();
+                }
+                for f in files {
+                    std::fs::write(g.join(d).join(f), "tarae-fake-token").unwrap();
+                }
+            }
+            let p = Policy {
+                key_places: vec![g.clone()],
+                ..Policy::for_project(&Env { root: t.join("project"), ..Default::default() })
+            };
+            // (the top's 12 entries, five folders of 4 whole, and 2 more: the sixth doesn't fit)
+            let w = outside_keys(&p, &[], &[], &[], 12 + 5 * 4 + 2);
+            let rel = |v: Vec<PathBuf>| -> Vec<PathBuf> {
+                v.into_iter().map(|k| k.strip_prefix(&g).unwrap().to_path_buf()).collect()
+            };
+            (rel(w.keys), rel(w.unwalked))
+        };
+        let keys: Vec<PathBuf> = names[..5].iter().map(|d| Path::new(d).join("k.pem")).collect();
+        let unwalked: Vec<PathBuf> = names[5..].iter().map(PathBuf::from).collect();
+        for (at, reversed) in [("made-in-order", false), ("made-reversed", true)] {
+            assert_eq!(
+                walk(at, reversed),
+                (keys.clone(), unwalked.clone()),
+                "{at}: the first five in name order"
+            );
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
+
     /// D-i: what no run writes is walked to its end before what runs write — a run that fills a place it writes
     /// (`/tmp`) past the cap can't keep the next run's walk from a key in another checkout behind it, though that
     /// place is the shallower; nor from one beside a folder it writes inside that checkout. What the cap stopped is
@@ -3598,10 +3653,11 @@ mod tests {
         let pid = std::process::id();
         assert_eq!(pid, Owner::this_thread().pid);
         let wait = std::time::Duration::from_millis(500);
+        // (within its wait: a probe that waited for the stream to end would wait out a sleep longer than any patience)
         let t = std::time::Instant::now();
-        let off = audit_probe(abi, |_, _| sh("exec sleep 5".into()), wait);
+        let off = audit_probe(abi, |_, _| sh("exec sleep 600".into()), wait);
         assert_eq!(off, Err("kernel audit is off (no auditd or audit=1)".into()));
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}: within its wait", t.elapsed());
+        assert!(t.elapsed() < crate::test_results::PATIENCE, "{:?}: within its wait", t.elapsed());
         assert_eq!(audit_probe(abi, |o, path| sh(records(pid, &o.comm, path)), wait), Ok(()));
         for (pid, name) in [(pid, "tarae-landlock".to_string()), (1, String::new())] {
             let other = audit_probe(

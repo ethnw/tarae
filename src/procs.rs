@@ -4302,9 +4302,10 @@ pub(crate) mod tests {
         assert!(t.elapsed() >= Duration::from_millis(60), "its pace");
         tx.send(Wake::Open(true)).unwrap();
         let t = Instant::now();
-        assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
-        // (at once, not after the 30 s pace — the bound only has to outlast a slow runner)
-        assert!(open && t.elapsed() < Duration::from_secs(10), "opened: at once");
+        let pace = crate::test_results::PATIENCE * 2;
+        assert_eq!(wait(&rx, pace, &mut open), Some(()));
+        // (at once, not after a pace longer than any patience)
+        assert!(open && t.elapsed() < crate::test_results::PATIENCE, "opened: at once");
         tx.send(Wake::Now).unwrap();
         assert_eq!(wait(&rx, Duration::from_secs(30), &mut open), Some(()));
         drop(tx);

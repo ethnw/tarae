@@ -666,19 +666,22 @@ fn output_code(root: &Path, ignored: &[String], since: std::time::SystemTime) ->
         }
         let (mut found, mut seen, mut todo) = (Vec::new(), 0, vec![root.join(folder)]);
         // (no link followed: a `DirEntry`'s metadata is the entry's own)
-        'walk: while let Some(d) = todo.pop() {
+        while let Some(d) = todo.pop() {
             let Ok(entries) = std::fs::read_dir(&d) else { continue };
-            for e in entries.flatten() {
-                seen += 1;
-                if seen > CODE_WALK_MAX {
-                    break 'walk;
-                }
+            // (a folder whole or not at all, in name order: what a walk cut short names is the same on every
+            // file system)
+            let Some(listed) = crate::sorting::listing(entries, CODE_WALK_MAX - seen) else {
+                seen = CODE_WALK_MAX + 1;
+                break;
+            };
+            seen += listed.len();
+            for (name, e) in listed {
                 let Ok(m) = e.metadata() else { continue };
                 if m.is_dir() {
                     todo.push(e.path());
                 } else if m.is_file()
                     && m.modified().is_ok_and(|t| t >= since)
-                    && code(&e.file_name(), m.permissions().mode())
+                    && code(&name, m.permissions().mode())
                     && let Ok(rel) = e.path().strip_prefix(root)
                 {
                     found.push(rel.to_string_lossy().into_owned());

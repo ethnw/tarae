@@ -427,13 +427,15 @@ pub fn tip(ed: &mut Editor, base: Base, tip: String) {
 /// An overlap round landed (`seq`: begun as the `seq`th): each base's move it predicts on looked at.
 pub fn landed(ed: &mut Editor, seq: u64) {
     ed.keep_close.round = ed.keep_close.round.max(seq);
-    let ready: Vec<Base> = ed
+    let mut ready: Vec<Base> = ed
         .keep_close
         .pending
         .iter()
         .filter(|(_, p)| !p.looking && seq > p.after)
         .map(|(b, _)| b.clone())
         .collect();
+    // (in the bases' order: two moved at once ask in the same order every run)
+    crate::sorting::sort(&mut ready);
     for b in ready {
         look(ed, &b);
     }

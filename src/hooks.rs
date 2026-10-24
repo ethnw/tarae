@@ -198,11 +198,17 @@ pub fn unseen(top: &Path, base: &str, likely: &[&str], store: Option<&Path>) -> 
             whole(&d, "/".into(), NOT_LOOKED);
             continue;
         };
+        let mut listed = Vec::new();
         for e in rd {
             let Ok(e) = e else {
                 whole(&d, "/".into(), NOT_LOOKED);
                 break;
             };
+            listed.push((e.file_name(), e));
+        }
+        // (in name order: which files are past `FILES_MAX` is the same on every file system, not its listing order)
+        crate::sorting::by(&mut listed, |a, b| a.0.cmp(&b.0));
+        for (_, e) in listed {
             // (a type it can't tell: as a file — opening it says what it is)
             match e.file_type() {
                 Ok(t) if t.is_dir() && depth < DEPTH_MAX => stack.push((e.path(), depth + 1)),

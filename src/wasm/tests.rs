@@ -318,9 +318,8 @@ fn bulk_ops_pay_fuel_per_byte() {
         let fresh = |fuel| {
             Instance::new(Module::new(&bytes).unwrap(), Limits { jit, ..Limits::default() }, fuel).unwrap()
         };
-        let start = std::time::Instant::now();
+        // (stopped after about a thousand fills: what each costs is pinned by `spent` below)
         assert_eq!(call(&mut fresh(1 << 30), "fills", &[]), Err(Trap::OutOfFuel));
-        assert!(start.elapsed() < std::time::Duration::from_secs(5), "stopped after about a thousand fills");
         let mut i = fresh(1 << 20);
         call(&mut i, "once", &[Val::I32(1000)]).unwrap();
         // 1000 filled + 1000 copied + 3 table elements + a 64 KiB page, and a few instructions

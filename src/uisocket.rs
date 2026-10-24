@@ -95,10 +95,16 @@ pub fn bind_in(dir: &Path, pid: u32) -> Result<UnixListener, String> {
         std::fs::remove_file(&path).map_err(|e| format!("can't remove the old {}: {e}", path.display()))?;
     }
     // SAFETY: umask only sets the process's mask (no thread is running yet); put back right after.
+    // (Not in the test binary: its other tests' threads run, and a file one makes meanwhile would take the mask —
+    // there the 0700 folder and the 0600 below keep the socket this user's)
+    #[cfg(not(test))]
     let old = unsafe { libc::umask(0o077) };
     let listener = at(&path, |p: &Path| UnixListener::bind(p));
     // SAFETY: as above.
-    unsafe { libc::umask(old) };
+    #[cfg(not(test))]
+    unsafe {
+        libc::umask(old)
+    };
     let listener = listener.map_err(|e| format!("can't listen on {}: {e}", path.display()))?;
     // (bound 0700 — a socket's mode is what's left of 0777; read and write are all it needs)
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
@@ -774,6 +780,9 @@ fn find() -> anyhow::Result<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "sock"))
         .collect();
+    // (by pid's name: two that fit alike pick the same one, and the list reads the same, every time)
+    let mut socks = socks;
+    crate::sorting::sort(&mut socks);
     let here = std::env::current_dir().ok().map(|d| std::fs::canonicalize(&d).unwrap_or(d));
     let mut live = Vec::new();
     for p in socks {

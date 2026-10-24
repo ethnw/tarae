@@ -822,7 +822,10 @@ fn found_under(place: &Path, home: Option<&Path>) -> Found {
                 continue;
             }
             let Ok(rd) = std::fs::read_dir(&p) else { continue };
-            stack.extend(rd.flatten().map(|e| e.path()));
+            // (taken in name order — the stack's last first — so what the caps let through is the same on every
+            // file system, not its listing order)
+            let listed = crate::sorting::listing(rd, usize::MAX).unwrap_or_default();
+            stack.extend(listed.into_iter().rev().map(|(_, e)| e.path()));
             continue;
         }
         // (by its name, whatever its size or kind of content)

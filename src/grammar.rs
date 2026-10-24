@@ -175,6 +175,17 @@ impl Drop for DirTurn {
 /// Downloads and builds grammars (even if present, with `force`). Calls `report` as each one finishes.
 pub fn install(names: &[String], force: bool, report: impl Fn(Progress) + Sync) -> Result<(), String> {
     let data = crate::runtime::data_dir().ok_or("no home directory")?;
+    install_in(&data, names, force, report)
+}
+
+/// `install` into tarae's data folder `data` (tests: one of their own — never by setting `XDG_DATA_HOME` in the
+/// test binary, which races every other test's `getenv`).
+fn install_in(
+    data: &Path,
+    names: &[String],
+    force: bool,
+    report: impl Fn(Progress) + Sync,
+) -> Result<(), String> {
     let out_dir = data.join("grammars");
     let src_dir = data.join("sources");
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -631,14 +642,12 @@ mod tests {
     #[test]
     #[ignore = "network: CI's network job runs it"]
     fn grammar_install_e2e() {
-        let dir = std::env::temp_dir().join(format!("tarae-grammar-{}", std::process::id()));
-        // SAFETY: a variable only this test uses
-        unsafe { std::env::set_var("XDG_DATA_HOME", &dir) };
+        let dir = crate::scratch::Scratch::new("grammar");
         let done = Mutex::new(Vec::new());
-        install(&["json".to_string()], false, |p| done.lock().unwrap().push(format!("{p:?}"))).unwrap();
-        assert!(dir.join("tarae/grammars/json.so").is_file(), "{:?}", done.lock().unwrap());
-        let left = std::fs::read_dir(dir.join("tarae/sources")).map_or(0, |d| d.count());
+        install_in(dir.path(), &["json".to_string()], false, |p| done.lock().unwrap().push(format!("{p:?}")))
+            .unwrap();
+        assert!(dir.join("grammars/json.so").is_file(), "{:?}", done.lock().unwrap());
+        let left = std::fs::read_dir(dir.join("sources")).map_or(0, |d| d.count());
         assert_eq!(left, 0, "checkout deleted after the build");
-        std::fs::remove_dir_all(dir).ok();
     }
 }

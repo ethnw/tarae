@@ -224,13 +224,20 @@ pub struct Completion {
     pub loading: bool,
     /// Completing a command name (otherwise an argument).
     pub command: bool,
+    /// The folder holds more than the `DIR_MAX` entries read (the prompt says so).
+    pub cut: bool,
 }
+
+/// A folder's entries a completion reads at most: which ones, past it, is the file system's choice.
+pub const DIR_MAX: usize = 5000;
 
 /// Lists read from disk (the editor fills them on a worker thread).
 #[derive(Default)]
 pub struct Lists {
     /// Folder → (name, is folder). Missing = not read yet.
     pub dirs: HashMap<PathBuf, Vec<(String, bool)>>,
+    /// Folders holding more than the `DIR_MAX` entries `dirs` has.
+    pub cut: std::collections::HashSet<PathBuf>,
     pub themes: Option<Vec<String>>,
     pub branches: Option<Vec<String>>,
     /// Commands plugins registered: (name, hint).
@@ -338,7 +345,7 @@ pub fn complete(text: &str, cwd: &Path, lists: &Lists) -> Completion {
             .chain(plugins)
             .collect();
         let ranked = rank(text, items, true);
-        return Completion { start: 0, cands: ranked, loading: false, command: true };
+        return Completion { start: 0, cands: ranked, loading: false, command: true, cut: false };
     };
     let name = &text[..space];
     let Some(cmd) = find(name) else { return Completion::default() };
@@ -347,10 +354,12 @@ pub fn complete(text: &str, cwd: &Path, lists: &Lists) -> Completion {
     let token = text.rsplit(char::is_whitespace).next().unwrap_or_default();
     let token_start = text.len() - token.len();
     let arg_index = args.split_whitespace().count() - usize::from(!token.is_empty());
+    let mut cut = false;
     let (cands, loading) = match cmd.arg {
         Arg::None => (Vec::new(), false),
         Arg::File => {
             let (dir, prefix) = file_query(token, cwd);
+            cut = lists.cut.contains(&dir);
             match lists.dirs.get(&dir) {
                 None => (Vec::new(), true),
                 Some(entries) => {
@@ -464,7 +473,7 @@ pub fn complete(text: &str, cwd: &Path, lists: &Lists) -> Completion {
         }
         _ => (Vec::new(), false),
     };
-    Completion { start: token_start, cands, loading, command: false }
+    Completion { start: token_start, cands, loading, command: false, cut }
 }
 
 /// Input text with the candidate applied.

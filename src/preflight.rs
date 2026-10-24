@@ -1383,8 +1383,8 @@ mod tests {
     /// CONTRIBUTING's list, and CI's jobs — CI read as it runs them (`--locked` and `--no-fail-fast` aside, `RUSTFLAGS: -D
     /// warnings` making clippy's warnings errors, its feature matrix spelled out). Where CI differs on
     /// purpose: `cargo perf` (it runs only the time budgets, and only to report — time is judged on a fixed
-    /// machine), the network job (`--ignored`) and macOS's tests, only built there (`--no-run`: they run on the
-    /// maintainer's Mac). A step with an `if:` names its command on the line after (`run: …`).
+    /// machine) and the network job (`--ignored`); its tests are Linux's only (macOS's run on the maintainer's Mac).
+    /// A step with an `if:` names its command on the line after (`run: …`).
     #[test]
     fn the_checks_are_the_same_here_in_contributing_and_in_ci() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1417,8 +1417,8 @@ mod tests {
             .filter_map(|l| l.trim().trim_start_matches("- ").strip_prefix("run: "))
             .filter(|c| c.starts_with("cargo "))
         {
-            // (on purpose: perf as budgets only, the network job, macOS's tests only built)
-            if cmd.contains("--profile perf") || cmd.contains("-- --ignored") || cmd.contains(" --no-run") {
+            // (on purpose: perf as budgets only, the network job)
+            if cmd.contains("--profile perf") || cmd.contains("-- --ignored") {
                 continue;
             }
             // (CI's own: the lock file as committed, every failing binary said at once)

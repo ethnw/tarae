@@ -1025,8 +1025,12 @@ mod tests {
         for h in headers {
             for line in std::fs::read_to_string(h).unwrap_or_default().lines() {
                 let mut words = line.split_whitespace();
+                // (the generic table's `*_time64` calls are a 32-bit kernel's only — under its `#if __BITS_PER_LONG
+                // == 32` block, which a reader of lines doesn't see: on aarch64 `utimensat_time64` read as the
+                // kernel's, ci5; a 64-bit kernel has the plain names alone)
                 if let (Some("#define"), Some(name), Some(n)) = (words.next(), words.next(), words.next())
                     && let (Some(name), Ok(n)) = (name.strip_prefix("__NR_"), n.parse())
+                    && !(cfg!(target_pointer_width = "64") && name.ends_with("_time64"))
                 {
                     calls.push((name.to_string(), n));
                 }

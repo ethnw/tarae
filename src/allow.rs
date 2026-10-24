@@ -1216,7 +1216,12 @@ pub fn code_trees(vars: &crate::sandboxpack::Vars) -> Vec<PathBuf> {
         }
         out.extend(at);
     }
-    out.into_iter().filter_map(|p| std::fs::canonicalize(p).ok()).filter(|p| p.is_dir()).collect()
+    // (in order, not the file systems' listing order)
+    let mut out: Vec<PathBuf> =
+        out.into_iter().filter_map(|p| std::fs::canonicalize(p).ok()).filter(|p| p.is_dir()).collect();
+    crate::sorting::sort(&mut out);
+    out.dedup();
+    out
 }
 
 /// What a read of Claude's may read unasked besides the project and what the user allowed, by kind
@@ -1285,7 +1290,11 @@ pub fn checkouts(root: &Path) -> Vec<PathBuf> {
     {
         out.push(main.to_path_buf());
     }
-    for entry in std::fs::read_dir(common.join("worktrees")).into_iter().flatten().flatten() {
+    // (the linked ones by name, not `worktrees/`' listing order)
+    let listed = std::fs::read_dir(common.join("worktrees"))
+        .ok()
+        .and_then(|rd| crate::sorting::listing(rd, usize::MAX));
+    for (_, entry) in listed.unwrap_or_default() {
         let Some(dot) = linked_to(&entry.path()) else { continue };
         if let Some(checkout) = dot.parent()
             && worktree_dir(checkout).is_some_and(|d| same(&d, &entry.path()))

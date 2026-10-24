@@ -3897,11 +3897,11 @@ mod tests {
         // The retry lands, still critical: the next one armed; memory back: it reads, its time from there
         settle_until(&mut ed, |ed| !ed.reviewer_retry);
         settle_until(&mut ed, |ed| ed.reviewer_retry);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let back = std::time::Instant::now();
         CRITICAL.store(false, Relaxed);
         settle_until(&mut ed, |ed| ed.session.reviewer.as_ref().is_some_and(|r| !r.queued()));
         let r = ed.session.reviewer.as_ref().unwrap();
-        assert!(r.started.elapsed() < std::time::Duration::from_millis(300), "its time from its start");
+        assert!(r.started >= back, "its time from its start, not from when it was first asked");
         std::fs::remove_dir_all(&dir).ok();
     }
 
