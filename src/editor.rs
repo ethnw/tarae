@@ -469,6 +469,9 @@ pub struct Screen {
     /// The notification card (x, y, width, height) — None when there's none, or it's folded into the status
     /// line.
     pub toast_card: std::cell::Cell<Option<(usize, usize, usize, usize)>>,
+    /// How strong this frame drew the notification card, in percent (its fade-in and fade-out —
+    /// `Editor::toast_alpha`, rounded down: 100 only once it's whole) — None with no card drawn.
+    pub toast_strength: std::cell::Cell<Option<u8>>,
     /// For the notification card up: whether it's said on the status line, the code too narrow for it —
     /// decided once, as it first shows; None with no card (`draw_toasts`).
     pub toast_narrow: std::cell::Cell<Option<bool>>,
@@ -3511,6 +3514,12 @@ impl Editor {
             crate::event::sleep(delay);
             move |ed: &mut Editor| ed.tick_landed(at)
         });
+    }
+
+    /// When the animation's next wake-up `tick_ask` armed lands (None: none armed) — the resting redraw waits for
+    /// one due before long (`term::Resting`).
+    pub(crate) fn tick_due(&self) -> Option<std::time::Instant> {
+        self.ticking
     }
 
     /// The wake-up `tick_ask` set for `at`, come: the frame it was for — nothing to draw when an earlier one

@@ -198,7 +198,8 @@ side git · 4 rows · in hand git:src/term.rs
 - **`redraw_due`**, **`frames_written`** (ci, 2026-10-24) — how the terminal is written to, as of the frame the
   answer came after, once it went out: `redraw_due` (only while true) the last frame went in parts and the whole
   screen goes again once input rests (`term::RESTING_REDRAW`, half a second after that write — an event that writes
-  nothing doesn't put it off); `frames_written` (from the first) the frames that went to the terminal, each ending
+  nothing doesn't put it off; an animation's frame due before another half second does, once a due, its own frame
+  first: `Resting::now_or_after`); `frames_written` (from the first) the frames that went to the terminal, each ending
   its synchronized update — what a driver reading the terminal has read once it caught up with the answer (the
   socket and the terminal are two roads). An idle check settles on both (e2e `Term::settle`), never a quiet second:
   an answer that owes a frame is waited out and asked again, until one owes nothing unread (`harness::settled` — a
@@ -264,7 +265,9 @@ side git · 4 rows · in hand git:src/term.rs
   `cards` in the same call, so the two can't disagree; `C-q` goes to its first. Those two are news, not
   questions (`Entry::asks_answer`): the status line's `▲n waiting` and a card's count leave them out.
 - **`toasts`** — the card's rows, and where they are: on a card, folded into the status line, or waiting for a
-  card (U7).
+  card (U7). On the card, `strength` (ci, 2026-10-24): how strong the last frame drew it, in percent — 100 only once
+  its fade-in is whole (`Screen.toast_strength`, recorded where it's drawn); a check of the fade reads it with
+  `tick_in_ms`, never a count of frames. Not at Claude's level.
 - **`panels`** — for the front session. Each holds what it shows and its *visible* rows (id + label +
   selected), with totals. The visible rows come from the frame (`Screen.sidebar`, `review_rail`, picker
   `view`).
@@ -459,6 +462,7 @@ A snapshot is one question. An event stream tells you about change without polli
 | `turn` | session, `started` / `ended` (`chat` Done), calls, edits | explicit |
 | `run` | id, `queued` · `started` · `waiting <what>` · `ended <how> <took>` | explicit, beside the `RunTrace` steps phase 0 already logs (and `Waiting::line`) |
 | `toast` | the toast | diff |
+| `toast-whole` | id (the card's newest toast), `written`: the frame that first drew the card whole (`strength` 100, as `frames_written` counts) | diff — kind `toasts`; what a check of the fade waits on without asking (ci round 5: an ask is a frame, drawing the fade forward itself) |
 | `procs` | processes `started`, `ended`; checks `found`, `over` — only when a look found something changed | explicit, at each `:procs` look (`procs_said`) |
 | `limits` (kind `usage`) | `limits` (above) — only when a reading changed what's known | explicit, at `limits::seen` |
 

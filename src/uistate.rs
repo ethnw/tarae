@@ -1543,6 +1543,9 @@ pub struct ToastState {
     /// yet — U7).
     pub place: &'static str,
     pub shown: bool,
+    /// On the card: how strong the last frame drew it, in percent (`Screen.toast_strength` — 100 once its fade-in
+    /// is over, less while it fades) — what a check of the fade reads, never a count of frames.
+    pub strength: Option<u8>,
 }
 
 /// This process's start, random enough to tell one start from the next (`:restart` keeps the pid, and the
@@ -1667,6 +1670,7 @@ impl Editor {
                     (false, false) => "status",
                 },
                 shown: t.shown,
+                strength: self.screen.toast_strength.get().filter(|_| on_card),
             })
             .collect();
         UiState {
@@ -1942,9 +1946,14 @@ impl UiState {
         let toasts: Vec<Value> = self
             .toasts
             .iter()
-            .map(
-                |t| json!({ "id": t.id, "kind": t.kind, "text": t.text, "where": t.place, "shown": t.shown }),
-            )
+            .map(|t| {
+                let mut v =
+                    json!({ "id": t.id, "kind": t.kind, "text": t.text, "where": t.place, "shown": t.shown });
+                if let Some(s) = t.strength {
+                    v["strength"] = json!(s);
+                }
+                v
+            })
             .collect();
         let mut v = json!({
             "v": V,

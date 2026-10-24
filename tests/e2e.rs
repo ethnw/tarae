@@ -1402,22 +1402,26 @@ fn an_idle_editor_draws_nothing_and_sleeps() {
         );
     }
     idle(&mut t, "a picker over an error");
-    // The picker gone, the card comes up — its time starts and its fade-in gets frames (first drawn
-    // transparent, it would stay so without them)
-    // (counted until the fade is over — frames stop for a while — not in a fixed window; and "it animated",
-    // not how far: a fade lasts a fixed time, so a slow runner draws fewer frames of it — CI's macOS drew 2.
-    // Without the fade's frames only the one that shows the card comes.)
-    let frames = t.frames();
+    // The picker gone, the card comes up — first drawn faint, its fade-in's own ticks must bring it to full
+    // strength (left as first drawn, it would stay transparent). Judged by what drew the frame that drew it
+    // whole, never by frames counted (CI's macOS, ci round 5: a slow runner's next frame came after the fade's
+    // whole 150 ms — one frame, already whole): nothing asked meanwhile — an ask is a frame, drawing the fade
+    // forward itself — a watcher hears when the card is first drawn whole (`toast-whole`, which frame); that
+    // frame was drawn for a tick (`frames_for`), not the resting redraw nor an ask.
+    let watching = t.watch("toasts");
+    watching.wait("its watching line", |_| true);
     t.esc("the card", |s| !s.contains("files in work") && s.contains("expected integer"));
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let before = t.frames();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        if t.frames() == before || std::time::Instant::now() > end {
-            break;
-        }
-    }
-    assert!(t.frames() - frames >= 2, "{} frames for the card's fade-in", t.frames() - frames);
+    let whole = watching.wait("the card drawn whole", |e| e["event"] == "toast-whole");
+    drop(watching);
+    let s = t.settle("the card's fade over", |s| s["toasts"].as_array().is_some_and(|ts| !ts.is_empty()));
+    let by =
+        s["frames_for"].as_array().and_then(|fs| fs.iter().find(|f| f["frame"] == whole["written"])).cloned();
+    assert!(
+        by.as_ref().and_then(|f| f["for"].as_array()).is_some_and(|f| f.iter().any(|w| w == "a tick")),
+        "the frame that drew the card whole ({}) wasn't its fade's tick: {by:?}\nthe frames: {:#}",
+        whole["written"],
+        s["frames_for"]
+    );
 }
 
 /// A client connected to `sock` that asks nothing (`nc -U`, from the socket's folder — its path may be past

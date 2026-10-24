@@ -47,6 +47,10 @@ struct Summary {
     reviewers: Vec<(String, String, super::ReviewerState)>,
     /// (id, kind, text)
     toasts: Vec<(String, &'static str, String)>,
+    /// The notification card drawn whole (`strength` 100 — its fade-in over): its newest toast's id, and the frame
+    /// that drew it (`frames_written`) — a `toast-whole` event when that id first comes, so a driver checking a
+    /// fade waits on it without asking (an ask is a frame: it would draw the fade forward itself).
+    card_whole: Option<(String, u64)>,
 }
 
 /// The editor's watchers (each with when it came), what was last sent, and what was said since (explicit
@@ -102,6 +106,11 @@ fn summary(s: &super::UiState) -> Summary {
             .filter_map(|x| Some((x.id.clone(), x.name.clone(), x.reviewer_run.clone()?)))
             .collect(),
         toasts: s.toasts.iter().map(|t| (t.id.clone(), t.kind, t.text.clone())).collect(),
+        card_whole: s
+            .toasts
+            .iter()
+            .rfind(|t| t.strength == Some(100))
+            .map(|t| (t.id.clone(), s.frames_written)),
     }
 }
 
@@ -165,6 +174,12 @@ fn diff(old: &Summary, new: &Summary) -> Vec<Value> {
                              "said": format!("{kind}: {first}") }));
         }
     }
+    if let Some((id, written)) = &new.card_whole
+        && old.card_whole.as_ref().is_none_or(|(was, _)| was != id)
+    {
+        out.push(json!({ "event": "toast-whole", "id": id, "written": written,
+                         "said": format!("{id}'s card drawn whole") }));
+    }
     out
 }
 
@@ -175,7 +190,7 @@ fn kind_of(event: &str) -> &str {
         "session" => "sessions",
         "turn" => "turns",
         "run" => "runs",
-        "toast" => "toasts",
+        "toast" | "toast-whole" => "toasts",
         "limits" => "usage",
         other => other,
     }
@@ -441,5 +456,22 @@ mod tests {
         let e = diff(&at(Some("reviewing")), &at(None));
         assert_eq!(e[0]["said"], "s0 author: idle · reviewing → idle");
         assert!(diff(&at(Some("reviewing")), &at(Some("reviewing"))).is_empty());
+    }
+
+    /// ci round 5: the card first drawn whole is one `toast-whole` event, with the frame that drew it — what an
+    /// idle check waits on instead of asking (an ask is a frame of its own, drawing the fade forward); the
+    /// frames after it, still whole, say nothing; another toast's card whole again is a new one.
+    #[test]
+    fn a_card_drawn_whole_is_told_once() {
+        let at = |whole: Option<(&str, u64)>| Summary {
+            card_whole: whole.map(|(id, n)| (id.to_string(), n)),
+            ..Default::default()
+        };
+        let e = diff(&at(None), &at(Some(("toast#3", 12))));
+        assert_eq!((e.len(), &e[0]["event"], &e[0]["written"]), (1, &json!("toast-whole"), &json!(12)));
+        assert!(diff(&at(Some(("toast#3", 12))), &at(Some(("toast#3", 13)))).is_empty(), "still whole");
+        assert_eq!(diff(&at(Some(("toast#3", 13))), &at(Some(("toast#4", 20))))[0]["id"], "toast#4");
+        assert!(diff(&at(Some(("toast#3", 12))), &at(None)).is_empty(), "fading or gone: nothing");
+        assert_eq!(kind_of("toast-whole"), "toasts");
     }
 }

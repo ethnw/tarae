@@ -118,7 +118,17 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
     l.chat = Some(c);
     l.at = crate::session::At::Chat;
     card(&mut ed, "End the review?");
+    // (a toast on its card: how strong the frame drew it is the drivers', never Claude's)
+    ed.set_warning("a toast on its card");
     frame(&mut ed);
+    let strength = |s: &serde_json::Value| {
+        s["toasts"].as_array().unwrap().iter().find_map(|t| t.get("strength").cloned())
+    };
+    assert!(
+        strength(&ed.ui_state().json()).is_some(),
+        "the full level has it: {}",
+        ed.ui_state().json()["toasts"]
+    );
     // (what drew the frames: a job's line — a shuttle's watch, say — and what was owed, a card's title: the
     // drivers', never Claude's)
     let owed = crate::editor::DrawnFor::Owed("card \"A secret owed card\"".into());
@@ -142,6 +152,7 @@ fn claudes_level_holds_back_unsent_text_and_other_sessions() {
     let json = s.json().to_string();
     assert!(!json.contains("Their own card"), "{json}");
     assert!(s.json().get("frames_for").is_none(), "what drew the frames at Claude's level: {json}");
+    assert_eq!(strength(&s.json()), None, "the card's strength at Claude's level: {}", s.json()["toasts"]);
     assert!(!json.contains("A secret owed card") && !json.contains("job src/"), "{json}");
     let theirs =
         s.json()["sessions"].as_array().unwrap().iter().find(|l| l["name"] == "other").cloned().unwrap();

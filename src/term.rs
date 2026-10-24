@@ -153,22 +153,41 @@ const RESTING_REDRAW: std::time::Duration = std::time::Duration::from_millis(500
 /// state asked) doesn't put it off — else events a little under `RESTING_REDRAW` apart would hold it back, to
 /// come in the quiet after them, a frame nothing asked for then (`Editor.redraw_due` says it's due).
 #[derive(Default)]
-struct Resting(Option<std::time::Instant>);
+struct Resting {
+    at: Option<std::time::Instant>,
+    /// Put off once already for an animation's frame (`now_or_after`) — until the whole screen has gone.
+    held: bool,
+}
 
 impl Resting {
     /// A frame went out at `now`: in parts (`patched`) — the whole screen due `RESTING_REDRAW` from now — or whole,
-    /// none due.
+    /// none due (and a hold spent with it).
     fn wrote(&mut self, patched: bool, now: std::time::Instant) {
-        self.0 = patched.then(|| now + RESTING_REDRAW);
+        self.at = patched.then(|| now + RESTING_REDRAW);
+        self.held &= patched;
     }
 
     /// How long the main loop waits for an event at `now` before the whole screen goes — None: none is due.
     fn wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
-        self.0.map(|at| at.saturating_duration_since(now))
+        self.at.map(|at| at.saturating_duration_since(now))
     }
 
     fn due(&self) -> bool {
-        self.0.is_some()
+        self.at.is_some()
+    }
+
+    /// Its time come at `now`: whether the whole screen goes now. Once per due it waits for an animation's frame
+    /// due before another `RESTING_REDRAW` (`tick`: `Editor::tick_due`) — that frame first, the whole screen
+    /// `RESTING_REDRAW` after (else a late fade tick lost the race: the card drawn whole by the redraw, ci round
+    /// 5). Only once: the next deadline draws it whatever ticks — an animation stepping each second (nothing on a
+    /// clock: the wave, the reviewer's time) always has its next frame that close, and would hold it the whole turn.
+    fn now_or_after(&mut self, tick: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+        if !self.held && tick.is_some_and(|t| t <= now + RESTING_REDRAW) {
+            self.wrote(true, now);
+            self.held = true;
+            return false;
+        }
+        true
     }
 }
 
@@ -223,6 +242,9 @@ fn event_loop(editor: &mut Editor) -> Result<()> {
             match editor.events.recv_within(wait) {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
+                    if !resting.now_or_after(editor.tick_due(), crate::clock::now()) {
+                        continue;
+                    }
                     screen.invalidate();
                     editor.drawn_by.push(crate::editor::DrawnFor::Named("the resting redraw"));
                     draw = true;
@@ -657,6 +679,7 @@ fn render_frame(editor: &mut Editor, out: &mut Vec<u8>, w: u16, h: u16) -> io::R
         note_card: Default::default(),
         thought_card: Default::default(),
         toast_card: Default::default(),
+        toast_strength: Default::default(),
         // (the card's place, decided once — kept from the frame before)
         toast_narrow: std::cell::Cell::new(editor.screen.toast_narrow.get()),
         toast_said: Default::default(),
@@ -10408,6 +10431,7 @@ fn draw_toasts(
     }
     let Some(y0) = toast_place((x0, width, h), rows_at, taken) else { return Ok(false) };
     editor.screen.toast_card.set(Some((x0, y0, width, h)));
+    editor.screen.toast_strength.set(Some((a * 100.0).floor() as u8));
     let edge_card = Style { bg, ..card };
     card_edge(out, edge_card, x0, y0, width)?;
     let mut spots = editor.screen.spots.borrow_mut();
@@ -18982,6 +19006,40 @@ mod tests {
             vec![ms(1), ms(7), ms(2)]
         });
         assert_eq!((slow, rounds), ((ms(7), "k".to_string()), ROUNDS));
+    }
+
+    /// ci round 5: the resting redraw waits once per due for an animation's frame due before long — that frame
+    /// first, the whole screen `RESTING_REDRAW` after (a late fade tick lost the race: the card drawn whole by the
+    /// redraw) — and only once: with nothing on a clock the wave steps each second, its next frame always that
+    /// close, and each step writes in parts (the review of round 5: held the whole turn). A whole frame spends the
+    /// hold; a tick far off, or none, doesn't hold it.
+    #[test]
+    fn the_resting_redraw_waits_once_for_an_animations_frame_due_before_long() {
+        let (t0, ms) = (std::time::Instant::now(), Duration::from_millis);
+        for tick in [ms(100), ms(500)] {
+            let mut r = Resting::default();
+            r.wrote(true, t0);
+            let at = t0 + RESTING_REDRAW;
+            // (a tick late — its time passed — or due soon: put off, the whole wait again)
+            assert!(!r.now_or_after(Some(t0 + tick), at), "a tick due at {tick:?}");
+            assert_eq!(r.wait(at), Some(RESTING_REDRAW));
+            // (that tick wrote in parts, the next is as close: the redraw goes at the next deadline all the same)
+            let next = at + ms(300);
+            r.wrote(true, next);
+            assert!(
+                r.now_or_after(Some(next + RESTING_REDRAW + ms(200)), next + RESTING_REDRAW),
+                "held once only"
+            );
+            // (the whole screen went: the next due may wait once again)
+            r.wrote(false, next + RESTING_REDRAW);
+            r.wrote(true, next + ms(1000));
+            assert!(!r.now_or_after(Some(next + ms(1600)), next + ms(1500)), "a new due, a new hold");
+        }
+        let mut r = Resting::default();
+        r.wrote(true, t0);
+        let at = t0 + RESTING_REDRAW;
+        assert!(r.now_or_after(Some(at + ms(59_000)), at), "a tick a minute off doesn't hold it");
+        assert!(r.now_or_after(None, at), "no tick: now");
     }
 
     /// The whole screen goes again `RESTING_REDRAW` after the last write that went out in parts (`Resting`):

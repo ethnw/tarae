@@ -56,6 +56,9 @@ impl Editor {
         // (how the terminal is written to: the drivers')
         (s.redraw_due, s.frames_written, s.tick_in_ms, s.unfocused) = (false, 0, None, false);
         s.frames_for.clear();
+        for t in &mut s.toasts {
+            t.strength = None;
+        }
         // (the floating lists are the person's: the session list names every session, `:messages` says what came of
         // the others — none of it at Claude's level)
         s.panels.lists.clear();
