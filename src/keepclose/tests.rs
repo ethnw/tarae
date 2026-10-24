@@ -605,3 +605,15 @@ fn the_tip_is_read_from_the_loose_ref_or_packed_refs_and_never_past_refs_heads()
     }
     assert_eq!(read_tip(common, "nope"), None);
 }
+
+/// Git's words for an autostash that didn't go back, before 2.55 and since (CI's 2.55 and 2.56 said the new ones; the
+/// move's message missed them) — and a clean one's.
+#[test]
+fn an_autostash_left_in_the_stash_is_read_in_either_gits_words() {
+    let old = "Applying autostash resulted in conflicts.\nYour changes are safe in the stash.\nYou can run \"git stash pop\" or \"git stash drop\" at any time.\n";
+    let new = "Your local changes are stashed, however applying them\nresulted in conflicts.  You can either resolve the conflicts\nand then discard the stash with \"git stash drop\", or, if you\ndo not want to resolve them now, run \"git reset --hard\" and\napply the local changes later by running \"git stash pop\".\n";
+    assert!(super::autostash_kept(old));
+    assert!(super::autostash_kept(new));
+    assert!(!super::autostash_kept("Applied autostash.\n"));
+    assert!(!super::autostash_kept(""));
+}

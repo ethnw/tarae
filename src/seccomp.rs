@@ -236,6 +236,9 @@ enum Attr {
     Xattr,
 }
 
+/// `fchmodat2`'s number, one on every architecture (the generic table, Linux 6.6): libc names it on x86_64 only, so
+/// an arm64 build of tarae didn't compile.
+pub const SYS_FCHMODAT2: libc::c_long = 452;
 /// `setxattrat` and `removexattrat` (Linux 6.13), `file_setattr` (6.17: an inode's flags, as `FS_IOC_FSSETXATTR`) —
 /// one number each on every architecture, not all in libc yet.
 pub const SYS_SETXATTRAT: libc::c_long = 463;
@@ -248,7 +251,7 @@ const SYS_FILE_SETATTR: libc::c_long = 469;
 const ATTR_CALLS: &[(&str, libc::c_long, Attr)] = &[
     ("fchmod", libc::SYS_fchmod, Attr::ModeTimes),
     ("fchmodat", libc::SYS_fchmodat, Attr::ModeTimes),
-    ("fchmodat2", libc::SYS_fchmodat2, Attr::ModeTimes),
+    ("fchmodat2", SYS_FCHMODAT2, Attr::ModeTimes),
     ("utimensat", libc::SYS_utimensat, Attr::ModeTimes),
     #[cfg(target_arch = "x86_64")]
     ("chmod", libc::SYS_chmod, Attr::ModeTimes),
@@ -1091,10 +1094,11 @@ mod tests {
         let v = value.as_ptr() as libc::c_long;
         let acl_access = c"system.posix_acl_access".as_ptr() as libc::c_long;
         let acl_default = c"system.posix_acl_default".as_ptr() as libc::c_long;
+        // (the owner calls name the file's own ids: an unprivileged user's chown to another id is the kernel's EPERM
+        // with or without the filter — CI's runners aren't root — and the filter refuses the call whatever it names)
         // SAFETY: getgid and getuid have no preconditions.
-        let gid = unsafe { libc::getgid() } as libc::c_long;
-        let other_gid = gid.wrapping_add(1);
-        let other_uid = unsafe { libc::getuid() as libc::c_long }.wrapping_add(1);
+        let own_gid = unsafe { libc::getgid() } as libc::c_long;
+        let own_uid = unsafe { libc::getuid() } as libc::c_long;
         let at = libc::AT_FDCWD as libc::c_long;
         // (`struct xattr_args`: the value's address, its size, flags — 16 bytes; `struct file_attr`: 24 zeroes;
         // what an `ioctl` reads: zeroes)
@@ -1102,8 +1106,8 @@ mod tests {
         let zeroes = [0u8; 128];
         let (xa, z) = (xattr_args.as_ptr() as libc::c_long, zeroes.as_ptr() as libc::c_long);
         let mut calls: Vec<(&'static str, libc::c_long, [libc::c_long; 6])> = vec![
-            ("fchown", libc::SYS_fchown, [fd, other_uid, other_gid, 0, 0, 0]),
-            ("fchownat", libc::SYS_fchownat, [at, p, other_uid, other_gid, 0, 0]),
+            ("fchown", libc::SYS_fchown, [fd, own_uid, own_gid, 0, 0, 0]),
+            ("fchownat", libc::SYS_fchownat, [at, p, own_uid, own_gid, 0, 0]),
             ("setxattr", libc::SYS_setxattr, [p, name, v, 1, 0, 0]),
             // (an ACL — `setfacl`'s way: its access and default lists are extended attributes on Linux)
             ("an access ACL", libc::SYS_setxattr, [p, acl_access, v, 1, 0, 0]),
@@ -1119,8 +1123,8 @@ mod tests {
         ];
         #[cfg(target_arch = "x86_64")]
         calls.extend([
-            ("chown", libc::SYS_chown, [p, other_uid, other_gid, 0, 0, 0]),
-            ("lchown", libc::SYS_lchown, [p, other_uid, other_gid, 0, 0, 0]),
+            ("chown", libc::SYS_chown, [p, own_uid, own_gid, 0, 0, 0]),
+            ("lchown", libc::SYS_lchown, [p, own_uid, own_gid, 0, 0, 0]),
         ]);
         for c in FLAG_IOCTLS {
             calls.push(("a flag ioctl", libc::SYS_ioctl, [fd, c as libc::c_long, z, 0, 0, 0]));

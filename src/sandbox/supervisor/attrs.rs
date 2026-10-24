@@ -110,7 +110,7 @@ pub(super) fn call(l: &Listener, n: &libc::seccomp_notif, p: &Served) -> Answer 
         libc::SYS_fchmodat => {
             (At::Path { dirfd: a[0], path: path(a[1])?, follow: true }, Change::Mode(a[2] as libc::mode_t))
         }
-        libc::SYS_fchmodat2 => {
+        crate::seccomp::SYS_FCHMODAT2 => {
             let flags = a[3] as i32;
             if flags & !(NOFOLLOW | EMPTY) != 0 {
                 return Err(libc::EINVAL);
@@ -364,7 +364,8 @@ fn on_fd(p: &Served, c: &Caller, fd: u64, change: Change, again: Again) -> Answe
         (Again::Fchmod, Change::Mode(mode)) => result(unsafe { libc::fchmod(f, mode) } as isize),
         (Again::Fchmodat2(flags), Change::Mode(mode)) => {
             // SAFETY: tarae's descriptor and an empty path that lives through the call.
-            result(unsafe { libc::syscall(libc::SYS_fchmodat2, f, c"".as_ptr(), mode, flags) } as isize)
+            result(unsafe { libc::syscall(crate::seccomp::SYS_FCHMODAT2, f, c"".as_ptr(), mode, flags) }
+                as isize)
         }
         (Again::Utimensat { empty, flags }, Change::Times(t)) => {
             utimensat(f, if empty { c"".as_ptr() } else { std::ptr::null() }, t, flags)

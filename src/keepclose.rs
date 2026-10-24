@@ -802,7 +802,7 @@ fn move_onto(root: &Path, base: &str, between: &dyn Fn()) -> Landed {
     let said = String::from_utf8_lossy(&r.stderr);
     match r.ok {
         true => {
-            let kept = said.contains("Applying autostash resulted in conflicts");
+            let kept = autostash_kept(&said);
             let top = repo.work_tree.clone().unwrap_or_else(|| root.to_path_buf());
             let names = ["diff-tree", "-r", "--name-only", "--no-renames", "-z", &old, "HEAD"];
             let changed = crate::gitrepo::git_no_hooks(root, &names)
@@ -822,6 +822,14 @@ fn move_onto(root: &Path, base: &str, between: &dyn Fn()) -> Landed {
             Landed::Failed(why.to_string())
         }
     }
+}
+
+/// Whether git's words after `rebase --autostash` say its changes stayed in the stash (they didn't go back cleanly):
+/// git ≤ 2.54 says "Applying autostash resulted in conflicts.", 2.55 on "Your local changes are stashed, however
+/// applying them\nresulted in conflicts." — the stash itself is `autostash` in both.
+fn autostash_kept(said: &str) -> bool {
+    said.contains("Applying autostash resulted in conflicts")
+        || said.contains("Your local changes are stashed, however applying them")
 }
 
 /// A move landed: in its session, the reloads said as one line, its buffers' git bases and its instruction files

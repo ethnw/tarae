@@ -265,7 +265,11 @@ fn a_sleeping_threads_wait_channel_is_read_on_linux() {
     let wchan = t.wchan.as_deref().unwrap_or_else(|| panic!("where it sleeps: {threads:?}"));
     assert!(wchan.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'), "a kernel function: {wchan}");
     assert!(lines[0].starts_with(&format!("pid {pid} · sleep 30 · 1 thread")), "{lines:?}");
-    assert_eq!(lines[1], format!("  sleep — sleeping in {wchan} · 0.00 s CPU"), "{lines:?}");
+    // (its CPU time as every time is written, `run_duration` — a sleeping `sleep`'s a few milliseconds at most)
+    let cpu = lines[1]
+        .strip_prefix(&format!("  sleep — sleeping in {wchan} · "))
+        .and_then(|r| r.strip_suffix(" CPU"));
+    assert!(cpu.is_some_and(|c| c.ends_with("ms") && c[..c.len() - 2].parse::<u32>().is_ok()), "{lines:?}");
 }
 
 /// A look at the processes as the sampling thread sends one: tarae (the test) and the run at `pct`.

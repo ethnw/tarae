@@ -404,6 +404,10 @@ pub(super) fn xattr_args(m: &impl Mem, at: u64, size: u64) -> Result<(u64, u64, 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Times {
     Utimbuf,
+    #[cfg_attr(
+        all(target_os = "linux", not(target_arch = "x86_64"), not(test)),
+        expect(dead_code, reason = "utimes and futimesat are x86_64's calls only")
+    )]
     Timevals,
     Timespecs,
 }

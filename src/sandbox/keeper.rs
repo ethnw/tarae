@@ -5135,9 +5135,9 @@ mod tests {
             unsafe { libc::open(c_link_outside.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) }
                 as libc::c_long;
         let empty = |fd| [fd, c_empty.as_ptr() as libc::c_long, 0o644, libc::AT_EMPTY_PATH as _, 0, 0];
-        let here = raw(libc::SYS_fchmodat2, empty(fd_inside)) != Err(libc::ENOSYS);
+        let here = raw(crate::seccomp::SYS_FCHMODAT2, empty(fd_inside)) != Err(libc::ENOSYS);
         let want = Err(if here { libc::EOPNOTSUPP } else { libc::ENOSYS });
-        let on_link = raw(libc::SYS_fchmodat2, empty(fd_link_outside));
+        let on_link = raw(crate::seccomp::SYS_FCHMODAT2, empty(fd_link_outside));
         check("fchmodat2 on the project's link to outside, by its O_PATH descriptor", on_link, want);
         unsafe { libc::close(fd_link_outside as i32) };
 
@@ -5151,7 +5151,7 @@ mod tests {
             check(
                 "fchmodat2 on O_PATH link to /proc/self/fd/N with AT_EMPTY_PATH",
                 raw(
-                    libc::SYS_fchmodat2,
+                    crate::seccomp::SYS_FCHMODAT2,
                     [fd_link_proc as _, c_empty.as_ptr() as _, 0o777, libc::AT_EMPTY_PATH as _, 0, 0],
                 ),
                 eperm,
@@ -5176,20 +5176,24 @@ mod tests {
         // 3. fchmodat2
         check(
             "fchmodat2 outside",
-            raw(libc::SYS_fchmodat2, [at, c_outside.as_ptr() as _, 0o644, 0, 0, 0]),
+            raw(crate::seccomp::SYS_FCHMODAT2, [at, c_outside.as_ptr() as _, 0o644, 0, 0, 0]),
             eperm,
         );
-        check("fchmodat2 inside", raw(libc::SYS_fchmodat2, [at, c_inside.as_ptr() as _, 0o644, 0, 0, 0]), ok);
+        check(
+            "fchmodat2 inside",
+            raw(crate::seccomp::SYS_FCHMODAT2, [at, c_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            ok,
+        );
         check(
             "fchmodat2 empty outside",
             raw(
-                libc::SYS_fchmodat2,
+                crate::seccomp::SYS_FCHMODAT2,
                 [fd_outside, c_empty.as_ptr() as _, 0o644, libc::AT_EMPTY_PATH as _, 0, 0],
             ),
             eperm,
         );
         let empty_in = raw(
-            libc::SYS_fchmodat2,
+            crate::seccomp::SYS_FCHMODAT2,
             [fd_inside, c_empty.as_ptr() as _, 0o644, libc::AT_EMPTY_PATH as _, 0, 0],
         );
         if empty_in != Ok(()) && empty_in != Err(libc::ENOSYS) {
@@ -5198,7 +5202,7 @@ mod tests {
         check(
             "fchmodat2 nofollow outside",
             raw(
-                libc::SYS_fchmodat2,
+                crate::seccomp::SYS_FCHMODAT2,
                 [at, c_outside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
             ),
             eperm,
@@ -5206,7 +5210,7 @@ mod tests {
         check(
             "fchmodat2 nofollow inside",
             raw(
-                libc::SYS_fchmodat2,
+                crate::seccomp::SYS_FCHMODAT2,
                 [at, c_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
             ),
             ok,
@@ -5214,24 +5218,24 @@ mod tests {
         check(
             "fchmodat2 nofollow link",
             raw(
-                libc::SYS_fchmodat2,
+                crate::seccomp::SYS_FCHMODAT2,
                 [at, c_link_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
             ),
             Err(libc::EOPNOTSUPP),
         );
         check(
             "fchmodat2 unknown flags",
-            raw(libc::SYS_fchmodat2, [at, c_inside.as_ptr() as _, 0o644, 0x2000, 0, 0]),
+            raw(crate::seccomp::SYS_FCHMODAT2, [at, c_inside.as_ptr() as _, 0o644, 0x2000, 0, 0]),
             einval,
         );
         check(
             "fchmodat2 empty without AT_EMPTY_PATH",
-            raw(libc::SYS_fchmodat2, [fd_inside, c_empty.as_ptr() as _, 0o644, 0, 0, 0]),
+            raw(crate::seccomp::SYS_FCHMODAT2, [fd_inside, c_empty.as_ptr() as _, 0o644, 0, 0, 0]),
             enoent,
         );
         check(
             "fchmodat2 bad fd",
-            raw(libc::SYS_fchmodat2, [-1, c_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            raw(crate::seccomp::SYS_FCHMODAT2, [-1, c_inside.as_ptr() as _, 0o644, 0, 0, 0]),
             ebadf,
         );
 
@@ -5496,14 +5500,14 @@ mod tests {
         check(
             "/proc/self/fd/N nofollow inside",
             raw(
-                libc::SYS_fchmodat2,
+                crate::seccomp::SYS_FCHMODAT2,
                 [at, c_proc_inside.as_ptr() as _, 0o644, libc::AT_SYMLINK_NOFOLLOW as _, 0, 0],
             ),
             Err(libc::EOPNOTSUPP),
         );
         check(
             "/proc/self/fd/N follow inside",
-            raw(libc::SYS_fchmodat2, [at, c_proc_inside.as_ptr() as _, 0o644, 0, 0, 0]),
+            raw(crate::seccomp::SYS_FCHMODAT2, [at, c_proc_inside.as_ptr() as _, 0o644, 0, 0, 0]),
             ok,
         );
 
