@@ -51,10 +51,17 @@ A page answers the code's language keys itself, in tarae — no server process (
 | `space o` | the headings (markdown's outline) | the outline |
 | `C-o` / `C-i` | the jump list, across pages and code alike | the same |
 | `gf` | the address under the cursor, as a page | the path or address under the cursor |
+| `ctrl`+click | `gd` there | `gd` there; on an http(s) address written in the code, `gf` (it opens as a page) |
 | `C-c` | stop the page's read | `toggle_comments` |
 
 Only `http(s)` links are followed: a `mailto:`, `file://` or `javascript:` link's `gd` says so and opens nothing.
 `[lsp.web] except = ["hover"]` turns a key off as for any server.
+
+A click puts the cursor on the character under it; **`ctrl`+click goes there, inside tarae** — `gd`, or on an
+address written in code (a comment, a string) `gf`: the page opens here (the system browser is `:web-open`). The cursor
+is put there first, so `C-o` comes back. Where the terminal doesn't send `ctrl` with a click (macOS's Terminal.app and iTerm2 can make ctrl+click a
+right click) it's a plain click, and nothing can tell the two apart: the first plain click on a link's words in a
+session says `gd` follows it.
 
 ## The fetch
 

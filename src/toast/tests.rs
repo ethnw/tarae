@@ -38,7 +38,7 @@ fn card(s: &str, ed: &Editor) -> Vec<String> {
 }
 
 fn press(ed: &mut Editor, x: usize, y: usize) {
-    ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
+    ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false, ctrl: false });
     frame(ed);
 }
 

@@ -313,7 +313,7 @@ fn the_wheel_crosses_surfaces_and_back_to_the_view_it_left() {
     let chat_wheel = |ed: &mut Editor, kind| {
         let (y0, ..) = ed.screen.chat_view.get().unwrap();
         let x = ed.screen.chat_x.unwrap() + 4;
-        ed.handle_mouse(Mouse { kind, x: x as u16, y: (y0 + 5) as u16, alt: false });
+        ed.handle_mouse(Mouse { kind, x: x as u16, y: (y0 + 5) as u16, alt: false, ctrl: false });
         frame(ed);
     };
     feed(&mut ed, "<C-\\>");

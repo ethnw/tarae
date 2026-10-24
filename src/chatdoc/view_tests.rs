@@ -494,7 +494,13 @@ fn the_wheel_enters_view_mode_and_leaves_it_at_the_end() {
     let (y0, _, rows, first) = ed.screen.chat_view.get().unwrap();
     let x = ed.screen.chat_x.unwrap() + 4;
     let wheel = |ed: &mut Editor, kind| {
-        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: (y0 + 5) as u16, alt: false });
+        ed.handle_mouse(crate::event::Mouse {
+            kind,
+            x: x as u16,
+            y: (y0 + 5) as u16,
+            alt: false,
+            ctrl: false,
+        });
         frame(ed);
     };
     wheel(&mut ed, crate::event::MouseKind::ScrollUp);
@@ -632,6 +638,7 @@ fn an_empty_conversation_has_nothing_to_view() {
         x: x as u16,
         y: (y0 + 2) as u16,
         alt: false,
+        ctrl: false,
     });
     assert!(!keyed(&ed), "the wheel: nothing to view");
 }
@@ -867,8 +874,13 @@ fn a_click_on_the_conversation_puts_the_cursor_on_that_character() {
         })
     };
     let press = |ed: &mut Editor, (x, y): (usize, usize)| {
-        let m =
-            crate::event::Mouse { kind: crate::event::MouseKind::Down, x: x as u16, y: y as u16, alt: false };
+        let m = crate::event::Mouse {
+            kind: crate::event::MouseKind::Down,
+            x: x as u16,
+            y: y as u16,
+            alt: false,
+            ctrl: false,
+        };
         ed.handle_mouse(m);
         frame(ed)
     };

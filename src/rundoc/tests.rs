@@ -396,6 +396,7 @@ fn a_step_row_shows_its_heading_at_the_top() {
         x: 3,
         y: (y + 1 - first) as u16,
         alt: false,
+        ctrl: false,
     });
     frame(&mut ed);
     assert_eq!(region(&ed), "list:preflight");
@@ -548,7 +549,7 @@ fn the_wheel_scrolls_and_a_press_puts_the_cursor() {
     let mut ed = task(40);
     let (_, y, x, rows) = ed.screen.run_rows.get().expect("its rows recorded");
     let wheel = |ed: &mut Editor, kind| {
-        ed.handle_mouse(Mouse { kind, x: x as u16 + 2, y: (y + 2) as u16, alt: false })
+        ed.handle_mouse(Mouse { kind, x: x as u16 + 2, y: (y + 2) as u16, alt: false, ctrl: false })
     };
     let top = |ed: &Editor| ed.session.task_run.as_ref().unwrap().top(rows);
     wheel(&mut ed, K::ScrollUp);
@@ -557,7 +558,7 @@ fn the_wheel_scrolls_and_a_press_puts_the_cursor() {
     wheel(&mut ed, K::ScrollDown);
     assert_eq!(ed.session.task_run.as_ref().unwrap().scroll, None, "at the end: it follows again");
     // A press on a row: the keys, the cursor there — the rows under the pointer where they were
-    ed.handle_mouse(Mouse { kind: K::Down, x: (x + 1) as u16, y: (y + 1) as u16, alt: false });
+    ed.handle_mouse(Mouse { kind: K::Down, x: (x + 1) as u16, y: (y + 1) as u16, alt: false, ctrl: false });
     assert_eq!(region(&ed), "output:task");
     let d = output(&ed, Slot::Task);
     assert_eq!(d.top, top(&ed), "the rows as they were");

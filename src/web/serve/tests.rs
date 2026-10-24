@@ -242,8 +242,13 @@ fn put(ed: &mut Editor, byte: usize) {
 
 /// A saved page read with its address, its server ready.
 fn page_editor() -> (Editor, crate::scratch::Scratch) {
+    page_editor_of(HTML)
+}
+
+/// `page_editor` on a page of `html`'s.
+fn page_editor_of(html: &str) -> (Editor, crate::scratch::Scratch) {
     let root = crate::scratch::Scratch::new("web-serve");
-    std::fs::write(root.join("a.html"), HTML).unwrap();
+    std::fs::write(root.join("a.html"), html).unwrap();
     let mut ed = Editor::new(crate::config::Config::default());
     ed.session.root = std::fs::canonicalize(root.path()).unwrap();
     feed(&mut ed, &format!(":web a.html {URL}<ret>"));
@@ -252,6 +257,101 @@ fn page_editor() -> (Editor, crate::scratch::Scratch) {
         page::of(ed.doc()).is_some_and(|p| p.read.is_some()) && ready(ed)
     });
     (ed, root)
+}
+
+/// `ctrl`+click is `gd` on a page as in code (R11): an `#anchor` link followed, `C-o` back to its words; a plain click
+/// puts the cursor on the character under it — on the words of a link `gd` follows said once a session (where the
+/// terminal doesn't send `ctrl` with a click, nothing tells the two apart); a `mailto:` link's words never spend it.
+#[test]
+fn a_click_is_the_cursor_and_ctrl_click_follows_a_link() {
+    use crate::event::{Mouse, MouseKind};
+    let (mut ed, _root) = page_editor();
+    let text = ed.doc().text.to_string();
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, 80, 24).unwrap();
+    let mut p = vt100::Parser::new(24, 80, 0);
+    p.process(&bytes);
+    let rows = p.screen().rows(0, 80).collect::<Vec<String>>();
+    // (the cell of `s`'s first character, on the row that shows it)
+    let cell = |s: &str| {
+        let (y, row) = rows.iter().enumerate().find(|(_, r)| r.contains(s)).unwrap_or_else(|| panic!("{s}"));
+        (row[..row.find(s).unwrap()].chars().count() as u16, y as u16)
+    };
+    let link = |words: &str| {
+        let (x, y) = cell(&format!("[{words}]"));
+        (x + 1, y)
+    };
+    let click = |ed: &mut Editor, (x, y): (u16, u16), ctrl: bool| {
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            ed.handle_event(crate::event::Event::Mouse(Mouse { kind, x, y, alt: false, ctrl }));
+        }
+    };
+    let said = "gd follows a link · ctrl+click too, where the terminal sends it";
+    let says = |ed: &Editor| ed.toasts.iter().filter(|t| t.text == said).count();
+    click(&mut ed, cell("See "), false);
+    assert_eq!(says(&ed), 0, "not a link's");
+    click(&mut ed, link("mail"), false);
+    assert_eq!(ed.doc().selection().primary().head, on(&text, "mail"), "the cursor on its words");
+    assert_eq!(says(&ed), 0, "a mailto: link's `gd` goes nowhere: not spent on it");
+    let (x, y) = link("bee");
+    click(&mut ed, (x + 1, y), false);
+    assert_eq!(ed.doc().selection().primary().head, on(&text, "bee") + 1, "the `e` under it");
+    assert_eq!(says(&ed), 1);
+    click(&mut ed, link("usage"), false);
+    assert_eq!(says(&ed), 1, "once");
+    let usage = line_of(&text, "## Usage");
+    let from = cursor_line(&ed);
+    click(&mut ed, link("usage"), true);
+    settle_until(&mut ed, "at #usage", |ed| cursor_line(ed) == usage);
+    feed(&mut ed, "<C-o>");
+    assert_eq!(ed.doc().selection().primary().head, on(&text, "usage"), "C-o back to the link's words");
+    assert_eq!(cursor_line(&ed), from);
+}
+
+/// On a page the link comes first: ctrl+click on link words that are an address of their own
+/// (`[https://a.example/](https://page.test/b)`) follows the link to its target — never the words' address — `C-o`
+/// back to them.
+#[test]
+fn ctrl_click_on_words_that_are_an_address_follows_the_link() {
+    use crate::event::{Mouse, MouseKind};
+    let (mut ed, _root) = page_editor_of(
+        "<!doctype html><title>Doc</title><main><p>Docs at <a href=\"/b\">https://a.example/</a>.</p></main>",
+    );
+    let a = ed.doc().id;
+    let text = ed.doc().text.to_string();
+    assert!(text.contains("[https://a.example/](https://page.test/b)"), "{text}");
+    let b = crate::web::fetch::Fetched {
+        asked: "https://page.test/b".into(),
+        url: "https://page.test/b".into(),
+        status: 200,
+        content_type: Some("text/html".into()),
+        bytes: b"<title>Bee</title><main><h1>Bee</h1><p>Its text.</p></main>".to_vec(),
+        from: Vec::new(),
+        hops: 0,
+        upgraded: false,
+        said: None,
+        cut: false,
+        took: Duration::from_millis(30),
+        elsewhere: None,
+    };
+    let _ = ed.session.pages.put(Arc::new(b), crate::clock::now());
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, 80, 24).unwrap();
+    let mut p = vt100::Parser::new(24, 80, 0);
+    p.process(&bytes);
+    let rows = p.screen().rows(0, 80).collect::<Vec<String>>();
+    let (y, row) = rows.iter().enumerate().find(|(_, r)| r.contains("a.example")).expect("the link's row");
+    let x = row[..row.find("a.example").unwrap()].chars().count() as u16;
+    for kind in [MouseKind::Down, MouseKind::Up] {
+        ed.handle_event(crate::event::Event::Mouse(Mouse { kind, x, y: y as u16, alt: false, ctrl: true }));
+    }
+    settle_until(&mut ed, "the link's target", |ed| {
+        ed.doc().title.as_deref() == Some("web · page.test › Bee")
+    });
+    feed(&mut ed, "<C-o>");
+    let d = ed.doc();
+    assert_eq!(d.id, a, "C-o back to the page");
+    assert_eq!(d.selection().primary().cursor(&d.text), text.find("a.example").unwrap(), "on the words");
 }
 
 /// The page's keys are the code's: `gd` on an `#anchor` a move in the page (`C-o` back), on another page's link that

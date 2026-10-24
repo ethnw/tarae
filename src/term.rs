@@ -379,6 +379,7 @@ fn spawn_input(tx: crate::event::Tx) {
                             x: m.column,
                             y: m.row,
                             alt: m.modifiers.contains(KeyModifiers::ALT),
+                            ctrl: m.modifiers.contains(KeyModifiers::CONTROL),
                         })
                     })
                 }
@@ -17620,6 +17621,7 @@ mod tests {
             x: x as u16 + 3,
             y: y as u16 + 2,
             alt: false,
+            ctrl: false,
         };
         ed.handle_mouse(at);
         assert_eq!(ed.doc().selection().primary(), before);
@@ -18125,8 +18127,13 @@ mod tests {
         assert_eq!(head(&ed), src.find("next").unwrap());
         key(&mut ed, "k");
         assert_eq!(head(&ed), src.find("four").unwrap());
-        let click =
-            crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 4 + 2 + 5, y: 2, alt: false };
+        let click = crate::event::Mouse {
+            kind: crate::event::MouseKind::Down,
+            x: 4 + 2 + 5,
+            y: 2,
+            alt: false,
+            ctrl: false,
+        };
         ed.handle_mouse(click);
         assert_eq!(head(&ed), src.find("five").unwrap());
         // One line taller than the screen: the rows around the cursor show
@@ -18225,6 +18232,7 @@ mod tests {
             x: (px + 2) as u16,
             y: (py + 1) as u16,
             alt: false,
+            ctrl: false,
         });
         assert_eq!(ed.popup_scroll, 3);
         ed.popup = None;
@@ -18239,11 +18247,17 @@ mod tests {
         ed.open_picker(Picker::new("buffers", items, false), None);
         render(&mut ed, &mut Vec::new(), w, h).unwrap();
         let x = ed.screen.picker_preview_x.expect("preview card at this width");
-        ed.handle_mouse(Mouse { kind: MouseKind::ScrollDown, x: (x + 3) as u16, y: 10, alt: false });
+        ed.handle_mouse(Mouse {
+            kind: MouseKind::ScrollDown,
+            x: (x + 3) as u16,
+            y: 10,
+            alt: false,
+            ctrl: false,
+        });
         assert_eq!(ed.picker.as_ref().map(|p| (p.preview_scroll, p.selected)), Some((3, 0)));
         ed.handle_key("C-b".parse().unwrap());
         assert_eq!(ed.picker.as_ref().map(|p| p.preview_scroll), Some(0));
-        ed.handle_mouse(Mouse { kind: MouseKind::ScrollDown, x: 5, y: 10, alt: false });
+        ed.handle_mouse(Mouse { kind: MouseKind::ScrollDown, x: 5, y: 10, alt: false, ctrl: false });
         assert_eq!(
             ed.picker.as_ref().map(|p| (p.preview_scroll, p.selected)),
             Some((0, 0)),

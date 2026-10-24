@@ -520,7 +520,13 @@ fn the_list_goes_to_the_one_picked_and_its_card_takes_the_keys() {
     // A click on the count opens it
     let rows = screen(&mut ed, 160, 30);
     let x = rows[29].find("▲2 waiting").map(|b| rows[29][..b].chars().count()).expect("the count");
-    let click = crate::event::Mouse { kind: crate::event::MouseKind::Down, x: x as u16, y: 29, alt: false };
+    let click = crate::event::Mouse {
+        kind: crate::event::MouseKind::Down,
+        x: x as u16,
+        y: 29,
+        alt: false,
+        ctrl: false,
+    };
     ed.handle_mouse(click);
     let p = ed.picker.as_ref().expect("the inbox");
     assert_eq!(p.title, super::INBOX);

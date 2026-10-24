@@ -1602,7 +1602,9 @@ mod tests {
             output.iter().map(|l| l.to_string()).collect(),
         ));
         ed.screen.test_panel.set(Some((20, 30, 9)));
-        let wheel = |ed: &mut Editor, y| ed.handle_mouse(Mouse { kind: K::ScrollDown, x: 5, y, alt: false });
+        let wheel = |ed: &mut Editor, y| {
+            ed.handle_mouse(Mouse { kind: K::ScrollDown, x: 5, y, alt: false, ctrl: false })
+        };
         wheel(&mut ed, 25);
         assert_eq!(ed.session.test_run.as_ref().unwrap().detail_top(9), 3);
         wheel(&mut ed, 5);

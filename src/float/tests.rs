@@ -38,7 +38,7 @@ fn shown(ed: &mut Editor, w: u16, h: u16) -> String {
 }
 
 fn mouse(ed: &mut Editor, kind: MouseKind, x: usize, y: usize) {
-    ed.handle_mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false });
+    ed.handle_mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false });
     frame_in(ed, W, H);
 }
 

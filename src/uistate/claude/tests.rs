@@ -301,6 +301,7 @@ fn an_id_in_the_answer_is_a_link() {
     ed.handle_mouse(crate::event::Mouse {
         kind: crate::event::MouseKind::Down,
         alt: false,
+        ctrl: false,
         x: spot.1 as u16,
         y: spot.0 as u16,
     });
@@ -414,6 +415,7 @@ fn pointing_by_a_click() {
     ed.handle_mouse(crate::event::Mouse {
         kind: crate::event::MouseKind::Down,
         alt: false,
+        ctrl: false,
         x: t.x as u16 + 3,
         y: t.y as u16,
     });

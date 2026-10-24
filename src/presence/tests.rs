@@ -452,7 +452,7 @@ fn a_click_on_the_tag_or_f_in_the_list_follows() {
     let r = rows(&frame(&mut ed, 100));
     let y = row_of(&r, "‹main reading›");
     let x = r[y][..r[y].find('‹').unwrap()].chars().count() + 3;
-    ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
+    ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false, ctrl: false });
     assert_eq!((ed.session.id, followed(&ed)), (0, Some(0)), "followed from its tag");
     // Back in fix; the list's `f`
     assert!(ed.session_switch(fix));

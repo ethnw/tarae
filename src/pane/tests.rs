@@ -281,7 +281,7 @@ fn the_tests_panel_is_a_linked_group_of_two_panes() {
     // (a click on a row picks it and gives the list the keys; on the detail's name in the slot's line, the detail's;
     // past the last result, the list's, the selection where it was)
     let click = |ed: &mut Editor, x: usize, y: usize| {
-        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false });
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: y as u16, alt: false, ctrl: false });
         frame(ed);
     };
     let (y0, _, first) = ed.screen.list(crate::pane::GroupKind::Tests).unwrap();
@@ -487,7 +487,7 @@ fn your_split_is_sized_by_keys_and_by_its_divider() {
     let (x, y) = (l.x + l.w, l.y + 3);
     assert_eq!(ed.border_at(x, y), Some(crate::sizes::Border::Divider(left)));
     let mouse = |ed: &mut Editor, kind, x: usize| {
-        ed.handle_mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false });
+        ed.handle_mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false });
         frame(ed);
     };
     mouse(&mut ed, MouseKind::Down, x);

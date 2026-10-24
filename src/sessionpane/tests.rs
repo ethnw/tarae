@@ -184,6 +184,7 @@ fn the_session_list_floats_and_stays_while_you_work() {
         x: (f.x + 4) as u16,
         y: (f.y + 1) as u16,
         alt: false,
+        ctrl: false,
     });
     assert!(ed.sessions_list_keys(), "a press on its row");
     // `C-w w` goes round to it after the docked panes (its id among the leaves, reviewer 7a); `space W` again

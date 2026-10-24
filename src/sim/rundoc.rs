@@ -151,7 +151,7 @@ fn input(sim: &mut Sim, ed: &mut Editor, world: &World) -> String {
             };
             let row = c.below(rows.max(1));
             let kind = if up { MouseKind::ScrollUp } else { MouseKind::ScrollDown };
-            ed.handle_mouse(Mouse { kind, x: (x + 1) as u16, y: (y + row) as u16, alt: false });
+            ed.handle_mouse(Mouse { kind, x: (x + 1) as u16, y: (y + row) as u16, alt: false, ctrl: false });
             ed.focus_sync();
             format!("the wheel {} over row {row}", if up { "up" } else { "down" })
         }

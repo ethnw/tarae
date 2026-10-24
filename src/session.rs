@@ -253,6 +253,9 @@ pub struct Session {
     /// The key card's answer (`envkey.rs`): `true` — its chat's claude takes a key from tarae's environment
     /// until the session ends · `false` — not asked again. None: not asked. Never kept past a restart.
     pub env_key: Option<bool>,
+    /// A plain press on a page's link said `gd` follows it (once a session: ctrl+click, which does, doesn't
+    /// arrive from every terminal — nothing tells the two apart then).
+    pub link_click_said: bool,
     /// The run cards of its Claude's answered until you quit — each the last for its run in its folder
     /// (`sinceyes::Answered`): the same run asked again says `Same as card#41 — y at 18:02` and what changed
     /// since in what it runs (cardburden 3).
@@ -468,6 +471,7 @@ impl Session {
             base_writing: false,
             no_sandbox: None,
             env_key: None,
+            link_click_said: false,
             answered: Vec::new(),
             asking: Vec::new(),
             spawned: Vec::new(),

@@ -6241,6 +6241,62 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
+    /// ctrl+click is `gd` in code (R11): the cursor put on the name clicked, its definition asked there, the answer
+    /// jumps — `C-o` back to the click. A plain click only puts the cursor there; ctrl+alt+click adds a cursor and a
+    /// ctrl+drag selects, as without ctrl — neither asks.
+    #[test]
+    fn ctrl_click_goes_to_the_definition() {
+        use crate::event::{Mouse, MouseKind};
+        let (mut ed, file, _log) = setup("ctrl-click", "fn a() {}\nfn b() { a() }\n");
+        let cid = ready(&mut ed);
+        let mut bytes = Vec::new();
+        crate::term::render(&mut ed, &mut bytes, 80, 24).unwrap();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(&bytes);
+        let rows: Vec<String> = parser.screen().rows(0, 80).collect();
+        let (y, x) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(y, r)| r.find("{ a()").map(|i| (y as u16, (r[..i].chars().count() + 2) as u16)))
+            .expect("the call's row");
+        let click = |ed: &mut Editor, ctrl: bool| {
+            for kind in [MouseKind::Down, MouseKind::Up] {
+                ed.handle_mouse(Mouse { kind, x, y, alt: false, ctrl });
+            }
+            ed.lsp_flush();
+        };
+        let call = "fn a() {}\nfn b() { ".len();
+        let asked =
+            |ed: &Editor| ed.lsp.pending.values().filter(|p| p.kind == Kind::Goto(Goto::Definition)).count();
+        click(&mut ed, false);
+        assert_eq!(ed.doc().selection().primary(), Range::point(call), "a plain click: the cursor");
+        assert_eq!(asked(&ed), 0);
+        feed(&mut ed, "gg");
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            ed.handle_mouse(Mouse { kind, x, y, alt: true, ctrl: true });
+        }
+        ed.lsp_flush();
+        assert_eq!(ed.doc().selection().len(), 2, "ctrl+alt+click: another cursor");
+        assert_eq!(asked(&ed), 0);
+        feed(&mut ed, "gg");
+        for (kind, x) in [(MouseKind::Down, x), (MouseKind::Drag, x + 2), (MouseKind::Up, x + 2)] {
+            ed.handle_mouse(Mouse { kind, x, y, alt: false, ctrl: true });
+        }
+        ed.lsp_flush();
+        assert_eq!(ed.doc().selection().primary(), Range::new(call, call + 3), "ctrl+drag: a selection");
+        assert_eq!(asked(&ed), 0);
+        feed(&mut ed, "gg");
+        click(&mut ed, true);
+        assert_eq!(ed.doc().selection().primary(), Range::point(call), "the cursor put there first");
+        let id = pending_of(&ed, Kind::Goto(Goto::Definition));
+        let at = json!({ "uri": lsp::uri(&file), "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 4 } } });
+        ed.on_lsp_message(cid, json!({ "id": id, "result": [at] }));
+        assert_eq!(ed.doc().selection().primary(), Range::point(3), "on `a`'s definition");
+        feed(&mut ed, "<C-o>");
+        assert_eq!(ed.doc().selection().primary().head, call, "C-o back to the click");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
     /// `:w` formats first (the line you edited — `format_on_save_keeps_the_lines_you_didnt_touch`), then
     /// saves; a server error or an edit made meanwhile still saves (as is); a server that can't format saves
     /// right away.

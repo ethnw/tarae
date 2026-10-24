@@ -188,6 +188,7 @@ fn step(sim: &mut Sim, ed: &mut Editor, model: &RefCell<Model>, wrong: &Cell<Opt
                 x: x as u16,
                 y: y as u16,
                 alt: false,
+                ctrl: false,
             };
             let before = front(ed);
             sim.batch(ed, crate::event::Event::Mouse(press));

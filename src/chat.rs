@@ -3581,7 +3581,7 @@ mod tests {
         let under: String = row[x0..x1].iter().collect();
         assert_eq!(under, "ok · outside ▲1", "the spot is the whole trail, from its verdict: {row:?}");
         let click = |ed: &mut Editor, x: usize| {
-            let at = |kind| Mouse { kind, x: x as u16, y: y as u16, alt: false };
+            let at = |kind| Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false };
             ed.handle_mouse(at(MouseKind::Down));
             ed.handle_mouse(at(MouseKind::Up));
         };

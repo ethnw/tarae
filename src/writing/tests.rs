@@ -866,6 +866,7 @@ fn a_view_key_of_yours_takes_the_view_back_to_your_cursor() {
                     x: 10,
                     y: 5,
                     alt: false,
+                    ctrl: false,
                 };
                 ed.handle_event(crate::event::Event::Mouse(m));
             }

@@ -676,7 +676,7 @@ fn enter_on_a_conflicts_part_goes_to_whose_it_is() {
     let y = r.iter().position(|l| l.contains("five, docs")).unwrap_or_else(|| panic!("{r:#?}"));
     let x = r[y][..r[y].find("five, docs").unwrap()].chars().count();
     for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
-        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false };
+        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false };
         ed.handle_event(crate::event::Event::Mouse(m));
     }
     assert_eq!(ed.cursor_line(), part(&ed, "docs"), "the cursor on its line");
@@ -802,7 +802,8 @@ fn a_side_behinds_change_is_numbered_by_its_own_lines() {
 }
 
 /// A conflict part with no lines (a side took them out) shows side by side as an empty column: a click on it is where
-/// `enter` goes — that side's workspace where the lines were — while the cursor stays where the click put it.
+/// `enter` goes — that side's workspace where the lines were — while the cursor stays where the click put it. A
+/// ctrl+click there is the same pick (no `gd`: the column is what it says).
 #[test]
 fn an_empty_column_is_picked_by_its_click() {
     let Scene { mut ed, docs, ids, dir: _dir, .. } = scene("weave-enter-empty");
@@ -818,10 +819,11 @@ fn an_empty_column_is_picked_by_its_click() {
     let y = r.iter().position(|l| l.contains("┬─ docs")).unwrap_or_else(|| panic!("{r:#?}"));
     let x = r[y][..r[y].find("┬─ docs").unwrap()].chars().count() + 4;
     for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
-        let m = crate::event::Mouse { kind, x: x as u16, y: (y + 1) as u16, alt: false };
+        let m = crate::event::Mouse { kind, x: x as u16, y: (y + 1) as u16, alt: false, ctrl: true };
         ed.handle_event(crate::event::Event::Mouse(m));
     }
     assert_eq!(ed.cursor_line(), c.base.start, "no line of its own: the conflict's first");
+    assert_eq!(ed.doc().id, view, "ctrl+click on a column: a pick, nothing gone to");
     press(&mut ed, "<ret>");
     assert_eq!(went(&ed), (ids[2], docs.join("a.rs"), 4), "docs's a.rs where line 5 was");
     // Used, the pick is gone: the tip's part again
@@ -833,7 +835,7 @@ fn an_empty_column_is_picked_by_its_click() {
 /// A click, `x` the cell and `y` the row.
 fn click(ed: &mut Editor, x: usize, y: usize) {
     for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
-        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false };
+        let m = crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false };
         ed.handle_event(crate::event::Event::Mouse(m));
     }
 }

@@ -179,6 +179,39 @@ fn gf_on_a_page_opens_the_address_written_there() {
     settle_until(&mut ed, "the page", |ed| ed.doc().title.as_deref() == Some("web · page.test › Bee"));
 }
 
+/// ctrl+click on an http(s) address written in code (a comment here) opens it as a page — `gf`'s act, inside tarae —
+/// `C-o` back to the click; elsewhere in code it's `gd` (`lsp_editor`'s `ctrl_click_goes_to_the_definition`).
+#[test]
+fn ctrl_click_on_an_address_in_code_opens_the_page() {
+    use crate::event::{Mouse, MouseKind};
+    let root = crate::scratch::Scratch::new("gotofile-click");
+    let text = "fn main() {}\n// see https://page.test/b for it\n";
+    std::fs::write(root.join("a.rs"), text).unwrap();
+    let mut ed = Editor::new(crate::config::Config::default());
+    ed.session.root = std::fs::canonicalize(root.path()).unwrap();
+    ed.open(&ed.session.root.join("a.rs")).unwrap();
+    bee_kept(&mut ed);
+    let mut bytes = Vec::new();
+    crate::term::render(&mut ed, &mut bytes, 80, 24).unwrap();
+    let mut p = vt100::Parser::new(24, 80, 0);
+    p.process(&bytes);
+    let rows = p.screen().rows(0, 80).collect::<Vec<String>>();
+    let (y, row) = rows.iter().enumerate().find(|(_, r)| r.contains("page.test")).expect("the comment's row");
+    let x = row[..row.find("page.test").unwrap()].chars().count() as u16;
+    for kind in [MouseKind::Down, MouseKind::Up] {
+        ed.handle_event(crate::event::Event::Mouse(Mouse { kind, x, y: y as u16, alt: false, ctrl: true }));
+    }
+    settle_until(&mut ed, "the page", |ed| ed.doc().title.as_deref() == Some("web · page.test › Bee"));
+    feed(&mut ed, "<C-o>");
+    let d = ed.doc();
+    assert_eq!(d.path.as_deref().and_then(|p| p.file_name()).and_then(|n| n.to_str()), Some("a.rs"));
+    assert_eq!(
+        d.selection().primary().cursor(&d.text),
+        text.find("page.test").unwrap(),
+        "C-o back to the click"
+    );
+}
+
 /// `https://page.test/b` in the session's copies: opened with nothing fetched.
 fn bee_kept(ed: &mut Editor) {
     let b = crate::web::fetch::Fetched {

@@ -717,6 +717,8 @@ pub struct Editor {
     pub view: Vec<crate::codeview::Row>,
     /// Where a drag started (selecting with the mouse).
     mouse_anchor: Option<usize>,
+    /// A ctrl+press in the code not dragged yet: its release is `gd` (a ctrl+drag selects, as a plain one).
+    mouse_goto: bool,
     /// The mouse was pressed on the terminal's screen — its drag and release go there, wherever they are.
     mouse_in_terminal: bool,
     /// Recently opened files (start screen — open with number keys).
@@ -1213,6 +1215,7 @@ impl Editor {
             theme_before: None,
             screen: Screen::default(),
             mouse_anchor: None,
+            mouse_goto: false,
             mouse_in_terminal: false,
             view: Vec::new(),
             overrides: Vec::new(),
@@ -2529,6 +2532,10 @@ impl Editor {
 
     pub fn handle_mouse(&mut self, m: crate::event::Mouse) {
         use crate::event::MouseKind as K;
+        // (a press anywhere starts afresh: only a ctrl+press in the code arms its release)
+        if m.kind == K::Down {
+            self.mouse_goto = false;
+        }
         // Input for follow = what can move the code's cursor: a press or a drag (anywhere — a chat link, a
         // side panel row, a pane), and the wheel over the code (below). A release, or the wheel over a
         // panel, moves nothing — counted, a reload in the same moment read as you taking over.
@@ -3166,8 +3173,17 @@ impl Editor {
                     Some(l) => doc.text.line_to_byte(l),
                     None => mv::pos_at_col(&doc.text, line, col, tab),
                 };
+                // A plain press on a page's link that `gd` follows says so once (ctrl+click doesn't arrive from every
+                // terminal: nothing tells the two apart then) — never a `mailto:`'s, whose `gd` says it goes nowhere
+                let link = crate::web::page::of(doc).is_some_and(|p| {
+                    p.facts.link_at(pos).is_some_and(|l| crate::web::facts::followed(&l.url))
+                });
                 let text = doc.text.clone();
                 let anchor = self.mouse_anchor;
+                // (a ctrl+press dragged off its character is a selection, not a `gd`)
+                if m.kind == K::Drag && anchor.is_some_and(|a| a != pos) {
+                    self.mouse_goto = false;
+                }
                 let doc = self.doc_mut();
                 let mut new_anchor = anchor;
                 match (m.kind, anchor) {
@@ -3195,8 +3211,34 @@ impl Editor {
                     }
                 }
                 self.mouse_anchor = new_anchor;
+                // ctrl+click goes there, inside tarae (as VS Code, JetBrains, Zed): a page's link followed, a name to
+                // its definition, an address written in code opened as a page — the cursor put there first, so `C-o`
+                // comes back to it; run at the release, so a ctrl+drag selects and ctrl+alt adds a cursor as without
+                // ctrl
+                if m.kind == K::Down && m.ctrl && !m.alt && picked.is_none() {
+                    self.mouse_goto = true;
+                    self.session.link_click_said = true;
+                }
+                if m.kind == K::Down && link && !m.alt && !self.session.link_click_said {
+                    self.session.link_click_said = true;
+                    self.set_status("gd follows a link · ctrl+click too, where the terminal sends it");
+                }
             }
-            K::Up => self.mouse_anchor = None,
+            K::Up => {
+                self.mouse_anchor = None;
+                // (an http(s) address written there — a comment's, a string's — opens as a page, `gf`'s act: inside
+                // tarae, the system browser is `:web-open`'s; on a page a followed link there comes first — its words
+                // may be an address of their own, `[https://a.example](https://b.example/x)`)
+                if std::mem::take(&mut self.mouse_goto) {
+                    let doc = self.doc();
+                    let at = doc.selection().primary().cursor(&doc.text);
+                    let followed = crate::web::facts::followed;
+                    let link = crate::web::page::of(doc)
+                        .is_some_and(|p| p.facts.link_at(at).is_some_and(|l| followed(&l.url)));
+                    let url = !link && crate::gotofile::around(&doc.text, at).is_some_and(|u| followed(&u));
+                    self.run_command_by_name(if url { "goto_file" } else { "goto_definition" });
+                }
+            }
         }
     }
 
@@ -6693,7 +6735,7 @@ mod tests {
         use serde_json::json;
         let (dir, main, util, lib) = follow_project("wheel");
         let read = |id: &str, p: &PathBuf, offset: u64| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": p, "offset": offset, "limit": 2}}]}});
-        let mouse = |kind, x| Mouse { kind, x, y: 2, alt: false };
+        let mouse = |kind, x| Mouse { kind, x, y: 2, alt: false, ctrl: false };
         let mut ed = editor("");
         ed.config.llm.follow_resume = 0;
         ed.open(&main).unwrap();
@@ -7424,7 +7466,7 @@ mod tests {
         let s = draw(&mut ed);
         assert!(s.contains("clippy line 59") && !s.contains("test line 0\n"), "its end: {s}");
         let click = |ed: &mut Editor, kind, x: usize, y: usize| {
-            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false });
+            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false });
         };
         let (y, x, _, _) =
             *ed.screen.task_steps.borrow().iter().find(|c| c.3 == 1).expect("the test step's chip");
@@ -8579,7 +8621,7 @@ mod tests {
         feed(&mut ed, "<C-u>");
         assert!(ed.session.review.as_ref().unwrap().scroll < at);
         let wheel = |ed: &mut Editor, kind| {
-            ed.handle_mouse(crate::event::Mouse { kind, x: 20, y: 10, alt: false });
+            ed.handle_mouse(crate::event::Mouse { kind, x: 20, y: 10, alt: false, ctrl: false });
         };
         let at = ed.session.review.as_ref().unwrap().scroll;
         wheel(&mut ed, crate::event::MouseKind::ScrollDown);
@@ -12699,21 +12741,33 @@ mod tests {
         // A click on a tab: that session, whole
         let r = rows(&mut ed, 200);
         let x = r[tabs].find("fix-login").map(|b| r[tabs][..b].chars().count()).unwrap();
-        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16 + 2, y: tabs as u16, alt: false });
+        ed.handle_mouse(Mouse {
+            kind: MouseKind::Down,
+            x: x as u16 + 2,
+            y: tabs as u16,
+            alt: false,
+            ctrl: false,
+        });
         assert_eq!(ed.session.id, one);
         // No chat there: the chip, then the list from it
         let r = rows(&mut ed, 120);
         let status = r.iter().position(|r| r.contains("● normal")).expect("the status line");
         assert!(r[status].contains("● normal   fix-login-everywhere ▲1 waiting"), "{}", r[status]);
         let x = r[status].find("fix-login").map(|b| r[status][..b].chars().count()).unwrap();
-        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: status as u16, alt: false });
+        ed.handle_mouse(Mouse {
+            kind: MouseKind::Down,
+            x: x as u16,
+            y: status as u16,
+            alt: false,
+            ctrl: false,
+        });
         assert!(ed.sessions_list_keys(), "the list");
         ed.float_list_close(crate::pane::GroupKind::Sessions);
         // A name folded to its prefix is clicked as the name is
         ed.session_switch(0);
         let r = rows(&mut ed, 100);
         let x = r[0].find("· f ·").map(|b| r[0][..b].chars().count() + 2).unwrap();
-        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: 0, alt: false });
+        ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16, y: 0, alt: false, ctrl: false });
         assert_eq!(ed.session.id, one, "f: fix-login-everywhere");
         ed.sessions.clear();
         for w in [&wt, &other] {
@@ -13411,7 +13465,9 @@ mod tests {
             let mut bytes = Vec::new();
             crate::term::render(ed, &mut bytes, 140, 40).unwrap();
         };
-        let mouse = |ed: &mut Editor, kind, x: u16, y: u16| ed.handle_mouse(Mouse { kind, x, y, alt: false });
+        let mouse = |ed: &mut Editor, kind, x: u16, y: u16| {
+            ed.handle_mouse(Mouse { kind, x, y, alt: false, ctrl: false })
+        };
         crate::chat::open(&mut ed);
         ed.session.leave(crate::session::At::Chat);
         draw(&mut ed);
@@ -13536,10 +13592,10 @@ mod tests {
         assert!(!ed.session.is_at(crate::session::At::Slot), "C-w k: back up");
         // A click on the panel, then one in the code
         let y = ed.screen.task_panel.get().unwrap().0 as u16 + 2;
-        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y, alt: false });
+        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y, alt: false, ctrl: false });
         assert!(ed.session.is_at(crate::session::At::Slot));
         let line_1 = ed.screen.text_top as u16 + 1;
-        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y: line_1, alt: false });
+        ed.handle_mouse(Mouse { kind: K::Down, x: 20, y: line_1, alt: false, ctrl: false });
         assert!(!ed.session.is_at(crate::session::At::Slot));
         assert_eq!(ed.cursor_line(), 1);
         // The panel gone: so are its keys
@@ -14604,7 +14660,7 @@ mod tests {
         let p = frame_cells(&mut ed);
         let y = p.screen().rows(0, 160).position(|r| r.contains("b.txt")).expect("its row") as u16;
         let click = |ed: &mut Editor| {
-            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }))
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false, ctrl: false }))
         };
         click(&mut ed);
         assert!(
@@ -14654,7 +14710,7 @@ mod tests {
         let other = ["a.txt", "b.txt", "c.txt"].into_iter().find(|f| dir.join(f) != kept).unwrap();
         let y = p.screen().rows(0, 160).position(|r| r.contains(other)).expect("its row") as u16;
         let click = |ed: &mut Editor| {
-            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }))
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false, ctrl: false }))
         };
         click(&mut ed);
         assert_eq!(shown(&ed), [false, true], "a click: the preview");
@@ -14710,7 +14766,7 @@ mod tests {
         let y = ed.screen.review_rail.borrow().iter().find(|r| r.1 == b).expect("its row").0 as u16;
         for _ in 0..2 {
             use crate::event::{Mouse, MouseKind};
-            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false }));
+            ed.handle_event(Event::Mouse(Mouse { kind: MouseKind::Down, x: 6, y, alt: false, ctrl: false }));
         }
         assert!(ed.toasts.iter().any(|t| t.step == Some("review-binary")), "the click reached the row: read");
         assert!(on(&ed, "c.txt") && ed.doc().preview, "a double-click on the binary row keeps nothing");
@@ -15719,7 +15775,13 @@ mod tests {
         ed.offer_grammar(syntax::spec("python").unwrap());
         assert_eq!(ed.offers.first().map(|o| o.title.as_str()), Some("Python syntax colors"));
         ed.screen.offer_buttons = vec![(20, 50, 59, 'y'), (20, 62, 71, 'n')];
-        let press = crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 65, y: 20, alt: false };
+        let press = crate::event::Mouse {
+            kind: crate::event::MouseKind::Down,
+            x: 65,
+            y: 20,
+            alt: false,
+            ctrl: false,
+        };
         ed.handle_mouse(press);
         assert!(ed.offers.len() == 1 && ed.card_has_keys(), "focused, not answered");
         ed.handle_mouse(press);
@@ -15948,7 +16010,13 @@ mod tests {
         let click = |ed: &mut Editor, k: char| {
             let (row, x0, _, _) = *ed.screen.offer_buttons.iter().find(|b| b.3 == k).unwrap();
             let (x, y) = (x0 as u16, row as u16);
-            ed.handle_mouse(crate::event::Mouse { kind: crate::event::MouseKind::Down, x, y, alt: false });
+            ed.handle_mouse(crate::event::Mouse {
+                kind: crate::event::MouseKind::Down,
+                x,
+                y,
+                alt: false,
+                ctrl: false,
+            });
         };
         click(&mut ed, 'y');
         assert_eq!(ed.offers.len(), 1, "a click on y waits too");
@@ -16454,7 +16522,7 @@ mod tests {
         // (its `y` as drawn now — where a press lands on it)
         let y_at = |ed: &Editor| {
             let b = ed.screen.offer_buttons.iter().find(|b| b.3 == 'y').expect("its y drawn");
-            Mouse { kind: MouseKind::Down, x: b.1 as u16, y: b.0 as u16, alt: false }
+            Mouse { kind: MouseKind::Down, x: b.1 as u16, y: b.0 as u16, alt: false, ctrl: false }
         };
         ed.handle_mouse(y_at(&ed));
         assert!(ed.card_has_keys() && ed.offers.len() == 1, "focused, not answered");
@@ -16549,6 +16617,7 @@ mod tests {
             x: 50,
             y: 10,
             alt: false,
+            ctrl: false,
         });
         assert_eq!(titles(&ed), ["Go", "Rust", "Python"]);
         feed(&mut ed, "n");
@@ -16574,7 +16643,7 @@ mod tests {
             panes: vec![(1, rect, 5, (0..10).map(|l| (l, 0, 0, usize::MAX)).collect())],
             ..Screen::default()
         };
-        let at = |kind, x, y| Mouse { kind, x, y, alt: false };
+        let at = |kind, x, y| Mouse { kind, x, y, alt: false, ctrl: false };
         // Screen (5+2, 3) = line 2, column 2
         ed.handle_mouse(at(K::Down, 7, 3));
         assert_eq!(ed.doc().selection().primary(), Range::point(14 + 2));
@@ -17348,7 +17417,7 @@ q = \"delete_selection\"\n",
         };
         let click = |ed: &mut Editor, row: usize| {
             let (top, _) = ed.screen.picker_list.expect("the list on screen");
-            ed.handle_mouse(Mouse { kind: K::Down, x: 10, y: (top + row) as u16, alt: false });
+            ed.handle_mouse(Mouse { kind: K::Down, x: 10, y: (top + row) as u16, alt: false, ctrl: false });
         };
         let selected = |ed: &Editor| ed.picker.as_ref().and_then(|p| p.current()).map(|i| i.label.clone());
         open(&mut ed);

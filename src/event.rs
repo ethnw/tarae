@@ -39,6 +39,10 @@ pub struct Mouse {
     pub y: u16,
     /// alt+press = add a cursor.
     pub alt: bool,
+    /// ctrl+press = go there: a link followed, a name to its definition, an http(s) address opened as a page (`gf`)
+    /// (where the terminal sends it — macOS's
+    /// Terminal.app and iTerm2 can make it a right click, which tarae doesn't take).
+    pub ctrl: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3307,7 +3307,13 @@ fn snapshot_review_doc_comments() {
     assert_eq!(rows[row + 1].0, 3, "the line after the block right below it: {rows:?}");
     let click = |s: &mut Shot, kind, y: usize| {
         let x = rect.x + gutter + 4;
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse {
+            kind,
+            x: x as u16,
+            y: y as u16,
+            alt: false,
+            ctrl: false,
+        }));
         s.frame();
     };
     click(&mut s, crate::event::MouseKind::Down, rect.y + row);
@@ -3508,7 +3514,7 @@ fn a_click_on_a_removed_or_folded_row() {
         let row = s.ed.view.iter().position(at).expect("the row");
         for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
             let (x, y) = ((rect.x + gutter + 6) as u16, (rect.y + row) as u16);
-            s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+            s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false, ctrl: false }));
         }
         s.frame();
         let doc = s.ed.doc();
@@ -3540,7 +3546,7 @@ fn a_tab_indented_folded_block_at_its_column() {
     let row = s.ed.view.iter().position(|r| matches!(r, Row::Doc { start: 1, .. })).expect("folded");
     for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
         let (x, y) = ((rect.x + gutter + 6) as u16, (rect.y + row) as u16);
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false, ctrl: false }));
     }
     let doc = s.ed.doc();
     assert_eq!(doc.selection().primary().cursor(&doc.text), doc.text.line_to_byte(1) + 1, "past the tab");
@@ -3569,7 +3575,13 @@ fn a_click_in_the_edit_review_takes_a_change_in_hand() {
         let shown = screen_text(s);
         let y = shown.lines().position(|l| l.contains(needle)).expect(needle);
         for kind in [crate::event::MouseKind::Down, crate::event::MouseKind::Up] {
-            s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x: 20, y: y as u16, alt: false }));
+            s.ed.handle_event(Event::Mouse(crate::event::Mouse {
+                kind,
+                x: 20,
+                y: y as u16,
+                alt: false,
+                ctrl: false,
+            }));
         }
         s.frame();
         s.ed.session.review.as_ref().unwrap().current
@@ -4664,8 +4676,8 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
     let opened = |s: &Shot| s.ed.doc().path.clone();
     // The cell the user clicked: the first file row, on its name
     let (y, i) = rail[0];
-    s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 11, y: y as u16, alt: false });
-    s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 11, y: y as u16, alt: false });
+    s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 11, y: y as u16, alt: false, ctrl: false });
+    s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 11, y: y as u16, alt: false, ctrl: false });
     let want = s.ed.session.code_review.as_ref().unwrap().files[i].path.clone();
     assert_eq!(opened(&s), Some(want), "the first row's file: {rows:#?}");
     // Every row, on its name
@@ -4674,8 +4686,20 @@ fn a_click_on_the_rails_file_names_opens_them_in_a_full_layout() {
         let f = s.ed.session.code_review.as_ref().unwrap().files[i].clone();
         let name = f.rel.rsplit('/').next().unwrap();
         let x = rows[y].find(name).map(|b| rows[y][..b].chars().count()).expect("its name");
-        s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: x as u16 + 1, y: y as u16, alt: false });
-        s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: x as u16 + 1, y: y as u16, alt: false });
+        s.ed.handle_mouse(Mouse {
+            kind: MouseKind::Down,
+            x: x as u16 + 1,
+            y: y as u16,
+            alt: false,
+            ctrl: false,
+        });
+        s.ed.handle_mouse(Mouse {
+            kind: MouseKind::Up,
+            x: x as u16 + 1,
+            y: y as u16,
+            alt: false,
+            ctrl: false,
+        });
         assert_eq!(opened(&s).as_deref(), Some(f.path.as_path()), "row {y}: {}", rows[y]);
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -4704,7 +4728,7 @@ fn review_rail_scrolls_by_itself_only_to_show_the_file() {
     s.frame();
     let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
     let click = |s: &mut Shot, kind, y: usize| {
-        s.ed.handle_mouse(Mouse { kind, x: 4, y: y as u16, alt: false });
+        s.ed.handle_mouse(Mouse { kind, x: 4, y: y as u16, alt: false, ctrl: false });
         s.frame();
     };
     let screen = |s: &mut Shot| {
@@ -4826,7 +4850,7 @@ fn review_rail_c_e_counts_its_folders_rows() {
         [crate::event::MouseKind::ScrollDown; 8].into_iter().chain([crate::event::MouseKind::ScrollUp; 8])
     {
         let before = hand(&s);
-        s.ed.handle_mouse(crate::event::Mouse { kind, x: 4, y, alt: false });
+        s.ed.handle_mouse(crate::event::Mouse { kind, x: 4, y, alt: false, ctrl: false });
         s.frame();
         let (now, files) = (hand(&s), drawn(&s));
         assert!(files.contains(&now), "the wheel: file {now} in hand, not drawn ({files:?})");
@@ -4922,8 +4946,8 @@ fn every_rail_row_clicks_the_file_drawn_on_it_while_its_head_grows() {
         // The row aimed at as it opened still holds its file
         let (y, i) = before[before.len() / 2];
         assert!(after.contains(&(y, i)), "{w}×{h}: row {y} kept {}: {before:?} → {after:?}", files[i].rel);
-        s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 12, y: y as u16, alt: false });
-        s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 12, y: y as u16, alt: false });
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Down, x: 12, y: y as u16, alt: false, ctrl: false });
+        s.ed.handle_mouse(Mouse { kind: MouseKind::Up, x: 12, y: y as u16, alt: false, ctrl: false });
         assert_eq!(s.ed.doc().path.as_deref(), Some(files[i].path.as_path()));
         screen(&mut s);
         assert!(rail(&s).contains(&(y, i)), "opened, it stays where it was clicked");
@@ -5121,7 +5145,7 @@ fn review_rail_scrolls_by_click_and_marks_by_click() {
     let rail = |s: &Shot| s.ed.screen.review_rail.borrow().clone();
     let more = |s: &Shot| s.ed.screen.review_rail_more.borrow().clone();
     let at = |s: &mut Shot, kind, x: usize, y: usize| {
-        s.ed.handle_event(Event::Mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false }));
+        s.ed.handle_event(Event::Mouse(Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false }));
         s.frame();
     };
     let before = rail(&s);
@@ -5272,6 +5296,7 @@ fn side_panel_c_e_scrolls_the_view_and_keeps_the_selection() {
             x: 2,
             y,
             alt: false,
+            ctrl: false,
         });
         s.frame();
     };
@@ -5862,6 +5887,7 @@ fn snapshot_test_panel_scrolled() {
             x: 60,
             y: (y0 + 3) as u16,
             alt: false,
+            ctrl: false,
         });
     }
     s.ed.toasts.clear();
@@ -5917,7 +5943,7 @@ fn snapshot_terminal_panel() {
     let first = s.ed.screen.terminal_rows.expect("the terminal's rows").0 + crate::chrome::SLOT_HEAD;
     let y = first as u16;
     let mouse = |s: &mut Shot, kind, x| {
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false, ctrl: false }));
         s.frame()
     };
     use crate::event::MouseKind as K;
@@ -5932,7 +5958,7 @@ fn snapshot_terminal_panel() {
     assert_eq!(bg_row.get(4..).map(str::trim_end), Some(" VVVVVVVVVVVV"), "the selected cells: {bg_row:?}");
     // A drag begun in the code isn't the terminal's when it crosses it — nor is its cursor moved by it
     let at = |s: &mut Shot, kind, x, y| {
-        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false }));
+        s.ed.handle_event(Event::Mouse(crate::event::Mouse { kind, x, y, alt: false, ctrl: false }));
         s.frame();
     };
     at(&mut s, K::Down, 10, 3);
@@ -7156,6 +7182,7 @@ fn the_bottom_slot_shows_its_panels_as_tabs() {
         x: x as u16,
         y: y as u16,
         alt: false,
+        ctrl: false,
     }));
     s.frame();
     assert_eq!(

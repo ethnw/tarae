@@ -404,7 +404,7 @@ fn a_group_docked_over_the_code_is_sized_by_its_rows() {
     feed(&mut ed, "<esc>");
     assert_eq!(ed.session.at, At::Code);
     let click = |ed: &mut Editor, x: usize, y: usize, kind| {
-        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false });
+        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false });
         frame(ed, W);
     };
     let list = rect(&ed, tests(&ed).list);
@@ -531,7 +531,7 @@ fn a_group_lays_its_members_by_its_panes_shape() {
     let name = ed.screen.member_names.borrow().iter().find(|n| n.0 == detail.y - 1).copied();
     let (y, a, ..) = name.expect("the output's name on its line");
     let kind = crate::event::MouseKind::Down;
-    ed.handle_mouse(crate::event::Mouse { kind, x: a as u16, y: y as u16, alt: false });
+    ed.handle_mouse(crate::event::Mouse { kind, x: a as u16, y: y as u16, alt: false, ctrl: false });
     frame(&mut ed, W);
     assert_eq!((ed.session.at, ed.slot()), (At::Slot, Some(Slot::Test)), "a click on its name: its keys");
     feed(&mut ed, "<C-w>H");
@@ -634,7 +634,7 @@ fn a_docked_groups_panes_are_clicked_and_listed() {
     let detail = rect(&ed, g.detail_pane().unwrap());
     let click = |ed: &mut Editor, x: usize, y: usize| {
         let kind = crate::event::MouseKind::Down;
-        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false });
+        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false });
         frame(ed, W);
     };
     assert!(detail.w > 0 && detail.y > rect(&ed, g.list).y, "64 columns: over and under");

@@ -1132,6 +1132,7 @@ mod tests {
                 x: 10,
                 y: first as u16,
                 alt: false,
+                ctrl: false,
             };
             ed.handle_mouse(m);
             draw(ed);

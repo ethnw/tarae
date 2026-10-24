@@ -464,7 +464,13 @@ const SCENES: &[Scene] = &[
         frame(ed);
         let (x, y, ..) = ed.screen.toast_card.get().unwrap();
         let kind = crate::event::MouseKind::Down;
-        ed.handle_mouse(crate::event::Mouse { kind, x: x as u16 + 2, y: y as u16 + 1, alt: false });
+        ed.handle_mouse(crate::event::Mouse {
+            kind,
+            x: x as u16 + 2,
+            y: y as u16 + 1,
+            alt: false,
+            ctrl: false,
+        });
     }),
     ("a toast focused, then C-w", |ed| {
         ed.set_status("saved a.rs");

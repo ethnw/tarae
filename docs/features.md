@@ -34,7 +34,8 @@ You don't need to know the keys to start:
   screen. When you had files open there last time, the start screen's first row offers them back: `r` continues
   where you left off ([screenshot](screenshots/ux-welcome-continue.png)). `editor.restore-files = true` reopens
   them right away instead
-- **Mouse** — click to place the cursor, drag to select, alt+click for another cursor, wheel to scroll. In pickers the
+- **Mouse** — click to place the cursor, drag to select, alt+click for another cursor, ctrl+click to go there
+  (`gd`: a definition, a page's link followed; an http(s) address in code opened as a page — `C-o` comes back), wheel to scroll. In pickers the
   wheel moves the selection and a click opens. (Your terminal's own text selection is usually shift+drag.)
 - **Key hints** — while a completion, a picker or a docs window is open, the keys that operate it show dimmed on the
   status line, right after the mode

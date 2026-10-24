@@ -102,6 +102,7 @@ fn step(sim: &mut Sim, ed: &mut Editor, model: &RefCell<Model>) -> String {
                 x: x as u16 + 2,
                 y: y as u16 + 1,
                 alt: false,
+                ctrl: false,
             };
             sim.batch(ed, crate::event::Event::Mouse(press));
             if reach {
@@ -118,7 +119,13 @@ fn step(sim: &mut Sim, ed: &mut Editor, model: &RefCell<Model>) -> String {
             format!("key {k}")
         }
         5 => {
-            let press = crate::event::Mouse { kind: crate::event::MouseKind::Down, x: 1, y: 1, alt: false };
+            let press = crate::event::Mouse {
+                kind: crate::event::MouseKind::Down,
+                x: 1,
+                y: 1,
+                alt: false,
+                ctrl: false,
+            };
             sim.batch(ed, crate::event::Event::Mouse(press));
             // (unless that's on the card itself)
             let on = ed

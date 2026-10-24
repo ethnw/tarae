@@ -247,6 +247,7 @@ fn a_click_on_a_places_row_picks_it() {
         x: (list.x + 4) as u16,
         y: (y + 1) as u16,
         alt: false,
+        ctrl: false,
     };
     ed.handle_mouse(click);
     frame(&mut ed);
@@ -951,6 +952,7 @@ fn a_narrow_group_is_stacked() {
         x: spot.1 as u16,
         y: spot.0 as u16,
         alt: false,
+        ctrl: false,
     };
     ed.handle_mouse(click);
     let all = cells(&mut ed, N).screen().contents();

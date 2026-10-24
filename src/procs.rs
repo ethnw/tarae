@@ -2605,8 +2605,9 @@ pub(crate) mod tests {
         draw(&mut ed);
         let a = ed.screen.procs_panel.get().expect(":procs drawn");
         assert!(ed.procs.rows.len() > a.shown, "more rows than it shows");
-        let wheel =
-            |ed: &mut Editor, kind| ed.handle_mouse(Mouse { kind, x: 5, y: a.first as u16, alt: false });
+        let wheel = |ed: &mut Editor, kind| {
+            ed.handle_mouse(Mouse { kind, x: 5, y: a.first as u16, alt: false, ctrl: false })
+        };
         let at = |ed: &Editor| {
             (ed.procs.panel.as_ref().unwrap().selected, ed.screen.procs_panel.get().unwrap().scroll)
         };
@@ -2658,7 +2659,13 @@ pub(crate) mod tests {
         assert!(ed.procs.rows.len() > a.shown + 6, "{} rows, {} shown", ed.procs.rows.len(), a.shown);
         ed.handle_key(Key::plain(Code::Char('j')));
         for _ in 0..4 {
-            ed.handle_mouse(Mouse { kind: MouseKind::ScrollDown, x: 5, y: a.first as u16, alt: false });
+            ed.handle_mouse(Mouse {
+                kind: MouseKind::ScrollDown,
+                x: 5,
+                y: a.first as u16,
+                alt: false,
+                ctrl: false,
+            });
             draw(&mut ed);
         }
         let a = ed.screen.procs_panel.get().unwrap();
@@ -2748,7 +2755,7 @@ pub(crate) mod tests {
         let r = ed.screen.run_rows.of(crate::sizes::Slot::Procs).expect("the detail drawn");
         let click = |ed: &mut Editor, x: usize, y: usize| {
             let kind = crate::event::MouseKind::Down;
-            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false })
+            ed.handle_mouse(crate::event::Mouse { kind, x: x as u16, y: y as u16, alt: false, ctrl: false })
         };
         click(&mut ed, r.2 + 10, r.1 + 1);
         assert_eq!(region(&ed), "output:procs", "a click on the detail");
@@ -2887,7 +2894,13 @@ pub(crate) mod tests {
         assert!(ed.procs.rows[1].gone.is_some(), "kept, said gone");
         screen(&mut ed, 120, 40);
         let a = ed.screen.procs_panel.get().expect(":procs drawn");
-        let down = Mouse { kind: MouseKind::ScrollDown, x: (a.x + 5) as u16, y: a.first as u16, alt: false };
+        let down = Mouse {
+            kind: MouseKind::ScrollDown,
+            x: (a.x + 5) as u16,
+            y: a.first as u16,
+            alt: false,
+            ctrl: false,
+        };
         ed.handle_mouse(down);
         assert!(ed.procs.rows.iter().all(|r| r.gone.is_none()), "the gone row let go");
         let p = ed.procs.panel.as_ref().unwrap();
@@ -2918,7 +2931,7 @@ pub(crate) mod tests {
         assert!(lines > rows + 3, "taller than its rows: {lines} lines in {rows}");
         let top = |ed: &Editor| ed.session.outputs.doc(slot).unwrap().top;
         let wheel = |ed: &mut Editor, kind| {
-            ed.handle_mouse(Mouse { kind, x: (r.2 + 2) as u16, y: r.1 as u16, alt: false });
+            ed.handle_mouse(Mouse { kind, x: (r.2 + 2) as u16, y: r.1 as u16, alt: false, ctrl: false });
             screen(ed, w, h);
         };
         wheel(&mut ed, MouseKind::ScrollDown);
