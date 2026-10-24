@@ -129,11 +129,12 @@ Items 1–3 are done (2026-10-16); 4 is the user's: the repository made public. 
    keeps them); nothing else in the order changes.
 
 6. **Where the repository lives, and its shape** (user, 2026-10-23 — after the main line in flight: P3, C3, the web
-   pane): move to the `sinabro-io` organization at a publishing batch (GitHub's transfer keeps history, issues and
-   the old address; two owners or more, so the project hangs on no one account — the user's to do); keep one
+   pane; the place changed by the user, 2026-10-24: the `tarae-sh` organization and the tarae.sh domain): move to
+   `tarae-sh` at a publishing batch — the 2026-10-24 one (GitHub's transfer keeps history, issues and the old
+   address; two owners or more, so the project hangs on no one account — the user's to do); keep one
    repository (tarae makes tarae runs on its worktrees; runtime and host change together before 1.0) but split it
    into workspace crates — `tarae-wasm` first, its build times measured before and after — and move the first-party
-   plugins (kubernetes, db, template) to `sinabro-io/tarae-plugins` once the SDK is first on crates.io, so they build
+   plugins (kubernetes, db, template) to `tarae-sh/tarae-plugins` once the SDK is first on crates.io, so they build
    against the published SDK as anyone's would (Zed's core/extensions split).
 7. **What tarae carries, audited** (user, 2026-10-23 — after the main line in flight, before the crate split): a
    plan first — each feature's use (`:features`' counts, the card record), its code, its fit — keep · fold · a plugin
@@ -582,7 +583,7 @@ bugs its reviewer found, two of tarae's own gates misbehaved in daily use, four 
 
 ### 10. The homepage
 
-tarae.sinabro.io. The brand it wears is in (2026-10-18, `ec987191`, [brand/](brand)): the seal — a skein's
+tarae.sh (the user's domain, 2026-10-24). The brand it wears is in (2026-10-18, `ec987191`, [brand/](brand)): the seal — a skein's
 thread carved out of an accent block, unwinding to a cursor, in hanji and meok; vector only (the start screen is
 set in type, 2026-10-19) — and the mascot, a ball of thread painted in ink, finished with the seal as its 낙관
 (small, at its lower left, 2026-10-19): the one picture at the README's top, over its title. An animation that feels like several agents working at once, and the README's demo, both from
